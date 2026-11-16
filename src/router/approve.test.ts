@@ -360,6 +360,33 @@ describe("approve, called through the host's own prompt", () => {
     expect(short.refused()).toBe(1);
   });
 
+  /** A CHARGED PAYMENT KEEPS ITS QUOTE USED. A seller can settle and still
+   *  answer 402 insufficient_funds: read as short of funds, the charged slot
+   *  reopened the quote, and the same quote could pay the seller again. */
+  it('keeps an approved quote used when a payment refused as short of funds was charged', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const base = deps(short.fetchImpl);
+    // The chain shows the authorization used.
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` }),
+      )) as typeof fetch;
+    const d = { ...base, payDeps: { ...base.payDeps, chainFetch }, approves: true };
+    const charged = await runApproveTool(args, d);
+    expect(charged.envelope).toMatchObject({ status: 'failed', settlement: 'settled' });
+    expect(String(charged.envelope.reason)).toMatch(/^The payment was charged/);
+    expect(String(charged.envelope.reason)).not.toContain('tenjin fund');
+    expect(charged.envelope).not.toHaveProperty('quote');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
   /** WHAT THE MONEY IS FOR: a short quote names its call and price, and the
    *  fund command carries both to the checkout page. */
   it('names the call, its price and the fund command when a quote is short of funds', async () => {

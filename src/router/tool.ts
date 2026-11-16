@@ -1677,6 +1677,8 @@ async function payAndDeliver(
     const detail = (cli?.details ?? {}) as {
       amountAtomic?: string;
       settlement?: string;
+      /** The tx the seller's payment response named for a payment it took. */
+      settlementTxHash?: string;
       diagnosis?: Record<string, unknown>;
       status?: number;
       providerError?: string;
@@ -1723,6 +1725,7 @@ async function payAndDeliver(
         text: '',
         header: cutHeader,
         providerAtomic: leftAtomic,
+        ...(detail.settlementTxHash !== undefined ? { txHash: detail.settlementTxHash } : {}),
         ...(detail.payer !== undefined ? { payer: detail.payer } : {}),
         ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
         ...(detail.settlement === 'settled' ? { settled: true } : {}),
@@ -1764,12 +1767,13 @@ async function payAndDeliver(
     });
     // An authorization that left is a paid call whatever came back: recorded
     // with its settlement unknown, for `tenjin payments reconcile` to resolve.
-    // A failure the chain already shows was charged (`runPay` read it) is
-    // recorded settled.
+    // A failure the seller's payment response or the chain already shows was
+    // charged (`runPay` read both) is recorded settled.
     if (leftAtomic > 0n) {
       await appendPaidRecord(
         deps.ctx.dataDir,
         paidRecord(call, built.url, call.sent, leftAtomic, {
+          ...(detail.settlementTxHash !== undefined ? { txHash: detail.settlementTxHash } : {}),
           ...(detail.payer !== undefined ? { payer: detail.payer } : {}),
           ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
           ...(detail.settlement === 'settled' ? { settled: true } : {}),

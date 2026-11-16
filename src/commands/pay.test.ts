@@ -1340,6 +1340,60 @@ describe('runPay, a paid call that failed', () => {
     expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'settled' }]);
   });
 
+  // The seller's own payment response is read first: a seller that says it
+  // settled, naming its tx, is believed, and the chain is not asked.
+  it("calls a failure charged when the seller's payment response names its settlement", async () => {
+    const TX = `0x${'ab'.repeat(32)}`;
+    const settle = Buffer.from(
+      JSON.stringify({ success: true, transaction: TX, network: 'eip155:8453' }),
+    ).toString('base64');
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+      json(400, { error: 'Invalid request parameters' }, { 'PAYMENT-RESPONSE': settle }),
+    ]);
+    const asked = chain(false);
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      chainFetch: asked.fetch,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).catch((e: unknown) => e)) as CliError;
+    expect(err).toMatchObject({
+      code: 'PAYMENT_FAILED',
+      message: expect.stringMatching(/^The payment was charged, and the endpoint answered 400/),
+      details: { status: 400, settlement: 'settled', settlementTxHash: TX },
+    });
+    expect(err.message).toContain(TX);
+    expect(asked.asked()).toBe(0);
+    expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'settled', txHash: TX }]);
+  });
+
+  // A seller can settle and still answer 402 insufficient_funds. Charged is
+  // the headline, the seller's reason is in the details, and it is not a
+  // request for funds.
+  it('says a charged payment the seller called short of funds was charged', async () => {
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+      json(402, { error: 'payment_failed', reason: 'insufficient_funds' }),
+    ]);
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      chainFetch: chain(true).fetch,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).catch((e: unknown) => e)) as CliError;
+    expect(err.message).toBe(
+      'The payment was charged, and the endpoint answered 402 with no result. The chain shows the authorization was used, so it was charged.',
+    );
+    expect(err.details).toMatchObject({
+      settlement: 'settled',
+      sellerReason: 'The seller said the wallet does not hold enough USDC for this payment.',
+    });
+    expect(err.fix).not.toContain('tenjin fund');
+  });
+
   it('leaves an authorization the chain shows unused unknown, never not charged', async () => {
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([
@@ -1914,7 +1968,8 @@ describe('runPay, bazaar lane', () => {
 
   it.each([
     ['no payment-response header', undefined],
-    ['one that says it settled', { success: true, transaction: `0x${'ab'.repeat(32)}` }],
+    // A transaction without `success: true` is not the seller saying it took it.
+    ['one that names a tx without success', { transaction: `0x${'ab'.repeat(32)}` }],
     ['one that cannot be read', 'not base64 json'],
     ['one that is not an object', Buffer.from('false').toString('base64')],
   ])('keeps the unknown-settlement failure for %s', async (_label, settle) => {

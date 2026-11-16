@@ -715,15 +715,24 @@ async function executePay(
     });
   };
   // A PAID CALL THAT FAILED MAY STILL HAVE BEEN CHARGED: a seller can settle
-  // and then answer an error (AiSpace's voiceover queue did). The chain is
-  // read once, as reconcile reads it, and a used authorization is reported as
-  // charged. A seller's own word that it settled is not that proof on a
-  // failure. An unused one stays unknown: it can still be settled until its
-  // `validBefore`.
-  const failedSettlement = async (): Promise<{
-    settlement: 'settled' | 'unknown';
-    charged?: string;
-  }> => {
+  // and then answer an error (AiSpace's voiceover queue did). Two sources, in
+  // order. First the seller's own payment response: `success: true` naming
+  // its settlement transaction. Believing it can only make this CLI say
+  // charged and keep a quote used, never pay again. Then the chain, read
+  // once as reconcile reads it, on the payment's own network and token. An
+  // unused authorization, or one this machine cannot read, stays unknown: it
+  // can still be settled until its `validBefore`.
+  const failedSettlement = async (
+    header: ((name: string) => string | undefined) | undefined,
+  ): Promise<{ settlement: 'settled' | 'unknown'; txHash?: string; charged?: string }> => {
+    const txHash = header !== undefined ? settledTx({ header }) : undefined;
+    if (txHash !== undefined) {
+      return {
+        settlement: 'settled',
+        txHash,
+        charged: `The seller's payment response names its settlement (tx ${txHash}), so it was charged.`,
+      };
+    }
     const settlement = await chargedOnChain(payment.authorization, settings.rpcUrl, {
       ...((deps.chainFetch ?? deps.fetchImpl) !== undefined
         ? { fetchImpl: deps.chainFetch ?? deps.fetchImpl }
@@ -750,8 +759,8 @@ async function executePay(
     // Settlement is just as unknown as on any other timeout, unless the chain
     // already shows it.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
-    const { settlement, charged } = await failedSettlement();
-    await recordDirect({ settlement });
+    const { settlement, txHash, charged } = await failedSettlement(paid.header);
+    await recordDirect({ settlement, ...(txHash !== undefined ? { txHash } : {}) });
     if (statusUrl !== null) {
       throw new CliError(
         'NETWORK_ERROR',
@@ -766,6 +775,7 @@ async function executePay(
             statusUrl,
             amountAtomic: payment.amountAtomic.toString(),
             settlement,
+            ...(txHash !== undefined ? { settlementTxHash: txHash } : {}),
             payer: payment.payer,
             ...(payment.authorization !== undefined
               ? { authorization: payment.authorization }
@@ -783,6 +793,7 @@ async function executePay(
       details: {
         amountAtomic: payment.amountAtomic.toString(),
         settlement,
+        ...(txHash !== undefined ? { settlementTxHash: txHash } : {}),
         payer: payment.payer,
         ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
@@ -824,19 +835,28 @@ async function executePay(
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
   // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
+  //
+  // SETTLEMENT IS RESOLVED FIRST. A seller can settle and still answer 402
+  // `insufficient_funds`: read as short of funds, that charged slot reopened
+  // an approved quote, and the same quote could pay the seller again on the
+  // next yes. A charged payment keeps its quote used, its message says it was
+  // charged, and the seller's reason rides in the details.
+  const { settlement, txHash, charged } = await failedSettlement(paid.header);
+  await recordDirect({ settlement, ...(txHash !== undefined ? { txHash } : {}) });
   // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
   // from the payment-response header: its body can be an empty `{}`. A 402's
   // own reason rides in its PAYMENT-REQUIRED header's `error`. The
   // authorization stays valid until it expires, so settlement is unknown
-  // unless the chain already shows it used.
+  // unless the seller or the chain shows it taken.
   const refusal = settlementRefusal(paid);
-  const lowFunds = paymentShortOfFunds(paid);
+  const sellerShort = paymentShortOfFunds(paid);
   const paymentError = paymentRequiredError(payer.http, paid);
+  const lowFunds = sellerShort && charged === undefined;
   if (lowFunds) markShortOfFunds(slot);
-  const { settlement, charged } = await failedSettlement();
-  await recordDirect({ settlement });
-  const said = lowFunds
-    ? LOW_FUNDS_MESSAGE
+  const said = sellerShort
+    ? charged !== undefined
+      ? 'The seller said the wallet does not hold enough USDC for this payment.'
+      : LOW_FUNDS_MESSAGE
     : refusal !== undefined
       ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
       : paid.status === 402
@@ -844,29 +864,37 @@ async function executePay(
         : charged !== undefined
           ? `The endpoint answered ${paid.status} on the paid request.`
           : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`;
-  throw new CliError('PAYMENT_FAILED', charged !== undefined ? `${said} ${charged}` : said, {
-    fix:
-      charged !== undefined
-        ? "The payment was charged and is recorded as settled. Do not simply retry: each attempt pays again. Read the seller's error, fix the request, and quote again."
-        : lowFunds
-          ? `Ask the person once to add funds; on yes, run \`tenjin fund\`. ${LOW_FUNDS_TAIL}`
-          : refusal !== undefined
-            ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
-            : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
-    // The amount rides on the failure so a caller can report what is at risk
-    // rather than a zero.
-    details: {
-      status: paid.status,
-      body: paid.json,
-      ...providerError(paid.text),
-      ...(paymentError !== undefined ? { paymentError } : {}),
-      ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
-      amountAtomic: payment.amountAtomic.toString(),
-      settlement,
-      payer: payment.payer,
-      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+  throw new CliError(
+    'PAYMENT_FAILED',
+    charged !== undefined
+      ? `The payment was charged, and the endpoint answered ${paid.status} with no result. ${charged}`
+      : said,
+    {
+      fix:
+        charged !== undefined
+          ? "The payment was charged and is recorded as settled. Do not simply retry: each attempt pays again. Read the seller's reason in the details, fix the request, and quote again."
+          : lowFunds
+            ? `Ask the person once to add funds; on yes, run \`tenjin fund\`. ${LOW_FUNDS_TAIL}`
+            : refusal !== undefined
+              ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
+              : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      // The amount rides on the failure so a caller can report what is at risk
+      // rather than a zero.
+      details: {
+        status: paid.status,
+        body: paid.json,
+        ...providerError(paid.text),
+        ...(charged !== undefined ? { sellerReason: said } : {}),
+        ...(paymentError !== undefined ? { paymentError } : {}),
+        ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
+        amountAtomic: payment.amountAtomic.toString(),
+        settlement,
+        ...(txHash !== undefined ? { settlementTxHash: txHash } : {}),
+        payer: payment.payer,
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+      },
     },
-  });
+  );
 }
 
 /**
@@ -1712,6 +1740,14 @@ function savedLine(saved: SavedBody): string {
 export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
   const tx = paymentResponse(res)?.transaction;
   return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
+}
+
+/**
+ * The seller's own word that it DID settle, on a failure: its payment-response
+ * header with `success: true` and the settlement transaction it names.
+ */
+function settledTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  return paymentResponse(res)?.success === true ? settlementTx(res) : undefined;
 }
 
 /**
