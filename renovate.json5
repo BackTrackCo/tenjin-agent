@@ -15,5 +15,13 @@
       matchUpdateTypes: ['major'],
       enabled: false,
     },
+    {
+      // The github-actions manager also bumps `node-version` in `actions/setup-node`
+      // steps. Those pins follow `engines.node` (ci.yml's `22.0.0` is the floor
+      // smoke), so change them by hand, together with `engines.node`.
+      matchManagers: ['github-actions'],
+      matchDepNames: ['node'],
+      enabled: false,
+    },
   ],
 }
