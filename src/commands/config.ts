@@ -12,6 +12,7 @@ import {
   EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
+  PERSONAL_ROUTER_KEYS,
   loadRawConfig,
   MAX_AUTO_SPEND_FLOOR_ATOMIC,
   MAX_AUTO_SPEND_FLOOR_WHY,
@@ -29,10 +30,11 @@ import type {
   RouterConfigKey,
   RouterContext,
 } from '../lib/config';
+import { closestNames } from '../lib/name-match';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError, type FileLockOptions } from '../lib/lock';
-import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
 import { ROUTER_DEFAULTS, type RouterLimits } from '../router/spend-question';
@@ -42,7 +44,16 @@ import {
   routerSettings,
   type RouterSettings,
 } from '../router/settings';
-import { style } from '../lib/output';
+import { paint, style } from '../lib/output';
+import { cachedIdentities, type Identities } from '../router/identities';
+import {
+  describeLimits,
+  replacementShort,
+  replacementSupport,
+  settingsReadback,
+  summarizeRule,
+  type SettingsReadback,
+} from './config-readback';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
@@ -145,12 +156,23 @@ function isUpdateKey(key: string): key is UpdateConfigKey {
 }
 
 /**
- * Show every effective key with its value and provenance. `data` is keyed by
- * config key; provenance comes from resolveSettings over the *raw* file (not the
- * defaults-merged config), so a key the user never set reads `default`, not
- * `file`.
+ * `tenjin config`: WHAT THE USER SET, AND NOTHING ELSE. Their rules, each
+ * with the command that undoes it, automatic picks, the limits, and the keys
+ * they changed from the default. `--all` prints every key with its value,
+ * provenance and description, then the readback in full sentences, as the
+ * listing read before.
+ *
+ * `data` is the same either way, keyed by config key; provenance comes from
+ * resolveSettings over the *raw* file (not the defaults-merged config), so a
+ * key the user never set reads `default`, not `file`. `data.settings` is the
+ * readback of the user's own settings: saved rules in their words, automatic
+ * use and the limits on the Tenjin balance. All of it is local: names come
+ * from the identities last read, and nothing here asks the network.
  */
-export async function runConfigList(ctx: CommandContext): Promise<CommandResult> {
+export async function runConfigList(
+  ctx: CommandContext,
+  opts: { all?: boolean } = {},
+): Promise<CommandResult> {
   const settings = await resolveFromContext(ctx);
   const data: Record<string, RenderedSetting> = {};
   const humanLines: string[] = [];
@@ -184,7 +206,116 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     show(key, describedLine(key, entry));
   }
-  return { data, humanLines };
+  const identities = await cachedIdentities(ctx.dataDir);
+  const readback = settingsReadback(
+    router,
+    identities,
+    describeLimits(settings.maxAutoSpend.value, settings.sessionBudget.value),
+    await replacementSupport(ctx.dataDir),
+  );
+  return {
+    data: { ...data, settings: readback.data },
+    humanLines:
+      opts.all === true
+        ? [...humanLines, '', ...readback.lines]
+        : listingLines(ctx, router, identities, readback.data, data),
+  };
+}
+
+/** Keys the listing shows elsewhere, or never: the limits have their own section. */
+const NOT_CHANGES: ReadonlySet<string> = new Set([
+  ...UNLISTED_KEYS,
+  'maxAutoSpend',
+  'sessionBudget',
+]);
+
+/** A value in a few characters: `on`, `$0.10`, `none`. */
+function shortValue({ value }: RenderedValue): string {
+  if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (value === null) return 'none';
+  if (typeof value === 'object') return `$${formatUsdDisplay(value.atomic)}`;
+  return value;
+}
+
+/** The plain listing: the user's rules, automatic picks, limits and changed keys. */
+function listingLines(
+  ctx: CommandContext,
+  router: RouterSettings,
+  identities: Identities | undefined,
+  readback: SettingsReadback,
+  keys: Record<string, RenderedSetting>,
+): string[] {
+  const dim = (text: string) => paint(ctx.io, 'dim', text);
+  const yellow = (text: string) => paint(ctx.io, 'yellow', text);
+  const under = '      ';
+  const rules = readback.rules.map((rule) => ({
+    ...summarizeRule(rule, identities, router.accounts.saved),
+    inactive: rule.inactive,
+    undo: rule.reset,
+  }));
+  const fallbacks = (readback.accounts ?? [])
+    .filter(({ onRefusal }) => onRefusal === 'tenjin')
+    .map(({ label, reset }) => ({
+      mark: '↻',
+      name: label,
+      does: "Tenjin's tool steps in when it refuses",
+      inactive: undefined,
+      undo: reset,
+    }));
+  const rows = [...rules, ...fallbacks];
+  const AUTOMATIC = 'Automatic picks';
+  const width = Math.max(16, AUTOMATIC.length, ...rows.map(({ name }) => name.length)) + 2;
+  const lines: string[] = [];
+  const { enabled } = router;
+  if (!enabled.value) {
+    lines.push(
+      enabled.source === 'project' || enabled.source === 'local'
+        ? `○ Tenjin is paused here by ${enabled.path ?? 'a project file'}, so none of this applies`
+        : '○ Tenjin is paused, so none of this applies: tenjin config set router.enabled true',
+      '',
+    );
+  }
+  lines.push('Your rules');
+  if (router.policy.status === 'invalid') {
+    lines.push(
+      `  ${yellow(`! Your rules can't be read (${router.policy.problem})`)}`,
+      `${under}${dim('fix: tenjin config reset --all')}`,
+    );
+  } else if (rows.length === 0) {
+    lines.push('  none yet, so Tenjin uses its defaults');
+  }
+  for (const row of rows) {
+    lines.push(
+      `  ${row.mark}   ${row.name.padEnd(width)}${row.does}${row.inactive !== undefined ? `  ${yellow(`! ${row.inactive}`)}` : ''}`,
+    );
+    if (row.undo !== undefined) lines.push(`${under}${dim(`undo: ${row.undo}`)}`);
+  }
+  const replacement = router.nativeReplacement;
+  lines.push(`${under}${AUTOMATIC.padEnd(width)}${replacementShort(replacement, identities)}`);
+  if (replacement.problem !== undefined)
+    lines.push(`${under}${dim('fix: tenjin config replacement off')}`);
+  const { perCall, daily } = readback.limits;
+  lines.push(
+    '',
+    'Limits',
+    `${under}${perCall} a call · ${daily === null ? 'no daily limit' : `${daily} a day`}`,
+  );
+  const changed = Object.entries(keys).filter(
+    ([key, entry]) => entry.source !== 'default' && !NOT_CHANGES.has(key),
+  );
+  if (changed.length > 0) {
+    lines.push('', 'Changed from the default');
+    for (const [key, entry] of changed) {
+      const where =
+        entry.source === 'file'
+          ? ''
+          : `  ${dim(`(${entry.source}${entry.path !== undefined && entry.source !== 'env' ? ` ${entry.path}` : ''})`)}`;
+      lines.push(`${under}${key.padEnd(KEY_WIDTH + 3)}${shortValue(entry)}${where}`);
+    }
+  }
+  lines.push('', dim('Every setting: tenjin config --all · How to change: tenjin config --help'));
+  return lines;
 }
 
 /** Same per-key shape as list, for one key. Unknown key is a USAGE failure. */
@@ -504,7 +635,8 @@ export async function persistRouterDefaults(
   return result;
 }
 
-async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
+/** The effective settings: the global file, `--base-url` and the env. */
+export async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
 }
@@ -514,8 +646,25 @@ function assertKey(key: string): ScalarConfigKey {
     throw new CliError('USAGE', `Retired config key: ${key}`, { fix: RETIRED_PAYMENT_GUIDANCE });
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
+  if ((PERSONAL_ROUTER_KEYS as readonly string[]).includes(key)) {
+    // Coupled settings: a generic set could skip the checks that keep them
+    // consistent, so only their own operations write them.
+    throw new CliError('USAGE', `${key} changes only through its own operations`, {
+      fix: '`tenjin config` shows it; `tenjin config --help` lists the operations that change it.',
+    });
+  }
+  const keys = [
+    ...CONFIG_KEYS,
+    ...UPDATE_CONFIG_KEYS,
+    ...ROUTER_CONFIG_KEYS,
+    ...EXPERIMENTAL_CONFIG_KEYS,
+  ];
+  const near = closestNames(
+    keys.map((name) => ({ id: name, label: name })),
+    key,
+  ).map(({ id }) => id);
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
+    fix: `${near.length > 0 ? `Did you mean: ${near.join(', ')}? ` : ''}Valid keys: ${keys.join(', ')}.`,
   });
 }
 
@@ -638,7 +787,7 @@ function parseHttpUrl(value: string): string {
  * drops the other's update (worst case, a zeroed maxAutoSpend resurrected). The
  * data dir is ensured first so the lock's mkdir has a parent on a fresh install.
  */
-async function persist(
+export async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
   lock?: FileLockOptions,
@@ -651,6 +800,8 @@ async function persist(
       async () => {
         const existing = await loadRawConfig(dir);
         const merged = merge(existing);
+        // A merge that changed nothing hands back what it was given: no write.
+        if (merged === existing) return;
         const validated = RawConfigSchema.parse(merged);
         // 0600: `rpcUrl` can carry an RPC provider's key, and this is the writer
         // `config set` uses to put it there. dirMode 0o700 is no backstop: node's

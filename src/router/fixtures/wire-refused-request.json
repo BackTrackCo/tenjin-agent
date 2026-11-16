@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "refused": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:d3907a149dbce1dc8d7034363a0b3c1f2e7ea099005788a58f74cf5e06eb3a75",
+    "policy": {
+      "prefer": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "targets": [
+            {
+              "kind": "source",
+              "id": "firecrawl"
+            }
+          ]
+        }
+      ]
+    },
+    "replacement": {
+      "mode": "when-routed"
+    },
+    "sources": ["tenjin", "firecrawl"]
+  }
+}

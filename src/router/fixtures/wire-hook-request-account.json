@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Find coffee shops in Austin with their phone numbers."
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  },
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a3d",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:44b9ea82595254e4decdff8c1dad72d5fd393082ce7e8749ef2932f8111c5565",
+    "policy": {
+      "prefer": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "targets": [
+            {
+              "kind": "source",
+              "id": "apify"
+            }
+          ]
+        }
+      ]
+    },
+    "sources": ["tenjin", "apify", "fal", "firecrawl"]
+  }
+}

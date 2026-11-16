@@ -42,7 +42,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.001 a call; tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits. Either choice approves this.';
+  'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. Either choice approves this.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [
@@ -582,6 +582,19 @@ describe('install asks a person the spend question once', () => {
     expect(spendStepOf(result)).toBeUndefined();
   });
 
+  // Limits approved now were approved on today's routing terms; a refresh, as
+  // `tenjin update` runs, leaves the old install to be told them once.
+  it('records the routing terms as told only when limits are approved in the run', async () => {
+    const { termsNotice } = await import('./terms-notice');
+    // An agent's install hands the question over; the refresh asks nothing.
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(await termsNotice(data)).not.toBeNull();
+    await rm(join(data, 'router', 'terms'), { recursive: true, force: true });
+    await runRouterInstall({ yes: true }, ctx(), deps());
+    expect(await termsNotice(data)).toBeNull();
+  });
+
   it('--yes keeps a 0 the file names', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
     await runRouterInstall({ yes: true }, ctx(), deps());
@@ -976,8 +989,14 @@ describe('daily limit readouts', () => {
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
-      expect(receipt(result).join('\n')).toContain('automatic router up to');
-      expect(receipt(result).join('\n')).not.toContain('per call at most');
+      const today = receipt(result).find((line) => line.trim().startsWith('Today'));
+      expect(today?.replace(/\s+/g, ' ').trim()).toBe(
+        sessionBudget === 'none'
+          ? 'Today $0.00, no daily limit · up to $0.25 a call'
+          : sessionBudget === '0'
+            ? 'Today automatic payments off ($0.00 a day) · up to $0.25 a call'
+            : 'Today $0.00 of $2.00 · up to $0.25 a call',
+      );
     },
   );
 });
@@ -1010,23 +1029,10 @@ it('status separates routing deposits in the spend window from the remaining rou
       routingDeposits: { atomic: '250000' },
       automaticExposure: { atomic: '300000' },
     },
-    routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
+    routingCredit: { remaining: { atomic: '240000' } },
   });
-  expect(receipt(result).slice(0, 4)).toEqual([
-    'lookups 0.05 USD',
-    'deposited for routing in the rolling 24h window: 0.25 USD',
-    'set aside for routing: approximately 0.24 USD (at least 80 calls; local estimate)',
-    'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
-  ]);
-});
-
-it('status shows no funds set aside before any deposit', async () => {
-  const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), {
-    wallet: async () => null,
-    routingCredit: async () => 0n,
-  });
-  expect(receipt(result)[0]).toBe('lookups 0 USD');
+  const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
+  expect(shown).toContain('Today $0.30 of $5.00 · up to $0.25 a call');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {

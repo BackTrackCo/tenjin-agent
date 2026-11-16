@@ -125,20 +125,27 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When your routing balance runs low, Tenjin tops it up from your wallet in the background; unused funds stay yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing fees vary by answer. Tool charges are separate. When your routing balance runs low, Tenjin tops it up from your wallet in the background; unused funds stay yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 
-| Command            | What it does                                  |
-| ------------------ | --------------------------------------------- |
-| `tenjin fund 5`    | Open checkout to add $5, and watch it land    |
-| `tenjin balance`   | Show your balance and limits                  |
-| `tenjin status`    | Show spending and limits                      |
-| `tenjin doctor`    | Check setup, activation and payment readiness |
-| `tenjin update`    | Update Tenjin                                 |
-| `tenjin uninstall` | Remove the integration; keep your wallet      |
+| Command                   | What it does                                      |
+| ------------------------- | ------------------------------------------------- |
+| `tenjin fund 5`           | Add $5 in your browser, and watch it land         |
+| `tenjin balance`          | Your balance and limits                           |
+| `tenjin status`           | On or paused, balance, accounts and settings      |
+| `tenjin usage`            | What lookups cost, by day                         |
+| `tenjin config`           | Your rules: block, prefer or limit tools          |
+| `tenjin config names exa` | Every name a rule can use, such as Exa            |
+| `tenjin connect apify`    | Use your own Apify, fal, Firecrawl or Exa account |
+| `tenjin disconnect apify` | Forget a connected account here                   |
+| `tenjin doctor`           | Check setup and payment readiness                 |
+| `tenjin update`           | Update Tenjin                                     |
+| `tenjin uninstall`        | Remove Tenjin from your agent; your balance stays |
 
 `tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
+
+Calls on your own account bill its plan, not your Tenjin balance. [Your own accounts →](./docs/agent-permissions.md#your-own-accounts)
 
 ## Privacy and help
 

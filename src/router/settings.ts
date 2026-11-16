@@ -5,12 +5,17 @@ import {
   CONFIG_DEFAULTS,
   loadRawConfig,
   parseRouterLayer,
+  readPersonalRouter,
   type PartialConfig,
+  type PersonalRouter,
   type RouterContext,
   type RouterLayer,
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
+import { connectedSourceIds } from './accounts/presence';
+import { savedAccountOf, type SavedAccount } from './accounts/saved';
+import { BUILT_IN_SOURCE, hasRules, wireSettings, type WireSettings } from './settings-wire';
 import {
   findAllProjectFiles,
   findNearestProjectFiles,
@@ -47,6 +52,14 @@ import {
  * router to keep the masked text of the turns it sees, so no project layer is
  * read for it: a repository cannot opt anyone in, and turning it off is the
  * one switch in `~/.tenjin/config.json`.
+ *
+ * SO ARE THE PERSONAL SETTINGS (plan 36): the routing rules (`router.policy`)
+ * and automatic use with its provider scope (`router.nativeReplacement`,
+ * `router.nativeReplacementProviders`). A project file cannot add a rule or
+ * turn automatic use on, so a cloned repository never changes what Tenjin
+ * may use or run on this machine. They are reread on every call, never
+ * cached, so a change from another process applies to the next call without
+ * restarting `tenjin mcp`.
  */
 
 /** The committed project file and the personal one beside it. */
@@ -62,11 +75,97 @@ export interface RouterSetting<T> {
   path?: string;
 }
 
-export interface RouterSettings {
+/** The saved routing rules: none, readable, or not readable by this build. */
+export type PolicySetting = PersonalRouter['policy'];
+
+/** Automatic use: off unless the global file says `when-routed`. An absent
+ *  provider scope means every eligible provider; a `problem` says why the
+ *  saved value could not be read, and the mode then reads off. */
+export type ReplacementSetting = PersonalRouter['nativeReplacement'];
+
+/**
+ * WHAT EVERY ROUTING CALL SENDS: the `settings` field with its hash, and
+ * whether it carries any rule. `invalid` is fail-closed: rules this build
+ * cannot read are never guessed, so nothing routes or runs until they are
+ * fixed (`tenjin config` shows the problem, `reset --all` clears it).
+ */
+export type WireState =
+  | { status: 'ok'; settings: WireSettings; hasRules: boolean }
+  | { status: 'invalid'; problem: string };
+
+/** The accounts saved in `router.sources` (plan 37), and which of them this
+ *  machine holds a sign-in for. A descriptor alone connects nothing. */
+export interface AccountsSetting {
+  saved: SavedAccount[];
+  connected: string[];
+}
+
+/** The personal settings, from the global file alone. */
+export interface PersonalSettings {
+  policy: PolicySetting;
+  nativeReplacement: ReplacementSetting;
+  wire: WireState;
+  accounts: AccountsSetting;
+}
+
+export interface RouterSettings extends PersonalSettings {
   enabled: RouterSetting<boolean>;
   context: RouterSetting<RouterContext>;
   /** "Help improve routing": the global file's, or the default, off. */
   improve: RouterSetting<boolean>;
+}
+
+/**
+ * The personal settings from the global file's router block. The sources are
+ * Tenjin's own and, with `dataDir`, every account connected on this machine
+ * that the router has jobs for (`accounts/presence.ts`): a saved descriptor
+ * with a vault here. The hash covers them, so connecting or disconnecting an
+ * account refuses every offer decided before it. A saved list this build
+ * cannot read names no account.
+ */
+export function personalSettings(router: unknown, dataDir?: string): PersonalSettings {
+  const personal = readPersonalRouter(router);
+  const { policy, nativeReplacement } = personal;
+  const listed = personal.sources.status === 'ok' ? personal.sources.saved : [];
+  const saved = listed.flatMap((entry) => savedAccountOf(entry) ?? []);
+  const accounts: AccountsSetting = {
+    saved,
+    connected:
+      dataDir !== undefined
+        ? connectedSourceIds(
+            dataDir,
+            saved.map(({ id }) => id),
+          )
+        : [],
+  };
+  if (policy.status === 'invalid') {
+    return {
+      policy,
+      nativeReplacement,
+      wire: { status: 'invalid', problem: policy.problem },
+      accounts,
+    };
+  }
+  const rules = policy.status === 'ok' ? policy.saved : undefined;
+  // NAMED TO THE ROUTER: a saved account that is connected here and mapped,
+  // in the order saved. One connected by its address alone never is: its id
+  // comes from a private host name, and the router has nothing for it.
+  const routed = saved
+    .filter((account) => account.mapped === true && accounts.connected.includes(account.id))
+    .map(({ id }) => id);
+  const settings = wireSettings(rules, nativeReplacement, [BUILT_IN_SOURCE, ...routed]);
+  return {
+    policy,
+    nativeReplacement,
+    wire: { status: 'ok', settings, hasRules: hasRules(settings.policy) },
+    accounts,
+  };
+}
+
+/** {@link personalSettings} straight from the global file in `dataDir`: what
+ *  the check before every call compares an offer against. */
+export async function personalSettingsAt(dataDir: string): Promise<PersonalSettings> {
+  return personalSettings((await loadRawConfig(dataDir)).router, dataDir);
 }
 
 export interface RouterSettingsInput {
@@ -112,7 +211,7 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context, improve };
+  return { enabled, context, improve, ...personalSettings(global, input.dataDir) };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

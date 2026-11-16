@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "identities": true,
+  "accepts": [
+    "catalog",
+    "spec",
+    "label",
+    "fields",
+    "jobs",
+    "headers",
+    "note",
+    "tolerant",
+    "settings",
+    "mcp"
+  ]
+}

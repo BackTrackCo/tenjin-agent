@@ -19,15 +19,25 @@ Automatic routing, an explicitly approved over-limit quote, direct `tenjin pay` 
 
 A signed authorization can be charged after a process exits or reports an error. Tenjin counts transmitted automatic authorizations conservatively; only eligible chain-proven expiry releases their exposure. A result file, HTTP success or provider's claim of failure is not settlement proof. Check payment records before retrying an uncertain purchase.
 
-A routing decision can cost the server's quoted fee, at most $0.003, even when it suggests no tool. Tenjin pays it from a routing balance that it tops up from your wallet in deposits. A deposit never exceeds `maxAutoSpend` or a $0.25 ceiling, must pass the automatic spend policy before signing, and counts against the per-call limit and daily budget once; fees drawn from it do not count again. A failed balance lookup sends no deposit. [How a deposit is sized →](./router-reference.md#routing-fee-and-deposit)
+A routing answer can cost the fee the server quotes for it, even when it suggests no tool; offers show no fee. The current routing limit and your spend policy still apply. Tenjin pays it from a routing balance that it tops up from your wallet in deposits. A deposit never exceeds `maxAutoSpend` or the current top-up limit, must pass the automatic spend policy before signing, and counts against the per-call limit and daily budget once; fees drawn from it do not count again. A failed balance lookup sends no deposit. [How a deposit is sized →](./router-reference.md#routing-fee-and-deposit)
 
 ## Destination and result limits
 
 For a spec-backed call, the live challenge must match the spec's recipient, network, asset and price ceiling. An older lookup without a spec checks the quote's price and does **not** provide complete endpoint/payee binding.
 
-The paid request checks that its destination resolves publicly, but the payment transport resolves it again. DNS changing between those steps can bypass that check. Media downloads and job polls instead connect to the validated public address; downloads validate every redirect hop, while polls follow no redirects and carry no payment.
+The paid request checks that its destination resolves publicly, but the payment transport resolves it again. DNS changing between those steps can bypass that check. Media downloads and job polls instead connect to the validated public address. Downloads validate every redirect hop, and polls follow no redirects and carry no payment.
 
 The provider controls its response. Schema and success-rule checks can detect contract failures; they cannot prove the content is correct, safe or useful. Results remain untrusted even after a successful payment.
+
+## Connected accounts
+
+Every request for a connected account (connecting, signing in, a token refresh, signing out and the MCP session) goes through one check. What it may reach depends on who named the host:
+
+- **The server the user typed** at `tenjin connect` is theirs to name. Requests to that server's own origin go out as typed: any port, any address, a `.local` or `.internal` name. It must be https, or plain http only on this machine (`localhost`, `127.0.0.0/8` or `[::1]`).
+- **A server the router names** (Apify, fal, Firecrawl) must be https at a public address, on any port.
+- **A host on another origin that the server's sign-in names** (its authorization server, and that server's token, registration and revocation endpoints) must be https at a public address, on any port. It may be on this machine, plain http included, only when the typed server is on this machine. It may be on a private network only when the user typed the server as a private IP address. Link-local and cloud metadata addresses are never reached.
+
+A request to a host the router or a server named connects to the one address that was checked, so a name whose answer changes between the check and the connect gets nothing. Requests to the typed server's own origin are not pinned, because the user chose that host. No account request follows a redirect to another origin: the MCP session follows one only within its origin and checks each hop as above, and the sign-in follows none. A sign-in page opens in the browser only at an https address, or at http on this machine for a server typed there, and never through a shell.
 
 ## Sharing and secret masking
 

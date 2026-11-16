@@ -246,8 +246,10 @@ describe('Codex automatic hooks', () => {
           expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
         } else {
           // A balance read that fails before a deposit is no fault
-          // (balance_unreadable): nothing is said to the person.
-          expect(out?.systemMessage).toBeUndefined();
+          // (balance_unreadable): no unpaid notice is said to the person. The
+          // new routing terms are told once, on this first routing call.
+          expect(out?.systemMessage ?? '').not.toContain('could not pay');
+          expect(out?.systemMessage).toContain('Routing fees now vary');
           expect(fake.paidRequests()).toBe(0);
           expect(await readSpendSummary(dir)).toBeNull();
         }
@@ -310,15 +312,15 @@ describe('Codex automatic hooks', () => {
     const server = await connect(fake);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
+      expect(out).toEqual({ systemMessage: expect.stringContaining('balance was too low') });
       // The leg's 402, and the top-up's, which read the balance and stopped.
       expect(fake.log).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route warm unpaid',
       ]);
       expect(fake.deposits).toBe(0);
-      expect(out?.systemMessage).toContain('the wallet holds less than the $0.013');
-      expect(out?.systemMessage).toContain('Your usual tools still work.');
+      expect(out?.systemMessage).toContain('Free routing still works.');
+      expect(out?.systemMessage).not.toMatch(/not routing calls|routing stopped/);
       expect(out?.systemMessage).not.toContain('tenjin fund');
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
         'prompt: fee unpaid: wallet_low',
