@@ -704,7 +704,7 @@ describe('Codex install, uninstall and doctor', () => {
       spend: { effective: { maxAutoSpend: string; sessionBudget: string } };
       nextSteps: { id: string; options: { command: string | null }[] }[];
     };
-    expect(data.spend.effective).toEqual({ maxAutoSpend: '0.25', sessionBudget: '5' });
+    expect(data.spend.effective).toEqual({ maxAutoSpend: '1', sessionBudget: '5' });
     expect(data.nextSteps.map((s) => s.id)).toEqual(['spend']);
     expect(data.nextSteps[0]?.options.map((o) => o.command)).toEqual([
       'tenjin install --yes',
