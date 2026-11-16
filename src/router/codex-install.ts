@@ -70,7 +70,7 @@ export interface CodexArgs {
   project?: boolean;
   yes?: boolean;
   noWallet?: boolean;
-  /** `--max-auto-spend`: the per-call limit, at least 0.25 USD. */
+  /** `--max-auto-spend`: the non-negative per-call limit in USD. */
   maxAutoSpend?: string;
   /** `--session-budget`: the daily limit in USD, or none. */
   sessionBudget?: string;

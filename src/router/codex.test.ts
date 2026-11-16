@@ -758,28 +758,38 @@ describe('Codex install, uninstall and doctor', () => {
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });
 
-  it('writes the limits the two flags name, and asks nothing', async () => {
+  it.each([
+    ['0', '0', '0.00'],
+    ['0.000001', '1', '0.000001'],
+    ['0.1', '100000', '0.10'],
+    ['0.24', '240000', '0.24'],
+    ['0.25', '250000', '0.25'],
+    ['0.5', '500000', '0.50'],
+  ])('writes a %s USD per-call limit and asks nothing', async (input, atomic, display) => {
     await writeFile(join(dir, 'config.json'), '{}');
     const { deps } = host();
-    const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
+    const out = await runCodexInstall({ maxAutoSpend: input, sessionBudget: 'none' }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
-    expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
-    expect(receipt(out)).toContain('Limits    $0.50 a call · no daily limit');
+    expect(config).toMatchObject({ maxAutoSpend: atomic, sessionBudget: 'none' });
+    expect(receipt(out)).toContain(`Limits    $${display} a call · no daily limit`);
     expect(out.data).toMatchObject({
-      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+      spend: { effective: { maxAutoSpend: input, sessionBudget: 'no daily budget limit' } },
     });
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 
-  it('refuses a per-call limit under the 0.25 floor before any write', async () => {
-    await writeFile(join(dir, 'config.json'), '{}');
-    const { steps, deps } = host();
-    await expect(runCodexInstall({ maxAutoSpend: '0.1' }, ctx(), deps)).rejects.toThrow(
-      '--max-auto-spend 0.1',
-    );
-    expect(steps).toEqual([]);
-    expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe('{}');
-  });
+  it.each(['-1', 'NaN', 'Infinity', '0.0000001'])(
+    'refuses invalid per-call limit %s before any write',
+    async (input) => {
+      await writeFile(join(dir, 'config.json'), '{}');
+      const { steps, deps } = host();
+      await expect(runCodexInstall({ maxAutoSpend: input }, ctx(), deps)).rejects.toThrow(
+        `--max-auto-spend ${input}`,
+      );
+      expect(steps).toEqual([]);
+      expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe('{}');
+    },
+  );
 
   it('refuses project scope before any write', async () => {
     const { steps, deps } = host();

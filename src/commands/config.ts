@@ -14,8 +14,6 @@ import {
   ROUTER_CONTEXTS,
   PERSONAL_ROUTER_KEYS,
   loadRawConfig,
-  MAX_AUTO_SPEND_FLOOR_ATOMIC,
-  MAX_AUTO_SPEND_FLOOR_WHY,
   parseOnOffFlag,
   parseUpdateModeFlag,
   resolveSettings,
@@ -86,7 +84,7 @@ const KEY_WIDTH = Math.max(
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend:
-    'automatic router limit per call, the runaway guard: default 1.00, at least 0.25; router.enabled false turns the router off',
+    'automatic router limit per call, the runaway guard: default 1.00, 0 blocks positive automatic payments; router.enabled false turns the router off',
   sessionBudget:
     'automatic router daily budget shared across chats (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
@@ -707,7 +705,7 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'sessionBudget':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'maxAutoSpend':
-      return parseAutoSpend(value);
+      return parseUsdToAtomic(value);
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'allowlistCreators':
@@ -718,17 +716,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'bazaarRegistries':
       return parseRegistryList(value);
   }
-}
-
-/** A per-call limit, refused below the $0.25 floor (and on a bad amount). */
-function parseAutoSpend(value: string): string {
-  const atomic = parseUsdToAtomic(value);
-  if (BigInt(atomic) < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
-    throw new CliError('USAGE', `maxAutoSpend ${value} is below the 0.25 USD minimum.`, {
-      fix: MAX_AUTO_SPEND_FLOOR_WHY,
-    });
-  }
-  return atomic;
 }
 
 /** "" clears to []; comma-split, each entry an absolute http(s) URL. */

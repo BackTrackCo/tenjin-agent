@@ -98,7 +98,7 @@ export function spendOptions(install: string): SpendOption[] {
       recommended: false,
       ask: [
         'Daily budget shared across chats, in USD, or none for no limit',
-        'The most it may pay for one call, in USD, at least 0.25',
+        'The most it may pay for one call, in USD; 0 blocks positive automatic payments',
       ],
       command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,
     },

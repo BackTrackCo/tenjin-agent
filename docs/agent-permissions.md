@@ -36,12 +36,12 @@ Installation and the first task add no optional retention or second-host questio
 
 ## What bounds a payment
 
-| Control             | Default and meaning                                                                                                                                                         |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessionBudget`     | $5 automatic spending shared across chats. Resets 24 hours after its window starts, not on a new chat. Zero blocks automatic payments; `none` removes this ceiling.         |
-| `maxAutoSpend`      | $1.00 by default for one call's total, including multiple takes or comparison options. Installation and config changes require at least $0.25; saved limits stay unchanged. |
-| Wallet balance      | No payment can exceed available funds.                                                                                                                                      |
-| `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                     |
+| Control             | Default and meaning                                                                                                                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessionBudget`     | $5 automatic spending shared across chats. Resets 24 hours after its window starts, not on a new chat. Zero blocks automatic payments; `none` removes this ceiling.                                                          |
+| `maxAutoSpend`      | $1.00 by default for one call's total, including multiple takes or comparison options. Accepts any non-negative USD amount with up to 6 decimal places; `0` blocks positive automatic payments. Saved limits stay unchanged. |
+| Wallet balance      | No payment can exceed available funds.                                                                                                                                                                                       |
+| `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                                                                      |
 
 Defaults apply before any answer. Accepting limits records them; explicit amount flags replace the named limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
 

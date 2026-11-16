@@ -1,16 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { ROUTER_DEFAULTS } from '../commands/config';
-import { MAX_CHANNEL_DEPOSIT_ATOMIC } from './fee';
 import { shownLimits, spendChoiceQuestion, spendOptions } from './spend-question';
 
 describe('the spend question', () => {
-  it('keeps the per-call floor at the largest routing deposit and the default above it', () => {
-    // A deposit the router asks for can reach $0.25: a lower ceiling would refuse it.
-    expect(MAX_AUTO_SPEND_FLOOR_ATOMIC).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
-    expect(BigInt(ROUTER_DEFAULTS.maxAutoSpend)).toBeGreaterThan(MAX_AUTO_SPEND_FLOOR_ATOMIC);
-  });
-
   it('shows the defaults where the file names no limit, and the file where it does', () => {
     expect(shownLimits({})).toEqual({ maxAutoSpend: '1000000', sessionBudget: '5000000' });
     expect(shownLimits({ maxAutoSpend: '250000', sessionBudget: '2000000' })).toEqual({

@@ -26,7 +26,10 @@ export function registerCore(reg: Registration): void {
     .option('--refresh', 'bring the plugin this machine already has up to this version')
     .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $1.00 a call)')
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
-    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (default 1.00)')
+    .option(
+      '--max-auto-spend <usd>',
+      'your own non-negative per-call limit (default 1.00; 0 blocks positive automatic payments)',
+    )
     .addHelpText(
       'after',
       `

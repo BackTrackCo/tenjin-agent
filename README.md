@@ -125,7 +125,7 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $1.00   |
 
-A new chat does not reset the daily budget. Routing fees vary by answer. Tool charges are separate. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Set any non-negative per-call USD limit with up to 6 decimal places; `0` blocks positive automatic payments. Routing fees vary by answer. Tool charges are separate. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 

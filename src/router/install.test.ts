@@ -148,7 +148,7 @@ describe('tenjin install', () => {
               recommended: false,
               ask: [
                 'Daily budget shared across chats, in USD, or none for no limit',
-                'The most it may pay for one call, in USD, at least 0.25',
+                'The most it may pay for one call, in USD; 0 blocks positive automatic payments',
               ],
               command: 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
             },
@@ -439,23 +439,32 @@ describe('install asks a person the spend question once', () => {
     expect(receipt(result)).toContain('Limits    $1.00 a call · $5.00 a day');
   });
 
-  it('"Set my own limits" asks the daily amount, then the per-call one, and writes both', async () => {
-    const promptAmount = amounts(['2', '0.5']);
-    const result = await runRouterInstall(
-      {},
-      humanCtx(),
-      deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
-    );
-    expect(promptAmount.mock.calls.map(([message]) => message)).toEqual([
-      'Daily budget shared across chats, in USD, or none',
-      'Most it may pay for one call, in USD, at least 0.25',
-    ]);
-    expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '500000',
-      sessionBudget: '2000000',
-    });
-    expect(receipt(result)).toContain('Limits    $0.50 a call · $2.00 a day');
-  });
+  it.each([
+    ['0', '0', '0.00'],
+    ['0.000001', '1', '0.000001'],
+    ['0.24', '240000', '0.24'],
+    ['0.25', '250000', '0.25'],
+    ['0.5', '500000', '0.50'],
+  ])(
+    '"Set my own limits" writes the daily amount and a %s USD per-call limit',
+    async (input, atomic, display) => {
+      const promptAmount = amounts(['2', input]);
+      const result = await runRouterInstall(
+        {},
+        humanCtx(),
+        deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
+      );
+      expect(promptAmount.mock.calls.map(([message]) => message)).toEqual([
+        'Daily budget shared across chats, in USD, or none',
+        'Most it may pay for one call, in USD; 0 blocks positive automatic payments',
+      ]);
+      expect(await loadRawConfig(data)).toMatchObject({
+        maxAutoSpend: atomic,
+        sessionBudget: '2000000',
+      });
+      expect(receipt(result)).toContain(`Limits    $${display} a call · $2.00 a day`);
+    },
+  );
 
   it('takes none for the daily limit', async () => {
     await runRouterInstall(
@@ -473,23 +482,25 @@ describe('install asks a person the spend question once', () => {
     });
   });
 
-  it('refuses zero, a negative amount and a per-call limit under $0.25, and asks again', async () => {
-    const promptAmount = amounts(['0', '-1', '3', '0.1', '0', '0.3']);
+  it('reasks after invalid amounts and accepts a zero per-call stop', async () => {
+    const promptAmount = amounts(['0', '-1', '3', '-1', 'NaN', 'Infinity', '0.0000001', '0']);
     await runRouterInstall(
       {},
       humanCtx(),
       deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
     );
     const messages = promptAmount.mock.calls.map(([message]) => message);
-    expect(messages).toHaveLength(6);
+    expect(messages).toHaveLength(8);
     expect(messages[1]).toMatch(
       /^The limit must be more than zero; `tenjin config set router\.enabled false` turns the router off\. /,
     );
     expect(messages[2]).toMatch(/^Invalid USD amount: "-1"\. /);
-    expect(messages[4]).toMatch(/^The per-call limit is at least \$0\.25\. /);
-    expect(messages[5]).toMatch(/^The per-call limit is at least \$0\.25\. /);
+    expect(messages[4]).toMatch(/^Invalid USD amount: "-1"\. /);
+    expect(messages[5]).toMatch(/^Invalid USD amount: "NaN"\. /);
+    expect(messages[6]).toMatch(/^Invalid USD amount: "Infinity"\. /);
+    expect(messages[7]).toContain('more than 6 decimal places');
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '300000',
+      maxAutoSpend: '0',
       sessionBudget: '3000000',
     });
   });
@@ -704,7 +715,7 @@ describe('the doctor this release registers', () => {
       },
     ],
     [
-      'a 0 an earlier release let the user set',
+      'a zero per-call automatic-spend stop',
       '0',
       {
         status: 'fail',
@@ -742,7 +753,9 @@ describe('the doctor this release registers', () => {
       expect(JSON.stringify(checks)).not.toMatch(/not answered|spend question/);
     } else {
       // Install keeps a limit it finds and never asks, so only `config set` changes it.
-      expect(spend?.fix).toBe('Raise it with `tenjin config set maxAutoSpend 0.25`.');
+      expect(spend?.fix).toBe(
+        'Choose a positive limit with `tenjin config set maxAutoSpend <usd>`.',
+      );
     }
     if (maxAutoSpend === '0') expect((out as CliError).message).toContain('maxAutoSpend is 0');
     expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
@@ -1064,16 +1077,22 @@ it('status warns about ignored retired keys and reports automatic exposure separ
 });
 
 describe('install applies the spend answer an agent relays, in one command', () => {
-  it('--max-auto-spend and --session-budget write the amounts named, as "Set my own limits" does', async () => {
+  it.each([
+    ['0', '0'],
+    ['0.000001', '1'],
+    ['0.24', '240000'],
+    ['0.25', '250000'],
+    ['0.40', '400000'],
+  ])('--max-auto-spend %s and --session-budget write the amounts named', async (input, atomic) => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     const result = await runRouterInstall(
-      { maxAutoSpend: '0.40', sessionBudget: '2' },
+      { maxAutoSpend: input, sessionBudget: '2' },
       ctx(),
       deps({ isInteractive: false, promptLimits }),
     );
     expect(promptLimits).not.toHaveBeenCalled();
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '400000',
+      maxAutoSpend: atomic,
       sessionBudget: '2000000',
     });
     expect(spendStepOf(result)).toBeUndefined();
@@ -1100,9 +1119,11 @@ describe('install applies the spend answer an agent relays, in one command', () 
   });
 
   it.each([
-    [{ maxAutoSpend: '0' }, 'The per-call limit is at least $0.25.'],
-    [{ maxAutoSpend: '0.24' }, 'The per-call limit is at least $0.25.'],
     [{ maxAutoSpend: 'none' }, 'Invalid USD amount'],
+    [{ maxAutoSpend: '-1' }, 'Invalid USD amount'],
+    [{ maxAutoSpend: 'NaN' }, 'Invalid USD amount'],
+    [{ maxAutoSpend: 'Infinity' }, 'Invalid USD amount'],
+    [{ maxAutoSpend: '0.0000001' }, 'more than 6 decimal places'],
     [{ sessionBudget: '0' }, 'The limit must be more than zero'],
     [{ sessionBudget: '-1' }, 'Invalid USD amount'],
   ])('refuses %o before writing anything', async (args, message) => {
@@ -1113,13 +1134,13 @@ describe('install applies the spend answer an agent relays, in one command', () 
     await expect(readFile(join(data, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('says why the per-call limit is at least $0.25', async () => {
-    const err = (await runRouterInstall({ maxAutoSpend: '0.1' }, ctx(), deps()).catch(
+  it('explains valid per-call amounts when the supplied amount is malformed', async () => {
+    const err = (await runRouterInstall({ maxAutoSpend: '-1' }, ctx(), deps()).catch(
       (e: unknown) => e,
     )) as CliError;
-    expect(err.message).toBe('--max-auto-spend 0.1: The per-call limit is at least $0.25.');
+    expect(err.message).toContain('--max-auto-spend -1: Invalid USD amount');
     expect(err.fix).toBe(
-      'Give 0.25 USD or more, for example `--max-auto-spend 0.5`. The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.',
+      'Give a non-negative USD amount with up to 6 decimal places, for example `--max-auto-spend 0.1`. Zero blocks positive automatic payments.',
     );
   });
 

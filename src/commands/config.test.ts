@@ -246,34 +246,32 @@ describe('runConfigGet', () => {
 
 describe('runConfigSet — spend keys', () => {
   it.each([
+    ['0', '0'],
+    ['0.000001', '1'],
+    ['0.24', '240000'],
+    ['0.25', '250000'],
     ['1', '1000000'],
     ['5', '5000000'],
   ])('stores %s USD as %s atomic', async (input, atomic) => {
     const { data } = await runConfigSet({ key: 'maxAutoSpend', value: input }, makeCtx());
     expect(data).toMatchObject({
       key: 'maxAutoSpend',
-      value: { atomic, usd: atomicToUsd(atomic) },
+      value: { atomic, usd: input },
       source: 'file',
     });
     expect(await readRawFile()).toEqual({ maxAutoSpend: atomic });
   });
 
-  it.each(['0', '0.1', '0.249'])(
-    'refuses a per-call limit of %s USD below the 0.25 USD floor and explains how to disable routing',
-    async (low) => {
-      const err = await caught(() => runConfigSet({ key: 'maxAutoSpend', value: low }, makeCtx()));
-      expect(err.code).toBe('USAGE');
-      expect(err.message).toBe(`maxAutoSpend ${low} is below the 0.25 USD minimum.`);
-      expect(err.fix).toContain('The per-call limit must be at least $0.25.');
-      expect(err.fix).toContain('`tenjin config set router.enabled false`');
-      await expect(readFile(configFile(), 'utf8')).rejects.toThrow();
-    },
-  );
-
-  it.each(['abc', '-1', '1.2345678', ''])('rejects %j as USAGE', async (bad) => {
-    const err = await caught(() => runConfigSet({ key: 'sessionBudget', value: bad }, makeCtx()));
-    expect(err.code).toBe('USAGE');
-    expect(err.exitCode).toBe(2);
+  describe.each(['maxAutoSpend', 'sessionBudget'])('%s validation', (key) => {
+    it.each(['abc', '-1', 'NaN', 'Infinity', '1.2345678', ''])(
+      'rejects %j as USAGE before writing',
+      async (bad) => {
+        const err = await caught(() => runConfigSet({ key, value: bad }, makeCtx()));
+        expect(err.code).toBe('USAGE');
+        expect(err.exitCode).toBe(2);
+        await expect(readFile(configFile(), 'utf8')).rejects.toThrow();
+      },
+    );
   });
 });
 
@@ -406,12 +404,6 @@ describe('runConfigSet — persistence', () => {
     });
   });
 });
-
-// Local mirror of lib/money's atomicToUsd expectation, used only to phrase the
-// spend-key table above without importing an extra symbol for one call site.
-function atomicToUsd(atomic: string): string {
-  return atomic === '1000000' ? '1' : atomic === '5000000' ? '5' : '0';
-}
 
 describe('forward compatibility', () => {
   it('preserves an unknown top-level block through a set', async () => {

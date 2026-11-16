@@ -357,12 +357,6 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 export const DEFAULT_MAX_AUTO_SPEND = '1000000';
 export const DEFAULT_SESSION_BUDGET = '5000000';
 
-/** The lowest configurable per-call ceiling, atomic USDC ($0.25). */
-export const MAX_AUTO_SPEND_FLOOR_ATOMIC = 250_000n;
-/** Why: said by install, `config set` and doctor wherever the floor refuses. */
-export const MAX_AUTO_SPEND_FLOOR_WHY =
-  'The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
-
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
   sessionBudget: DEFAULT_SESSION_BUDGET,
