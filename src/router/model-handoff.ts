@@ -94,6 +94,16 @@ function offerConsent(settings: ModelSettings, nativeRepositories: readonly stri
   };
 }
 
+/** Native directories the worker will not get, so the parent can tell the person. */
+function droppedNote(workspace: ClaudeWorkspace) {
+  const dropped = savedClaudeWorkspace(workspace)?.droppedDirectories ?? [];
+  return dropped.length
+    ? {
+        workspaceNote: `Outside model consent, so withheld from the worker: ${dropped.join(', ')}.`,
+      }
+    : {};
+}
+
 function nativeRepositories(job: ModelJob, workspace: ClaudeWorkspace | null): string[] | null {
   if (workspace)
     return [
@@ -468,6 +478,7 @@ export class ModelHandoff {
       reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
       parentPolicy: continuationPolicy,
       workspace: worker.claudeWorkspace,
+      ...droppedNote(worker.claudeWorkspace),
       consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
       instruction:
         'Assess the complete follow-up against the full parent policy and current repository constraints. Accept with offer_id only if it remains suitable for this DeepSeek worker. You retain the final veto. This reuses the original history and budget, with no new routing fee. Otherwise cancel the offer; do not send a Tenjin handle to native tools. No worker started.',
@@ -576,7 +587,7 @@ export class ModelHandoff {
       reason: parsed.data.reason,
       parentPolicy,
       ...(claudeWorkspace
-        ? { workspace: claudeWorkspace }
+        ? { workspace: claudeWorkspace, ...droppedNote(claudeWorkspace) }
         : {
             workspace: {
               root: settings.root,

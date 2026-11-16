@@ -19,6 +19,11 @@ const native = vi.hoisted(() => ({
   bridgeClose: vi.fn(),
   createServer: vi.fn(),
   promptMessages: [] as unknown[],
+  worktrees: [] as string[],
+}));
+vi.mock('./claude-workspace', async (original) => ({
+  ...(await original<typeof import('./claude-workspace')>()),
+  claudeWorkspaceWorktrees: vi.fn(async () => native.worktrees),
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
@@ -60,6 +65,7 @@ vi.mock('node:http', async (original) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   native.promptMessages.length = 0;
+  native.worktrees = [];
   vi.mocked(readClaudeCode).mockResolvedValue({
     binary: { path: '/fixture/claude' },
     version: '2.1.325',
@@ -475,9 +481,11 @@ it('keeps native sibling working directories distinct from read-only and shell-w
     readExceptions: ['/read-only'],
     writeExceptions: ['/shell-write'],
   };
+  // Named consent would make each named path a working directory; native scope keeps them apart.
   vi.mocked(modelSettings).mockResolvedValue({
+    scope: 'native-workspace',
     root: '/repo',
-    repositories: ['/repo', '/sibling', '/read-only', '/shell-write'],
+    repositories: ['/repo'],
   } as never);
   vi.mocked(resolveSettings).mockResolvedValue({
     effective: {
@@ -507,6 +515,44 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       'Read(//shell-write/**/.env*)',
     ]),
   );
+});
+
+it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
+  vi.mocked(modelSettings).mockResolvedValue({
+    root: '/repo',
+    repositories: ['/repo', '/workspace'],
+  } as never);
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { permissions: { additionalDirectories: ['/elsewhere'] } },
+  } as never);
+  native.worktrees = ['/workspace/.worktrees/fix'];
+  const workspace = {
+    version: 1,
+    root: '/repo',
+    workingDirectories: ['/repo', '/workspace'],
+    workingDirectorySpellings: ['/repo', '/workspace'],
+    readExceptions: [],
+    writeExceptions: [],
+    droppedDirectories: ['/elsewhere'],
+  };
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+    options(),
+  );
+  const call = vi.mocked(query).mock.calls[0]![0];
+  // The sandbox keeps a worktree's git metadata read-only unless the worktree is named.
+  expect(call.options?.additionalDirectories).toEqual(['/workspace', '/workspace/.worktrees/fix']);
+  expect(call.options?.settings).toHaveProperty(
+    'permissions.deny',
+    expect.arrayContaining([
+      'Read(//elsewhere/**)',
+      'Edit(//elsewhere/**)',
+      'Read(//workspace/**/.claude/settings.local.json)',
+    ]),
+  );
+  expect(call.options?.sandbox?.filesystem?.denyRead).toContain('/elsewhere');
+  expect(call.options?.sandbox?.filesystem?.denyWrite).toContain('/elsewhere');
 });
 
 it.each(['additional directory', 'read exception', 'write exception'] as const)(

@@ -45,6 +45,7 @@ async function continuationFixture(multiple = false) {
     workingDirectorySpellings: (multiple ? [repo, sibling] : [repo]).sort(),
     readExceptions: [],
     writeExceptions: [],
+    droppedDirectories: [],
   };
   vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
   await writeFile(

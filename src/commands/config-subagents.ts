@@ -54,14 +54,14 @@ export async function runConfigSubagents(
     );
   const disclosure = [
     'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results.',
-    'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. This grants no extra tool or filesystem permission. Wallet, login and environment files are excluded; known secrets are masked, not guaranteed anonymous.',
+    'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. Wallet, login and environment files are excluded; known secrets are masked, not guaranteed anonymous.',
     'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. Claude’s usual 32K-output request reserves at least $0.041611 at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003.',
   ].join('\n\n');
   let repositories = [repository];
   let githubRepositories: string[] = [];
   await persist(ctx.dataDir, (c) => {
-    // The locked merge keeps other explicitly named roots; this list never
-    // supplies working directories or grants tool/filesystem permissions.
+    // The locked merge keeps other explicitly named roots. Each is a working
+    // directory for a Claude worker; native sessions gain no permission.
     repositories = [
       ...new Set([...retainedRepositories(c.router?.subagentConsent, routerOrigin), repository]),
     ];

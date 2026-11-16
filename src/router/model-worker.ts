@@ -48,6 +48,7 @@ import {
   type WorkerPermissionAsk,
 } from './model-worker-prompt';
 import {
+  claudeWorkspaceWorktrees,
   resolveClaudeWorkspace,
   savedClaudeWorkspace,
   sameClaudeWorkspace,
@@ -216,6 +217,7 @@ async function runQualifiedWorker(
     return resolved;
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
+  const worktrees = await claudeWorkspaceWorktrees(workspace);
   const protectedRoots = [
     ...new Set([
       ...workspace.workingDirectories,
@@ -346,8 +348,12 @@ async function runQualifiedWorker(
       job.root,
       process.env,
       resolved.effective.env,
-      { sources: resolved.sources, workingDirectories: workspace.workingDirectories },
+      {
+        sources: resolved.sources,
+        workingDirectories: [...workspace.workingDirectories, ...worktrees],
+      },
     );
+    const dropped = workspace.droppedDirectories;
     if (
       !claudeManagedProviderCompatible(resolved) ||
       (permissionMode === 'auto' &&
@@ -364,7 +370,7 @@ async function runQualifiedWorker(
         pathToClaudeCodeExecutable: binary.path,
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
-        additionalDirectories: workspace.workingDirectories.slice(1),
+        additionalDirectories: [...workspace.workingDirectories.slice(1), ...worktrees],
         env,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
@@ -383,7 +389,9 @@ async function runQualifiedWorker(
           permissions: {
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
-            workingDirectoriesAsGiven: workspace.workingDirectorySpellings,
+            workingDirectoriesAsGiven: [
+              ...new Set([...workspace.workingDirectorySpellings, ...worktrees]),
+            ].sort(),
             blockReadsExemptPaths: workspace.readExceptions,
             deny: [
               ...privatePaths.deny,
@@ -392,11 +400,21 @@ async function runQualifiedWorker(
                 const patterns = [
                   `${absolute}/.env*`,
                   `${absolute}/**/.env*`,
+                  // A consented workspace holds other repositories' native settings too.
+                  ...NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`),
                   ...(basename(root).startsWith('.env') ? [absolute] : []),
                 ];
                 return ['Read', 'Edit', 'Write'].flatMap((tool) =>
                   patterns.map((pattern) => `${tool}(${pattern})`),
                 );
+              }),
+              // Native settings still add these; the worker may not use them.
+              ...dropped.flatMap((path) => {
+                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                return ['Read', 'Edit', 'Write'].flatMap((tool) => [
+                  `${tool}(${absolute})`,
+                  `${tool}(${absolute}/**)`,
+                ]);
               }),
             ],
           },
@@ -411,10 +429,12 @@ async function runQualifiedWorker(
               ...protectedRoots.flatMap((root) => [
                 `${root}/.env*`,
                 `${root}/**/.env*`,
+                ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
                 ...(basename(root).startsWith('.env') ? [root] : []),
               ]),
+              ...dropped,
             ],
-            denyWrite: privatePaths.paths,
+            denyWrite: [...privatePaths.paths, ...dropped],
           },
         },
         // Direct callers remain ephemeral; only the owned controller may retain
@@ -675,3 +695,6 @@ async function runQualifiedWorker(
   if (executionFailure) throw executionFailure.error;
   return result!;
 }
+
+/** Native settings and MCP config of repositories nested in a worker root. */
+const NESTED_PRIVATE = ['.claude/settings.json', '.claude/settings.local.json', '.mcp.json'];
