@@ -146,7 +146,7 @@ it.each(['default', 'acceptEdits', 'auto', 'dontAsk'] as const)(
       const tool = listed.tools.find((tool) => tool.name === 'subagent');
       expect(tool?.description).toContain('Accept with offer_id');
       expect(tool?.description).not.toContain(parentPolicy);
-      expect(tool?._meta?.['anthropic/alwaysLoad']).toBeUndefined();
+      expect(tool?._meta?.['anthropic/alwaysLoad']).toBe(true);
       const captured = await client.callTool({
         name: 'subagent',
         arguments: {
@@ -276,9 +276,9 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
   await server.connect(a);
   await client.connect(b);
   try {
-    expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain(
-      'subagent_activity',
-    );
+    const tools = (await client.listTools()).tools;
+    expect(tools.map((tool) => tool.name)).not.toContain('subagent_activity');
+    expect(tools.find((tool) => tool.name === 'subagent')?._meta).toBeUndefined();
     const foreign = await client.callTool({
       name: 'subagent',
       arguments: { offer_id: job.id },
@@ -404,7 +404,7 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
   }
 });
 
-async function ownedClaudeFixture(agentType = 'general-purpose') {
+async function ownedClaudeFixture(agentType = 'general-purpose', nativeReplay = false) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'owned-model-continuation-')));
   const repo = join(dir, 'repo'),
     configDir = join(dir, 'native-config');
@@ -485,7 +485,19 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
       callId: 'initial-call',
       root: repo,
       task: 'Implement the selected change.',
-      native: { subagent_type: agentType },
+      native: {
+        subagent_type: agentType,
+        ...(nativeReplay
+          ? {
+              prompt: 'Preserve `pnpm check` exactly.\nReturn JSON.\nFINAL LINE',
+              description: 'Original description',
+              model: 'sonnet',
+            }
+          : {}),
+      },
+      ...(nativeReplay
+        ? { nativeTool: 'Agent' as const, nativeReplaySupported: true as const }
+        : {}),
       capAtomic: '1000000',
       decision: {},
     },
@@ -545,6 +557,112 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
     getTransport,
   };
 }
+
+it('selects a short native veto and consumes its exact expanded call once without inference or another route', async () => {
+  const f = await ownedClaudeFixture('Explore', true);
+  const capture = (input: Record<string, unknown>, id = 'future-native-call') =>
+    f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: id,
+        tool: 'Agent',
+        native_replay: true,
+        input,
+      },
+    });
+  try {
+    const selected = await capture({
+      prompt: `tenjin-native:${f.job.id}`,
+      description: 'Keep native',
+      subagent_type: `tenjin-native-${f.job.id}`,
+    });
+    expect(selected).toEqual({
+      action: 'native_retry',
+      offer_id: f.job.id,
+      tool: 'Agent',
+      input: f.job.native,
+    });
+    vi.stubEnv('TENJIN_MODEL_WORKER', '1');
+    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
+    vi.stubEnv('TENJIN_MODEL_WORKER', '0');
+    expect(await capture(f.job.native)).toEqual({ action: 'native' });
+    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
+    expect(f.route).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('refuses a selected replay before lifecycle execution after interruption or transport failure', async () => {
+  const f = await ownedClaudeFixture('general-purpose', true);
+  const capture = (input: Record<string, unknown>) =>
+    f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: 'future-native-call',
+        tool: 'Agent',
+        native_replay: true,
+        input,
+      },
+    });
+  try {
+    expect(
+      await capture({
+        prompt: `tenjin-native:${f.job.id}`,
+        subagent_type: `tenjin-native-${f.job.id}`,
+      }),
+    ).toMatchObject({
+      action: 'native_retry',
+    });
+    await f.model.fence(f.session);
+    f.getTransport.mockRejectedValue(new Error('offline'));
+    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
+    expect(f.route).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('durably fences a saved native replay on a fresh MCP instance even when transport initialization fails', async () => {
+  const f = await ownedClaudeFixture('general-purpose', true);
+  const capture = (input: Record<string, unknown>) =>
+    f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: 'future-native-call',
+        tool: 'Agent',
+        native_replay: true,
+        input,
+      },
+    });
+  const freshServer = new McpServer({ name: 'offline-test', version: '1' });
+  const fresh = registerModelTool(freshServer, {
+    dataDir: dir,
+    harness: 'claude',
+    session: () => f.session,
+    transport: async () => {
+      throw new Error('offline transport');
+    },
+  });
+  try {
+    expect(
+      await capture({
+        prompt: `tenjin-native:${f.job.id}`,
+        subagent_type: `tenjin-native-${f.job.id}`,
+      }),
+    ).toMatchObject({ action: 'native_retry' });
+    await expect(fresh.fence(f.session)).rejects.toThrow('offline transport');
+    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
+    expect(f.route).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
+  } finally {
+    await fresh.shutdown();
+    await freshServer.close();
+    await f.close();
+  }
+});
 
 it('advertises display activity as read-only without changing the original subagent wire contract', async () => {
   const f = await ownedClaudeFixture();

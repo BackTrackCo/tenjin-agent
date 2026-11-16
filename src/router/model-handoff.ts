@@ -20,6 +20,7 @@ import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './c
 import parentPolicy from './model-parent-policy.json';
 import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { ModelConversationStore } from './model-conversations';
+import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
   claudeWorkspaceCovered,
@@ -185,8 +186,61 @@ export class ModelHandoff {
     native: Record<string, unknown>,
     signal?: AbortSignal,
     nativeTool: ModelNativeTool = 'Agent',
+    nativeReplaySupported = false,
   ) {
     signal?.throwIfAborted();
+    nativeReplaySupported &&= nativeTool === 'Agent';
+    const retry = nativeRetryReference(native, nativeTool);
+    if (retry.owned) {
+      if (retry.error || !retry.id)
+        return nativeRetryRefusal(retry.error ?? 'Unavailable native retry');
+      if (
+        !nativeReplaySupported ||
+        session.harness === 'codex' ||
+        isModelWorkerProcess() ||
+        !claudeWorkerPermissionMode(session.claudePermissionMode)
+      )
+        return nativeRetryRefusal('Current native retry context is unavailable');
+      const settings = await this.currentConsent(session.cwd);
+      if (!settings) return nativeRetryRefusal('Current native retry scope is unavailable');
+      signal?.throwIfAborted();
+      const selected = await this.store.chooseNative(
+        retry.id,
+        session.sessionId,
+        session.turnId,
+        settings.root,
+        nativeTool as 'Agent' | 'Task',
+        callId,
+      );
+      if (!selected)
+        return nativeRetryRefusal('Native retry expired, changed, foreign or already selected');
+      return {
+        action: 'native_retry',
+        offer_id: selected.id,
+        tool: selected.nativeTool,
+        input: selected.native,
+      };
+    }
+    const settings = await this.currentConsent(session.cwd);
+    const replay = await this.store.consumeNativeReplay(
+      session.sessionId,
+      session.turnId,
+      settings?.root ?? session.cwd,
+      nativeTool,
+      callId,
+      native,
+    );
+    if (replay !== 'none')
+      return replay === 'allow' &&
+        settings &&
+        !signal?.aborted &&
+        session.harness !== 'codex' &&
+        !isModelWorkerProcess() &&
+        claudeWorkerPermissionMode(session.claudePermissionMode)
+        ? { action: 'native' }
+        : nativeRetryRefusal(
+            'Native replay changed, expired, foreign, interrupted or already used',
+          );
     const reference = ownedModelReference(native, nativeTool);
     if (reference.owned) {
       if (reference.error || !reference.handle || !reference.task)
@@ -206,7 +260,6 @@ export class ModelHandoff {
     }
     if (nativeTool === 'SendMessage') return { action: 'native' };
     const { dataDir, transport } = this.options;
-    const settings = await this.currentConsent(session.cwd);
     if (
       !settings ||
       isModelWorkerProcess() ||
@@ -214,7 +267,9 @@ export class ModelHandoff {
     )
       return { action: 'native' };
     signal?.throwIfAborted();
-    if (await this.store.nativeRetry(session.sessionId, session.turnId, native))
+    if (
+      await this.store.nativeRetry(session.sessionId, session.turnId, native, undefined, nativeTool)
+    )
       return { action: 'native' };
     const worker = await qualifiedModelWorker(
       session.cwd,
@@ -249,6 +304,8 @@ export class ModelHandoff {
         root: settings.root,
         task,
         native,
+        nativeTool,
+        ...(nativeReplaySupported ? { nativeReplaySupported: true as const } : {}),
         decision: {
           routerOrigin: transport.origin,
           claudePermissionMode: session.claudePermissionMode,
@@ -499,7 +556,10 @@ export class ModelHandoff {
         recipients: ['Tenjin', 'DeepSeek'],
       },
       instruction:
-        'The user has installed Tenjin and enabled DeepSeek routing. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
+        'The user has installed Tenjin and enabled DeepSeek routing. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.' +
+        (job.nativeTool === 'Agent' && job.nativeReplaySupported === true
+          ? ` To keep this initial assignment native without recopying it, call Agent(${JSON.stringify({ description: 'Keep native', prompt: `tenjin-native:${job.id}`, subagent_type: `tenjin-native-${job.id}` })}). Tenjin restores the complete saved original call through native checks; this starts no DeepSeek worker.`
+          : ''),
     };
   }
 }

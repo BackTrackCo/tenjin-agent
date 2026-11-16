@@ -17,6 +17,7 @@ import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 import { realpath } from 'node:fs/promises';
 import { ModelWorkerActivity } from './model-worker-activity';
 import { ModelWorkerViews } from './model-worker-views';
+import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 
 type ActiveConversation = {
   handle: string;
@@ -44,6 +45,7 @@ export function registerModelTool(
     { abort: AbortController; done: Promise<unknown>; conversation?: ActiveConversation }
   >();
   const views = new ModelWorkerViews();
+  const jobs = new ModelJobStore(options.dataDir);
   let handoff: ModelHandoff | undefined;
   const getHandoff = async () =>
     (handoff ??= new ModelHandoff({
@@ -55,6 +57,7 @@ export function registerModelTool(
   });
   const fence = async (session: ModelSession) => {
     const draining = lifecycle.fence(session);
+    await jobs.fence(session.sessionId, session.turnId, 'cancelling');
     const model = await getHandoff();
     const pending = await model.store.pending(session.sessionId, session.turnId);
     const fenceConversation = async () => {
@@ -75,7 +78,6 @@ export function registerModelTool(
           : await model.conversations.findByJob(pending.id, owner);
       if (conversation) await model.conversations.fence(conversation.handle, owner, pending.id);
     };
-    await model.store.fence(session.sessionId, session.turnId, 'cancelling');
     await fenceConversation();
     await draining;
     await fenceConversation();
@@ -150,6 +152,7 @@ export function registerModelTool(
       description:
         'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
+      ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
       inputSchema: {
         offer_id: z.string().uuid().optional(),
         cancel: z.string().uuid().optional(),
@@ -159,6 +162,7 @@ export function registerModelTool(
             session_id: z.string(),
             tool_use_id: z.string(),
             tool: z.enum(['Agent', 'Task', 'SendMessage']).optional(),
+            native_replay: z.literal(true).optional(),
             input: z.record(z.string(), z.unknown()),
           })
           .optional(),
@@ -170,11 +174,26 @@ export function registerModelTool(
       let ownedContinuation = args.capture
         ? ownedModelReference(args.capture.input, args.capture.tool ?? 'Agent').owned
         : false;
+      let ownedRetry = args.capture
+        ? nativeRetryReference(args.capture.input, args.capture.tool ?? 'Agent').owned
+        : false;
       const unavailable = (reason: string) =>
-        answer(ownedContinuation ? continuationRefusal(reason) : { action: 'native', reason });
+        answer(
+          ownedRetry
+            ? nativeRetryRefusal(reason)
+            : ownedContinuation
+              ? continuationRefusal(reason)
+              : { action: 'native', reason },
+        );
       const session = options.session();
       const ownedSessionId = session?.sessionId;
       const ownedTurnId = session?.turnId;
+      if (args.capture)
+        ownedRetry ||= await jobs.ownsNativeReplay(
+          ownedSessionId ?? '',
+          ownedTurnId ?? '',
+          args.capture.tool_use_id,
+        );
       const currentClaudeMode = () => {
         const current = options.session();
         return current?.sessionId === ownedSessionId && current?.turnId === ownedTurnId
@@ -229,6 +248,7 @@ export function registerModelTool(
                   args.capture.input,
                   signal,
                   args.capture.tool,
+                  args.capture.native_replay === true,
                 ),
               );
             } catch {

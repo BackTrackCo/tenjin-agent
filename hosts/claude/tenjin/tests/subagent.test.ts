@@ -55,6 +55,7 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
       tool_use_id: 'agent_offer',
       input: ASSIGNMENT,
       tool: 'Agent',
+      native_replay: true,
     },
   ]);
   expect(ran).toEqual([]);
@@ -311,6 +312,45 @@ test('a validated local refusal preserves its actionable reason without native f
     message: 'Continue',
   });
   expect(result.result).toEqual({ success: false, message: JSON.stringify(refusal) });
+  expect(ran).toEqual([]);
+});
+
+test('a durable replay refusal holds a full native call even without a local observation of its id', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  // A fresh mod has no marker or expanded-ID observation. Only the local backend's
+  // durable replay index knows this complete call ID was already consumed.
+  const refusal = {
+    action: 'refused',
+    started: false,
+    reason: 'Native replay changed, expired, foreign, interrupted or already used',
+    instruction: 'No native retry started. Use the complete original native call if appropriate.',
+  };
+  const captured: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    captured.push(e.capture);
+    return { result: JSON.stringify(refusal) };
+  });
+  const ran = native(on);
+  const result = await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'persisted_replay_after_mod_reload',
+    ...ASSIGNMENT,
+  });
+  expect(captured).toEqual([
+    {
+      session_id: SESSION,
+      tool_use_id: 'persisted_replay_after_mod_reload',
+      input: ASSIGNMENT,
+      tool: 'Agent',
+      native_replay: true,
+    },
+  ]);
+  expect(result.result).toMatchObject({
+    status: 'completed',
+    content: [{ type: 'text', text: JSON.stringify(refusal) }],
+    canContinueAgent: false,
+  });
   expect(ran).toEqual([]);
 });
 

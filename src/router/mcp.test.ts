@@ -241,6 +241,9 @@ describe('the router MCP server', () => {
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
         [ALWAYS_LOAD_KEY]: true,
       });
+      expect(tools.tools.find((tool) => tool.name === 'subagent')!._meta).toEqual({
+        [ALWAYS_LOAD_KEY]: true,
+      });
       expect(tools.tools.find((tool) => tool.name === 'hook')!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:

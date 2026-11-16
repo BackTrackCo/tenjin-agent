@@ -330,6 +330,7 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 export const PLUGIN_FILES = [
   '.mcp.json',
   'types/index.d.ts',
+  'hooks/model-native-retry.ts',
   'hooks/model-viewer.tsx',
   'hooks/register.tsx',
   'hooks/hooks.json',
@@ -345,7 +346,12 @@ export const MOD_TYPES = 'types/index.d.ts';
  * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
  * later); nothing here builds or imports it.
  */
-export const MOD_FILES = [MOD_TYPES, 'hooks/model-viewer.tsx', 'hooks/register.tsx'] as const;
+export const MOD_FILES = [
+  MOD_TYPES,
+  'hooks/model-native-retry.ts',
+  'hooks/model-viewer.tsx',
+  'hooks/register.tsx',
+] as const;
 export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;

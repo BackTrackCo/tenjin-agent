@@ -6,6 +6,7 @@ import type {
   TurnStepResult,
 } from 'claude-code';
 import { update } from 'claude-code';
+import { clearNativeRetries, normalizeNativeRetry } from './model-native-retry';
 import type {
   TenjinModelActivity,
   TenjinModelViewerRecord,
@@ -726,6 +727,7 @@ export function registerModelViewer(on: On): void {
     }
   });
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) return yield* normalizeNativeRetry($, next(e), next.signal);
     if (!e.agentId) return yield* next(e);
     let marked = !!liveViewerGuards.get(e.agentId);
     if (marked) guardViewer(e.agentId, e.turnId);
@@ -789,6 +791,7 @@ export function registerModelViewer(on: On): void {
     return yield* next(e);
   });
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) await clearNativeRetries($).catch(() => undefined);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
@@ -809,6 +812,10 @@ export function registerModelViewer(on: On): void {
     } catch {
       /* Failed UI cancellation is not a new execution or payment. */
     }
+    return next(e);
+  });
+  on('session.end', async ($, e, next) => {
+    await clearNativeRetries($).catch(() => undefined);
     return next(e);
   });
 

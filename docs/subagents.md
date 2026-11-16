@@ -21,7 +21,7 @@ Worker file tools and commands cannot read credential-bearing native config, his
 
 ## Accept, cancel and continue
 
-The parent calls its native subagent tool normally. An offer starts no worker. Accept with `subagent({offer_id})` or retry the original native call unchanged. Saved consent covers its stated disclosure/inference scope; binding restrictions and additional approvals still apply. The parent retains repository-specific risk judgment and normal tool asks.
+The parent calls its native subagent tool normally. Every offer carries the full parent policy and starts no worker. Accept with `subagent({offer_id})`; Claude preloads this tool so acceptance needs no ToolSearch turn. To decline an initial Claude Agent offer, the parent can call Agent with only `description: "Keep native"`, `prompt: "tenjin-native:<offer_id>"` and matching `subagent_type: "tenjin-native-<offer_id>"`. Tenjin restores the exact saved native call before tool-call hooks and permission checks. Retrying the complete original call also works, including for legacy Task calls. Saved consent covers its stated disclosure/inference scope; binding restrictions, repository risk judgment and normal tool asks still apply.
 
 Cancel an offer or active worker with `subagent({cancel: offer_id})`, or interrupt the host. Turning routing off prevents new paid requests; cancel to drain active work. Repeated acceptance does not start a second worker.
 
@@ -29,7 +29,7 @@ On supported Claude Code versions, use the native Down-arrow agent selector and 
 
 Before reloading or removing Tenjin, wait for the parent's Tenjin call to finish or confirm cancellation, and for its native activity agent to stop. A stop acknowledgement alone does not confirm both have drained. Removing or reloading the mod while the viewer is active can let Claude call its own model outside the DeepSeek worker budget.
 
-Completed Claude workers return a `tenjin-worker-…` handle. The same parent can continue with native `SendMessage`, or compatible `Agent.resume`. Each full follow-up is held for accept/veto, then reopens the same history and original budget across days. Current instructions and permissions refresh. Missing history/accounting, uncertain state, changed directory scope or revoked disclosure refuses continuation. Native retention may remove history; no idle worker service is maintained.
+Completed Claude workers return a `tenjin-worker-…` handle. The same parent can continue with native `SendMessage`, or compatible `Agent.resume`. Each full follow-up is held for accept/veto, then reopens the same history and original budget across days. Decline a continuation by cancelling its offer; the initial-offer native shortcut never replays a worker handle. Current instructions and permissions refresh. Missing history/accounting, uncertain state, changed directory scope or revoked disclosure refuses continuation. Native retention may remove history; no idle worker service is maintained.
 
 ## Charges and limits
 
