@@ -185,8 +185,12 @@ it.each(
       const options = worker.run.mock.calls.at(-1)?.[1];
       expect(options.claudePermissionMode).toBe(mode);
       expect(options.currentClaudePermissionMode()).toBe(mode);
+      // A parent prompt (new turn) and a mode switch while the worker runs must
+      // not change its mode: a changed mode used to stop the worker as `unknown`.
       session.claudePermissionMode = mode === 'auto' ? 'default' : 'auto';
-      expect(options.currentClaudePermissionMode()).toBe(session.claudePermissionMode);
+      session.turnId = 'prompt-typed-while-running';
+      expect(options.currentClaudePermissionMode()).toBe(mode);
+      session.turnId = 'turn';
       session.claudePermissionMode = mode;
       const second = await store.offer({
         sessionId: 'root',

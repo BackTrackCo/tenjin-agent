@@ -396,6 +396,14 @@ export function registerModelTool(
                 : 'Owned permission mode changed; retry native',
             );
           }
+          // The mode accepted with the job holds for the job's life. A later parent
+          // prompt, mode switch or cd must not end a running worker.
+          const acceptedClaudeMode =
+            options.harness === 'claude'
+              ? claudeWorkerPermissionMode(job.decision.claudePermissionMode)
+              : null;
+          const jobClaudeMode = () =>
+            options.session()?.sessionId === ownedSessionId ? acceptedClaudeMode : undefined;
           let activeConversation: ActiveConversation | undefined;
           let executionJob = job;
           if (options.harness === 'claude') {
@@ -423,7 +431,7 @@ export function registerModelTool(
                   callId: job.callId,
                   decision: {
                     ...conversation.originalJob.decision,
-                    claudePermissionMode: currentClaudeMode(),
+                    claudePermissionMode: acceptedClaudeMode,
                     claudeWorkspace: job.decision.claudeWorkspace,
                     requireExistingBudget: true,
                   },
@@ -479,8 +487,8 @@ export function registerModelTool(
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
                 ...(options.harness === 'claude'
                   ? {
-                      claudePermissionMode: currentClaudeMode(),
-                      currentClaudePermissionMode: currentClaudeMode,
+                      claudePermissionMode: acceptedClaudeMode ?? undefined,
+                      currentClaudePermissionMode: jobClaudeMode,
                       claudeSession: {
                         ...(resumed
                           ? { resume: conversation!.sdkSessionId }
