@@ -396,6 +396,9 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
    *  taken, and the status URL answers `answers`. */
   async function cutOffTaken(answers: Answer[]) {
     await storeSpecs(dir, [TREZA]);
+    // Told when the seller's body is waiting on the paid leg's abort.
+    let listening!: () => void;
+    const waiting = new Promise<void>((resolve) => (listening = resolve));
     const { fetchImpl } = submit(
       TREZA,
       (init) =>
@@ -405,6 +408,7 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
               init?.signal?.addEventListener('abort', () =>
                 controller.error(new DOMException('The operation was aborted', 'AbortError')),
               );
+              listening();
             },
           }),
           {
@@ -417,25 +421,23 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     const { transport } = polls(answers);
     const used = (async () =>
       json(200, { jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` })) as typeof fetch;
-    const run = deps(fetchImpl, transport, { timeout: 50 });
-    // The paid leg's own timer is the test's: it runs out when moved, never
-    // by waiting.
+    const timeout = 50;
+    const run = deps(fetchImpl, transport, { timeout });
+    // The paid leg's own timer is the test's: once the body waits on it, it is
+    // moved past the leg's timeout once, and the call runs to its end. A call
+    // that fails before then rejects here, with its own error.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    let result: Awaited<ReturnType<typeof runRequestTool>> | undefined;
     try {
-      const pending = runRequestTool(
+      const task = runRequestTool(
         { id: ID, input: INPUT },
         { ...run, payDeps: { ...run.payDeps, chainFetch: used } },
-      ).then((done) => (result = done));
-      while (result === undefined) {
-        await vi.advanceTimersByTimeAsync(50);
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-      await pending;
+      );
+      await Promise.race([waiting, task]);
+      await vi.advanceTimersByTimeAsync(timeout);
+      return { result: await task, fetchImpl };
     } finally {
       vi.useRealTimers();
     }
-    return { result, fetchImpl };
   }
 
   // A seller that settles before it works: the chain read on the cut-off leg

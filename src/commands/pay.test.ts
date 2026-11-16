@@ -1089,10 +1089,14 @@ describe('runPay, a seller that asks only for a sign-in', () => {
     expect(getSigner).not.toHaveBeenCalled();
   });
 
-  it("leaves the router's provider leg to refuse it, as before", async () => {
+  // With a payment to the host on record, a sign-in would pass every check:
+  // only the router exclusion keeps the provider leg from signing it.
+  it("leaves the router's provider leg to refuse it, as before, for a host this wallet paid", async () => {
+    await payTheRun();
     const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(FOREIGN_URL).header }),
     ]);
+    const getSigner = vi.fn(async () => testSigner());
     await expect(
       runPay(
         {
@@ -1104,12 +1108,17 @@ describe('runPay, a seller that asks only for a sign-in', () => {
         {
           ...PUBLIC_DNS,
           fetchImpl: fetch,
-          provider: testWalletProvider(),
+          provider: { ...testWalletProvider(), getSigner },
           authorizer: fakeAuthorizer('allow'),
         },
       ),
-    ).rejects.toBeInstanceOf(CliError);
+    ).rejects.toMatchObject({
+      code: 'PAYMENT_FAILED',
+      message: 'The 402 advertised no payment requirements.',
+    });
     expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers['sign-in-with-x']).toBeUndefined();
+    expect(getSigner).not.toHaveBeenCalled();
   });
 });
 
