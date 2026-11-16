@@ -24,7 +24,10 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $1.00 a call)')
+    .option(
+      '--yes',
+      'accept setup and spending defaults ($5 a day, $1 a call; new installs include DeepSeek subagents with parent veto and a $1 job limit)',
+    )
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
     .option(
       '--max-auto-spend <usd>',
@@ -56,6 +59,9 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
+        const { captureNewInstall, completeNewInstall, newInstallReceipt } =
+          await import('../router/new-install');
+        const newInstall = await captureNewInstall(ctx.dataDir);
         const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
         const hostArgs = {
@@ -76,7 +82,7 @@ Learn more:
               host === 'codex'
                 ? await (
                     await import('../router/codex-install')
-                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding })
+                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding, newInstall })
                 : await (
                     await import('../router/install')
                   ).runRouterInstall(
@@ -93,13 +99,17 @@ Learn more:
                         : {}),
                     },
                     ctx,
-                    { runtime, funding },
+                    { runtime, funding, newInstall },
                   );
             if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          const result = await installAll();
+          const installed = await installAll();
+          const result = newInstallReceipt(
+            installed,
+            o.refresh !== true && (await completeNewInstall(newInstall, ctx)),
+          );
           const finished =
             o.refresh === true
               ? result

@@ -2,11 +2,49 @@ import { mkdtemp, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { resolveClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
+import {
+  modelClaudeRepositories,
+  resolveClaudeWorkspace,
+  sameClaudeWorkspace,
+} from './claude-workspace';
+import type { ModelSettings } from './model-settings';
 
 let dir: string;
 afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
+});
+
+it('native-workspace consent follows exact native roots and exceptions without granting an additional directory', async () => {
+  const f = await fixture();
+  const scope = await resolveClaudeWorkspace(
+    f.root,
+    {
+      permissions: { additionalDirectories: [f.sibling] },
+      sandbox: { filesystem: { allowRead: [f.read], allowWrite: [f.write] } },
+    },
+    'native-workspace',
+  );
+  expect(scope).toMatchObject({
+    workingDirectories: [f.root, f.sibling],
+    readExceptions: [f.read],
+    writeExceptions: [f.write],
+  });
+  expect(modelClaudeRepositories(scope!, { scope: 'native-workspace' } as ModelSettings)).toEqual([
+    f.root,
+    f.sibling,
+    f.read,
+    f.write,
+  ]);
+  const removed = await resolveClaudeWorkspace(f.root, {}, 'native-workspace');
+  expect(removed?.workingDirectories).toEqual([f.root]);
+  expect(sameClaudeWorkspace(scope!, removed!)).toBe(false);
+  expect(
+    await resolveClaudeWorkspace(
+      f.root,
+      { permissions: { additionalDirectories: [join(dir, 'missing')] } },
+      'native-workspace',
+    ),
+  ).toBeNull();
 });
 async function fixture() {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'claude-workspace-')));
@@ -74,4 +112,20 @@ it('canonicalizes explicitly configured aliases and rejects unavailable or chang
       [dir],
     ),
   ).toBeNull();
+});
+
+it('native-workspace disclosure cannot retain a raw native alias after its target changes', async () => {
+  const f = await fixture();
+  const alias = join(dir, 'native-alias');
+  await symlink(f.sibling, alias);
+  const settings = { permissions: { additionalDirectories: [alias] } };
+  const first = await resolveClaudeWorkspace(f.root, settings, 'native-workspace');
+  await rm(alias);
+  await symlink(f.read, alias);
+  const changed = await resolveClaudeWorkspace(f.root, settings, 'native-workspace');
+  expect(first?.workingDirectorySpellings).toContain(alias);
+  expect(changed?.workingDirectorySpellings).toContain(alias);
+  expect(sameClaudeWorkspace(first!, changed!)).toBe(false);
+  expect(await resolveClaudeWorkspace(f.root, {}, undefined as never)).toBeNull();
+  expect(await resolveClaudeWorkspace(f.root, {}, 'all' as never)).toBeNull();
 });

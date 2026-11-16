@@ -58,6 +58,7 @@ type QualifiedWorker = {
   source?: string;
   instructionContext?: InstructionContext;
   nativeSnapshot?: NativeCodexSnapshot;
+  disclosureRepositories?: string[];
   claudeWorkspace?: ClaudeWorkspace;
 };
 
@@ -87,7 +88,12 @@ export async function qualifiedModelWorker(
     return null;
   const disclosure = await modelSettings(dataDir, cwd);
   const claudeWorkspace =
-    disclosure && (await resolveClaudeWorkspace(cwd, effective, disclosure.repositories));
+    disclosure &&
+    (await resolveClaudeWorkspace(
+      cwd,
+      effective,
+      disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
+    ));
   return claudeWorkspace && claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved)
     ? { ...state.binary, claudeWorkspace }
     : null;
@@ -178,7 +184,11 @@ async function runQualifiedWorker(
       throw new Error('Managed Claude provider or authentication changed; keep native');
     const current =
       disclosure &&
-      (await resolveClaudeWorkspace(job.root, resolved.effective, disclosure.repositories));
+      (await resolveClaudeWorkspace(
+        job.root,
+        resolved.effective,
+        disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
+      ));
     if (
       !current ||
       !claudeWorkerSandboxCompatible([job.root, current.root], resolved) ||

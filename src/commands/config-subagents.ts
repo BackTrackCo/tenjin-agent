@@ -12,7 +12,12 @@ import { MODEL_MINIMUM_JOB_ATOMIC } from '../router/model-limits';
 
 function retainedRepositories(value: unknown, origin: string): string[] {
   const prior = modelConsentSchema.safeParse(value);
-  if (!prior.success || prior.data.routerOrigin !== origin || BigInt(prior.data.maxJobAtomic) <= 0n)
+  if (
+    !prior.success ||
+    prior.data.version !== 2 ||
+    prior.data.routerOrigin !== origin ||
+    BigInt(prior.data.maxJobAtomic) <= 0n
+  )
     return [];
   return prior.data.repositories.flatMap((path) => {
     if (!isAbsolute(path)) return [];

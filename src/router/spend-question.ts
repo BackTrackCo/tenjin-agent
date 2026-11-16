@@ -57,6 +57,10 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 export const ROUTING_FEE_TERMS =
   'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits.';
 
+/** Part of the existing setup question, never a separate opt-in question. */
+export const DEEPSEEK_INSTALL_TERMS =
+  'New installs enable eligible DeepSeek helpers in native workspaces with parent veto, up to $1 per job. Tenjin/TypeSafe receive assignments and bounded parent context; after parent acceptance, Tenjin/DeepSeek receive assignments, applicable instructions and tool results. Inference adds 5%; model routing is 15% of expected inference, capped at $0.003 per job. Stop with `tenjin config subagents off`.';
+
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either choice approves this.';
 
@@ -70,7 +74,7 @@ export const DEFAULTS_LABEL = `Up to $${DEFAULTS_USD.maxAutoSpend} a call and $$
 
 /** The question with the fee terms either answer approves. */
 export function spendChoiceQuestion(): string {
-  return `${SPEND_QUESTION} ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
+  return `${SPEND_QUESTION} ${ROUTING_FEE_TERMS} ${DEEPSEEK_INSTALL_TERMS} ${FEE_APPROVAL}`;
 }
 
 /** One answer to {@link spendChoiceQuestion}, and the one command that applies it. */

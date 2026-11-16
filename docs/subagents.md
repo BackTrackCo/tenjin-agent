@@ -2,20 +2,24 @@
 
 Tenjin can offer DeepSeek V4.1 Flash 1017 for helper work. Your parent keeps its model and final accept/veto. Ordinary implementation and scoped review can qualify; planning stays native. Repository instructions and model/privacy restrictions still apply.
 
-## Enable or stop
+## Setup and controls
+
+Fresh installations enable eligible DeepSeek routing for each session's qualified native workspace, with a $1 total routing/inference ceiling per job. The existing setup question and receipt explain sharing. Opening another repository uses that session's current native scope; the folder where installation ran supplies no directory grant. Each job freezes its qualified scope and rechecks it before tools, inference and continuation.
+
+Existing users keep their settings, including off choices and named-directory consent. Updating, refreshing or adding another host does not enable DeepSeek for an existing profile. The parent still accepts or vetoes each offer.
 
 ```sh
-tenjin config subagents on --repository /path/to/repository --max-job 1
 tenjin config subagents off
+tenjin config subagents on --repository /path/to/repository --max-job 1
 ```
 
-Enable one or more repositories, or a folder that contains them. Enabling records consent for that directory and descendants, the configured router origin, recipients and a cumulative routing/inference ceiling. Repeat for another repository to retain both, or explicitly name a containing workspace. Local GitHub origin names for the selected directories and their direct child repositories accompany offers so the parent can match GitHub tasks to the disclosed paths. Names are informational: they grant no filesystem permissions or additional disclosure scope. Changed or missing origins drop stale names until consent is renewed. A project can disable routing, but cannot grant consent or raise your money limits. Legacy consent must be renewed explicitly.
+The explicit `on --repository` command records consent for the named directory and descendants, the configured router origin, recipients and job ceiling. Repeat for another repository to retain both, or name a containing workspace. This selects named-directory scope instead of following future workspaces automatically. Local GitHub origin names for qualifying directories and their direct child repositories accompany offers so the parent can match GitHub tasks to paths. Names grant no filesystem permission or additional disclosure scope; stale names are dropped when their local origins change or disappear. A project can disable routing, but cannot grant consent or raise your money limits. Unsupported older consent must be renewed explicitly.
 
 ## Data and permissions
 
 Routing sends the assignment and bounded parent context to Tenjin and TypeSafe before acceptance. After acceptance, applicable instructions, assignments and tool results reach DeepSeek through Tenjin. Known secrets are masked; sensitive prose is not guaranteed anonymous. Server replay content expires after 24 hours; financial and continuation authorization records persist.
 
-The Claude worker retains native settings, rules, hooks, MCPs, CLIs and tool permissions in the current workspace, including uncommitted changes. Global auto-memory is disabled for this worker. Native directory grants must fit disclosure; extra disclosure roots grant no access. Workspace-only shell reads must be enforceable: Windows, managed-only read-path policies, disabled or excluded sandbox commands, and startup paths containing `*`, `?`, `[` or `]` keep work native. Scope is checked before assignment, tool use and inference. Your parent's endpoint, saved login and Remote Control stay in place. Unsupported authority or host-controlled authentication keeps work native. A provider refusal at worker startup can follow an already-paid routing fee.
+The Claude worker retains native settings, rules, hooks, MCPs, CLIs and tool permissions in the current workspace, including uncommitted changes. Global auto-memory is disabled for this worker. Native-workspace consent follows the host's qualified current directories and access exceptions; named-directory consent additionally requires those paths to fit the saved roots. Neither mode grants filesystem or tool access. Workspace-only shell reads must be enforceable: Windows, managed-only read-path policies, disabled or excluded sandbox commands, and startup paths containing `*`, `?`, `[` or `]` keep work native. Scope is checked before assignment, tool use and inference. Your parent's endpoint, saved login and Remote Control stay in place. Unsupported authority or host-controlled authentication keeps work native. A provider refusal at worker startup can follow an already-paid routing fee.
 
 Worker file tools and commands cannot read credential-bearing native config, history or private controller data. Ordinary skill, agent, command and support files remain usable under the current native permissions.
 

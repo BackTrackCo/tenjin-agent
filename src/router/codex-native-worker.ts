@@ -69,6 +69,7 @@ interface Session {
   threadId: string;
   snapshot: NativeCodexSnapshot;
   instructionContext: InstructionContext;
+  disclosureRepositories: string[];
   assertCurrent(): Promise<void>;
 }
 interface OwnedProvider {
@@ -95,6 +96,7 @@ async function assertDisclosureCurrent(options: Options) {
     !Array.isArray(profile.file_system.entries)
   )
     throw new Error('Native worker disclosure scope unavailable');
+  const repositories = new Set<string>();
   const covered = async (path: unknown, concrete = true) => {
     if (typeof path !== 'string' || !isAbsolute(path))
       throw new Error('Native worker filesystem scope is unsupported');
@@ -104,9 +106,10 @@ async function assertDisclosureCurrent(options: Options) {
     if (
       canonical === resolve('/') ||
       (concrete && canonical !== resolve(path)) ||
-      !disclosureCovers(settings.repositories, canonical)
+      (settings.scope !== 'native-workspace' && !disclosureCovers(settings.repositories, canonical))
     )
       throw new Error('Native worker filesystem scope exceeds disclosure');
+    repositories.add(canonical);
   };
   if (!options.policy.parent.runtimeWorkspaceRoots.length)
     throw new Error('Native worker workspace roots unavailable');
@@ -128,6 +131,7 @@ async function assertDisclosureCurrent(options: Options) {
       } else throw new Error('Native worker special filesystem scope is unsupported');
     } else throw new Error('Native worker filesystem scope is unsupported');
   }
+  return { repositories: [...repositories].sort(), scope: settings.scope };
 }
 
 async function assertParentCurrent(options: Options) {
@@ -453,12 +457,14 @@ async function withNativeSession<T>(
   } = {},
 ): Promise<T | null> {
   if (!options.policy.parent || !supportedApproval(options.policy)) return null;
+  let disclosure: Awaited<ReturnType<typeof assertDisclosureCurrent>>;
   try {
     await assertParentCurrent(options);
-    await assertDisclosureCurrent(options);
+    disclosure = await assertDisclosureCurrent(options);
   } catch {
     return null;
   }
+  const disclosureRepositories = disclosure.repositories;
   const profile = codexInstructionProfile({ ...options, worker: true });
   const instructionProfile = codexInstructionProfile(options);
   if (!profile || !instructionProfile) return null;
@@ -554,7 +560,11 @@ async function withNativeSession<T>(
           throw new Error('Native host changed during qualification');
         const snapshot: NativeCodexSnapshot = {
           version: 1,
-          fingerprint: canonicalHash({ host: current.fingerprint, catalog: catalog.hash }),
+          fingerprint: canonicalHash({
+            host: current.fingerprint,
+            catalog: catalog.hash,
+            ...(disclosure.scope === 'native-workspace' ? { disclosureRepositories } : {}),
+          }),
           parent: options.policy.parent!.fingerprint,
           instructions: instructionContext.fingerprint,
         };
@@ -563,14 +573,21 @@ async function withNativeSession<T>(
           threadId,
           snapshot,
           instructionContext,
+          disclosureRepositories,
           assertCurrent: async () => {
             options.signal?.throwIfAborted();
             await assertParentCurrent(options);
-            await assertDisclosureCurrent(options);
+            const currentDisclosure = await assertDisclosureCurrent(options);
+            const currentRepositories = currentDisclosure.repositories;
+            if (!isDeepStrictEqual(currentRepositories, disclosureRepositories))
+              throw new Error('Native worker filesystem scope changed');
             if (
               canonicalHash({
                 host: (await hostSnapshot(request, options, owned, threadId)).fingerprint,
                 catalog: (await nativeFlashCatalog(options.dataDir)).hash,
+                ...(currentDisclosure.scope === 'native-workspace'
+                  ? { disclosureRepositories: currentRepositories }
+                  : {}),
               }) !== snapshot.fingerprint
             )
               throw new Error('Native host configuration changed');
@@ -604,6 +621,7 @@ export async function qualifyNativeCodexWorker(options: Options) {
       path: binary.cmd,
       instructionContext: session.instructionContext,
       nativeSnapshot: session.snapshot,
+      disclosureRepositories: session.disclosureRepositories,
     }),
   );
 }

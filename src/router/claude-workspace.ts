@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from 'node:path';
 import type { Settings } from '@anthropic-ai/claude-agent-sdk/core';
 import { z } from 'zod';
 import { canonicalHash } from '../lib/request-schema';
-import { disclosureCovers } from './model-settings';
+import { disclosureCovers, type ModelSettings } from './model-settings';
 
 const pathSchema = z
   .string()
@@ -45,11 +45,24 @@ export function claudeWorkspaceCovered(
   );
 }
 
+/** The native scope is already canonical and validated; disclosure never supplies its paths. */
+export function modelClaudeWorkspaceCovered(scope: ClaudeWorkspace, settings: ModelSettings) {
+  return (
+    settings.scope === 'native-workspace' || claudeWorkspaceCovered(scope, settings.repositories)
+  );
+}
+
+export function modelClaudeRepositories(scope: ClaudeWorkspace, settings: ModelSettings): string[] {
+  return settings.scope === 'native-workspace'
+    ? [...new Set([...scope.workingDirectories, ...scope.readExceptions, ...scope.writeExceptions])]
+    : settings.repositories;
+}
+
 /** Native settings supply authority. Disclosure anchors only restrict its use. */
 export async function resolveClaudeWorkspace(
   cwd: string,
   settings: Settings,
-  repositories: readonly string[],
+  repositories: readonly string[] | 'native-workspace',
 ): Promise<ClaudeWorkspace | null> {
   try {
     const root = await realpath(cwd);
@@ -61,14 +74,14 @@ export async function resolveClaudeWorkspace(
           const path = await realpath(resolve(root, value).normalize('NFC'));
           if (directories && !(await stat(path)).isDirectory())
             throw new Error('Native working directory is unavailable');
-          if (!disclosureCovers(repositories, path))
+          if (repositories !== 'native-workspace' && !disclosureCovers(repositories, path))
             throw new Error('Native workspace is outside disclosure scope');
           return path;
         }),
       );
       return [...new Set(canonical)].sort();
     };
-    if (!disclosureCovers(repositories, root)) return null;
+    if (repositories !== 'native-workspace' && !disclosureCovers(repositories, root)) return null;
     const nativeAdditional = settings.permissions?.additionalDirectories ?? [];
     const additional = await paths(nativeAdditional, true);
     const readExceptions = await paths(settings.sandbox?.filesystem?.allowRead ?? [], false);

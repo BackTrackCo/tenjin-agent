@@ -21,6 +21,13 @@ import { loadRawConfig } from '../lib/config';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { readAliveStamp } from './alive';
+import {
+  captureNewInstall,
+  reserveNewInstall,
+  completeNewInstall,
+  newInstallReceipt,
+  type NewInstallSession,
+} from './new-install';
 import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
@@ -60,6 +67,7 @@ import {
   limitsLine,
   ROUTER_DEFAULTS,
   ROUTING_FEE_TERMS,
+  DEEPSEEK_INSTALL_TERMS,
   shownLimits,
   SPEND_QUESTION,
   spendChoiceQuestion,
@@ -102,6 +110,7 @@ export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin
 
 export const DISCLOSURE: readonly string[] = [
   'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
+  DEEPSEEK_INSTALL_TERMS,
   'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
 ];
 
@@ -199,6 +208,8 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps, FundingDeps {
+  /** Shared by both host installers; the core action finalizes it after every host succeeds. */
+  newInstall?: NewInstallSession;
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -361,6 +372,7 @@ export async function runRouterInstall(
   ctx: CommandContext,
   deps: RouterInstallDeps = {},
 ): Promise<CommandResult> {
+  const newInstall = deps.newInstall ?? (await captureNewInstall(ctx.dataDir));
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
@@ -436,6 +448,14 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
+  newInstall.accepted ||= args.refresh !== true && (answered || (canPrompt && unasked));
+  if (args.refresh !== true)
+    await reserveNewInstall(
+      newInstall,
+      ctx,
+      !legacy.present &&
+        (!newInstall.absent || !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))),
+    );
   // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
   // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
   // any version and would silence the settings install in every session,
@@ -632,28 +652,33 @@ export async function runRouterInstall(
     runtime: runtimeData(rt),
     launcher: rt?.launcher ?? null,
   };
-  return {
-    data,
-    humanLines: [
-      ...lines(ctx, {
-        plugin,
-        claude,
-        migration,
-        wallet,
-        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-        asks: asksAgent ? nextSteps.length : 0,
-        policy: effective.policy,
-        ...(spendAsk !== undefined ? { spendAsk } : {}),
-        router,
-        rt,
-        home,
-        env,
-      }),
-      ...removedKeysLines,
-      ...serverLines,
-    ],
-    humanTail: receiptTail(ctx, effective.policy, data.next),
-  };
+  newInstall.completed.push(plugin.state !== 'failed' && plugin.state !== 'deferred');
+  const defaultEnabled = deps.newInstall ? false : await completeNewInstall(newInstall, ctx);
+  return newInstallReceipt(
+    {
+      data,
+      humanLines: [
+        ...lines(ctx, {
+          plugin,
+          claude,
+          migration,
+          wallet,
+          ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
+          asks: asksAgent ? nextSteps.length : 0,
+          policy: effective.policy,
+          ...(spendAsk !== undefined ? { spendAsk } : {}),
+          router,
+          rt,
+          home,
+          env,
+        }),
+        ...removedKeysLines,
+        ...serverLines,
+      ],
+      humanTail: receiptTail(ctx, effective.policy, data.next),
+    },
+    defaultEnabled,
+  );
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
@@ -1202,7 +1227,7 @@ export async function approveLimits(
   deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`,
+    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${DEEPSEEK_INSTALL_TERMS} ${FEE_APPROVAL}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return { ...ROUTER_DEFAULTS };

@@ -6,7 +6,9 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults, including eligible DeepSeek routing on a fresh installation; it never consents to checkout.
+
+Fresh installations enable DeepSeek helpers for each session's qualified native workspace with a $1 job ceiling within your daily budget. Your parent keeps final accept/veto. Existing users, saved off choices and named-directory consent keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing. [Scope, sharing and worker controls →](./subagents.md)
 
 Use the activation step the installer returns:
 
@@ -43,7 +45,9 @@ Installation and the first task add no optional retention or second-host questio
 | Wallet balance      | No payment can exceed available funds.                                                                                                                                                                                       |
 | `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                                                                      |
 
-Defaults apply before any answer. Accepting limits records them; explicit amount flags replace the named limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+Ordinary spending defaults apply before any answer. Completing accepted fresh setup also records the $1 DeepSeek job ceiling; explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+
+A DeepSeek job's saved ceiling covers its routing and inference together. Inference uses that ceiling rather than a positive ordinary per-call limit; an explicit zero automatic-spend stop and the daily budget still apply. [Quotes and cumulative job limits →](./subagents.md#charges-and-limits)
 
 Changing global limits is a normal config write: the CLI does not distinguish a person from an agent. Your host's permissions and filesystem access protect those writes. Authorize limit changes deliberately; the request tool itself cannot raise them.
 
@@ -109,6 +113,8 @@ Bash(tenjin usage:*)
 ## What the hooks send
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
+
+DeepSeek routing sends the held assignment and bounded parent context to Tenjin and TypeSafe before parent acceptance. Accepted work sends applicable native instructions and tool results through Tenjin to DeepSeek. Model replies can be replayed for 24 hours; financial and continuation metadata persist. [DeepSeek disclosure and retention →](./subagents.md#data-and-permissions)
 
 For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
 

@@ -17,6 +17,7 @@ import {
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
+import { nativeWorkspaceModelConsent } from './model-settings';
 let dir: string;
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -445,7 +446,7 @@ it('refuses a complete follow-up whose encoded private record would be unreadabl
   expect(f.route).not.toHaveBeenCalled();
 });
 
-it('routes the complete resubmitted task with owned parent context once, and preserves the parent veto', async () => {
+it.each([2, 3])('routes with consent v%i and preserves parent veto', async (version) => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'model-handoff-')));
   const repo = join(dir, 'repo');
   await mkdir(repo);
@@ -473,21 +474,25 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     path: '/fixture/worker',
     source: 'path',
     instructionContext,
+    disclosureRepositories: [repo],
   });
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({
       router: {
         subagents: true,
-        subagentConsent: {
-          version: 2,
-          instructions: 'applicable',
-          recipients: ['Tenjin', 'DeepSeek'],
-          repositories: [repo],
-          githubRepositories: ['Acme/repo'],
-          maxJobAtomic: '1000000',
-          routerOrigin: 'http://localhost:3939',
-        },
+        subagentConsent:
+          version === 3
+            ? nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' })
+            : {
+                version: 2,
+                instructions: 'applicable',
+                recipients: ['Tenjin', 'DeepSeek'],
+                repositories: [repo],
+                githubRepositories: ['Acme/repo'],
+                maxJobAtomic: '1000000',
+                routerOrigin: 'http://localhost:3939',
+              },
       },
     }),
   );
@@ -550,7 +555,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     started: false,
     parentPolicy,
     consent: {
-      version: 2,
+      version,
       repository: repo,
       githubRepositories: ['Acme/repo'],
       routerOrigin: 'http://localhost:3939',
@@ -612,6 +617,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
       configHash: 'fixture',
       watchPaths: [instructionFile],
     }),
+    disclosureRepositories: [repo],
   });
   const revoking = { ...session, turnId: 'revoking' };
   await model.captureCodex(revoking, 'revoking-call', native);
@@ -659,6 +665,87 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     expect(await model.store.pending('root', guarded.turnId)).toMatchObject({ state: 'native' });
   }
   expect(route).toHaveBeenCalledTimes(4);
+});
+
+it('native-workspace routing follows later native projects and discloses only their current qualified roots', async () => {
+  const f = await continuationFixture();
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+      },
+    }),
+  );
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the current project and report its facts.' },
+    }) + '\n',
+  );
+  f.route.mockImplementation(async (body) => ({ ...offer, jobId: body.jobId }));
+  for (const [index, root] of [f.session.cwd, f.sibling].entries()) {
+    const workspace = {
+      ...f.workspace,
+      root,
+      workingDirectories: [root],
+      workingDirectorySpellings: [root],
+    };
+    vi.mocked(qualifiedModelWorker).mockResolvedValue({
+      path: '/fixture/worker',
+      claudeWorkspace: workspace,
+    });
+    const result = await f.model.capture(
+      { ...f.session, cwd: root, turnId: `project-${index}`, transcript },
+      `call-${index}`,
+      { prompt: 'Read the fixture.' },
+    );
+    expect(result).toMatchObject({
+      action: 'offer',
+      started: false,
+      capAtomic: '1000000',
+      parentPolicy,
+      consent: { version: 3, scope: 'native-workspace', repository: root, repositories: [root] },
+      workspace,
+    });
+  }
+  expect(f.route).toHaveBeenCalledTimes(2);
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagentConsent).not.toHaveProperty('repositories');
+});
+
+it('native-workspace continuation keeps its original scope and budget with a truthful current offer', async () => {
+  const f = await continuationFixture(true);
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+      },
+    }),
+  );
+  const result = await f.model.capture(
+    f.session,
+    'resume-v3',
+    { to: f.conversation.handle, message: 'Continue the complete assignment.\nFINAL_LINE' },
+    undefined,
+    'SendMessage',
+  );
+  expect(result).toMatchObject({
+    action: 'offer',
+    started: false,
+    continuation: true,
+    capAtomic: '900000',
+    routingFeeAtomic: '0',
+    consent: { version: 3, scope: 'native-workspace', repositories: [f.session.cwd, f.sibling] },
+  });
+  expect(f.route).not.toHaveBeenCalled();
+  expect(f.requireResumeBudget).toHaveBeenCalledWith(f.initial);
 });
 
 it('consumes the server canonical offer contract without enabling an alias or provider switch', () => {

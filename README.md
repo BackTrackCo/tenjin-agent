@@ -74,6 +74,8 @@ tenjin install
 
 Setup asks about spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
+Fresh installations also enable eligible DeepSeek helper routing in your agent's current native workspaces, with a $1 ceiling per job within your daily budget. Your parent keeps final accept/veto. Existing users keep their settings. Stop helper routing with `tenjin config subagents off`. [DeepSeek sharing, charges and controls →](./docs/subagents.md)
+
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
 ## Try it

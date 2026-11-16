@@ -509,6 +509,76 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   );
 });
 
+it.each(['additional directory', 'read exception', 'write exception'] as const)(
+  'native-workspace consent still stops inference when its frozen %s is revoked',
+  async (change) => {
+    vi.mocked(modelSettings).mockResolvedValue({
+      scope: 'native-workspace',
+      root: '/repo',
+      repositories: ['/repo'],
+    } as never);
+    const effective = {
+      permissions: { additionalDirectories: ['/sibling'] },
+      sandbox: { filesystem: { allowRead: ['/read-only'], allowWrite: ['/shell-write'] } },
+    };
+    vi.mocked(resolveSettings).mockResolvedValue({ effective } as never);
+    const workspace = {
+      version: 1,
+      root: '/repo',
+      workingDirectories: ['/repo', '/sibling'],
+      workingDirectorySpellings: ['/repo', '/sibling'].sort(),
+      readExceptions: ['/read-only'],
+      writeExceptions: ['/shell-write'],
+    };
+    const messages = vi.fn();
+    sdkResult({ subtype: 'success', result: 'not a valid completion' }, undefined, async () => {
+      const changed = structuredClone(effective);
+      if (change === 'additional directory') changed.permissions.additionalDirectories = [];
+      else if (change === 'read exception') changed.sandbox.filesystem.allowRead = [];
+      else changed.sandbox.filesystem.allowWrite = [];
+      vi.mocked(resolveSettings).mockResolvedValue({ effective: changed } as never);
+      const call = vi.mocked(query).mock.calls[0]![0];
+      const handle = native.createServer.mock.calls[0]![0] as (
+        request: unknown,
+        response: unknown,
+      ) => void;
+      await new Promise<void>((complete) =>
+        handle(
+          {
+            method: 'POST',
+            url: '/v1/messages',
+            headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+            async *[Symbol.asyncIterator]() {
+              yield Buffer.from(
+                JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
+              );
+            },
+          },
+          {
+            headersSent: false,
+            destroyed: false,
+            writeHead() {
+              return this;
+            },
+            end(_body: string, done?: () => void) {
+              done?.();
+              complete();
+              return this;
+            },
+          },
+        ),
+      );
+    });
+    await expect(
+      runModelWorker(
+        { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+        { ...options(), transport: { messages } as unknown as ModelTransport },
+      ),
+    ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
+    expect(messages).not.toHaveBeenCalled();
+  },
+);
+
 it('applies native settings-source and project MCP credential guards while preserving ordinary application settings', async () => {
   vi.mocked(resolveSettings).mockResolvedValue({
     effective: {},

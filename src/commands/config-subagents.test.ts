@@ -159,3 +159,30 @@ it('refuses a job ceiling below the useful reservation floor before saving conse
   ).rejects.toMatchObject({ code: 'USAGE' });
   await expect(readFile(join(dir, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
+
+it('an explicit repository command narrows native-workspace disclosure to the named v2 scope', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const repository = join(dir, 'selected');
+  await mkdir(repository);
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: {
+          version: 3,
+          scope: 'native-workspace',
+          instructions: 'applicable',
+          recipients: ['Tenjin', 'DeepSeek'],
+          routerOrigin: 'https://tenjin.sh',
+          maxJobAtomic: '1000000',
+        },
+      },
+    }),
+  );
+  await runConfigSubagents('on', { repository, maxJob: '1' }, testCtx(dir));
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagentConsent).toMatchObject({ version: 2, repositories: [repository] });
+  expect(saved.router.subagentConsent).not.toHaveProperty('scope');
+  expect(await modelSettings(dir, dir)).toBeNull();
+});

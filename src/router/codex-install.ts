@@ -50,6 +50,12 @@ import {
 } from './install';
 import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/codex-trust';
 import { readInstalledHosts, withNote } from './hosts';
+import {
+  captureNewInstall,
+  reserveNewInstall,
+  completeNewInstall,
+  newInstallReceipt,
+} from './new-install';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
 import { fundStep, type FundingDeps } from './install-funding';
@@ -83,7 +89,10 @@ export interface CodexRun {
 }
 
 export interface CodexSetupDeps
-  extends WalletDeps, FundingDeps, Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'> {
+  extends
+    WalletDeps,
+    FundingDeps,
+    Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount' | 'newInstall'> {
   /** One `codex` command, recorded in tests. */
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
@@ -351,6 +360,7 @@ export async function runCodexInstall(
   ctx: CommandContext,
   deps: CodexSetupDeps = {},
 ): Promise<CommandResult> {
+  const newInstall = deps.newInstall ?? (await captureNewInstall(ctx.dataDir));
   userScopeOnly(args);
   const run = deps.run ?? runCodex;
   const home = deps.homeDir ?? homedir();
@@ -373,6 +383,20 @@ export async function runCodexInstall(
         : canPrompt && unasked
           ? await approveLimits(deps)
           : {};
+  newInstall.accepted ||= answered || (canPrompt && unasked);
+  const initialCodexConfig = newInstall.absent
+    ? await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))()
+    : undefined;
+  await reserveNewInstall(
+    newInstall,
+    ctx,
+    !newInstall.absent ||
+      (initialCodexConfig !== null &&
+        typeof initialCodexConfig === 'object' &&
+        !Array.isArray(initialCodexConfig) &&
+        at(initialCodexConfig, 'plugins', CODEX_PLUGIN) === undefined &&
+        at(initialCodexConfig, 'marketplaces', CODEX_MARKETPLACE) === undefined),
+  );
   const rt = await (deps.runtime ?? defaultRuntime)({
     dataDir: ctx.dataDir,
     home,
@@ -403,7 +427,9 @@ export async function runCodexInstall(
   const tooOld = version !== null && !atLeast(version, CODEX_MCP_HOOKS_VERSION);
   let next: string = CODEX_TOO_OLD;
   if (!tooOld) {
-    const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+    const codexConfig =
+      initialCodexConfig ??
+      (await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))());
     await addPlugin(
       run,
       hosts,
@@ -441,36 +467,41 @@ export async function runCodexInstall(
   ];
   if (asksAgent && nextSteps.length > 0)
     next = `Follow the instructions in nextSteps, then ${next}`;
-  return {
-    data: {
-      plugin: CODEX_PLUGIN,
-      wallet,
-      spend: { ...spend, effective },
-      runtime: runtimeData(rt),
-      nextSteps,
-      disclosure: DISCLOSURE,
-      ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-      next,
+  newInstall.completed.push(!tooOld);
+  const defaultEnabled = deps.newInstall ? false : await completeNewInstall(newInstall, ctx);
+  return newInstallReceipt(
+    {
+      data: {
+        plugin: CODEX_PLUGIN,
+        wallet,
+        spend: { ...spend, effective },
+        runtime: runtimeData(rt),
+        nextSteps,
+        disclosure: DISCLOSURE,
+        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
+        next,
+      },
+      humanLines: [
+        tooOld
+          ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
+          : 'Tenjin is installed for Codex.',
+        ...(tooOld ? [] : CAPABILITY_LINES.map((line) => `  ${line}`)),
+        ...runtimeLines(ctx, rt, home, true),
+        ...walletLines(ctx, wallet, 'Codex'),
+        ...(funding?.warning !== undefined ? [funding.warning] : []),
+        ...(spendAsk !== undefined
+          ? [
+              `  Ask the person in this session: ${spendAsk.question}`,
+              ...spendAsk.options.map(
+                (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
+              ),
+            ]
+          : []),
+      ],
+      humanTail: receiptTail(ctx, policy, next),
     },
-    humanLines: [
-      tooOld
-        ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
-        : 'Tenjin is installed for Codex.',
-      ...(tooOld ? [] : CAPABILITY_LINES.map((line) => `  ${line}`)),
-      ...runtimeLines(ctx, rt, home, true),
-      ...walletLines(ctx, wallet, 'Codex'),
-      ...(funding?.warning !== undefined ? [funding.warning] : []),
-      ...(spendAsk !== undefined
-        ? [
-            `  Ask the person in this session: ${spendAsk.question}`,
-            ...spendAsk.options.map(
-              (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
-            ),
-          ]
-        : []),
-    ],
-    humanTail: receiptTail(ctx, policy, next),
-  };
+    defaultEnabled,
+  );
 }
 
 export async function runCodexUninstall(

@@ -65,6 +65,7 @@ it('qualifies genuine Codex independently of Claude installation or permission s
     path: '/native/codex',
     instructionContext: {} as never,
     nativeSnapshot: {} as never,
+    disclosureRepositories: ['/repo'],
   });
   expect(await qualifiedModelWorker('/repo', 'general-purpose', policy, '/data')).toMatchObject({
     path: '/native/codex',

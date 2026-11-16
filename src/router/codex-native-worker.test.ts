@@ -15,6 +15,7 @@ import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { codexModelPolicy } from './codex-model-context';
+import { nativeWorkspaceModelConsent } from './model-settings';
 
 const http = vi.hoisted(() => ({
   handler: undefined as undefined | ((req: unknown, res: unknown) => void),
@@ -456,6 +457,82 @@ async function repositories(paths: string[]) {
   saved.router.subagentConsent.repositories = paths;
   await writeFile(file, JSON.stringify(saved));
 }
+
+async function nativeWorkspaceConsent() {
+  await writeFile(
+    join(dataDir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost' }),
+      },
+    }),
+  );
+}
+
+it('native-workspace consent reports exact qualified Codex roots while preserving the complete native ACL', async () => {
+  await nativeWorkspaceConsent();
+  const sibling = join(dir, 'sibling');
+  await mkdir(sibling);
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
+  policy.parent!.runtimeWorkspaceRoots.push(sibling);
+  const original = structuredClone(policy.permissionProfile);
+  const qualified = await qualify();
+  expect(qualified?.disclosureRepositories).toEqual(
+    [root, sibling, join(home, '.codex', 'AGENTS.md')].sort(),
+  );
+  expect(policy.permissionProfile).toEqual(original);
+  expect(requests.find((request) => request.method === 'thread/start')?.params).toMatchObject({
+    runtimeWorkspaceRoots: [root, sibling],
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
+  });
+  expect(responses).not.toHaveBeenCalled();
+});
+
+it.each(['root grant', 'aliased grant', 'unknown grant', 'approval policy'] as const)(
+  'native-workspace consent cannot qualify unsupported Codex %s',
+  async (change) => {
+    await nativeWorkspaceConsent();
+    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+    if (change === 'root grant')
+      profile.file_system.entries.push({
+        path: { type: 'special', value: { kind: 'root' } },
+        access: 'read',
+      });
+    else if (change === 'aliased grant') {
+      const alias = join(dir, 'alias');
+      await symlink(root, alias);
+      profile.file_system.entries.push({ path: { type: 'path', path: alias }, access: 'read' });
+    } else if (change === 'unknown grant')
+      profile.file_system.entries.push({
+        path: { type: 'special', value: { kind: 'foreign' } },
+        access: 'read',
+      });
+    else policy.approvalPolicy = 'on-request';
+    expect(await qualify()).toBeNull();
+    expect(responses).not.toHaveBeenCalled();
+    expect(withAppServer).not.toHaveBeenCalled();
+  },
+);
+
+it('native-workspace consent cannot silently expand the frozen ACL between inference purchases', async () => {
+  await nativeWorkspaceConsent();
+  const accepted = await job();
+  const sibling = join(dir, 'new-scope');
+  await mkdir(sibling);
+  onTurn = async () => {
+    await provider();
+    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+    profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
+    await provider();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /filesystem scope changed/,
+  );
+  expect(responses).toHaveBeenCalledTimes(1);
+});
 
 it('preserves a concrete multi-root native profile only when each grant and runtime root is explicitly covered', async () => {
   const sibling = join(dir, 'sibling');

@@ -10,8 +10,8 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore } from './model-job';
-import { modelSettings } from './model-settings';
-import { currentModelGithubRepositories } from './model-repositories';
+import { modelSettings, type ModelSettings } from './model-settings';
+import { currentModelGithubRepositories, modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
@@ -23,10 +23,13 @@ import { ModelConversationStore } from './model-conversations';
 import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
-  claudeWorkspaceCovered,
+  modelClaudeWorkspaceCovered,
+  modelClaudeRepositories,
   savedClaudeWorkspace,
   sameClaudeWorkspace,
+  type ClaudeWorkspace,
 } from './claude-workspace';
+import { isAbsolute } from 'node:path';
 import {
   continuationRefusal,
   ownedModelReference,
@@ -74,6 +77,39 @@ const held = (reason: string) => ({
   },
 });
 
+function offerConsent(settings: ModelSettings, nativeRepositories: readonly string[]) {
+  const repositories =
+    settings.scope === 'native-workspace' ? [...nativeRepositories] : settings.repositories;
+  return {
+    version: settings.version,
+    ...(settings.scope === 'native-workspace' ? { scope: settings.scope } : {}),
+    repository: settings.root,
+    repositories,
+    githubRepositories:
+      settings.scope === 'native-workspace'
+        ? modelGithubRepositories(repositories)
+        : currentModelGithubRepositories(settings),
+    routerOrigin: settings.routerOrigin,
+    recipients: ['Tenjin', 'DeepSeek'],
+  };
+}
+
+function nativeRepositories(job: ModelJob, workspace: ClaudeWorkspace | null): string[] | null {
+  if (workspace)
+    return [
+      ...new Set([
+        ...workspace.workingDirectories,
+        ...workspace.readExceptions,
+        ...workspace.writeExceptions,
+      ]),
+    ];
+  const parsed = z
+    .array(z.string().refine(isAbsolute))
+    .min(1)
+    .safeParse(job.decision.disclosureRepositories);
+  return parsed.success ? parsed.data : null;
+}
+
 export class ModelHandoff {
   readonly store: ModelJobStore;
   readonly conversations: ModelConversationStore;
@@ -120,7 +156,11 @@ export class ModelHandoff {
       this.options.dataDir,
       signal,
     );
-    if (!worker?.instructionContext) return null;
+    if (
+      !worker?.instructionContext ||
+      (settings.scope === 'native-workspace' && !worker.disclosureRepositories?.length)
+    )
+      return null;
     signal?.throwIfAborted();
     const job = await this.store.offer(
       {
@@ -134,6 +174,9 @@ export class ModelHandoff {
           routerOrigin: this.options.transport.origin,
           instructionContext: worker.instructionContext,
           ...(worker.nativeSnapshot ? { nativeSnapshot: worker.nativeSnapshot } : {}),
+          ...(worker.disclosureRepositories
+            ? { disclosureRepositories: worker.disclosureRepositories }
+            : {}),
         },
         capAtomic: settings.maxJobAtomic.toString(),
       },
@@ -377,7 +420,7 @@ export class ModelHandoff {
     if (
       !latest ||
       latest.root !== settings.root ||
-      !claudeWorkspaceCovered(originalWorkspace, latest.repositories)
+      !modelClaudeWorkspaceCovered(originalWorkspace, latest)
     )
       return continuationRefusal('Current model consent changed during qualification');
     signal?.throwIfAborted();
@@ -425,14 +468,7 @@ export class ModelHandoff {
       reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
       parentPolicy: continuationPolicy,
       workspace: worker.claudeWorkspace,
-      consent: {
-        version: 2,
-        repository: settings.root,
-        repositories: latest.repositories,
-        githubRepositories: currentModelGithubRepositories(latest),
-        routerOrigin: settings.routerOrigin,
-        recipients: ['Tenjin', 'DeepSeek'],
-      },
+      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
       instruction:
         'Assess the complete follow-up against the full parent policy and current repository constraints. Accept with offer_id only if it remains suitable for this DeepSeek worker. You retain the final veto. This reuses the original history and budget, with no new routing fee. Otherwise cancel the offer; do not send a Tenjin handle to native tools. No worker started.',
     };
@@ -450,9 +486,11 @@ export class ModelHandoff {
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
     if (
       session.harness !== 'codex' &&
-      (!claudeWorkspace || !claudeWorkspaceCovered(claudeWorkspace, settings.repositories))
+      (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
     )
       return native();
+    const disclosureRepositories = nativeRepositories(job, claudeWorkspace);
+    if (settings.scope === 'native-workspace' && !disclosureRepositories) return native();
     if (
       session.harness === 'codex' &&
       (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
@@ -513,7 +551,7 @@ export class ModelHandoff {
       !consent ||
       consent.root !== job.root ||
       consent.maxJobAtomic < BigInt(job.capAtomic) ||
-      (claudeWorkspace && !claudeWorkspaceCovered(claudeWorkspace, consent.repositories))
+      (claudeWorkspace && !modelClaudeWorkspaceCovered(claudeWorkspace, consent))
     )
       return native();
     await this.store.decided(job.id, {
@@ -521,6 +559,7 @@ export class ModelHandoff {
       routerOrigin: transport.origin,
       ...(instructions ? { instructionContext: instructions } : {}),
       ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),
+      ...(disclosureRepositories ? { disclosureRepositories } : {}),
       ...(claudeWorkspace ? { claudeWorkspace } : {}),
       ...(session.harness !== 'codex'
         ? { claudePermissionMode: job.decision.claudePermissionMode }
@@ -546,14 +585,7 @@ export class ModelHandoff {
               ],
             },
           }),
-      consent: {
-        version: 2,
-        repository: consent.root,
-        repositories: consent.repositories,
-        githubRepositories: currentModelGithubRepositories(consent),
-        routerOrigin: consent.routerOrigin,
-        recipients: ['Tenjin', 'DeepSeek'],
-      },
+      consent: offerConsent(consent, disclosureRepositories ?? []),
       instruction:
         'The user has installed Tenjin and enabled DeepSeek routing. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.' +
         (job.nativeTool === 'Agent' && job.nativeReplaySupported === true
