@@ -7,6 +7,7 @@ import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import type { TypedDataDefinition } from 'viem';
 import { getAddress } from 'viem';
 import { CliError } from './errors';
+import { sanitizeForTerminal } from './output';
 import { USDC_ADDRESS } from './usdc';
 import type { TenjinSigner } from './wallet/provider';
 import { isRecord } from './guards';
@@ -188,9 +189,14 @@ export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
 export const eip3009Only: PaymentPolicy = (_version, requirements) =>
   requirements.filter(signsEip3009);
 
+/** The transfer method an entry asks for, as the seller wrote it. */
+function transferMethod(entry: Pick<PaymentRequirements, 'extra'>): unknown {
+  return (entry.extra as Record<string, unknown> | undefined)?.assetTransferMethod;
+}
+
 /** Whether the SDK would sign an EIP-3009 authorization for this entry. */
 export function signsEip3009(entry: Pick<PaymentRequirements, 'extra'>): boolean {
-  const method = (entry.extra as Record<string, unknown> | undefined)?.assetTransferMethod;
+  const method = transferMethod(entry);
   return method === undefined || method === 'eip3009';
 }
 
@@ -281,19 +287,27 @@ function sameAsset(a: string, b: string): boolean {
   }
 }
 
-/** The named refusal when a 402 advertises nothing this wallet can pay. */
+/**
+ * The named refusal when a 402 advertises nothing this wallet can pay. An
+ * entry it would pay but for its transfer method is named by that method:
+ * Permit2 only when it asks for `permit2`, any other as the seller wrote it.
+ */
 export function noPayableRequirement(accepts: readonly PaymentRequirements[]): CliError {
   const advertised = accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
-  const permit2 = accepts.some(
+  const unsigned = accepts.find(
     (a) => a.scheme === 'exact' && isCanonicalUsdc(a) && !signsEip3009(a),
   );
+  const method = unsigned !== undefined ? transferMethod(unsigned) : undefined;
+  const permit2 = method === 'permit2';
   return new CliError(
     'PAYMENT_FAILED',
     accepts.length === 0
       ? 'The 402 advertised no payment requirements.'
       : permit2
         ? 'The 402 asks for a Permit2 transfer, which this CLI does not sign: it pays USDC on Base by EIP-3009 only.'
-        : 'The 402 advertises nothing this CLI can pay: it lists no exact-scheme entry in canonical USDC on Base.',
+        : unsigned !== undefined
+          ? `This payment method is not supported: the 402 asks for the transfer method "${sanitizeForTerminal(String(method)).slice(0, 100)}", and this CLI pays USDC on Base by EIP-3009 only.`
+          : 'The 402 advertises nothing this CLI can pay: it lists no exact-scheme entry in canonical USDC on Base.',
     {
       fix: 'Only USDC on Base (eip155:8453) by EIP-3009, or Base Sepolia for previews, is supported. Nothing was signed.',
       ...(accepts.length > 0

@@ -1369,15 +1369,15 @@ function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | un
   // No terms, or terms that pinned no chain and no token: the 402 simply
   // advertises nothing this wallet can pay, which the shared refusal already
   // names in the SDK's own vocabulary.
-  // A Permit2 entry on the terms' chain is the deal, in a transfer this CLI
-  // does not sign: the shared refusal names it.
-  const permit2 = challenge.accepts.some(
+  // An entry on the terms' chain is the deal, in a transfer method this CLI
+  // does not sign (Permit2, or another): the shared refusal names the method.
+  const unsupportedMethod = challenge.accepts.some(
     (a) => !signsEip3009(a) && (terms?.network === undefined || a.network === terms.network),
   );
   if (
     terms === undefined ||
     (terms.network === undefined && terms.asset === undefined) ||
-    permit2
+    unsupportedMethod
   ) {
     return noPayableRequirement(challenge.accepts);
   }

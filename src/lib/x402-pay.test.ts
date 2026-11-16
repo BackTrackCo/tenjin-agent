@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { verifyTypedData } from 'viem';
+import type { CliError } from './errors';
 import { buildExactPayment, TENJIN_CLI_BUILDER_CODE } from './x402-pay';
 import { buildPaymentRequired, testSigner, withBuilderCode } from './read-test-utils';
 
@@ -127,23 +128,27 @@ describe('buildExactPayment', () => {
   });
 
   // The SDK signs a Permit2 transfer when the entry asks for one, and it
-  // cannot settle without a Permit2 allowance this CLI never sets.
-  it.each(['permit2', 'something-else'])(
-    'refuses an entry whose transfer method is %s, signing nothing',
-    async (assetTransferMethod) => {
+  // cannot settle without a Permit2 allowance this CLI never sets. Any other
+  // method is refused too, named as itself: it was called Permit2.
+  it.each([
+    ['permit2', /^The 402 asks for a Permit2 transfer/, 'permit2'],
+    ['something-else', /^This payment method is not supported: .*"something-else"/, undefined],
+  ])(
+    'refuses an entry whose transfer method is %s, naming it, signing nothing',
+    async (assetTransferMethod, message, reason) => {
       const { paymentRequired } = buildPaymentRequired({
         extra: { name: 'USD Coin', version: '2', assetTransferMethod },
       });
       const signer = testSigner();
       const signTypedData = vi.spyOn(signer, 'signTypedData');
-      const refused = buildExactPayment(paymentRequired, signer);
-      await expect(refused).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-      if (assetTransferMethod === 'permit2') {
-        await expect(refused).rejects.toMatchObject({
-          message: expect.stringContaining('Permit2'),
-          details: { reason: 'permit2' },
-        });
-      }
+      const err = (await buildExactPayment(paymentRequired, signer).catch(
+        (e: unknown) => e,
+      )) as CliError;
+      expect(err).toMatchObject({
+        code: 'PAYMENT_FAILED',
+        message: expect.stringMatching(message),
+      });
+      expect((err.details as { reason?: string }).reason).toBe(reason);
       expect(signTypedData).not.toHaveBeenCalled();
     },
   );
