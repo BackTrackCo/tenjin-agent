@@ -796,6 +796,33 @@ async function saveOne(
 }
 
 /**
+ * ONE TRY AT A NEW FILE HOLDING `bytes`: created exclusively under
+ * `directory`, named for `stem` with the extension `contentType` implies,
+ * written whole and closed, and its path returned. A file that could not be
+ * written whole is removed, and the error is thrown. A direct pay and the
+ * router's provider leg both save a paid body with it, so both fail alike.
+ */
+export async function writeNewFile(
+  directory: string,
+  stem: string,
+  contentType: string,
+  bytes: Uint8Array,
+): Promise<string> {
+  const file = await createUniqueFile(directory, stem, extensionFor(contentType));
+  try {
+    try {
+      await file.handle.writeFile(bytes);
+    } finally {
+      await file.handle.close();
+    }
+  } catch (err) {
+    await rm(file.path, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  return file.path;
+}
+
+/**
  * EVERY BYTE, OR A THROW. `FileHandle.write` may write fewer bytes than it was
  * handed and says so only in `bytesWritten`; a caller that ignores it saves a
  * file with a hole in it. A write that makes no progress is an error.

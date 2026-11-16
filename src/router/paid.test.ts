@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -16,6 +16,7 @@ import {
   saveMedia,
   walletPaidHost,
   writeAll,
+  writeNewFile,
   type MediaTransport,
   type PaidRecord,
 } from './paid';
@@ -139,6 +140,24 @@ describe('writing a saved file', () => {
   it('throws on a write that makes no progress, rather than spinning', async () => {
     const stuck = { write: async (buffer: Uint8Array) => ({ bytesWritten: 0, buffer }) };
     await expect(writeAll(stuck as never, new Uint8Array([1]))).rejects.toThrow('no progress');
+  });
+});
+
+describe('one try at a new file', () => {
+  it('writes the bytes whole, with the extension the type implies, in a new file each time', async () => {
+    const bytes = new Uint8Array(200_000).map((_, i) => i % 251);
+    const a = await writeNewFile(join(dir, 'out'), 'stem', 'image/png; charset=binary', bytes);
+    const b = await writeNewFile(join(dir, 'out'), 'stem', 'image/png', bytes);
+    expect(a).not.toBe(b);
+    expect(a.endsWith('.png')).toBe(true);
+    expect(new Uint8Array(await readFile(a))).toEqual(bytes);
+  });
+
+  it('removes the file it made when the write fails, and throws', async () => {
+    await expect(
+      writeNewFile(join(dir, 'out'), 'stem', 'audio/mpeg', 42 as unknown as Uint8Array),
+    ).rejects.toThrow();
+    expect(await readdir(join(dir, 'out'))).toEqual([]);
   });
 });
 

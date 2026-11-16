@@ -93,18 +93,16 @@ import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
-  extensionFor,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
   payerOf,
   reconcilePayments,
   recordedSent,
   saveMedia,
-  createUniqueFile,
   maskDeep,
   recordAccountRow,
   updatePaidRecord,
-  writeAll,
+  writeNewFile,
   type MediaTransport,
   type PaidRecord,
   type SignedAuthorization,
@@ -2900,17 +2898,13 @@ async function saveBinary(
   }
   if (opts.budget !== undefined) opts.budget.leftBytes -= bytes.byteLength;
   try {
-    const file = await createUniqueFile(
+    const savedTo = await writeNewFile(
       downloadsDir(dataDir),
       `${capabilityId.slice(0, 80)}-${(opts.now ?? Date.now)()}`,
-      extensionFor(opts.contentType),
+      opts.contentType,
+      bytes,
     );
-    try {
-      await writeAll(file.handle, bytes);
-    } finally {
-      await file.handle.close();
-    }
-    return { savedTo: file.path, ...described };
+    return { savedTo, ...described };
   } catch (err) {
     if (opts.budget !== undefined) opts.budget.leftBytes += bytes.byteLength;
     return { saveError: err instanceof Error ? err.message : String(err), ...described };

@@ -1,4 +1,3 @@
-import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
@@ -47,11 +46,9 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import {
   appendPaidRecord,
   chargedOnChain,
-  createUniqueFile,
-  extensionFor,
   walletPaidHost,
   recordedSent,
-  writeAll,
+  writeNewFile,
   type Settlement,
   type SignedAuthorization,
 } from '../router/paid';
@@ -1698,25 +1695,17 @@ async function keepBody(
   };
 }
 
-/** One try at a new file in `directory`; a partial file is removed. */
+/** One try at a new file in `directory` ({@link writeNewFile}), as a path
+ *  or the reason it was not saved. */
 async function writeBody(
   directory: string,
   stem: string,
   contentType: string,
   bytes: Uint8Array,
 ): Promise<{ path: string } | { error: string }> {
-  let path: string | undefined;
   try {
-    const file = await createUniqueFile(directory, stem, extensionFor(contentType));
-    path = file.path;
-    try {
-      await writeAll(file.handle, bytes);
-    } finally {
-      await file.handle.close();
-    }
-    return { path: file.path };
+    return { path: await writeNewFile(directory, stem, contentType, bytes) };
   } catch (err) {
-    if (path !== undefined) await rm(path, { force: true }).catch(() => undefined);
     return { error: err instanceof Error ? err.message : String(err) };
   }
 }
