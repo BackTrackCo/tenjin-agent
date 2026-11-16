@@ -369,7 +369,9 @@ async function runQualifiedWorker(
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         ...(job.native.subagent_type === 'Explore' ? { agent: 'Explore' } : {}),
-        effort: 'high',
+        // DeepSeek's Claude Code guide runs its model at max effort. The paid proxy
+        // sets the upstream effort itself; this keeps the native harness consistent.
+        effort: 'max',
         abortController: controller,
         permissionMode,
         ...session?.query,

@@ -415,7 +415,7 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
   const call = vi.mocked(query).mock.calls[0]![0];
   expect(call.options).toMatchObject({
     maxTurns: 500,
-    effort: 'high',
+    effort: 'max',
     model: 'deepseek-flash[1m]',
     cwd: '/repo',
     persistSession: false,
@@ -1082,6 +1082,8 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
       }),
     ).resolves.toBe('finished');
     const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+    // DeepSeek's guide runs its model at max effort in Claude Code.
+    expect(sent.effort).toBe('max');
     if (mode !== 'default') {
       // Auto and bypass: nothing may wait on a person dialog.
       expect(sent.permissionPrompts).toBe('none');
