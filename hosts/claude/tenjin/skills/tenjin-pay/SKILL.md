@@ -36,12 +36,10 @@ cannot pay the endpoint. A 2xx on the probe is delivered free. Read the quote
 before the first call to an endpoint, and again when the body or the headers
 change: some endpoints price by request shape.
 
-`signIn: true` with no `accepts` means the endpoint asks the wallet that paid
-it to sign in, as the status URL of a paid run does. `tenjin pay <url> --json`,
-a plain GET, answers it and pays nothing, so it needs no `--max-price` or
-`--yes`. It signs only when the challenge matches the responding origin and
-`tenjin payments` shows this wallet paid that host; otherwise it refuses with
-exit 3.
+`signIn: true` with no `accepts` means the endpoint, such as a paid run's
+status URL, asks the wallet that paid it to sign in. `tenjin pay <url> --json`
+(a GET, with no `--max-price` or `--yes`) signs in and pays nothing. It
+refuses with exit 3 when this wallet has not paid that host.
 
 ## Pay
 
@@ -67,17 +65,14 @@ tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H '
   turn. Batch work needs the user's consent for the whole batch and its total.
 - A paid 2xx returns `amountPaid`, `payTo`, `settlementTxHash` when the
   seller reported one, and the body. A file (an image, a sound, a PDF) is saved
-  instead: `savedTo` is its path, beside `contentType` and `bytes`. If
-  Downloads cannot take it, `savedTo` is in the OS temp folder and `saveError`
-  says why. If no folder can, `bodyBase64` holds the bytes. A 4xx or 5xx AFTER
-  payment is exit 4 (`PAYMENT_FAILED`): the signed authorization
-  already left, so do not retry blindly. Read the provider's error in
-  `details.body` and, for a refused payment, `details.paymentError`; fix the
-  request, and quote again. `details.settlement: "settled"` means the chain
-  shows the payment was taken: say it was charged, and do not ask for funds.
-  `details.reportedTxHash` with `"unknown"` is only the seller's word that it
-  charged: say the seller reports a charge the chain does not show yet, and do
-  not ask for funds.
+  instead, and `savedTo` is its path; `saveError` says why when Downloads could
+  not take it. If no folder could, `bodyBase64` holds the bytes.
+- A 4xx or 5xx AFTER payment is exit 4 (`PAYMENT_FAILED`): the signed
+  authorization already left, so do not retry blindly. Read `details.body` and
+  `details.paymentError` (the seller's reason), fix the request, and quote
+  again. When `details.settlement` is `"settled"`, say it was charged. When
+  only `details.reportedTxHash` is set, say the seller reports a charge the
+  chain does not show yet. In both cases, do not ask for funds.
 
 ## Refusals are answers
 
