@@ -1,9 +1,16 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Settings, SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core';
+
+export type WindowsWorkerProcess = {
+  launcherPath: string;
+  workerSid: string;
+  configDir: string;
+  protectedPaths: readonly string[];
+};
 
 /**
  * Observe the maintained SDK's native child without replacing its transport. `secrets`
@@ -17,7 +24,9 @@ import type { Settings, SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core
  * folder that only this user can open and that is outside every working directory, and
  * the SDK is given only its path. The folder is removed once every child has closed.
  */
-export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {}) {
+export function claudeWorkerProcess(
+  o: { secrets?: () => readonly string[]; windows?: WindowsWorkerProcess } = {},
+) {
   const children: Array<{
     child: ReturnType<typeof spawn>;
     closed: Promise<void>;
@@ -67,7 +76,7 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
         // before its accept has nothing to finish: it is ended at once.
         if (now) kill('SIGTERM');
         const term = now ? undefined : setTimeout(() => kill('SIGTERM'), 8000);
-        const hard = setTimeout(() => kill('SIGKILL'), now ? 2000 : 10000);
+        const hard = o.windows ? undefined : setTimeout(() => kill('SIGKILL'), now ? 2000 : 10000);
         let deadline: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -75,7 +84,7 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
             new Promise<never>((_resolve, reject) => {
               deadline = setTimeout(
                 () => reject(new Error('Claude worker process did not drain')),
-                12000,
+                o.windows ? 60_000 : 12_000,
               );
             }),
           ]);
@@ -116,15 +125,74 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
       const secrets = (o.secrets?.() ?? []).filter((secret) => secret.length > 0);
       if (args.some((arg) => secrets.some((secret) => arg.includes(secret))))
         throw new Error('A Claude worker secret would be on its command line');
-      const child = spawn(options.command, args, {
-        cwd: options.cwd,
-        env: options.env,
-        signal: options.signal,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-        // Its own process group, so a drain reaches everything it started.
-        ...(process.platform === 'win32' ? {} : { detached: true }),
-      });
+      const windows = o.windows;
+      const cancelFolder = windows
+        ? mkdtempSync(join(tmpdir(), 'tenjin-worker-cancel-'))
+        : undefined;
+      const cancelFile = cancelFolder ? join(cancelFolder, 'stop') : undefined;
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child =
+          windows && cancelFile
+            ? spawn(
+                windows.launcherPath,
+                [
+                  '--worker-sid',
+                  windows.workerSid,
+                  '--parent-pid',
+                  String(process.pid),
+                  '--cwd',
+                  options.cwd ?? process.cwd(),
+                  '--cancel-file',
+                  cancelFile,
+                  '--',
+                  options.command,
+                  ...args,
+                ],
+                {
+                  cwd: options.cwd,
+                  env: {
+                    ...options.env,
+                    TENJIN_WINDOWS_PROFILE: windows.configDir,
+                    TENJIN_WINDOWS_PROTECTED_PATHS: JSON.stringify(windows.protectedPaths),
+                  },
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                  detached: true,
+                  windowsHide: true,
+                },
+              )
+            : spawn(options.command, args, {
+                cwd: options.cwd,
+                env: options.env,
+                signal: options.signal,
+                stdio: ['pipe', 'pipe', 'pipe'],
+                windowsHide: true,
+                ...(process.platform === 'win32' ? {} : { detached: true }),
+              });
+      } catch (error) {
+        if (cancelFolder) rmSync(cancelFolder, { recursive: true, force: true });
+        throw error;
+      }
+      if (cancelFile) {
+        // A cold alternate logon can still be inside Win32 when the SDK stops. Leave
+        // the launcher alive to reap the suspended process once that call returns.
+        const stop = () => {
+          try {
+            writeFileSync(cancelFile, '', { mode: 0o600 });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        child.kill = stop;
+        options.signal.addEventListener('abort', stop, { once: true });
+        if (options.signal.aborted) stop();
+        child.once('close', () => {
+          options.signal.removeEventListener('abort', stop);
+          if (cancelFolder)
+            void rm(cancelFolder, { recursive: true, force: true }).catch(() => undefined);
+        });
+      }
       // The custom-spawn interface leaves stderr to its caller. Drain it without
       // retaining tool output, credentials or native diagnostic text.
       child.stderr.on('error', () => {});

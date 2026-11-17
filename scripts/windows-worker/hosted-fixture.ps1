@@ -76,10 +76,13 @@ function Grant-DirectoryAccess($Path, $Principal, $Rights) {
 $fixtureId = [Guid]::NewGuid().ToString('N')
 $account = 'tenjin_' + $fixtureId.Substring(0, 10)
 $stagePath = Join-Path $env:RUNNER_TEMP "tenjin-windows-$fixtureId"
-$binaryPath = Join-Path $stagePath 'bin'
+$binaryPath = Join-Path $env:ProgramFiles "tenjin-windows-$fixtureId"
 $workspacePath = Join-Path $stagePath 'workspace'
+$profilePath = Join-Path $stagePath 'profile'
+$dataPath = Join-Path $env:USERPROFILE "tenjin-windows-$fixtureId"
 $canaryPath = Join-Path $stagePath 'private-canary.txt'
 $launcherPath = Join-Path $binaryPath 'tenjin-windows-worker.exe'
+$testLauncherPath = Join-Path $binaryPath 'tenjin-windows-worker-test.exe'
 $sdkProbe = Join-Path $PSScriptRoot 'qualify.mjs'
 $worker = $null
 $storedCredential = $false
@@ -93,9 +96,10 @@ try {
   [WorkerFixtureCredential]::Create(".\$account", $password)
   $storedCredential = $true
 
-  New-Item -ItemType Directory -Path $binaryPath, $workspacePath | Out-Null
+  New-Item -ItemType Directory -Path $binaryPath, $workspacePath, $profilePath, $dataPath | Out-Null
   Grant-DirectoryAccess $binaryPath $worker.SID 'ReadAndExecute'
   Grant-DirectoryAccess $workspacePath $worker.SID 'Modify'
+  Grant-DirectoryAccess $profilePath $worker.SID 'Modify'
   [IO.File]::WriteAllText($canaryPath, 'SYNTHETIC_TENJIN_PRIVATE_FIXTURE')
   $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
   $canaryAcl = New-Object System.Security.AccessControl.FileSecurity
@@ -106,6 +110,7 @@ try {
   Push-Location $PSScriptRoot
   try {
     Invoke-Checked 'go' @('test', './...')
+    Invoke-Checked 'go' @('test', '-c', '-o', $testLauncherPath, '.')
     Invoke-Checked 'go' @('build', '-trimpath', '-o', $launcherPath, '.')
   } finally { Pop-Location }
 
@@ -121,7 +126,7 @@ try {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'process-probe.mjs') -Destination $processProbe
   $failedProbes = @()
   try {
-    Invoke-Checked 'node.exe' @($processProbe, $launcherPath, $worker.SID.Value, $workspacePath)
+    Invoke-Checked 'node.exe' @($processProbe, $launcherPath, $worker.SID.Value, $workspacePath, $testLauncherPath)
   } catch { $failedProbes += 'process ownership' }
   foreach ($tool in 'Bash', 'PowerShell') {
     Write-Host "Windows SDK probe: $tool"
@@ -129,6 +134,9 @@ try {
       Invoke-Checked 'node.exe' @($sdkProbe, $launcherPath, $claudePath[0].FullName, $worker.SID.Value, $workspacePath, $canaryPath, $tool)
     } catch { $failedProbes += $tool }
   }
+  try {
+    Invoke-Checked 'node.exe' @((Join-Path $PSScriptRoot 'qualify-offer.mjs'), $launcherPath, $claudePath[0].FullName, $workspacePath, $dataPath, $profilePath, $worker.SID.Value)
+  } catch { $failedProbes += 'production offer' }
   if ($failedProbes.Count -gt 0) { throw ('Windows probes failed: ' + ($failedProbes -join ', ')) }
 } finally {
   $password.Dispose()
@@ -138,7 +146,9 @@ try {
     try {
       if ($worker) { Remove-LocalUser -SID $worker.SID }
     } finally {
-      if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force }
+      foreach ($fixturePath in $stagePath, $binaryPath, $dataPath) {
+        if (Test-Path -LiteralPath $fixturePath) { Remove-Item -LiteralPath $fixturePath -Recurse -Force }
+      }
     }
   }
 }

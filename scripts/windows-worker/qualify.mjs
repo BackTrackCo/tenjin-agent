@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { extname, isAbsolute, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { clearTimeout, setTimeout } from 'node:timers';
@@ -88,6 +90,8 @@ function latestResult(messages, id) {
 
 async function qualify({ launcher, binary, sid, workspace, canary, tool }) {
   const directory = await mkdtemp(join(workspace, 'tenjin-windows-fixture-'));
+  const control = await mkdtemp(join(tmpdir(), 'tenjin-windows-probe-'));
+  const cancelFile = join(control, 'stop');
   const fixture = join(directory, 'inside.txt');
   const commands = shellCommands(tool, fixture, canary);
   const abortController = new globalThis.AbortController();
@@ -216,6 +220,8 @@ async function qualify({ launcher, binary, sid, workspace, canary, tool }) {
               String(process.pid),
               '--cwd',
               cwd,
+              '--cancel-file',
+              cancelFile,
               '--',
               command,
               ...args,
@@ -224,9 +230,16 @@ async function qualify({ launcher, binary, sid, workspace, canary, tool }) {
               env: { ...env, SystemRoot: process.env.SystemRoot },
               stdio: 'pipe',
               windowsHide: true,
-              signal,
+              detached: true,
             },
           );
+          child.kill = () => {
+            writeFileSync(cancelFile, '');
+            return true;
+          };
+          signal.addEventListener('abort', child.kill, { once: true });
+          if (signal.aborted) child.kill();
+          child.once('close', () => signal.removeEventListener('abort', child.kill));
           closed = new Promise((resolve) => child.once('close', resolve));
           const diagnostics = createInterface({ input: child.stderr });
           diagnostics.on('line', (line) => {
@@ -270,6 +283,7 @@ async function qualify({ launcher, binary, sid, workspace, canary, tool }) {
     await closed;
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    await rm(control, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
   }
 }

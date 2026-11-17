@@ -15,6 +15,20 @@ import {
   usdOfAtomic,
 } from '../router/model-limits';
 import { ModelJobStore, type NoOffer } from '../router/model-job';
+import { validateWindowsWorkerConfig } from '../router/windows-worker-config';
+
+export type SubagentConfigFlags = {
+  repository?: string;
+  maxJob?: string;
+  windowsWorkerSid?: string;
+  windowsLauncher?: string;
+  windowsClaude?: string;
+  windowsConfigDir?: string;
+  acceptWindowsShellAccess?: boolean;
+};
+
+const NATIVE_WINDOWS_DISCLOSURE =
+  'The Windows DeepSeek worker runs under the dedicated standard account with Claude’s native permissions and without its shell sandbox. Shell tools can reach files and networks available to that Windows account. Tenjin and DeepSeek can receive instructions and tool results from those resources. Exa can receive search queries and public page addresses. Use a separate shared Claude profile and keep wallet, login and spend data under the controller account.';
 
 /** What each no-offer code means, in the words `tenjin config subagents why` prints. */
 const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
@@ -75,11 +89,26 @@ function retainedRepositories(value: unknown, origin: string): string[] {
 
 export async function runConfigSubagents(
   mode: string,
-  flags: { repository?: string; maxJob?: string },
+  flags: SubagentConfigFlags,
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  const configuringWindows =
+    flags.windowsWorkerSid !== undefined ||
+    flags.windowsLauncher !== undefined ||
+    flags.windowsClaude !== undefined ||
+    flags.windowsConfigDir !== undefined ||
+    flags.acceptWindowsShellAccess === true;
+  if (configuringWindows && (mode !== 'on' || process.platform !== 'win32'))
+    throw new CliError(
+      'USAGE',
+      'The Windows worker flags require native Windows and subagents on.',
+    );
   if (mode === 'off') {
-    await persist(ctx.dataDir, (c) => ({ ...c, router: { ...c.router, subagents: false } }));
+    await persist(ctx.dataDir, (c) => {
+      const router = { ...c.router, subagents: false };
+      delete router.windowsWorker;
+      return { ...c, router };
+    });
     return {
       data: { enabled: false },
       humanLines: ['Subagent model routing is off. No new DeepSeek jobs may start.'],
@@ -111,9 +140,33 @@ export async function runConfigSubagents(
       'USAGE',
       `The job ceiling must be at least ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} for the current minimum Messages reservation and routing fee. Actual input can require more.`,
     );
+  if (configuringWindows && !flags.acceptWindowsShellAccess)
+    throw new CliError('USAGE', NATIVE_WINDOWS_DISCLOSURE, {
+      fix: 'Review the Windows disclosure and add --accept-windows-shell-access if you agree.',
+    });
+  const windowsWorker = configuringWindows
+    ? await validateWindowsWorkerConfig(
+        {
+          version: 1,
+          workerSid: flags.windowsWorkerSid,
+          launcherPath: flags.windowsLauncher,
+          claudePath: flags.windowsClaude,
+          configDir: flags.windowsConfigDir,
+          routerOrigin,
+          shellAccess: 'native-windows',
+        },
+        ctx.dataDir,
+      )
+    : null;
+  if (configuringWindows && !windowsWorker)
+    throw new CliError('USAGE', 'The Windows worker setup is incomplete or unavailable.', {
+      fix: 'Supply a dedicated account SID, readable local launcher and Claude .exe paths, and a separate shared Claude config directory.',
+    });
   const disclosure = [
     'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results, and Exa receives the worker’s web search queries and the address of a public page its WebFetch could not fetch. Your Tenjin block and only rules apply to those Exa calls as they do to what Tenjin picks on its own.',
-    'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. It loads your global Claude Code configuration as a native subagent does: your personal CLAUDE.md is in its instructions, and it can read the skills, plugins, agents, commands and rules under ~/.claude, every session transcript and memory folder there, your prompt history and your settings files, so what it reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders you did not name stay unreadable; known secrets are masked, not guaranteed anonymous.',
+    windowsWorker
+      ? NATIVE_WINDOWS_DISCLOSURE
+      : 'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. It loads your global Claude Code configuration as a native subagent does: your personal CLAUDE.md is in its instructions, and it can read the skills, plugins, agents, commands and rules under ~/.claude, every session transcript and memory folder there, your prompt history and your settings files, so what it reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders you did not name stay unreadable; known secrets are masked, not guaranteed anonymous.',
     `Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. A worker request, with its ${MODEL_OUTPUT_TOKENS.toLocaleString('en-US')}-token output cap, reserves at least ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.`,
   ].join('\n\n');
   let repositories = [repository];
@@ -125,23 +178,23 @@ export async function runConfigSubagents(
       ...new Set([...retainedRepositories(c.router?.subagentConsent, routerOrigin), repository]),
     ];
     githubRepositories = modelGithubRepositories(repositories);
-    return {
-      ...c,
-      router: {
-        ...c.router,
-        subagents: true,
-        subagentConsent: {
-          version: 2,
-          instructions: 'applicable',
-          reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-          repositories,
-          githubRepositories,
-          maxJobAtomic: maxJob.toString(),
-          routerOrigin,
-        },
+    const router = {
+      ...c.router,
+      subagents: true,
+      subagentConsent: {
+        version: 2,
+        instructions: 'applicable',
+        reads: 'claude-home',
+        recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+        repositories,
+        githubRepositories,
+        maxJobAtomic: maxJob.toString(),
+        routerOrigin,
       },
     };
+    if (windowsWorker) router.windowsWorker = windowsWorker;
+    else delete router.windowsWorker;
+    return { ...c, router };
   });
   return {
     data: {
@@ -152,10 +205,16 @@ export async function runConfigSubagents(
       maxJobAtomic: maxJob.toString(),
       routerOrigin,
       disclosure,
+      ...(windowsWorker ? { windowsWorker: { enabled: true } } : {}),
     },
     humanLines: [
       disclosure,
       `Enabled for ${repositories.join(', ')}, at ${routerOrigin}, at most $${flags.maxJob} per job.`,
+      ...(process.platform === 'win32' && !windowsWorker
+        ? [
+            'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',
+          ]
+        : []),
       'Undo: tenjin config subagents off',
     ],
   };

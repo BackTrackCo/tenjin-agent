@@ -66,6 +66,12 @@ import {
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
+import {
+  nativeWindowsShellPolicy,
+  sameWindowsPath,
+  windowsWorkerLaunch,
+  type WindowsWorkerLaunch,
+} from './windows-worker-launch';
 import { SettingsEnvValues, settingsFileEnv } from './model-worker-privacy';
 import { workerCredentialProbe } from './worker-credential-probes';
 import {
@@ -123,6 +129,7 @@ type QualifiedWorker = {
   nativeSnapshot?: NativeCodexSnapshot;
   disclosureRepositories?: string[];
   claudeWorkspace?: ClaudeWorkspace;
+  windows?: WindowsWorkerLaunch;
 };
 
 /** Qualify host policy, not model capability; unsupported paths stay native. */
@@ -137,9 +144,16 @@ export async function qualifiedModelWorker(
   if (!dataDir) return null;
   if (codexPolicy) return qualifyNativeCodexWorker({ cwd, policy: codexPolicy, dataDir, signal });
   if (!claudeWorkerAuthCompatible(process.env)) return null;
+  const windows = await windowsWorkerLaunch(dataDir, cwd);
+  if (process.platform === 'win32' && !windows) return null;
   // Read at every offer and again at its accept: once per binary file, not per call.
   const state = await readClaudeCodeCached(process.env, cwd);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
+  if (
+    windows &&
+    !sameWindowsPath(await realpath(state.binary.path).catch(() => ''), windows.claudePath)
+  )
+    return null;
   // A built-in a file redefines, a plugin's agent and the host's other built-ins run
   // natively. A custom type's own definition is read where it is offered and where it runs.
   if (
@@ -169,8 +183,11 @@ export async function qualifiedModelWorker(
       effective,
       disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
     ));
-  return claudeWorkspace && claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved)
-    ? { ...state.binary, claudeWorkspace }
+  return claudeWorkspace &&
+    (windows
+      ? disclosure?.routerOrigin === windows.routerOrigin && nativeWindowsShellPolicy(resolved)
+      : claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved))
+    ? { ...state.binary, claudeWorkspace, ...(windows ? { windows } : {}) }
     : null;
 }
 
@@ -281,6 +298,8 @@ export async function runModelWorker(
       current.currentClaudePermissionMode(),
     );
     if (!binary) throw new Error('Claude Code worker is unavailable; keep native');
+    if (binary.windows?.fingerprint !== job.decision.windowsWorker)
+      throw new Error('The Windows worker profile changed; keep native');
     const saved = savedClaudeWorkspace(job.decision.claudeWorkspace);
     if (!saved || !binary.claudeWorkspace || !sameClaudeWorkspace(saved, binary.claudeWorkspace))
       throw new Error('Owned Claude workspace scope changed or is unavailable');
@@ -296,6 +315,7 @@ async function runQualifiedWorker(
     path: string;
     claudeWorkspace?: ClaudeWorkspace;
     customAgent?: WorkerAgent;
+    windows?: WindowsWorkerLaunch;
   },
   early?: EarlyWorkerInput,
 ) {
@@ -316,6 +336,7 @@ async function runQualifiedWorker(
     if (!claudeWorkerAuthCompatible(process.env))
       throw new Error('Native Claude authentication is owned by its host; keep native');
     const disclosure = await modelSettings(options.dataDir, job.root);
+    const windows = binary.windows ? await windowsWorkerLaunch(options.dataDir, job.root) : null;
     const resolved = await resolveWorkerSettings({
       cwd: job.root,
       settingSources: ['user', 'project', 'local'],
@@ -334,7 +355,12 @@ async function runQualifiedWorker(
       ));
     if (
       !current ||
-      !claudeWorkerSandboxCompatible([job.root, current.root], resolved) ||
+      !(binary.windows
+        ? windows?.fingerprint === binary.windows.fingerprint &&
+          windows.routerOrigin === disclosure?.routerOrigin &&
+          windows.routerOrigin === options.transport.origin &&
+          nativeWindowsShellPolicy(resolved)
+        : claudeWorkerSandboxCompatible([job.root, current.root], resolved)) ||
       !sameClaudeWorkspace(workspace, current)
     )
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
@@ -353,14 +379,15 @@ async function runQualifiedWorker(
   ];
   // Before the native init timer starts: `gh auth token` may wait on the keychain. A setup
   // failure leaves the worker without GitHub access, never without its job.
-  const github: WorkerGithub | undefined = await prepareWorkerGithub(process.env).catch(
-    () => undefined,
-  );
+  const github: WorkerGithub | undefined = binary.windows
+    ? undefined
+    : await prepareWorkerGithub(process.env).catch(() => undefined);
   // The job's GitHub env: its token or none, and with a token named for workers the
   // session's own cleared, also when the setup failed.
-  const githubEnv = github?.env ?? sessionTokenClears(process.env);
+  const githubEnv = binary.windows ? {} : (github?.env ?? sessionTokenClears(process.env));
   // Literal GitHub token values; the bridge removes them before anything leaves.
   let secrets: readonly string[] = github?.secrets ?? workerTokenValues(process.env);
+  const token = randomBytes(32).toString('hex');
   // Also before the timer: the worker reads its env files as a native subagent does, and
   // their values are replaced in everything that leaves this process. A scan that stops
   // short keeps every env file denied.
@@ -384,7 +411,7 @@ async function runQualifiedWorker(
   // cover its root, or where no recursive watcher would learn one made during the job.
   const settingsClosed = (root: string) => envDenied.has(root) || !envFiles.watching;
   const redactEnv = (text: string) => envFiles.redact(settingsEnv.redact(text));
-  const redactAll = (text: string) => redactEnv(redactWorkerSecrets(text, secrets));
+  const redactAll = (text: string) => redactEnv(redactWorkerSecrets(text, [token, ...secrets]));
   // The user's settings files the worker may read, set at start.
   let settingsFiles: readonly string[] = [];
   // A value found late is also removed from activity rows made before it was known.
@@ -409,6 +436,11 @@ async function runQualifiedWorker(
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
+    if (
+      binary.windows &&
+      (!envFiles.scanned || envFiles.withheld.length || envFiles.unlisted.length)
+    )
+      throw new Error('Cannot cover workspace env files before starting the Windows worker');
   } catch (error) {
     envFiles.close();
     await github?.close().catch(() => undefined);
@@ -419,10 +451,12 @@ async function runQualifiedWorker(
   const cancel = () => controller.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
-  const token = randomBytes(32).toString('hex');
   // The worker's settings carry the bridge token and the job's GitHub env: in a private
   // file, never on its command line.
-  const nativeProcess = claudeWorkerProcess({ secrets: () => [token, ...secrets] });
+  const nativeProcess = claudeWorkerProcess({
+    secrets: () => [token, ...secrets],
+    windows: binary.windows,
+  });
   const pending = new Set<Promise<void>>();
   let worker: ReturnType<typeof query> | undefined;
   let proxyFailure: { error: unknown } | undefined;
@@ -550,7 +584,7 @@ async function runQualifiedWorker(
             });
           // Env values may need JSON escapes, so they are replaced in the parsed strings.
           const text = withholdDroppedDirectories(
-            redactWorkerSecrets(body, secrets),
+            redactWorkerSecrets(body, [token, ...secrets]),
             workspace.droppedDirectories,
           );
           let parsed: unknown;
@@ -726,6 +760,7 @@ async function runQualifiedWorker(
       cwd: job.root,
       additionalDirectories: additionalDirectories.filter((dir) => dir !== temp?.directory),
       agentType,
+      ...(binary.windows ? { windows: binary.windows } : {}),
       ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
     };
     const startSettings = ({
@@ -811,7 +846,7 @@ async function runQualifiedWorker(
           ...(nativeAgent?.withheldInstructions.length
             ? { claudeMdExcludes: instructionExcludes(nativeAgent.withheldInstructions) }
             : {}),
-          apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
+          ...(!binary.windows ? { apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper() } : {}),
           env: {
             ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
             // Above a GitHub token in the person's settings env, which Claude Code would
@@ -901,42 +936,46 @@ async function runQualifiedWorker(
           },
           // Here, as the SDK would merge its own `sandbox` option, which it refuses beside a
           // settings file.
-          sandbox: {
-            enabled: true,
-            allowUnsandboxedCommands: false,
-            failIfUnavailable: true,
-            // Other hosts ask in default mode and are denied where no one answers.
-            network: { allowedDomains: [...WORKER_ALLOWED_DOMAINS] },
-            // gh is a Go program: on macOS it verifies TLS through the trust service only.
-            ...(github?.authenticated && process.platform === 'darwin'
-              ? { enableWeakerNetworkIsolation: true }
-              : {}),
-            filesystem: {
-              allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
-              ...(github ? { allowWrite: [github.directory] } : {}),
-              denyRead: [
-                ...privatePaths.paths,
-                ...protectedRoots.flatMap((root) => [
-                  ...(envDenied.has(root)
-                    ? [
-                        `${root}/.env*`,
-                        `${root}/**/.env*`,
-                        ...(basename(root).startsWith('.env') ? [root] : []),
-                      ]
-                    : []),
-                  ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
-                  ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
-                ]),
-                ...envFiles.withheld,
-                // Commands cannot read inside a folder the scan could not list.
-                ...envFiles.unlisted,
-                ...dropped,
-                // Other sessions' temp files; this job's own are in its temp folder.
-                ...(temp?.shared ?? []),
-              ],
-              denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
-            },
-          },
+          ...(!binary.windows
+            ? {
+                sandbox: {
+                  enabled: true,
+                  allowUnsandboxedCommands: false,
+                  failIfUnavailable: true,
+                  // Other hosts ask in default mode and are denied where no one answers.
+                  network: { allowedDomains: [...WORKER_ALLOWED_DOMAINS] },
+                  // gh is a Go program: on macOS it verifies TLS through the trust service only.
+                  ...(github?.authenticated && process.platform === 'darwin'
+                    ? { enableWeakerNetworkIsolation: true }
+                    : {}),
+                  filesystem: {
+                    allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
+                    ...(github ? { allowWrite: [github.directory] } : {}),
+                    denyRead: [
+                      ...privatePaths.paths,
+                      ...protectedRoots.flatMap((root) => [
+                        ...(envDenied.has(root)
+                          ? [
+                              `${root}/.env*`,
+                              `${root}/**/.env*`,
+                              ...(basename(root).startsWith('.env') ? [root] : []),
+                            ]
+                          : []),
+                        ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
+                        ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
+                      ]),
+                      ...envFiles.withheld,
+                      // Commands cannot read inside a folder the scan could not list.
+                      ...envFiles.unlisted,
+                      ...dropped,
+                      // Other sessions' temp files; this job's own are in its temp folder.
+                      ...(temp?.shared ?? []),
+                    ],
+                    denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
+                  },
+                },
+              }
+            : {}),
         }),
         // Direct callers remain ephemeral; only the owned controller may retain
         // and reopen a session. Native retention/config discovery are unchanged.
@@ -1090,7 +1129,7 @@ async function runQualifiedWorker(
             return { behavior: 'deny', message: 'The DeepSeek job has not been accepted.' };
           assertCurrentMode();
           if (nobodyAsked)
-            return sandboxJudgesRead(tool, input, context, permissionMode)
+            return !binary.windows && sandboxJudgesRead(tool, input, context, permissionMode)
               ? { behavior: 'allow', updatedInput: input }
               : {
                   behavior: 'deny',
@@ -1168,7 +1207,7 @@ async function runQualifiedWorker(
         // Without a recursive watcher, refresh() cannot discover a new env file in a
         // previously empty nested directory. Start fresh if its fixed denies need to change.
         if (
-          !envFiles.watching &&
+          (!envFiles.watching || binary.windows) &&
           !(await Promise.race([envFiles.refreshBeforeAssignment(), stoppedBeforeAssignment]))
         )
           throw new Error("The warm Claude worker's env file restrictions changed");

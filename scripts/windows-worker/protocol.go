@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -21,12 +22,14 @@ type launchRecord struct {
 	Directory  string
 	Arguments  []string
 	Overlay    map[string]string
+	Runtime    *runtimeLaunch `json:",omitempty"`
 }
 
 type launchOptions struct {
-	WorkerSID string
-	ParentPID uint32
-	Record    launchRecord
+	WorkerSID  string
+	ParentPID  uint32
+	CancelFile string
+	Record     launchRecord
 }
 
 var localAccountSID = regexp.MustCompile("^S-1-5-21-([0-9]{1,10}-){3}[0-9]{1,10}$")
@@ -39,19 +42,20 @@ func localDrivePath(path string) bool {
 }
 
 func parseOptions(args []string) (launchOptions, error) {
-	if len(args) < 8 || args[0] != "--worker-sid" || args[2] != "--parent-pid" ||
-		args[4] != "--cwd" || args[6] != "--" || !localAccountSID.MatchString(args[1]) {
+	if len(args) < 10 || args[0] != "--worker-sid" || args[2] != "--parent-pid" ||
+		args[4] != "--cwd" || args[6] != "--cancel-file" || args[8] != "--" ||
+		!localAccountSID.MatchString(args[1]) || !localDrivePath(args[7]) {
 		return launchOptions{}, errors.New("invalid launcher options")
 	}
 	pid, err := strconv.ParseUint(args[3], 10, 32)
 	if err != nil || pid == 0 {
 		return launchOptions{}, errors.New("invalid parent PID")
 	}
-	record := launchRecord{Executable: args[7], Directory: args[5], Arguments: args[8:]}
+	record := launchRecord{Executable: args[9], Directory: args[5], Arguments: args[10:]}
 	if err := validateCommand(record); err != nil {
 		return launchOptions{}, err
 	}
-	return launchOptions{WorkerSID: args[1], ParentPID: uint32(pid), Record: record}, nil
+	return launchOptions{WorkerSID: args[1], ParentPID: uint32(pid), CancelFile: args[7], Record: record}, nil
 }
 
 func validateCommand(record launchRecord) error {
@@ -208,7 +212,7 @@ func validateLaunch(record launchRecord) error {
 			}
 		}
 	}
-	return nil
+	return validateRuntime(record)
 }
 
 func encodeLaunch(record launchRecord) ([]byte, error) {
@@ -252,4 +256,73 @@ func receiveLaunch(reader io.Reader) (launchRecord, error) {
 		return launchRecord{}, fmt.Errorf("launch frame: %w", err)
 	}
 	return record, nil
+}
+
+const maxRuntimeSettings = 32 * 1024
+const maxProtectedPaths = 64
+
+type runtimeLaunch struct {
+	Profile        string
+	ProtectedPaths []string
+	SettingsSource string
+	Settings       json.RawMessage
+}
+
+func settingsArgument(args []string) (int, error) {
+	index := -1
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--settings=") {
+			return -1, errors.New("expected a private worker settings file")
+		}
+		if arg == "--settings" {
+			if index != -1 || i+1 == len(args) {
+				return -1, errors.New("expected one worker settings argument")
+			}
+			index = i + 1
+		}
+	}
+	if index == -1 {
+		return -1, errors.New("worker settings argument is required")
+	}
+	return index, nil
+}
+
+func validRuntimePath(path string) bool {
+	return len(path) <= 1024 && localDrivePath(path)
+}
+
+func validateRuntimePaths(runtime *runtimeLaunch) error {
+	if !validRuntimePath(runtime.Profile) || len(runtime.ProtectedPaths) == 0 ||
+		len(runtime.ProtectedPaths) > maxProtectedPaths {
+		return errors.New("invalid Windows worker runtime configuration")
+	}
+	for _, path := range runtime.ProtectedPaths {
+		if !validRuntimePath(path) {
+			return errors.New("invalid controller private path")
+		}
+	}
+	return nil
+}
+
+func validRuntimeSettings(settings []byte) bool {
+	trimmed := bytes.TrimSpace(settings)
+	return len(settings) <= maxRuntimeSettings && len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(settings)
+}
+
+func validateRuntime(record launchRecord) error {
+	runtime := record.Runtime
+	if runtime == nil {
+		return nil
+	}
+	if err := validateRuntimePaths(runtime); err != nil {
+		return err
+	}
+	index, err := settingsArgument(record.Arguments)
+	if err != nil {
+		return err
+	}
+	if record.Arguments[index] != "" || !validRuntimePath(runtime.SettingsSource) || !validRuntimeSettings(runtime.Settings) {
+		return errors.New("invalid private worker settings payload")
+	}
+	return nil
 }

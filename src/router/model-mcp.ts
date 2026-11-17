@@ -698,6 +698,7 @@ export function registerModelTool(
             (options.harness === 'claude' &&
               (!offeredWorkspace ||
                 !qualified.claudeWorkspace ||
+                qualified.windows?.fingerprint !== pending?.decision.windowsWorker ||
                 !sameClaudeWorkspace(offeredWorkspace, qualified.claudeWorkspace))) ||
             (options.harness === 'codex' &&
               JSON.stringify(qualified.nativeSnapshot) !==

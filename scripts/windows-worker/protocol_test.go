@@ -13,14 +13,15 @@ import (
 func TestLauncherOptionsKeepNativeArgumentVector(t *testing.T) {
 	args := []string{
 		"--worker-sid", "S-1-5-21-123-456-789-1001", "--parent-pid", "42",
-		"--cwd", "C:\\Workspace with spaces", "--", "C:\\Program Files\\Claude\\claude.exe",
+		"--cwd", "C:\\Workspace with spaces", "--cancel-file", "C:\\owner-private\\stop",
+		"--", "C:\\Program Files\\Claude\\claude.exe",
 		"--output-format", "stream-json", "literal & | %",
 	}
 	opts, err := parseOptions(args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.ParentPID != 42 || !reflect.DeepEqual(opts.Record.Arguments, args[8:]) {
+	if opts.ParentPID != 42 || opts.CancelFile != args[7] || !reflect.DeepEqual(opts.Record.Arguments, args[10:]) {
 		t.Fatal("native argv changed")
 	}
 	for _, invalid := range []struct {
@@ -31,8 +32,10 @@ func TestLauncherOptionsKeepNativeArgumentVector(t *testing.T) {
 		{3, "0"},
 		{5, "\\\\server\\share"},
 		{5, "C:relative"},
-		{7, "C:\\Claude\\claude.cmd"},
-		{7, "C:\\Claude\\claude.exe:alternate"},
+		{7, "\\\\server\\share\\stop"},
+		{7, "C:relative"},
+		{9, "C:\\Claude\\claude.cmd"},
+		{9, "C:\\Claude\\claude.exe:alternate"},
 	} {
 		changed := slices.Clone(args)
 		changed[invalid.index] = invalid.value

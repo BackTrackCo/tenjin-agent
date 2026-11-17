@@ -7,6 +7,7 @@ import { HARNESSES, type Harness } from '../router/names';
 import type { TargetKind } from '../router/settings-wire';
 import { SETUP, WALLET, collect, type Registration } from './registration';
 import { installOutput } from '../router/install-output';
+import type { SubagentConfigFlags } from '../commands/config-subagents';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -256,6 +257,17 @@ Examples:
     )
     .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
     .option('--max-job <USD>', 'total routing and inference ceiling per job')
+    .option('--windows-worker-sid <sid>', 'SID of the dedicated standard Windows worker account')
+    .option('--windows-launcher <path>', 'absolute local path to the Windows worker launcher .exe')
+    .option('--windows-claude <path>', 'absolute local path to the native Claude Code .exe')
+    .option(
+      '--windows-config-dir <path>',
+      'separate shared Claude configuration directory on Windows',
+    )
+    .option(
+      '--accept-windows-shell-access',
+      'allow the unsandboxed Windows worker to share results from files and networks its account can reach with Tenjin and DeepSeek',
+    )
     .addHelpText(
       'after',
       configExamples(
@@ -263,11 +275,7 @@ Examples:
         'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
       ),
     )
-    .action(async function (
-      this: Command,
-      mode: string,
-      options: { repository?: string; maxJob?: string },
-    ) {
+    .action(async function (this: Command, mode: string, options: SubagentConfigFlags) {
       await runCommand('config subagents', this, async (ctx) =>
         (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
       );

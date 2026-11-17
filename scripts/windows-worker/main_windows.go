@@ -19,6 +19,8 @@ var waitForObjects = kernel.NewProc("WaitForMultipleObjects")
 
 const alternateBootstrap = "--worker-bootstrap"
 
+type alternateLogon func(*uint16, *uint16, []uint16, *syscall.StartupInfo) (syscall.ProcessInformation, error)
+
 func operationError(operation string, err error) error {
 	var code syscall.Errno
 	if errors.As(err, &code) {
@@ -28,23 +30,26 @@ func operationError(operation string, err error) error {
 }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == alternateBootstrap {
-		exit, err := runBootstrap()
-		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "tenjin Windows worker:", err)
-		}
-		os.Exit(exit)
+	exitLauncher(os.Args[1:], createAlternateBootstrap)
+}
+
+func exitLauncher(args []string, logon alternateLogon) {
+	code, err := launch(args, logon)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "tenjin Windows worker:", err)
 	}
-	opts, err := parseOptions(os.Args[1:])
-	if err == nil {
-		var exit int
-		exit, err = runController(opts)
-		if err == nil {
-			os.Exit(exit)
-		}
+	os.Exit(code)
+}
+
+func launch(args []string, logon alternateLogon) (int, error) {
+	if len(args) == 1 && args[0] == alternateBootstrap {
+		return runBootstrap()
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "tenjin Windows worker:", err)
-	os.Exit(125)
+	opts, err := parseOptions(args)
+	if err != nil {
+		return 125, err
+	}
+	return runController(opts, logon)
 }
 
 func runBootstrap() (int, error) {
@@ -54,9 +59,14 @@ func runBootstrap() (int, error) {
 		return 125, err
 	}
 	trace("bootstrap received launch frame")
+	cleanup, err := prepareRuntimeBootstrap(&record)
+	if err != nil {
+		return 125, err
+	}
+	defer cleanup()
 	child := exec.Command(record.Executable, record.Arguments...)
 	child.Dir = record.Directory
-	child.Env = workerEnvironment(os.Environ(), record.Overlay)
+	child.Env = runtimeEnvironment(record, os.Environ())
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	if err := child.Start(); err != nil {
@@ -100,6 +110,26 @@ func openParent(pid uint32, caller syscall.Handle) (syscall.Handle, error) {
 		return 0, errors.New("worker controller is no longer alive")
 	}
 	return parent, nil
+}
+
+type launchOwner struct {
+	process    syscall.Handle
+	cancelFile string
+}
+
+func (owner launchOwner) check() error {
+	state, err := syscall.WaitForSingleObject(owner.process, 0)
+	if err != nil || state != syscall.WAIT_TIMEOUT {
+		return errors.New("worker controller ended")
+	}
+	_, err = os.Lstat(owner.cancelFile)
+	if err == nil {
+		return errors.New("worker launch cancelled")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("could not verify worker cancellation marker")
+	}
+	return nil
 }
 
 type jobLimits struct {
@@ -156,7 +186,7 @@ func bootstrapStdio(caller syscall.Handle, input, output, errorsOutput syscall.H
 	return info, close, nil
 }
 
-func runController(opts launchOptions) (int, error) {
+func runController(opts launchOptions, logon alternateLogon) (int, error) {
 	caller, err := syscall.GetCurrentProcess()
 	if err != nil {
 		return 125, operationError("identify launcher", err)
@@ -166,11 +196,21 @@ func runController(opts launchOptions) (int, error) {
 		return 125, err
 	}
 	defer syscall.CloseHandle(parent)
+	owner := launchOwner{process: parent, cancelFile: opts.CancelFile}
+	if err := owner.check(); err != nil {
+		return 125, err
+	}
 	opts.Record.Overlay, err = parentOverlay(os.Environ())
 	if err != nil {
 		return 125, err
 	}
+	if err := prepareRuntimeLaunch(&opts.Record); err != nil {
+		return 125, err
+	}
 	frame, err := encodeLaunch(opts.Record)
+	if opts.Record.Runtime != nil {
+		clear(opts.Record.Runtime.Settings)
+	}
 	if err != nil {
 		return 125, err
 	}
@@ -179,14 +219,18 @@ func runController(opts launchOptions) (int, error) {
 		clear(frame)
 		return 125, errors.New("launcher executable must be on a local drive")
 	}
-	process, input, job, err := startOwned(launcher, caller, opts)
+	process, input, job, err := startOwned(launcher, caller, owner, opts, logon)
 	if err != nil {
 		clear(frame)
 		return 125, err
 	}
 	defer syscall.CloseHandle(process)
-	defer syscall.CloseHandle(job)
 	defer input.Close()
+	defer syscall.CloseHandle(job)
+	if err := owner.check(); err != nil {
+		clear(frame)
+		return 125, err
+	}
 	go func() {
 		err := sendLaunch(input, frame)
 		clear(frame)
@@ -199,22 +243,29 @@ func runController(opts launchOptions) (int, error) {
 		_ = input.Close()
 	}()
 	handles := [...]syscall.Handle{parent, process}
-	ready, _, winErr := waitForObjects.Call(uintptr(len(handles)), uintptr(unsafe.Pointer(&handles[0])), 0, uintptr(syscall.INFINITE))
-	switch uint32(ready) {
-	case syscall.WAIT_OBJECT_0:
-		return 125, errors.New("worker controller ended")
-	case syscall.WAIT_OBJECT_0 + 1:
-		var exit uint32
-		if err := syscall.GetExitCodeProcess(process, &exit); err != nil {
-			return 125, operationError("read worker exit status", err)
+	for {
+		// Controller death is signalled immediately. A short wait interval also
+		// observes a cooperative cancel without interrupting the Win32 logon call.
+		ready, _, winErr := waitForObjects.Call(uintptr(len(handles)), uintptr(unsafe.Pointer(&handles[0])), 0, 100)
+		if err := owner.check(); err != nil {
+			return 125, err
 		}
-		return int(exit), nil
-	default:
-		return 125, operationError("wait for the worker and controller", winErr)
+		switch uint32(ready) {
+		case syscall.WAIT_OBJECT_0 + 1:
+			var exit uint32
+			if err := syscall.GetExitCodeProcess(process, &exit); err != nil {
+				return 125, operationError("read worker exit status", err)
+			}
+			return int(exit), nil
+		case syscall.WAIT_TIMEOUT:
+			continue
+		default:
+			return 125, operationError("wait for the worker and controller", winErr)
+		}
 	}
 }
 
-func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (syscall.Handle, *os.File, syscall.Handle, error) {
+func startOwned(launcher string, caller syscall.Handle, owner launchOwner, opts launchOptions, logon alternateLogon) (_ syscall.Handle, _ *os.File, _ syscall.Handle, launchErr error) {
 	job, err := openOwnedJob()
 	if err != nil {
 		return 0, nil, 0, err
@@ -233,7 +284,9 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 		if !success {
 			if process != 0 {
 				// Before assignment the suspended bootstrap is not in the job.
-				_ = syscall.TerminateProcess(process, 125)
+				if err := terminateFailedStart(process); err != nil {
+					launchErr = errors.Join(launchErr, err)
+				}
 				syscall.CloseHandle(process)
 			}
 			if input != nil {
@@ -260,13 +313,21 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 		return 0, nil, 0, errors.New("launcher executable path is too long")
 	}
 	cwd, _ := syscall.UTF16PtrFromString(opts.Record.Directory)
+	if err := owner.check(); err != nil {
+		return 0, nil, 0, err
+	}
 	trace("starting alternate logon")
-	info, err := createAlternateBootstrap(program, cwd, command, &startup)
+	info, err := logon(program, cwd, command, &startup)
 	if err != nil {
 		return 0, nil, 0, err
 	}
 	process, thread = info.Process, info.Thread
 	trace("alternate logon created suspended bootstrap")
+	// Node keeps this launcher alive while logon is blocked. If ownership
+	// ended in that interval, terminate and wait without ever resuming.
+	if err := owner.check(); err != nil {
+		return 0, nil, 0, err
+	}
 	ok, _, winErr := attachToJob.Call(uintptr(job), uintptr(process))
 	if ok == 0 {
 		return 0, nil, 0, operationError("attach suspended worker to its job", winErr)
@@ -275,6 +336,9 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 		return 0, nil, 0, err
 	}
 	trace("bootstrap identity verified and assigned to job")
+	if err := owner.check(); err != nil {
+		return 0, nil, 0, err
+	}
 	previousCount, _, winErr := pauseGate.Call(uintptr(thread))
 	if uint32(previousCount) != 1 {
 		return 0, nil, 0, operationError("resume verified worker", winErr)
@@ -282,4 +346,18 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 	success = true
 	trace("controller resumed bootstrap")
 	return process, input, job, nil
+}
+
+func terminateFailedStart(process syscall.Handle) error {
+	if state, _ := syscall.WaitForSingleObject(process, 0); state == syscall.WAIT_OBJECT_0 {
+		return nil
+	}
+	if err := syscall.TerminateProcess(process, 125); err != nil {
+		return operationError("terminate suspended worker", err)
+	}
+	state, err := syscall.WaitForSingleObject(process, 5_000)
+	if err != nil || state != syscall.WAIT_OBJECT_0 {
+		return errors.New("could not confirm failed worker launch exited")
+	}
+	return nil
 }

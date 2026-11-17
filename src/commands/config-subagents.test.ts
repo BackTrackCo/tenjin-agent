@@ -1,12 +1,13 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { testCtx } from '../context-test-utils';
 import { runConfigSubagents } from './config-subagents';
 import { modelSettings } from '../router/model-settings';
 import { ModelJobStore } from '../router/model-job';
 import { currentModelGithubRepositories } from '../router/model-repositories';
+import * as windowsWorkerConfig from '../router/windows-worker-config';
 
 let dir: string;
 afterEach(async () => {
@@ -68,6 +69,53 @@ it('records explicit accepted-worker instruction consent while preserving wallet
   expect(await modelSettings(dir, repo)).not.toBeNull();
   await runConfigSubagents('off', {}, testCtx(dir));
   expect(await modelSettings(dir, repo)).toBeNull();
+});
+
+it('requires explicit Windows shell acknowledgement and clears that grant on off', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-windows-subagents-')));
+  const repo = join(dir, 'repo');
+  await mkdir(repo);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  const validate = vi
+    .spyOn(windowsWorkerConfig, 'validateWindowsWorkerConfig')
+    .mockImplementation(async (candidate) => candidate as windowsWorkerConfig.WindowsWorkerConfig);
+  try {
+    const flags = {
+      repository: repo,
+      maxJob: '1',
+      windowsWorkerSid: 'S-1-5-21-1-2-3-4',
+      windowsLauncher: 'D:\\Tools\\launcher.exe',
+      windowsClaude: 'D:\\Tools\\claude.exe',
+      windowsConfigDir: 'C:\\SharedClaude',
+    };
+    const ctx = testCtx(dir);
+    await expect(runConfigSubagents('on', flags, ctx)).rejects.toMatchObject({
+      fix: expect.stringContaining('--accept-windows-shell-access'),
+    });
+    expect(validate).not.toHaveBeenCalled();
+    const configured = await runConfigSubagents(
+      'on',
+      { ...flags, acceptWindowsShellAccess: true },
+      ctx,
+    );
+    expect(configured.data).toMatchObject({ windowsWorker: { enabled: true } });
+    const read = async () => JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+    const saved = (await read()).router;
+    expect(saved.windowsWorker).toMatchObject({
+      version: 1,
+      workerSid: flags.windowsWorkerSid,
+      shellAccess: 'native-windows',
+      routerOrigin: saved.subagentConsent.routerOrigin,
+    });
+    await runConfigSubagents('off', {}, ctx);
+    expect((await read()).router).not.toHaveProperty('windowsWorker');
+    await runConfigSubagents('on', { repository: repo, maxJob: '1' }, ctx);
+    expect((await read()).router).not.toHaveProperty('windowsWorker');
+  } finally {
+    validate.mockRestore();
+    Object.defineProperty(process, 'platform', platform);
+  }
 });
 
 it('adds separately named repositories without losing earlier roots or duplicating canonical aliases', async () => {

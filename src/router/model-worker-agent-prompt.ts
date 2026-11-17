@@ -12,7 +12,7 @@ import {
   CLAUDE_DEEPSEEK_WORKER_MODEL,
 } from './claude-model-policy';
 import { claudeConfigDir } from './claude-cli';
-import { claudeWorkerProcess } from './claude-worker-process';
+import { claudeWorkerProcess, type WindowsWorkerProcess } from './claude-worker-process';
 import { completedMessageSse } from './model-messages';
 import { isRecord } from '../lib/guards';
 
@@ -98,6 +98,7 @@ export async function readNativeAgentPrompt(input: {
   additionalDirectories?: readonly string[];
   agentType: string;
   customAgent?: WorkerAgent;
+  windows?: WindowsWorkerProcess;
   signal: AbortSignal;
   timeoutMs?: number;
 }): Promise<NativeAgentPrompt> {
@@ -178,7 +179,7 @@ export async function readNativeAgentPrompt(input: {
   const controller = new AbortController();
   const abort = () => controller.abort(input.signal.reason);
   input.signal.addEventListener('abort', abort, { once: true });
-  const nativeProcess = claudeWorkerProcess({ secrets: () => [token] });
+  const nativeProcess = claudeWorkerProcess({ secrets: () => [token], windows: input.windows });
   let worker: ReturnType<typeof query> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -216,7 +217,7 @@ export async function readNativeAgentPrompt(input: {
         settings: nativeProcess.settingsFile({
           disableAllHooks: true,
           autoMemoryEnabled: false,
-          apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
+          ...(!input.windows ? { apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper() } : {}),
           env: { ...claudeDeepSeekWorkerSettingsEnv(url, token), ...listAll },
         }),
         permissionMode: 'default',
@@ -416,6 +417,9 @@ export async function nativeAgentStartKey(
     resolve(input.cwd),
     directories,
     input.customAgent ?? null,
+    input.windows
+      ? [input.windows.workerSid, input.windows.launcherPath, input.windows.configDir]
+      : null,
     await dependencies(input.cwd, directories, deps.env ?? process.env, deps.home ?? homedir()),
   ]);
 }

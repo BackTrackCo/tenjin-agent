@@ -439,6 +439,7 @@ export class ModelHandoff {
           routerOrigin: transport.origin,
           claudePermissionMode: session.claudePermissionMode,
           claudeWorkspace: worker.claudeWorkspace,
+          ...(worker.windows ? { windowsWorker: worker.windows.fingerprint } : {}),
         },
         capAtomic: settings.maxJobAtomic.toString(),
       },
@@ -498,6 +499,7 @@ export class ModelHandoff {
     const originalWorkspace = savedClaudeWorkspace(original.decision.claudeWorkspace);
     if (
       !worker?.claudeWorkspace ||
+      worker.windows?.fingerprint !== original.decision.windowsWorker ||
       !originalWorkspace ||
       !sameClaudeWorkspace(originalWorkspace, worker.claudeWorkspace)
     )
@@ -667,6 +669,7 @@ export class ModelHandoff {
       ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),
       ...(disclosureRepositories ? { disclosureRepositories } : {}),
       ...(claudeWorkspace ? { claudeWorkspace } : {}),
+      ...(job.decision.windowsWorker ? { windowsWorker: job.decision.windowsWorker } : {}),
       ...(session.harness !== 'codex'
         ? { claudePermissionMode: job.decision.claudePermissionMode }
         : {}),
