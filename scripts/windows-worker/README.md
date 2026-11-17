@@ -9,6 +9,8 @@ Tenjin uses this launcher to run native Claude Code tools under a standard local
 3. Grant the worker account access to the intended workspace and prepare a shared Claude configuration directory with the settings and instructions to use. Keep controller credentials and Tenjin data in its private home. Start the parent Claude Code session with `CLAUDE_CONFIG_DIR` set to the shared directory. Its active `claude.exe` must be the executable used below.
 4. Enable the Windows worker for the repository from the controller account.
 
+For the parent session, supply Claude Code credentials through its own environment. A Claude Console API key or a subscription token created with `claude setup-token` can be used this way. Keep `.credentials.json`, keys and tokens out of the shared profile. Tenjin gives the worker its own scoped inference credential. [Claude Code authentication](https://code.claude.com/docs/en/authentication)
+
 ```powershell
 tenjin config subagents on --repository "C:\src\project" --max-job 1 `
   --windows-worker-sid "<worker SID>" `
