@@ -58,6 +58,9 @@ const budgetSchema = z.object({
       quote: z.string().regex(/^\d+$/),
       completed: z.boolean().optional(),
       actual: z.string().regex(/^\d+$/).optional(),
+      /** A router tool a worker's native tool paid for (`toolCall`), by its catalog id;
+       *  absent for a model call. Its id is local: the model proxy holds no record of it. */
+      tool: z.string().min(1).max(200).optional(),
     }),
   ),
 });
@@ -270,27 +273,8 @@ export class ModelTransport {
         ? canonicalHash({ protocol, responses: messages })
         : canonicalHash(messages);
     const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
-    const load = async (): Promise<Budget> => {
-      const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
-      if (job.decision.requireExistingBudget === true && !parsed.success)
-        throw new Error('Original model budget is unavailable; refusing continuation');
-      if (!parsed.success && (await lstat(path).catch(() => null)))
-        throw new Error('Unreadable model budget; refusing another authorization');
-      // The route's payment ceiling is trusted locally; an offer cannot reduce it.
-      return parsed.success
-        ? parsed.data
-        : {
-            charged: MODEL_ROUTING_FEE_CEILING_ATOMIC.toString(),
-            calls: {},
-          };
-    };
-    const consent = async () => {
-      const current = await modelSettings(dataDir, job.root);
-      signal.throwIfAborted();
-      if (!current || current.routerOrigin !== new URL(baseUrl).origin)
-        throw new Error('Model consent revoked or origin changed');
-      return current;
-    };
+    const load = () => this.loadBudget(job, path);
+    const consent = () => this.jobConsent(job, signal);
     type Call = Budget['calls'][string];
     const keptResult = async () => {
       const kept = await readJsonFile(resultFile, resultLimit);
@@ -586,6 +570,78 @@ export class ModelTransport {
     return settle(reservation, this.receipt(result.json, body.invocationId, quote, protocol));
   }
 
+  /** The job's budget as kept, or the routing fee alone for a job with no file yet. */
+  private async loadBudget(job: ModelJob, path: string): Promise<Budget> {
+    const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
+    if (job.decision.requireExistingBudget === true && !parsed.success)
+      throw new Error('Original model budget is unavailable; refusing continuation');
+    if (!parsed.success && (await lstat(path).catch(() => null)))
+      throw new Error('Unreadable model budget; refusing another authorization');
+    // The route's payment ceiling is trusted locally; an offer cannot reduce it.
+    return parsed.success
+      ? parsed.data
+      : {
+          charged: MODEL_ROUTING_FEE_CEILING_ATOMIC.toString(),
+          calls: {},
+        };
+  }
+
+  /** The consent the job runs under, still in force for this router. */
+  private async jobConsent(job: ModelJob, signal?: AbortSignal) {
+    const current = await modelSettings(this.options.dataDir, job.root);
+    signal?.throwIfAborted();
+    if (!current || current.routerOrigin !== this.origin)
+      throw new Error('Model consent revoked or origin changed');
+    return current;
+  }
+
+  /**
+   * A ROUTER TOOL A WORKER'S NATIVE TOOL PAID FOR (its web search through Exa), counted in
+   * the job's budget beside its model calls, so the job's spend, its end line and every
+   * later model quote see it. Reserved at the tool's price ceiling before anything is
+   * signed: a call that would pass the job's cap is refused here, unpaid. `run` pays from
+   * the person's wallet within their own limits and says what their spend gate committed,
+   * and whether a payment may have left that it could not account. Settled at what was
+   * committed; a call that signed nothing releases its reservation, and an uncertain one
+   * keeps it whole, as an uncertain model call does.
+   */
+  async toolCall<T>(
+    job: ModelJob,
+    tool: string,
+    ceilingAtomic: bigint,
+    run: () => Promise<{ value: T; spentAtomic: bigint; uncertain: boolean }>,
+  ): Promise<T> {
+    const { dataDir } = this.options;
+    await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
+    const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
+    const key = `tool:${randomUUID()}`;
+    const call = { invocationId: randomUUID(), quote: ceilingAtomic.toString(), tool };
+    await modelLock(`${path}.lock`, async () => {
+      const current = await this.jobConsent(job);
+      const state = await this.loadBudget(job, path);
+      const cap =
+        current.maxJobAtomic < BigInt(job.capAtomic) ? current.maxJobAtomic : BigInt(job.capAtomic);
+      if (ceilingAtomic <= 0n || ceilingAtomic > cap - BigInt(state.charged))
+        throw new ModelCallFailed('Tool price exceeds remaining job ceiling', { cause: 'budget' });
+      state.calls[key] = call;
+      state.charged = (BigInt(state.charged) + ceilingAtomic).toString();
+      await writePrivate(path, JSON.stringify(state));
+    });
+    // A throw here keeps the whole reservation: nothing says what was signed.
+    const ran = await run();
+    if (!ran.uncertain)
+      await modelLock(`${path}.lock`, async () => {
+        const state = await this.loadBudget(job, path);
+        const now = state.calls[key];
+        if (now?.invocationId !== call.invocationId || now.completed) return;
+        state.charged = (BigInt(state.charged) - ceilingAtomic + ran.spentAtomic).toString();
+        if (ran.spentAtomic === 0n) delete state.calls[key];
+        else state.calls[key] = { ...now, completed: true, actual: ran.spentAtomic.toString() };
+        await writePrivate(path, JSON.stringify(state));
+      });
+    return ran.value;
+  }
+
   private receipt(
     raw: unknown,
     invocationId: string,
@@ -680,7 +736,8 @@ export class ModelTransport {
       const kept = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
       if (!kept.success) return;
       for (const [key, call] of Object.entries(kept.data.calls)) {
-        if (call.completed) continue;
+        // A tool call's id is local: the model proxy has no record of it to read.
+        if (call.completed || call.tool !== undefined) continue;
         const server = await this.recover(call.invocationId, signal, protocol).catch(() => null);
         if (!server) continue;
         const spent = server.state === 'completed' && server.voucherState === 'accepted';

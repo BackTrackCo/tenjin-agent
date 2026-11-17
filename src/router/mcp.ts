@@ -335,6 +335,37 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         },
       });
     },
+    // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it
+    // (`model-worker-web.ts`): the person's wallet, limits and settings in the job's root,
+    // no routing fee and no approval, so a call over the limits is refused, never kept.
+    web: async (args, { cwd, watch }) => {
+      const settings = await resolveContextSettings(ctx);
+      const authorizer = watch(
+        opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
+      );
+      const payDeps = opts.handlerDeps?.payDeps;
+      return runRequestTool(args, {
+        ctx,
+        provider,
+        authorizer,
+        cwd,
+        approves: false,
+        harness: 'claude',
+        ...(opts.handlerDeps?.fetchImpl !== undefined
+          ? { fetchImpl: opts.handlerDeps.fetchImpl }
+          : {}),
+        ...(payDeps !== undefined
+          ? {
+              payDeps: {
+                ...payDeps,
+                ...(payDeps.authorizer !== undefined
+                  ? { authorizer: watch(payDeps.authorizer) }
+                  : {}),
+              },
+            }
+          : {}),
+      });
+    },
   });
   const rememberSession = (raw: Record<string, unknown>): void => {
     const id = raw['session_id'];

@@ -1,12 +1,15 @@
 import { z } from 'zod';
+/** The proxy's blocks, and the two of Tenjin's own answer to a worker's web search. */
 const block = z.object({
-  type: z.enum(['text', 'thinking', 'tool_use']),
+  type: z.enum(['text', 'thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result']),
   text: z.string().optional(),
   thinking: z.string().optional(),
   signature: z.string().optional(),
   id: z.string().optional(),
   name: z.string().optional(),
   input: z.record(z.string(), z.unknown()).optional(),
+  tool_use_id: z.string().optional(),
+  content: z.unknown().optional(),
 });
 const messageSchema = z
   .object({
@@ -61,12 +64,19 @@ export function completedMessageSse(raw: unknown): string {
           delta: { type: 'signature_delta', signature: b.signature ?? '' },
         },
       );
+    } else if (b.type === 'web_search_tool_result') {
+      // The API sends a search's results whole, in the block's start.
+      events.push({
+        type: 'content_block_start',
+        index,
+        content_block: { type: b.type, tool_use_id: b.tool_use_id, content: b.content },
+      });
     } else {
       events.push(
         {
           type: 'content_block_start',
           index,
-          content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} },
+          content_block: { type: b.type, id: b.id, name: b.name, input: {} },
         },
         {
           type: 'content_block_delta',
