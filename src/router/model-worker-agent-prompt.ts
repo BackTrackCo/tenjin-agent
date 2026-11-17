@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk/core';
 import type { WorkerAgent } from './agent-tools';
 import {
@@ -8,6 +11,7 @@ import {
   claudeDeepSeekWorkerSettingsEnv,
   CLAUDE_DEEPSEEK_WORKER_MODEL,
 } from './claude-model-policy';
+import { claudeConfigDir } from './claude-cli';
 import { claudeWorkerProcess } from './claude-worker-process';
 import { completedMessageSse } from './model-messages';
 import { isRecord } from '../lib/guards';
@@ -273,4 +277,139 @@ export async function readNativeAgentPrompt(input: {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+}
+
+/** Prompts read, by everything the read depends on (see {@link readNativeAgentPromptCached}). */
+const prompts = new Map<string, { at: number; native: NativeAgentPrompt }>();
+/** Bounds how old the git status a cached read carries can be, and covers a wrapper script. */
+const PROMPT_TTL_MS = 10 * 60_000;
+
+// Where Claude Code reads managed settings and instructions, per platform.
+const MANAGED_DIR =
+  process.platform === 'darwin'
+    ? '/Library/Application Support/ClaudeCode'
+    : process.platform === 'win32'
+      ? 'C:\\Program Files\\ClaudeCode'
+      : '/etc/claude-code';
+
+/** Path, size and mtime of each file, `-` for one that is not there. */
+async function stamps(paths: Iterable<string>): Promise<string[]> {
+  return Promise.all(
+    [...new Set(paths)].map((path) =>
+      stat(path).then(
+        (file) => `${path}\0${file.isDirectory() ? 'dir' : file.size}\0${file.mtimeMs}`,
+        () => `${path}\0-`,
+      ),
+    ),
+  );
+}
+
+/** Every file under a folder (agents, rules, managed settings), so an added, removed or edited one changes the stamp. */
+async function treeFiles(dir: string): Promise<string[]> {
+  const names = await readdir(dir, { recursive: true }).catch(() => [] as string[]);
+  return [
+    dir,
+    ...names
+      .sort()
+      .slice(0, 500)
+      .map((name) => join(dir, name)),
+  ];
+}
+
+/**
+ * The files a native subagent's prompt, tools and instruction list depend on: the person's,
+ * the project's and the managed settings (plugins enabled, output style, CLAUDE.md
+ * excludes), the installed plugins, the agent definitions, and every CLAUDE.md and rules
+ * file Claude Code may load for the root, the folders above it and the other working
+ * directories.
+ */
+async function dependencies(
+  root: string,
+  directories: readonly string[],
+  env: NodeJS.ProcessEnv,
+  home: string,
+): Promise<string[]> {
+  const config = claudeConfigDir(env, home);
+  const above: string[] = [];
+  for (let dir = resolve(root); ; dir = dirname(dir)) {
+    above.push(dir);
+    if (dirname(dir) === dir) break;
+  }
+  const project = (dir: string) => [
+    join(dir, 'CLAUDE.md'),
+    join(dir, 'CLAUDE.local.md'),
+    join(dir, '.claude', 'CLAUDE.md'),
+    join(dir, '.claude', 'settings.json'),
+    join(dir, '.claude', 'settings.local.json'),
+  ];
+  const trees = await Promise.all(
+    [
+      ...[...above, ...directories].map((dir) => join(dir, '.claude', 'rules')),
+      join(resolve(root), '.claude', 'agents'),
+      join(config, 'rules'),
+      join(config, 'agents'),
+      join(home, '.claude', 'agents'),
+      join(MANAGED_DIR, 'managed-settings.d'),
+    ].map(treeFiles),
+  );
+  return stamps([
+    ...[...above, ...directories.map((dir) => resolve(dir))].flatMap(project),
+    join(config, 'settings.json'),
+    join(config, 'CLAUDE.md'),
+    join(config, 'plugins', 'installed_plugins.json'),
+    join(MANAGED_DIR, 'managed-settings.json'),
+    join(MANAGED_DIR, 'CLAUDE.md'),
+    ...trees.flat(),
+  ]);
+}
+
+/**
+ * {@link readNativeAgentPrompt}, read once per Claude Code binary (its resolved path, size and
+ * mtime, as the version cache keys it), agent type, custom definition, root and working
+ * directories, and kept while none of the files it depends on changes and for at most
+ * {@link PROMPT_TTL_MS}. The key holds each of them whole, so a read is never handed to
+ * another agent type or root. `ephemeralDirectories` (the job's own temp folder) are left
+ * out of the key; a read that names one is not kept.
+ */
+export async function readNativeAgentPromptCached(
+  input: Parameters<typeof readNativeAgentPrompt>[0] & {
+    ephemeralDirectories?: readonly string[];
+  },
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    home?: string;
+    now?: () => number;
+    read?: typeof readNativeAgentPrompt;
+  } = {},
+): Promise<NativeAgentPrompt> {
+  const { ephemeralDirectories = [], ...request } = input;
+  const read = deps.read ?? readNativeAgentPrompt;
+  const now = deps.now ?? Date.now;
+  let binary: string;
+  try {
+    const path = await realpath(input.binary);
+    binary = (await stamps([path]))[0]!;
+  } catch {
+    return read(request);
+  }
+  const ephemeral = new Set(ephemeralDirectories);
+  const directories = (input.additionalDirectories ?? []).filter((dir) => !ephemeral.has(dir));
+  const key = JSON.stringify([
+    binary,
+    input.agentType,
+    resolve(input.cwd),
+    directories,
+    input.customAgent ?? null,
+    await dependencies(input.cwd, directories, deps.env ?? process.env, deps.home ?? homedir()),
+  ]);
+  const held = prompts.get(key);
+  if (held && now() - held.at < PROMPT_TTL_MS) return structuredClone(held.native);
+  const native = await read(request);
+  const text = JSON.stringify(native);
+  if (![...ephemeral].some((dir) => text.includes(dir))) {
+    prompts.delete(key);
+    prompts.set(key, { at: now(), native: structuredClone(native) });
+    if (prompts.size > 16) prompts.delete(prompts.keys().next().value!);
+  }
+  return native;
 }

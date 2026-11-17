@@ -79,11 +79,17 @@ import { prepareClaudeWorkerTemp } from './claude-worker-session';
 // Reading the native agent prompt starts Claude Code: here it is unreadable unless a test says.
 vi.mock('./model-worker-agent-prompt', async (original) => {
   const actual = await original<typeof import('./model-worker-agent-prompt')>();
+  const readNativeAgentPrompt = vi.fn(async (_input: unknown) => {
+    throw new actual.NativeAgentPromptUnavailable('not_captured');
+  });
   return {
     ...actual,
-    readNativeAgentPrompt: vi.fn(async () => {
-      throw new actual.NativeAgentPromptUnavailable('not_captured');
-    }),
+    readNativeAgentPrompt,
+    // Uncached here, so each test sees its own read.
+    readNativeAgentPromptCached: vi.fn(
+      async ({ ephemeralDirectories: _, ...input }: { ephemeralDirectories?: unknown }) =>
+        readNativeAgentPrompt(input),
+    ),
   };
 });
 import { readNativeAgentPrompt } from './model-worker-agent-prompt';

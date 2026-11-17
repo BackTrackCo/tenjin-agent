@@ -1,7 +1,20 @@
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { query } from '@anthropic-ai/claude-agent-sdk/core';
-import { NativeAgentPromptUnavailable, readNativeAgentPrompt } from './model-worker-agent-prompt';
+import {
+  NativeAgentPromptUnavailable,
+  readNativeAgentPrompt,
+  readNativeAgentPromptCached,
+} from './model-worker-agent-prompt';
 
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({ query: vi.fn() }));
 beforeEach(() => vi.clearAllMocks());
@@ -151,4 +164,81 @@ it('says why when Claude Code never starts the subagent, so the worker starts wi
   });
   await expect(read).rejects.toBeInstanceOf(NativeAgentPromptUnavailable);
   await expect(read).rejects.toMatchObject({ reason: 'not_captured' });
+});
+
+it('reads a native prompt once per binary, agent type and root, and again when an agent definition changes', async () => {
+  // Failure caught: every accept spending about 11 s starting a Claude Code to read the same
+  // prompt, or a held read reaching another agent type, root or a changed definition.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tenjin-prompt-cache-')));
+  const [root, other, home, temp] = ['repo', 'other', 'home', 'tmp-job'].map((name) => {
+    mkdirSync(join(base, name, '.claude', 'agents'), { recursive: true });
+    return join(base, name);
+  });
+  const binary = join(base, 'claude');
+  writeFileSync(binary, 'binary one');
+  const definition = join(root!, '.claude', 'agents', 'reviewer.md');
+  writeFileSync(definition, '---\nname: reviewer\n---\nReview.');
+  let reads = 0;
+  const read = vi.fn(async (input: Parameters<typeof readNativeAgentPrompt>[0]) => ({
+    prompt: [`${input.agentType} in ${input.cwd} #${++reads}`],
+    context: [],
+    withheldTools: [],
+    withheldInstructions: [],
+  }));
+  let clock = 0;
+  const deps = { env: { CLAUDE_CONFIG_DIR: join(home!, '.claude') }, home, now: () => clock, read };
+  const agent = { description: 'reviewer', prompt: 'Review.' };
+  const ask = (over: Partial<Parameters<typeof readNativeAgentPromptCached>[0]> = {}) =>
+    readNativeAgentPromptCached(
+      {
+        binary,
+        cwd: root!,
+        agentType: 'reviewer',
+        customAgent: agent,
+        additionalDirectories: [temp!],
+        ephemeralDirectories: [temp!],
+        signal: new AbortController().signal,
+        ...over,
+      },
+      deps,
+    ).then((native) => native.prompt[0]);
+  expect(await ask()).toBe(`reviewer in ${root} #1`);
+  // The same read, though the job's temp folder is a new one.
+  expect(
+    await ask({
+      additionalDirectories: [join(base, 'tmp-two')],
+      ephemeralDirectories: [join(base, 'tmp-two')],
+    }),
+  ).toBe(`reviewer in ${root} #1`);
+  expect(read).toHaveBeenCalledTimes(1);
+  // Never another agent type's or root's read.
+  expect(await ask({ agentType: 'Explore', customAgent: undefined })).toBe(`Explore in ${root} #2`);
+  expect(await ask({ cwd: other! })).toBe(`reviewer in ${other} #3`);
+  // A changed agent definition misses: as handed over, and as the file under the root.
+  expect(await ask({ customAgent: { ...agent, prompt: 'Review twice.' } })).toBe(
+    `reviewer in ${root} #4`,
+  );
+  utimesSync(definition, 1_000, 1_000);
+  expect(await ask()).toBe(`reviewer in ${root} #5`);
+  expect(await ask()).toBe(`reviewer in ${root} #5`);
+  // So does a new CLAUDE.md, a changed settings file or plugin list, and a new binary.
+  writeFileSync(join(root!, 'CLAUDE.md'), 'Use pnpm.');
+  expect(await ask()).toBe(`reviewer in ${root} #6`);
+  mkdirSync(join(home!, '.claude', 'plugins'), { recursive: true });
+  writeFileSync(join(home!, '.claude', 'plugins', 'installed_plugins.json'), '{}');
+  expect(await ask()).toBe(`reviewer in ${root} #7`);
+  writeFileSync(binary, 'binary two, longer');
+  expect(await ask()).toBe(`reviewer in ${root} #8`);
+  // And a read older than ten minutes, whose git status is then read again.
+  clock = 10 * 60_000;
+  expect(await ask()).toBe(`reviewer in ${root} #9`);
+  // A read that names the job's temp folder is not kept.
+  read.mockImplementationOnce(async () => ({
+    prompt: [`in ${temp}`],
+    context: [],
+    withheldTools: [],
+    withheldInstructions: [],
+  }));
+  expect(await ask({ cwd: home! })).toBe(`in ${temp}`);
+  expect(await ask({ cwd: home! })).toBe(`reviewer in ${home} #10`);
 });

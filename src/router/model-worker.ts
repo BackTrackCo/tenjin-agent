@@ -76,7 +76,7 @@ import {
 import {
   NativeAgentPromptUnavailable,
   instructionExcludes,
-  readNativeAgentPrompt,
+  readNativeAgentPromptCached,
   type NativeAgentPrompt,
 } from './model-worker-agent-prompt';
 import {
@@ -682,10 +682,11 @@ async function runQualifiedWorker(
       ...(temp ? [temp.directory] : []),
     ];
     try {
-      nativeAgent = await readNativeAgentPrompt({
+      nativeAgent = await readNativeAgentPromptCached({
         binary: binary.path,
         cwd: job.root,
         additionalDirectories,
+        ...(temp ? { ephemeralDirectories: [temp.directory] } : {}),
         agentType,
         ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
         signal: controller.signal,
