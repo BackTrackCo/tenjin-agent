@@ -2529,6 +2529,14 @@ it.each([
   },
 );
 
+/** The hash of the routing rules saved in `dataDir` now. */
+async function rulesHash(dataDir: string): Promise<string> {
+  const { rulesNow } = await import('./settings-check');
+  const now = await rulesNow(dataDir);
+  if (!('wire' in now)) throw new Error(now.problem);
+  return now.wire.settings.hash;
+}
+
 it("hands a worker's failed WebFetch the page through Exa, as hook context, while the job runs", async () => {
   // The failure: a public page the worker's own fetch could not reach stayed unread.
   const dataDir = await mkdtemp(join(tmpdir(), 'worker-fetch-'));
@@ -2536,28 +2544,33 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
   const web = vi.fn(async (args: Record<string, unknown>) => {
     if (args.tool !== undefined) {
       const id = `spec-${String(args.tool)}`;
-      await storeSpecs(dataDir, [
-        {
-          id,
-          capabilityId: String(args.tool),
-          provider: 'Exa',
-          description: 'page read',
-          priceAtomic: '1000',
-          priceVaries: false,
-          maxAmountAtomic: '1000',
-          payTo: '0x6d6E695b09861467c7d462f5AAF31cF3540B9192',
-          network: 'eip155:8453',
-          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-          request: {
-            method: 'POST',
-            url: 'https://api.exa.ai/contents',
-            fields: {},
-            location: 'body',
+      await storeSpecs(
+        dataDir,
+        [
+          {
+            id,
+            capabilityId: String(args.tool),
+            provider: 'Exa',
+            description: 'page read',
+            priceAtomic: '1000',
+            priceVaries: false,
+            maxAmountAtomic: '1000',
+            payTo: '0x6d6E695b09861467c7d462f5AAF31cF3540B9192',
+            network: 'eip155:8453',
+            asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+            request: {
+              method: 'POST',
+              url: 'https://api.exa.ai/contents',
+              fields: {},
+              location: 'body',
+            },
+            input: { type: 'object' },
+            pinned: {},
           },
-          input: { type: 'object' },
-          pinned: {},
-        },
-      ]);
+          // Kept under the rules saved now, as the request tool keeps a spec it read.
+        ],
+        await rulesHash(dataDir),
+      );
       return { isError: false, summary: '', envelope: { status: 'spec', id } };
     }
     return {

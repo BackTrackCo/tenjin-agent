@@ -267,7 +267,7 @@ async function paidWorkerTool(
   const stopped = () => signal?.aborted === true;
   if (stopped()) throw new WorkerToolRefused('the worker was stopped');
   const ruled = await rulesRefusal(deps, tool);
-  if (ruled !== null) throw new WorkerToolRefused(ruled);
+  if ('refused' in ruled) throw new WorkerToolRefused(ruled.refused);
   const gate = spendWatch();
   const call = { cwd: deps.job.root, watch: gate.wrap };
   const read = await request({ tool }, call);
@@ -277,6 +277,11 @@ async function paidWorkerTool(
   const spec = await readSpec(deps.dataDir, id);
   if (spec?.capabilityId !== tool)
     throw new WorkerToolRefused("Tenjin's router offered another service");
+  // THE RULES CHECKED ARE THE RULES THE SPEC WAS READ UNDER: a block saved between the
+  // check and the read would otherwise pass, since a named read skips blocks. The paid
+  // request then refuses settings changed after the read (`runSpec`), which closes the chain.
+  if (spec.settingsHash === undefined || spec.settingsHash !== ruled.hash)
+    throw new WorkerToolRefused("the person's Tenjin settings changed during the call");
   if (stopped()) throw new WorkerToolRefused('the worker was stopped');
   const ran = await deps.transport.toolCall(
     deps.job,
@@ -312,15 +317,19 @@ async function paidWorkerTool(
  * leave `service` out, or null. A preference never forbids a service, so it changes
  * nothing here. Settings that cannot be read refuse, as they refuse every call.
  */
-async function rulesRefusal(deps: WorkerWebDeps, service: string): Promise<string | null> {
+async function rulesRefusal(
+  deps: WorkerWebDeps,
+  service: string,
+): Promise<{ refused: string } | { hash: string }> {
   const now = await rulesNow(deps.dataDir);
-  if ('problem' in now) return "the person's Tenjin settings could not be read";
-  const { policy } = now.wire.settings;
-  if (!policy.block?.length && !policy.only?.length) return null;
+  if ('problem' in now) return { refused: "the person's Tenjin settings could not be read" };
+  const { policy, hash } = now.wire.settings;
+  if (!policy.block?.length && !policy.only?.length) return { hash };
   const identities = await (deps.identities ?? (() => cachedIdentities(deps.dataDir)))().catch(
     () => undefined,
   );
-  return ruledOut(service, policy, identities);
+  const refused = ruledOut(service, policy, identities);
+  return refused === null ? { hash } : { refused };
 }
 
 /**

@@ -699,6 +699,44 @@ it('buys nothing for a worker stopped while its search waited, and releases what
   expect(seen.length).toBe(before);
 });
 
+/** The hash of the routing rules saved now, as a spec read under them keeps it. */
+async function savedHash(): Promise<string> {
+  const { rulesNow } = await import('./settings-check');
+  const now = await rulesNow(dir);
+  if (!('wire' in now)) throw new Error(now.problem);
+  return now.wire.settings.hash;
+}
+
+// Review finding: a block of Exa saved after the rules were checked but before the spec
+// was read passed, since a named read skips blocks, and the search was bought.
+it('buys nothing when a block of Exa is saved between the rules check and the spec read', async () => {
+  // An unrelated block is saved, so the rules are checked against the router's identities.
+  await configure({ policy: { block: [{ kind: 'provider', id: 'coinmarketcap' }] } });
+  const { fetchImpl, seen } = network();
+  const { job, transport, deps } = setup(fetchImpl);
+  const { storeSpecs } = await import('./specs');
+  const request: WorkerRequest = async (args, call) => {
+    if (args.tool === undefined) return deps.request!(args, call);
+    // The person blocks Exa while the spec is read; a named read skips blocks, and the
+    // spec is kept under the new rules, so the paid request would find them unchanged.
+    await configure({ policy: { block: [EXA] } });
+    const id = randomUUID();
+    await storeSpecs(dir, [{ ...SEARCH_SPEC, id } as never], await savedHash());
+    return { isError: false, summary: '', envelope: { status: 'spec', id } };
+  };
+  const answer = await answerWorkerWebSearch(SEARCH, {
+    ...deps,
+    request,
+    identities: async () => IDENTITIES,
+  });
+  expect(asWebSearchReads(answer).text).toContain('settings changed during the call');
+  expect(seen.filter((call) => call.paid)).toEqual([]);
+  expect(await transport.summary(job)).toMatchObject({
+    reservedAtomic: ROUTING_FEE.toString(),
+    uncertain: [],
+  });
+});
+
 it('keeps the whole ceiling reserved for a search whose payment the spend gate never settled, and reconcile leaves it', async () => {
   // The failure: a payment that may have left was released from the job's budget, or its
   // local id was sent to the model proxy as if it named a model call.
@@ -708,7 +746,8 @@ it('keeps the whole ceiling reserved for a search whose payment the spend gate n
   const request: WorkerRequest = async (args, { watch }) => {
     if (args.tool !== undefined) {
       const id = randomUUID();
-      await storeSpecs(dir, [{ ...SEARCH_SPEC, id } as never]);
+      // Kept under the rules saved now, as the request tool keeps a spec it read.
+      await storeSpecs(dir, [{ ...SEARCH_SPEC, id } as never], await savedHash());
       return { isError: false, summary: '', envelope: { status: 'spec', id } };
     }
     // Reserved at the gate, then neither committed nor released: it may have been signed.
