@@ -52,6 +52,17 @@ vi.mock('./claude-worker-session', async (original) => ({
   prepareClaudeWorkerTemp: vi.fn(async () => undefined),
 }));
 import { prepareClaudeWorkerTemp } from './claude-worker-session';
+// Reading the native agent prompt starts Claude Code: here it is unreadable unless a test says.
+vi.mock('./model-worker-agent-prompt', async (original) => {
+  const actual = await original<typeof import('./model-worker-agent-prompt')>();
+  return {
+    ...actual,
+    readNativeAgentPrompt: vi.fn(async () => {
+      throw new actual.NativeAgentPromptUnavailable('not_captured');
+    }),
+  };
+});
+import { readNativeAgentPrompt } from './model-worker-agent-prompt';
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
@@ -2051,6 +2062,74 @@ it.each([
     });
   },
 );
+
+it("runs with the native subagent's prompt, context and tools as Claude Code built them, and the context only once", async () => {
+  // Failure caught: a worker running with the main thread's prompt and its main-only
+  // tools, where a native subagent of its type gets its own.
+  const directory = await mkdtemp(join(tmpdir(), 'worker-temp-'));
+  const scratchpad = join(directory, 'claude-501');
+  vi.mocked(prepareClaudeWorkerTemp).mockResolvedValueOnce({
+    directory,
+    scratchpad,
+    shared: [],
+    close: () => rm(directory, { recursive: true, force: true }),
+  });
+  const read = {
+    prompt: ['You are a file search specialist.'],
+    context: ['<system-reminder>\n# gitStatus\nmain\n</system-reminder>'],
+    withheldTools: ['ScheduleWakeup'],
+  };
+  vi.mocked(readNativeAgentPrompt).mockResolvedValueOnce(read).mockResolvedValueOnce(read);
+  const explore = { ...job, native: { subagent_type: 'Explore' } } as unknown as ModelJob;
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  sdkResult({ subtype: 'success', result: 'native fixture' }, sessionId);
+  await runModelWorker(explore, {
+    ...options(),
+    claudeSession: { sessionId, onSession: async () => {} },
+  });
+  expect(vi.mocked(readNativeAgentPrompt).mock.calls[0]![0]).toMatchObject({
+    binary: '/fixture/claude',
+    cwd: '/repo',
+    agentType: 'Explore',
+  });
+  const sent = vi.mocked(query).mock.calls[0]![0].options!;
+  expect(sent.systemPrompt).toEqual({
+    type: 'custom',
+    prompt: ['You are a file search specialist.', expect.stringContaining(scratchpad)],
+  });
+  expect(sent.disallowedTools).toEqual(expect.arrayContaining(['Agent', 'ScheduleWakeup']));
+  expect(native.promptMessages.at(-1)).toMatchObject({
+    message: {
+      content: [
+        { type: 'text', text: '<system-reminder>\n# gitStatus\nmain\n</system-reminder>' },
+        { type: 'text', text: 'Check the selected function.' },
+      ],
+    },
+  });
+  // A continued worker already holds its first message: only the follow-up is sent.
+  vi.mocked(getSessionInfo).mockResolvedValue({ sessionId, cwd: '/repo' } as never);
+  sdkResult({ subtype: 'success', result: 'continued' }, sessionId);
+  await runModelWorker({ ...explore, task: 'Continue.' } as ModelJob, {
+    ...options(),
+    claudeSession: { resume: sessionId, onSession: async () => {} },
+  });
+  expect(native.promptMessages.at(-1)).toMatchObject({
+    message: { content: [{ type: 'text', text: 'Continue.' }] },
+  });
+});
+
+it('still starts, with the main prompt and the note, and says why when the native prompt cannot be read', async () => {
+  // Failure caught: a Claude Code that cannot show its subagent prompt ending the job,
+  // or the worker silently losing the note that a parent's message approves nothing.
+  const warn = vi.fn();
+  sdkResult({ subtype: 'success', result: 'fallback fixture' });
+  await expect(runModelWorker(job, { ...options(), warn })).resolves.toBe('fallback fixture');
+  expect(vi.mocked(query).mock.calls[0]![0].options!.systemPrompt).toMatchObject({
+    type: 'preset',
+    append: NATIVE_SUBAGENT_NOTE,
+  });
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('(not_captured)'));
+});
 
 it("qualifies a custom type and the two built-ins, never a plugin's agent or a built-in a file redefines", async () => {
   const qualifies = async (type: string) =>

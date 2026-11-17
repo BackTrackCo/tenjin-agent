@@ -65,6 +65,11 @@ import {
   type WorkerAsk,
 } from './worker-unattended';
 import {
+  NativeAgentPromptUnavailable,
+  readNativeAgentPrompt,
+  type NativeAgentPrompt,
+} from './model-worker-agent-prompt';
+import {
   jobScopedRules,
   type WorkerPermissionAnswer,
   type WorkerPermissionAsk,
@@ -171,6 +176,8 @@ export async function runModelWorker(
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
      *  each search answers that it is not available. */
     web?: WorkerRequest;
+    /** Where a worker that starts without its native agent prompt says why. Default: stderr. */
+    warn?: (line: string) => void;
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
@@ -365,13 +372,20 @@ async function runQualifiedWorker(
   const authenticationReady = new Promise<boolean>((resolve) => {
     authorizePrompt = resolve;
   });
+  // What a native subagent of this type gets, read from this Claude Code before it starts.
+  let nativeAgent: NativeAgentPrompt | undefined;
   async function* prompt(): AsyncGenerator<SDKUserMessage> {
     if (!(await authenticationReady)) return;
     controller.signal.throwIfAborted();
+    // A native subagent gets its git status with its task, once, when it starts.
+    const context = session?.query.resume === undefined ? (nativeAgent?.context ?? []) : [];
     yield {
       type: 'user',
       session_id: '',
-      message: { role: 'user', content: [{ type: 'text', text: job.task }] },
+      message: {
+        role: 'user',
+        content: [...context, job.task].map((text) => ({ type: 'text' as const, text })),
+      },
       parent_tool_use_id: null,
     };
   }
@@ -562,6 +576,22 @@ async function runQualifiedWorker(
         resolved.effective.permissions?.disableBypassPermissionsMode === 'disable')
     )
       throw new Error('Managed Claude worker policy changed; keep native');
+    const agentType = String(job.native.subagent_type ?? 'general-purpose');
+    try {
+      nativeAgent = await readNativeAgentPrompt({
+        binary: binary.path,
+        cwd: job.root,
+        agentType,
+        ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      // The worker still starts, with Claude Code's main prompt and the subagent note.
+      (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        `tenjin: the DeepSeek worker starts with Claude Code's main prompt: the ${agentType} subagent prompt could not be read (${error instanceof NativeAgentPromptUnavailable ? error.reason : 'read_failed'})`,
+      );
+    }
     assertCurrentMode();
     options.signal.throwIfAborted();
     worker = query({
@@ -586,19 +616,26 @@ async function runQualifiedWorker(
           TENJIN_WORKER_GITHUB_TOKEN_FILE: undefined,
           ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
         },
-        systemPrompt: {
-          type: 'preset',
-          preset: 'claude_code',
-          append: [NATIVE_SUBAGENT_NOTE, ...(temp ? [workerTempNote(temp.scratchpad)] : [])].join(
-            '\n\n',
-          ),
-        },
+        // The prompt Claude Code gives a native subagent of this type, as it built it above.
+        // Claude Code still adds the environment, the person's CLAUDE.md files and the
+        // skills to each request itself.
+        systemPrompt: nativeAgent
+          ? {
+              type: 'custom',
+              prompt: [...nativeAgent.prompt, ...(temp ? [workerTempNote(temp.scratchpad)] : [])],
+            }
+          : {
+              type: 'preset',
+              preset: 'claude_code',
+              append: [
+                NATIVE_SUBAGENT_NOTE,
+                ...(temp ? [workerTempNote(temp.scratchpad)] : []),
+              ].join('\n\n'),
+            },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         // The native agent the parent asked for, with that agent's own tools.
-        agent: String(job.native.subagent_type ?? 'general-purpose'),
-        ...(binary.customAgent
-          ? { agents: { [String(job.native.subagent_type)]: binary.customAgent } }
-          : {}),
+        agent: agentType,
+        ...(binary.customAgent ? { agents: { [agentType]: binary.customAgent } } : {}),
         effort: 'high',
         abortController: controller,
         permissionMode,
@@ -730,6 +767,8 @@ async function runQualifiedWorker(
           'mcp__plugin_tenjin_router__approve',
           // A native subagent has no question tool in any mode; it ends with its report.
           'AskUserQuestion',
+          // Nor the main thread's own tools, such as scheduling a wake-up.
+          ...(nativeAgent?.withheldTools ?? []),
         ],
         // Auto mode: the native classifier judges each call that needs a decision.
         // Auto and bypass: a call that would still prompt is answered at once below,

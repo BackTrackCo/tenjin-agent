@@ -320,3 +320,22 @@ it.each(['TENJIN_WALLET_KEY', 'TENJIN_WALLET_PASSPHRASE'])(
     ).toBe(false);
   },
 );
+
+it("leaves tool search as the person's session has it, a managed setting included", () => {
+  // Failure caught: every worker request carrying every tool schema, where the session
+  // loads MCP tools on demand (the proxy takes 256 tools at most), and a managed tool
+  // search setting keeping the work native because the worker overrode it.
+  const url = 'http://127.0.0.1:1234';
+  expect(claudeDeepSeekWorkerSettingsEnv(url, 'worker-token')).not.toHaveProperty(
+    'ENABLE_TOOL_SEARCH',
+  );
+  expect(
+    claudeDeepSeekWorkerEnv({ ENABLE_TOOL_SEARCH: 'auto:5' }, url, 'worker-token')
+      .ENABLE_TOOL_SEARCH,
+  ).toBe('auto:5');
+  expect(
+    claudeManagedProviderCompatible({
+      sources: [{ source: 'managed', settings: { env: { ENABLE_TOOL_SEARCH: 'true' } } }],
+    } as never),
+  ).toBe(true);
+});
