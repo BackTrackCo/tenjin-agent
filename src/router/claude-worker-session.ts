@@ -2,7 +2,7 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { codexHome } from '../lib/codex-home';
 import {
   CLAUDE_WORKER_READABLE,
@@ -151,7 +151,6 @@ export async function claudeWorkerPrivatePaths(
       ];
     }),
   ];
-  const canonical = await Promise.all(paths.map((path) => realpath(path).catch(() => path)));
   // Session transcripts, memory, prompt history and the user's settings files stay
   // readable, as for a native subagent. A settings file opens only when its env block
   // could be read, so its values are known and replaced before anything leaves.
@@ -170,15 +169,33 @@ export async function claudeWorkerPrivatePaths(
     ...configs.flatMap((config) => CLAUDE_WORKER_READABLE.map((name) => join(config, name))),
     ...known.map((file) => file.path),
   ];
-  const readable = [
+  // PROTECTION WINS OVER OPENNESS. The opened names are taken out of the protected set by
+  // their own spelling only. One that is a link to, into or over anything protected (a
+  // `history.jsonl` linked to the credentials file) stays closed with its target: opening
+  // a path by where it resolves would hand the worker the file the link points at.
+  const closed = paths.filter((path) => !opened.includes(path));
+  const guarded = [
     ...new Set([
-      ...opened,
-      ...(await Promise.all(opened.map((path) => realpath(path).catch(() => path)))),
+      ...closed,
+      ...(await Promise.all(closed.map((path) => realpath(path).catch(() => path)))),
     ]),
   ];
-  const protectedPaths = [...new Set([...paths, ...canonical])].filter(
-    (path) => !readable.includes(path),
+  const overlaps = (a: string, b: string) => {
+    const within = (root: string, path: string) => {
+      const way = relative(root, path);
+      return way === '' || (!way.startsWith('..') && !isAbsolute(way));
+    };
+    return within(a, b) || within(b, a);
+  };
+  const resolved = await Promise.all(
+    opened.map(async (path) => [path, await realpath(path).catch(() => path)] as const),
   );
+  const safe = resolved.filter(
+    (spellings) => !spellings.some((path) => guarded.some((kept) => overlaps(path, kept))),
+  );
+  const readable = [...new Set(safe.flat())];
+  const refused = resolved.filter((spellings) => !safe.includes(spellings)).flat();
+  const protectedPaths = [...new Set([...guarded, ...refused])];
   // Native permission rules use // for an absolute filesystem pattern.
   const rules = (path: string, tools: readonly string[]) => {
     const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
@@ -192,6 +209,8 @@ export async function claudeWorkerPrivatePaths(
     paths: protectedPaths,
     deny,
     readable,
+    // A settings file that stayed closed is still scanned: Claude Code hands its env block
+    // to the worker's commands whether or not the worker can open the file.
     settingsFiles: known.map((file) => file.path),
     settingsEnv: known.map((file) => file.env),
   };

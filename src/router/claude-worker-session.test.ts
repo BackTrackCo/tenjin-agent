@@ -11,8 +11,9 @@ import { isSecretPath } from './model-worker-privacy';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 const files = vi.hoisted(() => ({}) as Record<string, string>);
+const links = vi.hoisted(() => ({}) as Record<string, string>);
 vi.mock('node:fs/promises', () => ({
-  realpath: async (path: string) => path,
+  realpath: async (path: string) => links[path] ?? path,
   readFile: async (path: string) => {
     if (path in files) return files[path];
     throw Object.assign(new Error('absent'), { code: 'ENOENT' });
@@ -22,6 +23,7 @@ const id = '11111111-2222-4333-8444-555555555555';
 beforeEach(() => {
   vi.clearAllMocks();
   for (const path of Object.keys(files)) delete files[path];
+  for (const path of Object.keys(links)) delete links[path];
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(homedir(), '.claude'));
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -94,6 +96,34 @@ it('protects an in-repository registry and credentials, and opens native history
   expect(protectedPaths.deny).toContain('Write(//repo/private/**)');
   expect(isSecretPath('/repo/native config/skills/example/SKILL.md', protectedPaths.paths)).toBe(
     false,
+  );
+});
+
+it.each([
+  [
+    'the credentials file',
+    '/repo/native config/history.jsonl',
+    '/repo/native config/.credentials.json',
+  ],
+  ['a folder that holds protected files', '/repo/native config/projects', '/repo/native config'],
+  ["Tenjin's own data folder", '/repo/native config/history.jsonl', '/repo/private/wallet.json'],
+])('keeps an opened name closed when it is a link to %s', async (_label, name, target) => {
+  vi.stubEnv('CLAUDE_CONFIG_DIR', '/repo/native config');
+  links[name] = target;
+  const kept = await claudeWorkerPrivatePaths('/repo/private', '/repo');
+  // Opening it by where it resolves would hand the worker the file the link points at.
+  expect(kept.readable).not.toContain(name);
+  expect(kept.readable).not.toContain(target);
+  expect(kept.paths).toEqual(
+    expect.arrayContaining([name, '/repo/native config/.credentials.json']),
+  );
+  expect(kept.deny).toContain(`Read(/${name})`);
+  expect(kept.deny).toContain('Read(//repo/native config/.credentials.json)');
+  // A link to somewhere that is not protected is still followed, as a dotfiles setup has it.
+  links[name] = '/elsewhere/dotfiles/claude-history';
+  const followed = await claudeWorkerPrivatePaths('/repo/private', '/repo');
+  expect(followed.readable).toEqual(
+    expect.arrayContaining([name, '/elsewhere/dotfiles/claude-history']),
   );
 });
 
