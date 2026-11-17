@@ -43,17 +43,24 @@ import type { InstructionContext } from './model-instructions';
 import {
   claudeWorkerPrivatePaths,
   prepareClaudeWorkerSession,
+  prepareClaudeWorkerTemp,
   type ClaudeWorkerSession,
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
 import { workerCredentialProbe } from './worker-credential-probes';
-import { sandboxJudgesRead, unattendedDenial } from './worker-unattended';
+import {
+  readBlockUnchecked,
+  sandboxJudgesRead,
+  unattendedDenial,
+  type WorkerAsk,
+} from './worker-unattended';
 import {
   jobScopedRules,
   type WorkerPermissionAnswer,
   type WorkerPermissionAsk,
   NATIVE_SUBAGENT_NOTE,
+  workerTempNote,
 } from './model-worker-prompt';
 import {
   claudeWorkspaceWorktrees,
@@ -293,12 +300,16 @@ async function runQualifiedWorker(
       // Display only.
     }
   };
+  // The job's own temp folder, as a native session has its scratchpad. Without one the
+  // worker uses the shared temp root, as before.
+  const temp = await prepareClaudeWorkerTemp().catch(() => undefined);
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
   } catch (error) {
     envFiles.close();
     await github?.close().catch(() => undefined);
+    await temp?.close().catch(() => undefined);
     throw error;
   }
   const controller = new AbortController();
@@ -470,7 +481,12 @@ async function runQualifiedWorker(
         pathToClaudeCodeExecutable: binary.path,
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
-        additionalDirectories: [...workspace.workingDirectories.slice(1), ...worktrees],
+        // The temp folder is a working directory, so the file tools take its literal paths.
+        additionalDirectories: [
+          ...workspace.workingDirectories.slice(1),
+          ...worktrees,
+          ...(temp ? [temp.directory] : []),
+        ],
         env: {
           ...env,
           // Sandboxed commands reach the network only through the sandbox proxy; Node's
@@ -479,8 +495,15 @@ async function runQualifiedWorker(
           ...github?.env,
           TENJIN_WORKER_GITHUB_TOKEN: undefined,
           TENJIN_WORKER_GITHUB_TOKEN_FILE: undefined,
+          ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
         },
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: NATIVE_SUBAGENT_NOTE },
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: [NATIVE_SUBAGENT_NOTE, ...(temp ? [workerTempNote(temp.scratchpad)] : [])].join(
+            '\n\n',
+          ),
+        },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         // The native agent the parent asked for, with that agent's own tools.
         agent: String(job.native.subagent_type ?? 'general-purpose'),
@@ -497,12 +520,20 @@ async function runQualifiedWorker(
           // Native settings, instruction files and owned session history still load.
           autoMemoryEnabled: false,
           apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
-          env: claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
+          env: {
+            ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
+            // Above a value in the person's settings, which would move the temp root back.
+            ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
+          },
           permissions: {
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
             workingDirectoriesAsGiven: [
-              ...new Set([...workspace.workingDirectorySpellings, ...worktrees]),
+              ...new Set([
+                ...workspace.workingDirectorySpellings,
+                ...worktrees,
+                ...(temp ? [temp.directory] : []),
+              ]),
             ].sort(),
             blockReadsExemptPaths: workspace.readExceptions,
             deny: [
@@ -578,6 +609,8 @@ async function runQualifiedWorker(
               // Commands cannot read inside a folder the scan could not list.
               ...envFiles.unlisted,
               ...dropped,
+              // Other sessions' temp files; this job's own are in its temp folder.
+              ...(temp?.shared ?? []),
             ],
             denyWrite: [...privatePaths.paths, ...dropped],
           },
@@ -698,14 +731,16 @@ async function runQualifiedWorker(
             suppressAlwaysAllowRule?: boolean;
             title?: string;
             description?: string;
-            decisionReason?: string;
-          },
+          } & WorkerAsk,
         ) => {
           assertCurrentMode();
           if (nobodyAsked)
-            return sandboxJudgesRead(tool, input, context.decisionReason)
+            return sandboxJudgesRead(tool, input, context, permissionMode)
               ? { behavior: 'allow', updatedInput: input }
-              : { behavior: 'deny', message: unattendedDenial(context.decisionReason) };
+              : {
+                  behavior: 'deny',
+                  message: unattendedDenial(context, readBlockUnchecked(tool, input, context)),
+                };
           if (permissionMode === 'dontAsk')
             return {
               behavior: 'deny',
@@ -846,6 +881,7 @@ async function runQualifiedWorker(
     options.signal.removeEventListener('abort', cancel);
     closeFailure = await processClosed;
     await github?.close().catch(() => undefined);
+    await temp?.close().catch(() => undefined);
     // Last look, so the result and a stopped worker's partial lose a late value too.
     await refreshEnv().catch(() => undefined);
     envFiles.close();

@@ -15,7 +15,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -46,6 +46,12 @@ vi.mock('./claude-workspace', async (original) => ({
   ...(await original<typeof import('./claude-workspace')>()),
   claudeWorkspaceWorktrees: vi.fn(async () => native.worktrees),
 }));
+// No job temp folder unless a test asks for the real one.
+vi.mock('./claude-worker-session', async (original) => ({
+  ...(await original<typeof import('./claude-worker-session')>()),
+  prepareClaudeWorkerTemp: vi.fn(async () => undefined),
+}));
+import { prepareClaudeWorkerTemp } from './claude-worker-session';
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
@@ -1629,26 +1635,36 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
     if (mode !== 'default') {
       // Auto and bypass: nothing may wait on a person dialog, so each ask is answered at once
       // and the person's own permission surface is never reached.
-      const ask = (reason: string, command = 'WT=/repo; cd "$WT"; ls') =>
+      const ask = (context: Record<string, unknown>) =>
         sent.canUseTool!(
           'Bash',
-          { command },
+          {
+            command:
+              'cd /repo/.worktrees/b && git rev-parse HEAD && git status --short | head -20 && echo "---DIFF---" && git diff origin/main...HEAD --stat',
+          },
           {
             signal: new AbortController().signal,
-            decisionReason: reason,
             toolUseID: 't',
             requestId: 'r',
-          },
+            suggestions: [],
+            suppressAlwaysAllowRule: true,
+            ...context,
+          } as never,
         );
-      // The read block's ask about a command whose paths cannot be worked out: the sandbox
-      // refuses a read outside consent at the read, so the command runs.
-      expect(
-        await ask(
-          'ls names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)',
-        ),
-      ).toMatchObject({ behavior: 'allow' });
+      // The read block's ask about a command whose paths it cannot work out, as Claude Code
+      // 2.1.326 sends it. Bypass judges no call, so the sandbox alone bounds the read. In
+      // auto mode a yes would run it with no classifier verdict: refused, with a form that runs.
+      const unchecked = await ask({ decisionReasonType: 'safetyCheck' });
+      expect(unchecked).toMatchObject({
+        behavior: mode === 'bypassPermissions' ? 'allow' : 'deny',
+      });
+      if (mode === 'auto')
+        expect((unchecked as { message: string }).message).toContain('git -C <path>');
       // Any other ask is refused, in words about this one call and not the tool.
-      const refused = await ask('The classifier could not decide this action');
+      const refused = await ask({
+        decisionReasonType: 'classifier',
+        decisionReason: 'The classifier could not decide this action',
+      });
       expect(refused).toMatchObject({ behavior: 'deny' });
       expect((refused as { message: string }).message).toContain('Only this call was refused');
       expect((refused as { message: string }).message).not.toMatch(
@@ -1664,6 +1680,42 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
     expect(sent.disallowedTools).toContain('AskUserQuestion');
   },
 );
+
+it("gives each job a private temp folder that its commands and file tools use by path, and closes the shared temp root's other files", async () => {
+  // A live worker's literal path under the shared root was refused to Read, Write and the
+  // shell's read check, while its commands could read every other session's files there.
+  const actual =
+    await vi.importActual<typeof import('./claude-worker-session')>('./claude-worker-session');
+  let made: Awaited<ReturnType<typeof actual.prepareClaudeWorkerTemp>>;
+  vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(
+    async (env) => (made = await actual.prepareClaudeWorkerTemp(env)),
+  );
+  let mode: number | undefined;
+  sdkResult({ subtype: 'success', result: 'temp fixture' }, undefined, async () => {
+    mode = (await lstat(made!.scratchpad)).mode & 0o777;
+  });
+  await runModelWorker(job, options());
+  const { directory, scratchpad } = made!;
+  const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+  const settings = sent.settings as {
+    env: Record<string, string>;
+    permissions: { workingDirectoriesAsGiven: string[] };
+  };
+  // Claude Code makes its temp root, the commands' $TMPDIR, inside it.
+  expect(sent.env?.CLAUDE_CODE_TMPDIR).toBe(directory);
+  expect(settings.env.CLAUDE_CODE_TMPDIR).toBe(directory);
+  expect(scratchpad.startsWith(`${directory}/`)).toBe(true);
+  expect(sent.additionalDirectories).toContain(directory);
+  expect(settings.permissions.workingDirectoriesAsGiven).toContain(directory);
+  expect((sent.systemPrompt as { append: string }).append).toContain(scratchpad);
+  expect(sent.sandbox?.filesystem?.denyRead).toContain(`/tmp/claude-${process.getuid!()}`);
+  // A write deny on a parent of the folder would win over the folder's own allow.
+  expect(sent.sandbox?.filesystem?.denyWrite?.some((path) => directory.startsWith(path))).toBe(
+    false,
+  );
+  expect(mode).toBe(0o700);
+  await expect(lstat(directory)).rejects.toThrow();
+});
 
 it('refuses a credential probe in the worker hook whatever the mode, and leaves a push to the mode', async () => {
   const decisions: unknown[] = [];

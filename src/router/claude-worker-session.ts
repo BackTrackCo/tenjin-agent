@@ -1,6 +1,6 @@
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { codexHome } from '../lib/codex-home';
@@ -56,6 +56,42 @@ export async function prepareClaudeWorkerSession(
     assert: (observed: string) => {
       if (observed !== sessionId) throw new Error('Native Claude changed the owned worker session');
     },
+  };
+}
+
+/**
+ * A job's own temp folder, private to the user and removed by close. Named as the
+ * worker's `CLAUDE_CODE_TMPDIR`, it holds Claude Code's temp root for this job, which is
+ * the `$TMPDIR` of its commands and the scratchpad it is told of. `shared` is the temp
+ * root every other Claude Code session of this user shares.
+ */
+export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.env) {
+  const uid = process.getuid?.();
+  if (uid === undefined || process.platform === 'win32') return undefined;
+  // Under /tmp, not the macOS per-user temp folder: Claude Code makes sockets under it,
+  // and falls back to the shared root when the path is too long for one.
+  const directory = await realpath(await mkdtemp('/tmp/tenjin-job-'));
+  // Claude Code names its temp root so (2.1.326) and checks that it is private.
+  const scratchpad = join(directory, `claude-${uid}`);
+  const close = () => rm(directory, { recursive: true, force: true });
+  await mkdir(scratchpad, { mode: 0o700 }).catch(async (error: unknown) => {
+    await close();
+    throw error;
+  });
+  const shared = await Promise.all(
+    [...new Set(['/tmp', env.CLAUDE_CODE_TMPDIR || '/tmp'])].flatMap((base) => [
+      join(base, `claude-${uid}`),
+      realpath(base).then(
+        (real) => join(real, `claude-${uid}`),
+        () => join(base, `claude-${uid}`),
+      ),
+    ]),
+  );
+  return {
+    directory,
+    scratchpad,
+    shared: [...new Set(shared)],
+    close,
   };
 }
 
