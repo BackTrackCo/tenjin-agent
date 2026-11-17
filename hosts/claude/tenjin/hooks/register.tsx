@@ -5,9 +5,11 @@ import type { TenjinHeld, TenjinRow } from '../types';
 import {
   keptNative,
   modelStep,
+  raisedByThisPlugin,
   registerModelViewer,
   rememberModelOffer,
   translateViewerContinuation,
+  VIEWER_TYPE,
 } from './model-viewer';
 
 /**
@@ -110,6 +112,12 @@ export const register: Register = (on) => {
     };
   });
   on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
+    // THE PLUGIN'S OWN AGENT IS NOT THE PARENT'S CALL. The host raises this mod's start of
+    // the worker's viewer agent as an Agent call too (seen live: a no-offer record,
+    // `input_filter:run_in_background`, at the second of every accept). It is never
+    // judged, offered or recorded: told by who raised it, and by its type.
+    if (raisedByThisPlugin(next.origin) || (e as Json).subagent_type === VIEWER_TYPE)
+      return next(e);
     const { tool_use_id, ...raw } = e;
     delete (raw as Json).tool;
     const translated = await translateViewerContinuation($, e.tool, raw);

@@ -22,6 +22,7 @@ import type {
 
 // Source candidate: the production native ordering, permissions and Remote Control gate is separate.
 const TYPE = 'tenjin:deepseek-viewer';
+export const VIEWER_TYPE = TYPE;
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const ACTIVITY = 'mcp__plugin_tenjin_router__subagent_activity';
 const SERVER = 'plugin:tenjin:router';
@@ -1099,8 +1100,8 @@ function undecided(input: unknown): boolean {
   );
 }
 
-/** Whether a call of the activity read is this plugin's own, by who raised it. */
-export function ownActivityRead(origin: { plugin?: string } | undefined): boolean {
+/** Whether a call is this plugin's own (its activity read, its viewer agent), by who raised it. */
+export function raisedByThisPlugin(origin: { plugin?: string } | undefined): boolean {
   return origin?.plugin === 'tenjin';
 }
 
@@ -1180,7 +1181,7 @@ export function registerModelViewer(on: On): void {
   // on 2.1.326): refused there, the viewer's first read threw, and its agent ended
   // within a second of the accept and left the agent list.
   on('tool.call', { tool: ACTIVITY }, (_$, e, next) => {
-    if (ownActivityRead(next.origin)) return next(e);
+    if (raisedByThisPlugin(next.origin)) return next(e);
     return {
       deny: "This read is the Tenjin plugin's own, for the DeepSeek worker's viewer. A worker's result arrives by itself: as the result of your subagent call, or as that task's notification when the call was moved to the background. Do not check on it. If someone asks how it is doing, say it is still running and that they can open the DeepSeek agent in the agent list. To stop it, call subagent with cancel.",
     };

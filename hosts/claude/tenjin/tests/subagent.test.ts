@@ -108,6 +108,32 @@ test('a capture the model sends itself is refused before it reaches the CLI, so 
   ]);
 });
 
+test("the plugin's own start of the worker's viewer agent runs through: never held, offered or sent to the CLI", async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: offered, text: offered };
+  });
+  const ran = native(on);
+  // What the host raises for the mod's own `$.agent.spawn`: once recorded as a no-offer.
+  await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'viewer_start',
+    description: 'DeepSeek #1 · Read the selected file',
+    prompt: 'Observe only the already owned DeepSeek worker activity.',
+    subagent_type: 'tenjin:deepseek-viewer',
+    run_in_background: true,
+  });
+  expect(asked).toEqual([]);
+  expect(ran).toEqual(['viewer_start']);
+  // The model's own call is still held.
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_offer', ...ASSIGNMENT });
+  expect(asked).toHaveLength(1);
+  expect(ran).toEqual(['viewer_start']);
+});
+
 test('an action offer in MCP content holds Task as well', async ($, on) => {
   const { files } = machine(on);
   enabled(files);

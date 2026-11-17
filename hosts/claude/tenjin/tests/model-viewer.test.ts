@@ -1,6 +1,6 @@
 import type { AgentInfo, On, ToolCallResult, TurnStepChunk, TurnStepResult } from 'claude-code';
 import { expect, mock, test, type TestBody } from 'claude-code/testing';
-import { ownActivityRead } from '../hooks/model-viewer';
+import { raisedByThisPlugin } from '../hooks/model-viewer';
 import type { TenjinModelViewerState } from '../types';
 import { DATA, NOW, OFFER, SESSION, SURFACES, sha256Hex, shownLines, toolRow } from './fixtures';
 
@@ -2031,10 +2031,10 @@ test("the parent model cannot poll a worker with the viewer's own activity read,
 // model's. Refusing both ended the viewer agent within a second of every accept, so a
 // running worker had no entry in the agent list.
 test("the plugin's own activity read is told from the model's by who raised it, so the viewer keeps reading", () => {
-  expect(ownActivityRead({ plugin: 'tenjin', tier: 'user' } as never)).toBe(true);
-  expect(ownActivityRead({ plugin: 'engine', tier: 'core' } as never)).toBe(false);
-  expect(ownActivityRead({ plugin: 'another-plugin', tier: 'user' } as never)).toBe(false);
-  expect(ownActivityRead(undefined)).toBe(false);
+  expect(raisedByThisPlugin({ plugin: 'tenjin', tier: 'user' } as never)).toBe(true);
+  expect(raisedByThisPlugin({ plugin: 'engine', tier: 'core' } as never)).toBe(false);
+  expect(raisedByThisPlugin({ plugin: 'another-plugin', tier: 'user' } as never)).toBe(false);
+  expect(raisedByThisPlugin(undefined)).toBe(false);
 });
 
 for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as const)
