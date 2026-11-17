@@ -204,7 +204,7 @@ it.each(['completed', 'stopped'] as const)(
       try {
         const first = await call();
         expect(JSON.parse(first)).toMatchObject({
-          status: ending === 'completed' ? 'completed' : 'unknown',
+          status: ending === 'completed' ? 'completed' : 'stopped',
         });
         // What the parent read, and what a later accept reads back from disk.
         const again = await call();

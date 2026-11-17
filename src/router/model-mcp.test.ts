@@ -56,7 +56,7 @@ import type { ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
-import { ModelWorkerStopped } from './model-worker-control';
+import { ModelWorkerStopped, WORKER_ENDS } from './model-worker-control';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { MODEL_WORKER_HANDLE_PREFIX, ModelConversationStore } from './model-conversations';
 import type { ModelJob } from './model-job';
@@ -426,7 +426,7 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
     const content = (accepted.content as Array<{ text: string }>)[0]!.text;
     const result = JSON.parse(content);
     expect(result).toMatchObject({
-      status: 'unknown',
+      status: 'stopped',
       spend,
       stopReason: { kind: 'harness_limit', reason: 'turn_guard', turns: 500 },
       nextStep: expect.stringContaining('do not rebuy an uncertain turn'),
@@ -1292,33 +1292,54 @@ it('promises no free native repeat when a continuation never started', async () 
   }
 });
 
-it("hands a stopped worker's counts back beside its partial work", async () => {
-  const f = await ownedClaudeFixture();
-  worker.run.mockImplementation(async (_job, options) => {
-    options.activity.running();
-    options.activity.observe({
-      type: 'assistant',
-      uuid: 'turn-one',
-      session_id: options.claudeSession.sessionId,
-      message: {
-        id: 'message-1',
-        usage: { input_tokens: 10, output_tokens: 5 },
-        content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} }],
-      },
+// Live case for the model call: a review worker's call failed at the router and the job
+// ended `unknown`, with no cause the parent could read.
+it.each([
+  [{ kind: 'harness_limit', reason: 'turn_guard', turns: 3 }, 'turn_limit'],
+  [{ kind: 'execution_failure', reason: 'model_call_failed', status: 502 }, 'model_call_failed'],
+  [{ kind: 'execution_failure', reason: 'model_call_timeout' }, 'model_call_timeout'],
+] as const)(
+  "hands a stopped worker's cause and counts back beside its partial work (%o)",
+  async (stop, endedBy) => {
+    const f = await ownedClaudeFixture();
+    worker.run.mockImplementation(async (_job, options) => {
+      options.activity.running();
+      options.activity.observe({
+        type: 'assistant',
+        uuid: 'turn-one',
+        session_id: options.claudeSession.sessionId,
+        message: {
+          id: 'message-1',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          content: [
+            { type: 'text', text: 'I start with the required reads.' },
+            { type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} },
+          ],
+        },
+      });
+      throw new ModelWorkerStopped(stop);
     });
-    throw new ModelWorkerStopped({ kind: 'harness_limit', reason: 'turn_guard', turns: 3 });
-  });
-  try {
-    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
-      status: 'unknown',
-      toolUses: 1,
-      tokens: 15,
-      partial: { rows: [expect.objectContaining({ name: 'Bash' })] },
-    });
-  } finally {
-    await f.close();
-  }
-});
+    try {
+      const answer = await f.call({ offer_id: f.job.id });
+      expect(answer).toMatchObject({
+        status: 'stopped',
+        endedBy,
+        ended: WORKER_ENDS[endedBy],
+        stopReason: stop,
+        toolUses: 1,
+        tokens: 15,
+        partial: {
+          lastText: 'I start with the required reads.',
+          rows: expect.arrayContaining([expect.objectContaining({ name: 'Bash' })]),
+        },
+      });
+      // A later accept in the session reads the same end from the job's record.
+      expect(await f.call({ offer_id: f.job.id })).toMatchObject({ status: 'stopped', endedBy });
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 // LATER TURNS, RESTARTS AND REPEATED ACCEPTS, in the session that owns the offer.
 
@@ -1362,7 +1383,7 @@ it('returns a finished result after the session is resumed in a new process, and
   }
 });
 
-it.each(['unknown', 'not_started', 'cancelled'] as const)(
+it.each(['stopped', 'not_started', 'cancelled'] as const)(
   'keeps a %s handback for a later accept in the same session: what the parent already received, with the spend as it now stands',
   async (status) => {
     const f = await ownedClaudeFixture('general-purpose', true);
@@ -1802,7 +1823,7 @@ it.each([
   const record = await f.store.owned(f.job.id, 'root');
   expect(JSON.parse(record!.result!)).toMatchObject({
     endedBy,
-    status: endedBy === 'time_limit' ? 'unknown' : 'cancelled',
+    status: endedBy === 'time_limit' ? 'stopped' : 'cancelled',
   });
   // A later read from a process with no live view of the job draws the same end.
   await f.restart();

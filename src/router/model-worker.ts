@@ -81,6 +81,7 @@ import {
 } from './worker-github';
 import { envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
+  modelCallStop,
   ModelWorkerStopped,
   withWorkerDeadline,
   WorkerRepeatReminder,
@@ -423,7 +424,13 @@ async function runQualifiedWorker(
         ) as Record<string, unknown>;
         const messages = workerMessages(raw);
         assertCurrentMode();
-        const message = await options.transport.messages(job, messages, controller.signal);
+        // A model call that returned no result ends the job with its cause in fixed codes
+        // (the router's status, a timeout, the ceiling), not as an error nobody can read.
+        const message = await options.transport
+          .messages(job, messages, controller.signal)
+          .catch((error: unknown) => {
+            throw controller.signal.aborted ? error : modelCallStop(error);
+          });
         if (raw.stream === true)
           res
             .writeHead(200, { 'content-type': 'text/event-stream' })

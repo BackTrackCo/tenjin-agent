@@ -18,6 +18,7 @@ import {
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
+import { ModelCallFailed, timedOut } from './model-worker-control';
 
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
@@ -303,7 +304,10 @@ export class ModelTransport {
           throw new Error('Conflicting invocation receipt; exposure remains reserved');
         return settle(call, value);
       }
-      throw new Error(`Uncertain invocation ${call.invocationId}; no new authorization sent`);
+      throw new ModelCallFailed(
+        `Uncertain invocation ${call.invocationId}; no new authorization sent`,
+        { cause: 'failed' },
+      );
     };
     const old = await modelLock(`${path}.lock`, async () => {
       await consent();
@@ -349,16 +353,27 @@ export class ModelTransport {
     };
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;
+    // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
     const challenge = await fetchFn(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
       redirect: 'error',
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    }).catch((error: unknown) => {
+      if (signal.aborted) throw error;
+      throw new ModelCallFailed(
+        'Model proxy did not answer',
+        { cause: timedOut(error) ? 'timeout' : 'failed' },
+        { cause: error },
+      );
     });
     if (challenge.status !== 402) {
       await challenge.body?.cancel();
-      throw new Error('Model proxy did not return a payment quote');
+      throw new ModelCallFailed('Model proxy did not return a payment quote', {
+        cause: 'failed',
+        status: challenge.status,
+      });
     }
     const header = challenge.headers.get('payment-required');
     if (!header) {
@@ -383,7 +398,9 @@ export class ModelTransport {
             ? current.maxJobAtomic
             : BigInt(job.capAtomic);
         if (quote <= 0n || quote > cap - BigInt(state.charged))
-          throw new Error('Model quote exceeds remaining job ceiling');
+          throw new ModelCallFailed('Model quote exceeds remaining job ceiling', {
+            cause: 'budget',
+          });
         const call = { invocationId: body.invocationId, quote: quote.toString() };
         state.calls[key] = call;
         state.charged = (BigInt(state.charged) + quote).toString();
@@ -482,17 +499,31 @@ export class ModelTransport {
             await writePrivate(path, JSON.stringify(state));
           }
         });
-        throw new Error('Model payment refused before signing; no authorization sent', {
-          cause: failure,
-        });
+        throw new ModelCallFailed(
+          'Model payment refused before signing; no authorization sent',
+          { cause: 'payment_refused' },
+          { cause: failure },
+        );
       }
-      throw new Error(
+      // The payer's own code says how far the paid call went, such as `payment_failed`
+      // when the router answered the signed request with an error.
+      throw new ModelCallFailed(
         `Model call uncertain (${body.invocationId}); recover its receipt before retrying`,
+        {
+          cause: timedOut(failure) ? 'timeout' : 'failed',
+          ...(failure instanceof RouteSkipped ? { payer: failure.why } : {}),
+        },
         { cause: failure },
       );
     }
     if (!result?.ok || result.status !== 200)
-      throw new Error('Model call uncertain; inspect invocation receipt before retrying');
+      throw new ModelCallFailed(
+        'Model call uncertain; inspect invocation receipt before retrying',
+        {
+          cause: 'failed',
+          ...(typeof result?.status === 'number' ? { status: result.status } : {}),
+        },
+      );
     return settle(reservation, this.receipt(result.json, body.invocationId, quote, protocol));
   }
 

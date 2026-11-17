@@ -790,7 +790,14 @@ export function registerModelTool(
               const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
               const endedBy = abort.signal.aborted ? abortedBy : workerEnd(stop);
               const stopped = {
-                status: abort.signal.aborted ? 'cancelled' : notStarted ? 'not_started' : 'unknown',
+                // `stopped` with its cause in `endedBy`; `unknown` only when nothing said why.
+                status: abort.signal.aborted
+                  ? 'cancelled'
+                  : notStarted
+                    ? 'not_started'
+                    : stop
+                      ? 'stopped'
+                      : 'unknown',
                 endedBy,
                 ended: WORKER_ENDS[endedBy],
                 stopReason: stop,

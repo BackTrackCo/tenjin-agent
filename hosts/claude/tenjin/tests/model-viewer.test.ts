@@ -1088,19 +1088,24 @@ test(
 );
 
 // The CLI's `endedBy` codes, each in a native-sounding word.
-for (const [endedBy, word] of [
-  ['agent_stopped', 'Stopped by you'],
-  ['parent_cancel', 'Cancelled by the parent'],
-  ['host_aborted', 'Interrupted'],
-  ['session_ended', 'Session ended'],
-  ['time_limit', 'Time limit reached'],
-  ['budget', 'Budget reached'],
-  ['worker_error', 'Stopped'],
+// A stop with a known cause reads `stopped`, the CLI's word since a failed model call
+// read `unknown` (live case); an older CLI's `unknown` still draws.
+for (const [endedBy, word, status] of [
+  ['agent_stopped', 'Stopped by you', 'cancelled'],
+  ['parent_cancel', 'Cancelled by the parent', 'cancelled'],
+  ['host_aborted', 'Interrupted', 'cancelled'],
+  ['session_ended', 'Session ended', 'cancelled'],
+  ['time_limit', 'Time limit reached', 'unknown'],
+  ['budget', 'Budget reached', 'stopped'],
+  ['model_call_failed', 'Model call failed', 'stopped'],
+  ['model_call_timeout', 'Model call timed out', 'stopped'],
+  ['payment_refused', 'Payment refused', 'stopped'],
+  ['worker_error', 'Stopped', 'unknown'],
 ] as const)
   test('a worker ended by ' + endedBy + ' says so on its row', async ($, on) => {
     const f = setup($, on);
     const answer = JSON.stringify({
-      status: endedBy === 'worker_error' ? 'unknown' : 'cancelled',
+      status,
       elapsedMs: 61_000,
       toolUses: 3,
       tokens: 900,

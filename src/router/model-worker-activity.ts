@@ -131,7 +131,11 @@ export function endedDisplay(state: string, kept: string | null | undefined) {
   const spend = spendSchema.safeParse(handback.spend);
   const endedBy = Object.keys(WORKER_ENDS).find((code) => code === handback.endedBy);
   return {
-    status: state === 'unknown' && handback.status === 'not_started' ? 'not_started' : state,
+    // The handback's own word for a stop the job's state calls `unknown`.
+    status:
+      state === 'unknown' && (handback.status === 'not_started' || handback.status === 'stopped')
+        ? handback.status
+        : state,
     ...(endedBy ? { endedBy } : {}),
     ...(elapsedMs !== undefined ? { elapsedMs } : {}),
     ...(toolUses !== undefined ? { toolUses } : {}),

@@ -1,6 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import {
+  ModelCallFailed,
+  modelCallStop,
   ModelWorkerStopped,
+  timedOut,
   withWorkerDeadline,
   WorkerRepeatReminder,
   WORKER_ENDS,
@@ -158,6 +161,9 @@ it.each([
   ['context_limit', 'context_limit'],
   ['env_file_unscanned', 'env_file_unscanned'],
   ['startup_timeout', 'not_started'],
+  ['model_call_failed', 'model_call_failed'],
+  ['model_call_timeout', 'model_call_timeout'],
+  ['payment_refused', 'payment_refused'],
   ['structured_output_guard', 'worker_error'],
   ['worker_execution', 'worker_error'],
 ] as const)('names a %s stop as %s, with words for the parent', (reason, end) => {
@@ -167,4 +173,34 @@ it.each([
 
 it('names a stop with no known reason as a worker error', () => {
   expect(workerEnd(undefined)).toBe('worker_error');
+});
+
+it('turns a failed model call into a stop of fixed codes, and leaves every other error as it was', () => {
+  const failed = new ModelCallFailed('Model call uncertain (secret-id)', {
+    cause: 'failed',
+    status: 502,
+    payer: 'payment_failed',
+  });
+  expect(workerStop(modelCallStop(failed))).toEqual({
+    kind: 'execution_failure',
+    reason: 'model_call_failed',
+    status: 502,
+    payer: 'payment_failed',
+  });
+  // What is not an HTTP status or a code is left out; no message text is carried.
+  const odd = modelCallStop(
+    new ModelCallFailed('x', { cause: 'failed', status: 7, payer: 'Not a code: secret' }),
+  );
+  expect(workerStop(odd)).toEqual({ kind: 'execution_failure', reason: 'model_call_failed' });
+  expect(workerStop(modelCallStop(failed))).not.toHaveProperty('message');
+  const other = new Error('Model consent revoked or origin changed');
+  expect(modelCallStop(other)).toBe(other);
+});
+
+it("tells a timer's abort from another failure, also as a cause", () => {
+  const timeout = new DOMException('The operation timed out.', 'TimeoutError');
+  expect(timedOut(timeout)).toBe(true);
+  expect(timedOut(new Error('fetch failed', { cause: timeout }))).toBe(true);
+  expect(timedOut(new DOMException('aborted', 'AbortError'))).toBe(false);
+  expect(timedOut(new TypeError('fetch failed'))).toBe(false);
 });

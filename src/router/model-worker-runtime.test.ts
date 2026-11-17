@@ -5,7 +5,7 @@ import { readClaudeCode, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
 import { modelSettings } from './model-settings';
-import { workerStop } from './model-worker-control';
+import { ModelCallFailed, workerStop } from './model-worker-control';
 import { MAX_ENV_FILE_BYTES } from './worker-env-secrets';
 import { prepareWorkerGithub } from './worker-github';
 import type { ModelJob } from './model-job';
@@ -1283,6 +1283,70 @@ it.each(['additional directory', 'read exception', 'write exception'] as const)(
       ),
     ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
     expect(messages).not.toHaveBeenCalled();
+  },
+);
+
+// Live case: a paid call that the router answered with no result ended the job as
+// `unknown` with no cause, and the bridge kept nothing of why.
+it.each([
+  [
+    { cause: 'failed', status: 502 },
+    { reason: 'model_call_failed', status: 502 },
+  ],
+  [{ cause: 'timeout' }, { reason: 'model_call_timeout' }],
+  [{ cause: 'budget' }, { kind: 'harness_limit', reason: 'budget_guard' }],
+  [{ cause: 'payment_refused' }, { reason: 'payment_refused' }],
+] as const)(
+  'ends a worker whose model call failed (%o) with that cause as its stop',
+  async (detail, stop) => {
+    const messages = vi.fn(async () => {
+      throw new ModelCallFailed('Model call uncertain; inspect invocation receipt', detail);
+    });
+    const answered: { status?: number; body?: string } = {};
+    sdkResult({ subtype: 'success', result: 'not reached' }, undefined, async () => {
+      const call = vi.mocked(query).mock.calls[0]![0];
+      const handle = native.createServer.mock.calls[0]![0] as (
+        request: unknown,
+        response: unknown,
+      ) => void;
+      await new Promise<void>((complete) =>
+        handle(
+          {
+            method: 'POST',
+            url: '/v1/messages',
+            headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+            async *[Symbol.asyncIterator]() {
+              yield Buffer.from(
+                JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
+              );
+            },
+          },
+          {
+            headersSent: false,
+            destroyed: false,
+            writeHead(status: number) {
+              answered.status = status;
+              return this;
+            },
+            end(body: string, done?: () => void) {
+              answered.body = body;
+              done?.();
+              complete();
+              return this;
+            },
+          },
+        ),
+      );
+    });
+    const error = await runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+    }).catch((caught: unknown) => caught);
+    expect(workerStop(error)).toMatchObject({ kind: 'execution_failure', ...stop });
+    expect(messages).toHaveBeenCalledOnce();
+    // The worker itself still reads the fixed refusal, and no transport text.
+    expect(answered.status).toBe(502);
+    expect(answered.body).not.toContain('inspect invocation receipt');
   },
 );
 

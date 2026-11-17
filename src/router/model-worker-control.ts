@@ -15,9 +15,69 @@ export type WorkerStop = {
     | 'output_limit'
     | 'context_limit'
     | 'env_file_unscanned'
+    | 'model_call_failed'
+    | 'model_call_timeout'
+    | 'payment_refused'
     | 'worker_execution';
   turns?: number;
+  /** The router's HTTP status, when a model call got an answer that was not a result. */
+  status?: number;
+  /** The payer's own code for a paid call it could not complete, such as `payment_failed`. */
+  payer?: string;
 };
+
+/**
+ * A MODEL CALL THROUGH THE ROUTER THAT RETURNED NO RESULT, with what can be told about
+ * why: it timed out, the router answered with another status, the job's ceiling or the
+ * payer refused it, or it failed otherwise. The message stays the transport's own; the
+ * detail is fixed codes only, so it can reach the parent and the stored handback.
+ */
+export class ModelCallFailed extends Error {
+  constructor(
+    message: string,
+    readonly detail: {
+      cause: 'failed' | 'timeout' | 'budget' | 'payment_refused';
+      status?: number;
+      payer?: string;
+    },
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'ModelCallFailed';
+  }
+}
+
+/** Whether a failure, or one of its causes, is a timer's abort (`AbortSignal.timeout`). */
+export function timedOut(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth++) {
+    const value = current as { name?: unknown; cause?: unknown };
+    if (value.name === 'TimeoutError') return true;
+    current = value.cause;
+  }
+  return false;
+}
+
+/** The worker's stop for a model call that failed, else the error as it was. */
+export function modelCallStop(error: unknown): unknown {
+  if (!(error instanceof ModelCallFailed)) return error;
+  const { cause, status, payer } = error.detail;
+  return new ModelWorkerStopped({
+    kind: cause === 'budget' ? 'harness_limit' : 'execution_failure',
+    reason:
+      cause === 'budget'
+        ? 'budget_guard'
+        : cause === 'timeout'
+          ? 'model_call_timeout'
+          : cause === 'payment_refused'
+            ? 'payment_refused'
+            : 'model_call_failed',
+    ...(status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599
+      ? { status }
+      : {}),
+    ...(payer !== undefined && /^[a-z][a-z_]{0,47}$/.test(payer) ? { payer } : {}),
+  });
+}
 
 /** Only bounded machine-readable diagnostics cross the worker boundary. */
 export class ModelWorkerStopped extends Error {
@@ -45,6 +105,11 @@ export const WORKER_ENDS = {
   not_started: 'Its Claude Code did not start.',
   env_file_unscanned:
     'An env file appeared that could not be read in full, so nothing more could be forwarded.',
+  model_call_failed:
+    'Its model call through Tenjin returned no result; that call stays reserved until its receipt is read.',
+  model_call_timeout:
+    'Its model call through Tenjin timed out; that call stays reserved until its receipt is read.',
+  payment_refused: 'Tenjin refused to pay for its next model call, and sent nothing for it.',
   worker_error: 'The worker or the provider failed.',
 } as const;
 export type WorkerEnd = keyof typeof WORKER_ENDS;
@@ -61,6 +126,9 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
     case 'output_limit':
     case 'context_limit':
     case 'env_file_unscanned':
+    case 'model_call_failed':
+    case 'model_call_timeout':
+    case 'payment_refused':
       return stop.reason;
     case 'startup_timeout':
       return 'not_started';

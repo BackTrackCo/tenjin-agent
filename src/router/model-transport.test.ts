@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { SIWX_HEADER } from '../lib/siwx';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
 import { ModelTransport } from './model-transport';
+import { ModelCallFailed } from './model-worker-control';
 import type { ModelJob } from './model-job';
 
 const made: string[] = [];
@@ -808,6 +809,46 @@ it('settles concurrent owner recoveries once without subtracting the same reserv
     reservedAtomic: '4000',
     uncertain: [],
   });
+});
+
+// Live case: a paid call answered with no result ended its job with nothing to say why.
+it('says how a model call failed: the status of an answer that is not a result, a timeout, the ceiling', async () => {
+  const f = await fixture();
+  const real = f.deps.fetchImpl!;
+  const failure = (transport = f.make()) =>
+    transport.messages(f.job, { messages: [] }, new AbortController().signal).then(
+      () => undefined,
+      (error: unknown) => error as ModelCallFailed,
+    );
+  // No answer to the quote request: nothing is reserved, so nothing is uncertain.
+  f.deps.fetchImpl = async () => {
+    throw new DOMException('The operation timed out.', 'TimeoutError');
+  };
+  const timedOut = await failure();
+  expect(timedOut).toBeInstanceOf(ModelCallFailed);
+  expect(timedOut?.detail).toEqual({ cause: 'timeout' });
+  // A quote request answered with an error carries its status.
+  f.deps.fetchImpl = async () => new Response('busy', { status: 503 });
+  expect((await failure())?.detail).toEqual({ cause: 'failed', status: 503 });
+  expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [] });
+  // The paid request answered with an error: its reservation stays until its receipt is read.
+  f.deps.fetchImpl = async (input, init) =>
+    new Request(input, init).headers.has('payment-signature')
+      ? Response.json({ error: { code: 'model_inference_failed' } }, { status: 500 })
+      : real(input, init);
+  const paid = await failure();
+  expect(paid).toBeInstanceOf(ModelCallFailed);
+  // The payer's code says the router answered the signed request with an error.
+  expect(paid?.detail).toEqual({ cause: 'failed', payer: 'payment_failed' });
+  expect(paid?.message).toMatch(/uncertain/);
+  expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+  // A quote over what is left of the ceiling is the job's budget.
+  const small = await fixture({ quote: '2000000' });
+  const over = await small
+    .make()
+    .messages(small.job, { messages: [] }, new AbortController().signal)
+    .catch((error: unknown) => error as ModelCallFailed);
+  expect(over?.detail).toEqual({ cause: 'budget' });
 });
 
 it('retains exposure when signing starts but fails before a paid request is sent', async () => {

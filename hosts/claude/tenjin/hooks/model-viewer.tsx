@@ -680,7 +680,8 @@ async function pollWorker(
 }
 /** How a worker ended, from the accept call's own answer; undefined when the answer is not one. */
 function endedFrom(answer: Json | undefined): Partial<TenjinModelWorker> | undefined {
-  const status = answer?.status;
+  // A worker that stopped with a known cause (`endedBy`) is drawn as one with none.
+  const status = answer?.status === 'stopped' ? 'unknown' : answer?.status;
   if (
     status !== 'completed' &&
     status !== 'cancelled' &&
@@ -823,6 +824,9 @@ const ENDED_BY: Record<string, string> = {
   session_ended: 'Session ended',
   time_limit: 'Time limit reached',
   budget: 'Budget reached',
+  model_call_failed: 'Model call failed',
+  model_call_timeout: 'Model call timed out',
+  payment_refused: 'Payment refused',
   worker_error: 'Stopped',
 };
 function endedByOf(code: unknown): code is string {
@@ -1614,7 +1618,12 @@ export function registerModelViewer(on: On): void {
       const said = textOf(output);
       const ended = json(said);
       const status = ended?.status;
-      if (status === 'completed' || status === 'cancelled' || status === 'unknown') {
+      if (
+        status === 'completed' ||
+        status === 'cancelled' ||
+        status === 'unknown' ||
+        status === 'stopped'
+      ) {
         const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
         return workerRow(ui, {
           ...head,
