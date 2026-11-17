@@ -17,6 +17,7 @@ import {
   workerFetchFallback,
   workerWebSearch,
   type WorkerRequest,
+  type WorkerWebDeps,
 } from './model-worker-web';
 import { runRequestTool } from './tool';
 
@@ -261,7 +262,14 @@ function setup(fetchImpl: typeof fetch, auth = spyAuthorizer()) {
     job,
     transport,
     auth,
-    deps: { job, transport, dataDir: dir, request: executor(fetchImpl, auth) },
+    deps: {
+      job,
+      transport,
+      dataDir: dir,
+      request: executor(fetchImpl, auth),
+      // A fallback page's host resolves to a public address unless a test says otherwise.
+      resolve: async () => [{ address: '93.184.216.34' }],
+    } as WorkerWebDeps,
   };
 }
 
@@ -494,6 +502,61 @@ it('never names a page on this machine, or an address holding a secret value, to
   );
   expect(secret).toContain('its address holds a secret value');
   expect(seen).toEqual([]);
+});
+
+// Review finding: a name that resolves to a private address passed on its spelling alone.
+it.each([
+  ['a name that resolves to a private address', async () => [{ address: '10.0.0.5' }]],
+  [
+    'a name that also resolves to loopback',
+    async () => [{ address: '93.184.216.34' }, { address: '127.0.0.1' }],
+  ],
+  [
+    'a name that does not resolve here',
+    async () => {
+      throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
+    },
+  ],
+] as const)('never names %s to Exa', async (_label, resolve) => {
+  await configure();
+  const { fetchImpl, seen } = network();
+  const { deps } = setup(fetchImpl);
+  expect(
+    await workerFetchFallback(
+      {
+        input: { url: 'https://build.corp.example.com/private-report', prompt: 'x' },
+        response: { code: 404, codeText: 'Not Found', bytes: 0, result: 'gone' },
+      },
+      { ...deps, resolve, redact: (text) => text },
+    ),
+  ).toBeNull();
+  expect(seen).toEqual([]);
+});
+
+// Review finding: a worker stopped while its search waited for the free spec read still
+// reserved the job's budget and paid for the search.
+it('buys nothing for a worker stopped while its search waited, and releases what it reserved', async () => {
+  await configure();
+  const { fetchImpl, seen } = network();
+  const { job, transport, deps } = setup(fetchImpl);
+  const stop = new AbortController();
+  const request: WorkerRequest = async (args, call) => {
+    const answer = await deps.request!(args, call);
+    // The person stops the worker while the spec read is answered.
+    if ('tool' in args) stop.abort();
+    return answer;
+  };
+  const answer = await answerWorkerWebSearch(SEARCH, { ...deps, request, signal: stop.signal });
+  expect(asWebSearchReads(answer).errors).toEqual(['unavailable']);
+  expect(seen.filter((call) => call.paid)).toEqual([]);
+  expect(await transport.summary(job)).toMatchObject({
+    reservedAtomic: ROUTING_FEE.toString(),
+    uncertain: [],
+  });
+  // A worker already stopped makes no request at all, not even the free one.
+  const before = seen.length;
+  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal });
+  expect(seen.length).toBe(before);
 });
 
 it('keeps the whole ceiling reserved for a search whose payment the spend gate never settled, and reconcile leaves it', async () => {

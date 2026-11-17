@@ -399,6 +399,7 @@ async function runQualifiedWorker(
     transport: options.transport,
     dataDir: options.dataDir,
     ...(options.web ? { request: options.web } : {}),
+    signal: controller.signal,
   };
   const fetchFallback = async (event: WorkerFetchEvent) =>
     controller.signal.aborted ? null : workerFetchFallback(event, { ...web, redact: redactAll });

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { isPublicAddress } from '../lib/destination';
 import { isRecord } from '../lib/guards';
@@ -53,6 +54,10 @@ export interface WorkerWebDeps {
   dataDir: string;
   /** Absent where no request executor runs (a test, another host): every search refused. */
   request?: WorkerRequest;
+  /** The job's own abort: a stopped worker buys nothing it had not started paying for. */
+  signal?: AbortSignal;
+  /** Resolver seam for a fallback page's host; production uses `dns.lookup`. */
+  resolve?: (host: string) => Promise<{ address: string }[]>;
 }
 
 /** The catalog's search, its tier and its page count. */
@@ -152,7 +157,8 @@ export async function workerFetchFallback(
 ): Promise<string | null> {
   const failure = fetchFailure(event);
   const url = isRecord(event.input) ? event.input.url : undefined;
-  if (failure === null || typeof url !== 'string' || !publicPage(url)) return null;
+  if (failure === null || typeof url !== 'string' || deps.signal?.aborted) return null;
+  if (!(await publicPage(url, deps.resolve))) return null;
   try {
     if (deps.redact(url) !== url) throw new WorkerToolRefused('its address holds a secret value');
     const body = await paidWorkerTool(deps, PAGE_READ_TOOL, { urls: [url], text: true });
@@ -168,9 +174,13 @@ export async function workerFetchFallback(
   }
 }
 
-/** A page Exa could read: http or https on a public name or address. A host on this
- *  machine or a private network is never named to Exa. */
-function publicPage(url: string): boolean {
+/**
+ * A page Exa could read: http or https on a public name or address. A host on this
+ * machine or a private network is never named to Exa: a name must resolve here, and
+ * every address it resolves to must be public (an internal name such as
+ * `build.corp.example.com` resolving to 10.0.0.5 is not).
+ */
+async function publicPage(url: string, resolve: WorkerWebDeps['resolve']): Promise<boolean> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -180,7 +190,14 @@ function publicPage(url: string): boolean {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (isIP(host) !== 0) return isPublicAddress(host);
-  return host.includes('.') && !PRIVATE_NAMES.test(host);
+  if (!host.includes('.') || PRIVATE_NAMES.test(host)) return false;
+  try {
+    const answers = await (resolve ?? ((name) => lookup(name, { all: true })))(host);
+    return answers.length > 0 && answers.every(({ address }) => isPublicAddress(address));
+  } catch {
+    // A name that does not resolve here may still be private elsewhere: it stays here.
+    return false;
+  }
 }
 const PRIVATE_NAMES = /(^|\.)(localhost|local|internal|lan|home\.arpa|invalid|test|example)$/;
 
@@ -236,8 +253,13 @@ async function paidWorkerTool(
   tool: string,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const { request } = deps;
+  const { request, signal } = deps;
   if (request === undefined) throw new WorkerToolRefused('no Tenjin router runs it here');
+  // A STOPPED WORKER BUYS NOTHING: checked before the free spec read, before the job's
+  // budget is reserved, and again just before the paid request, since each await can
+  // outlast a stop. Once the paid request is sent it runs to its answer, as a model call does.
+  const stopped = () => signal?.aborted === true;
+  if (stopped()) throw new WorkerToolRefused('the worker was stopped');
   const gate = spendWatch();
   const call = { cwd: deps.job.root, watch: gate.wrap };
   const read = await request({ tool }, call);
@@ -247,11 +269,14 @@ async function paidWorkerTool(
   const spec = await readSpec(deps.dataDir, id);
   if (spec?.capabilityId !== tool)
     throw new WorkerToolRefused("Tenjin's router offered another service");
+  if (stopped()) throw new WorkerToolRefused('the worker was stopped');
   const ran = await deps.transport.toolCall(
     deps.job,
     tool,
     BigInt(spec.maxAmountAtomic),
     async () => {
+      // Nothing signed: the reservation is released whole.
+      if (stopped()) return { value: undefined, spentAtomic: 0n, uncertain: false };
       let value: RequestToolResult | undefined;
       try {
         value = await request({ id, input }, call);

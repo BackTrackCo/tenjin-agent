@@ -2278,9 +2278,10 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
       {
         hook_event_name: 'PostToolUseFailure',
         tool_name: 'WebFetch',
-        tool_input: { url: 'https://x402.org', prompt: 'Summarize' },
+        // A literal public address: the fallback checks a name's addresses with DNS.
+        tool_input: { url: 'https://93.184.216.34/', prompt: 'Summarize' },
         tool_use_id: 'fetch-1',
-        error: 'getaddrinfo ENOTFOUND x402.org',
+        error: 'connect ECONNREFUSED 93.184.216.34:443',
       } as never,
       undefined,
       { signal: new AbortController().signal },
