@@ -420,6 +420,14 @@ function redeemRefusal(status: number, envelope: ErrorEnvelope, code: string): C
         details,
       });
     }
+    // The code is spent and the transfer may still land: a rerun only hears
+    // "already redeemed", so the way to know is the balance.
+    if (envelope.code === 'promo_unconfirmed') {
+      return new CliError('API_UNREACHABLE', message, {
+        fix: 'Run `tenjin balance` in a few minutes to see whether it arrived.',
+        details,
+      });
+    }
     if (envelope.code === 'promo_unavailable' || status >= 500) {
       return new CliError('API_UNREACHABLE', message, { fix: 'Retry later.', details });
     }

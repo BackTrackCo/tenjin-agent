@@ -410,6 +410,21 @@ describe('runRedeem: refusals', () => {
     expect(err.code).toBe('REFUSED');
     expect(err.fix).toContain('clock');
   });
+
+  // The code is spent: a rerun only hears "already redeemed", so it never says retry.
+  it('an unconfirmed transfer points at the balance, not a retry', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const net = servers({
+      redeem: [[503, { error: { code: 'promo_unconfirmed', message: 'Not confirmed yet.' } }]],
+    });
+    const err = await catchCliError(
+      redeem(makeCtx(), { provider, fetchImpl: net.fetchImpl, code: 'NCSTATE26' }),
+    );
+    expect(err.message).toBe('Not confirmed yet.');
+    expect(err.fix).toContain('tenjin balance');
+    expect(err.fix).not.toMatch(/retry/i);
+  });
 });
 
 describe('runRedeem: a transfer the server has not seen land', () => {
