@@ -10,7 +10,7 @@
 # override. Before this, the first hard failure was release.yml's pre-publish
 # gate, on release day. Now the fix PR lands the day the advisory does.
 #
-# One bot branch, one PR updated in place.
+# One bot branch, one PR updated in place, and closed once main passes the audit.
 set -euo pipefail
 
 BRANCH=bot/audit-fix
@@ -19,20 +19,28 @@ COMMIT_MESSAGE="$TITLE"
 
 cd "$(git rev-parse --show-toplevel)"
 
-# `pnpm audit` also exits non-zero when the registry is unreachable. That case
-# falls through to the fix below, which fails on the same network error and
-# reds the run, which is the right outcome for a run that learned nothing.
-if pnpm audit --audit-level=high >/dev/null; then
-  echo "audit-fix: no high or critical advisories on main; nothing to do."
-  exit 0
-fi
-echo "audit-fix: main has high or critical advisories."
-
 # Only a SAME-REPO pull request may steer this run: `gh pr list --head` matches
 # the head-ref name alone, so a fork could otherwise park a branch with this
 # name and silence the run.
 pr_number=$(gh pr list --head "$BRANCH" --state open --json number,isCrossRepository \
   --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty')
+
+# `pnpm audit` also exits non-zero when the registry is unreachable. That case
+# falls through to the fix below, which fails on the same network error and
+# reds the run, which is the right outcome for a run that learned nothing.
+if pnpm audit --audit-level=high >/dev/null; then
+  if [ -n "$pr_number" ]; then
+    # Another fix reached main first (a Renovate security PR, the weekly lockfile
+    # refresh, or a manual override), so the open PR has nothing left to fix.
+    gh pr close "$pr_number" --delete-branch --comment \
+      "main now passes \`pnpm audit --audit-level=high\`, so this PR has nothing left to fix. Closing it."
+    echo "audit-fix: main is clean; closed PR #$pr_number."
+  else
+    echo "audit-fix: no high or critical advisories on main; nothing to do."
+  fi
+  exit 0
+fi
+echo "audit-fix: main has high or critical advisories."
 
 if [ -n "$pr_number" ]; then
   # A PR is under review: build on its branch so the review thread survives,
