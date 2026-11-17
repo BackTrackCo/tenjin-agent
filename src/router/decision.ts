@@ -1,17 +1,26 @@
 import { z } from 'zod';
+import { isLoopbackHost } from '../lib/destination';
 import { fetchFailureToCliError, httpRequest, MAX_BINARY_BODY_BYTES } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
+import {
+  BUILT_IN_SOURCE,
+  SETTINGS_ACCEPT,
+  SettingsHashSchema,
+  TargetIdSchema,
+  type WireSettings,
+} from './settings-wire';
 
 /**
  * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
  * and the `request` tool's, goes to the paid route ({@link ROUTE_PAID_PATH}).
  * Inside `tenjin mcp` the payer sends it through the stock x402 client and
  * pays the routing fee its 402 quotes ({@link DecisionRoute},
- * `routing-payer.ts`); a call it cannot pay is skipped at once, with no second
- * request. The free route ({@link ROUTER_PATH}) keeps only what stays free:
+ * `routing-payer.ts`); a call it cannot pay is skipped, with no request to any
+ * other route. One whose channel needs a deposit waits for the payer's
+ * background top-up inside its budget first. The free route ({@link ROUTER_PATH}) keeps only what stays free:
  * browse, a browse row's spec and the outcome report.
  *
  * The backend answers with what it would do and what the provider charges,
@@ -349,6 +358,183 @@ export type OfferSpec = z.infer<typeof OfferSpecSchema>;
  *  lists, and each option of a choice set. */
 const SpecsSchema = z.array(OfferSpecSchema).min(1).max(8).optional();
 
+/*
+ * A SERVICE ON A CONNECTED ACCOUNT (plan 37), with the bounds tenjin's
+ * `wire.ts` holds it to: one MCP tool call this client makes on the user's
+ * own account, which the user's plan pays. Sent only to a build that lists
+ * `mcp`, and only for an account its `settings.sources` names. It carries no
+ * URL, no credential and no price: this client calls the server it connected
+ * for `source`, so no answer can send a user's token anywhere else.
+ */
+
+/** The `accepts` token for a call on a connected account. */
+export const MCP_ACCEPT = 'mcp';
+
+/** A connected account's id, which this client keeps its sign-in under: the
+ *  vault `sources/<id>.json` and the OS-store account `source:<id>:<folder>`.
+ *  Narrower than a target id, so no file system, shell or keychain command
+ *  line reads it as anything else. */
+export const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
+/** Whether `id` is an account's: never the built-in source, which is never
+ *  connected. */
+export function isAccountId(id: string): boolean {
+  return ACCOUNT_ID.test(id) && id !== BUILT_IN_SOURCE;
+}
+
+/** A tool name as the MCP specification bounds it. */
+export const McpToolSchema = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/);
+
+/** The most an account call, its follow-up included, may serialize to. */
+export const ACCOUNT_CALL_MAX_BYTES = 8 * 1024;
+
+/** How a tool's answer is read: its `structuredContent`; the JSON its text
+ *  items hold, joined in order; or its content items as they come. */
+export const ACCOUNT_RESULTS = ['structured', 'json-text', 'content'] as const;
+
+const RESULT_PATH = '[A-Za-z_][A-Za-z0-9_]{0,63}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}';
+/** An argument value that is exactly `{field}` is that input field's value, of
+ *  its own JSON type; one that is exactly `{result.<path>}`, in a follow-up
+ *  only, is the value at that path in the first call's result. Every other
+ *  value is sent as written: that is how a map pins a tool's settings. */
+export const INPUT_PLACEHOLDER = /^\{([A-Za-z_][A-Za-z0-9_]{0,63})\}$/;
+export const RESULT_PLACEHOLDER = new RegExp(`^\\{result\\.(${RESULT_PATH})\\}$`);
+
+/** A value at a path of a tool's result, and the values that mean a state. */
+const AccountStateSchema = z.object({
+  path: z.string().regex(new RegExp(`^${RESULT_PATH}$`)),
+  values: z.array(z.string().min(1).max(64)).min(1).max(8),
+});
+
+const AccountCallFields = {
+  tool: McpToolSchema,
+  /** The tool's `arguments`, a template (above). */
+  args: z.record(z.string(), z.unknown()),
+  result: z.enum(ACCOUNT_RESULTS),
+};
+
+/** A status call, sent every `everyS` seconds until its own result leaves
+ *  `running`; `failed` ends the call. `maxWaitS` counts from the first call. */
+const AccountPollSchema = z.object({
+  ...AccountCallFields,
+  running: AccountStateSchema,
+  failed: AccountStateSchema.optional(),
+  everyS: z.number().int().min(1).max(30),
+  maxWaitS: z.number().int().min(1).max(600),
+});
+
+/** The follow-up that fetches the result, when the first call does not hold
+ *  it: always, or only `when` the first result is in that state. The call
+ *  that bills is sent once and never again because its job is still running;
+ *  only `poll` repeats. */
+const AccountStepSchema = z.object({
+  when: AccountStateSchema.optional(),
+  poll: AccountPollSchema.optional(),
+  ...AccountCallFields,
+});
+
+export const AccountCallSchema = z.object({
+  ...AccountCallFields,
+  next: AccountStepSchema.optional(),
+});
+export type AccountCall = z.infer<typeof AccountCallSchema>;
+
+const AccountSpecFields = z.object({
+  capabilityId: z.string().min(1).max(200),
+  provider: z.string().min(1).max(120),
+  label: LabelSchema.optional(),
+  holds: z
+    .object({
+      WebSearch: z.string().min(1).max(64).optional(),
+      WebFetch: z.string().min(1).max(64).optional(),
+    })
+    .optional(),
+  output: z.enum(['json', 'text', 'media']).optional(),
+  description: z.string().min(1).max(500),
+  /** The connected account the call runs on: this client attaches the
+   *  credential it holds for it, and only while it is connected here. */
+  source: z.string().regex(ACCOUNT_ID),
+  /** The call on the account, in place of a paid spec's price and request. */
+  mcp: AccountCallSchema,
+  input: z.record(z.string(), z.unknown()),
+  pinned: z.record(z.string(), z.unknown()),
+  example: z.record(z.string(), z.unknown()).optional(),
+  returns: z.string().min(1).max(200).optional(),
+  returnsExample: z.unknown().optional(),
+  resultSchema: z.record(z.string(), z.unknown()).optional(),
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  requires: RequiresSchema,
+  // A paid spec's own keys: an object naming them is no account spec.
+  priceAtomic: OtherArm,
+  request: OtherArm,
+  payTo: OtherArm,
+});
+
+/** Every string in a template that is exactly a placeholder. */
+function placeholders(value: unknown): string[] {
+  if (typeof value === 'string')
+    return INPUT_PLACEHOLDER.test(value) || RESULT_PLACEHOLDER.test(value) ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap(placeholders);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(placeholders);
+  return [];
+}
+
+function accountSpecProblems(spec: z.infer<typeof AccountSpecFields>, ctx: z.RefinementCtx): void {
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  const { mcp } = spec;
+  if (spec.source === BUILT_IN_SOURCE)
+    issue(`an account service is never on ${BUILT_IN_SOURCE}`, ['source']);
+  if (!(spec.requires ?? []).includes(MCP_ACCEPT))
+    issue(`an account spec requires ${MCP_ACCEPT}`, ['requires']);
+  if (Buffer.byteLength(JSON.stringify(mcp), 'utf8') > ACCOUNT_CALL_MAX_BYTES)
+    issue(`the call must serialize to at most ${ACCOUNT_CALL_MAX_BYTES} bytes`, ['mcp']);
+  // The first call bills, so a poll or follow-up never sends it again.
+  if (mcp.next?.poll?.tool === mcp.tool)
+    issue('the poll never repeats the call that bills', ['mcp', 'next', 'poll', 'tool']);
+  if (mcp.next?.tool === mcp.tool)
+    issue('the follow-up never repeats the call that bills', ['mcp', 'next', 'tool']);
+  const properties = spec.input.properties;
+  const fields = new Set(
+    properties && typeof properties === 'object' ? Object.keys(properties) : [],
+  );
+  const calls: [(string | number)[], Record<string, unknown>, boolean][] = [
+    [['mcp', 'args'], mcp.args, false],
+  ];
+  if (mcp.next?.poll) calls.push([['mcp', 'next', 'poll', 'args'], mcp.next.poll.args, true]);
+  if (mcp.next) calls.push([['mcp', 'next', 'args'], mcp.next.args, true]);
+  for (const [path, args, followUp] of calls)
+    for (const value of placeholders(args)) {
+      const field = INPUT_PLACEHOLDER.exec(value)?.[1];
+      if (field === undefined && !followUp) issue('only a follow-up reads the first result', path);
+      if (field !== undefined && !fields.has(field))
+        issue(`${value} names no field of the input`, path);
+    }
+}
+
+/** An account service's spec, as a lookup's `spec` answer carries it. */
+export const AccountSpecSchema = AccountSpecFields.superRefine(accountSpecProblems);
+export type AccountSpec = z.infer<typeof AccountSpecSchema>;
+
+/** An account service's spec under the offer id the agent calls it with. */
+export const AccountOfferSpecSchema = AccountSpecFields.extend({ id: IdSchema }).superRefine(
+  accountSpecProblems,
+);
+export type AccountOfferSpec = z.infer<typeof AccountOfferSpecSchema>;
+
+/** Any spec an offer id can hold: paid from the balance, or a call on an account. */
+export type AnyOfferSpec = OfferSpec | AccountOfferSpec;
+
+export const isAccountSpec = <T extends object>(spec: T): spec is T & AccountSpec =>
+  'mcp' in spec && 'source' in spec;
+
+/** The specs on an `execute`, whose lead may be an account service's. */
+const ExecuteSpecsSchema = z
+  .array(z.union([OfferSpecSchema, AccountOfferSpecSchema]))
+  .min(1)
+  .max(8)
+  .optional();
+
 /** Words this client shows the model itself, in its own line: one plain line. */
 const PlainLine = (max: number) =>
   z
@@ -414,6 +600,29 @@ function checkChoices(
   else if (fallback.id !== decision.id) issue("the default choice is this answer's own offer");
 }
 
+/** One call's input, serialized, bounded as the server bounds it. */
+export const MAX_INPUT_BYTES = 16 * 1024;
+
+/**
+ * THE NATIVE CALL'S OWN INPUT, on a hook answer for a pending WebSearch or
+ * WebFetch to a client that sends `settings`, only while the user turned on
+ * automatic use and the pick fits its provider scope: the offer id to run
+ * and the complete input the server built from that call's own query or URL
+ * through the spec's `holds`. Run unchanged in the native call's place,
+ * through the ordinary executor and the check before every call, or not at
+ * all; never edited, merged or parsed here (`swap.ts`).
+ */
+export const BoundSchema = z.object({
+  id: IdSchema,
+  input: z
+    .record(z.string(), z.unknown())
+    .refine(
+      (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= MAX_INPUT_BYTES,
+      `bound input must serialize to at most ${MAX_INPUT_BYTES} bytes`,
+    ),
+});
+export type Bound = z.infer<typeof BoundSchema>;
+
 /** The same answer on both calls: the hook's offer, and the tool's answer
  *  when a query with no id found a service nobody curated. */
 const DiscoveredSchema = z
@@ -427,9 +636,49 @@ const DiscoveredSchema = z
     specs: SpecsSchema,
     choices: ChoicesSchema.optional(),
     requires: RequiresSchema,
+    bound: BoundSchema.optional(),
   })
   .superRefine(checkHint)
   .superRefine(checkChoices);
+
+/**
+ * AN ACCOUNT LEAD IS OFFERED ALONE, as a service this client runs on its own
+ * connection: no endpoint, no balance price, in place of a native call only
+ * through `bound` as any lead. Every other `execute` is as it always was, with
+ * the URL it pays.
+ */
+function checkExecute(
+  decision: {
+    id: string;
+    capabilityId: string;
+    providerPriceAtomic: string;
+    endpoint?: string | undefined;
+    specs?: AnyOfferSpec[] | undefined;
+    delivery?: 'offer' | 'augment' | 'note' | undefined;
+    augmentUrl?: string | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  const specs = decision.specs ?? [];
+  const lead = specs.find(({ id }) => id === decision.id);
+  if (!lead || !isAccountSpec(lead)) {
+    if (specs.some((spec) => isAccountSpec(spec)))
+      issue('an account service is only ever the lead', ['specs']);
+    if (decision.endpoint === undefined) issue('an execute names the URL it pays', ['endpoint']);
+    return;
+  }
+  if (specs.length > 1) issue('an account lead is offered alone', ['specs']);
+  if (decision.endpoint !== undefined)
+    issue('an account lead names no endpoint: this client calls its own account', ['endpoint']);
+  if (decision.capabilityId !== lead.capabilityId)
+    issue('the listing names the lead', ['capabilityId']);
+  if (decision.providerPriceAtomic !== '0')
+    issue('the balance pays an account lead nothing', ['providerPriceAtomic']);
+  if (decision.delivery === 'augment' || decision.augmentUrl !== undefined)
+    issue('an account lead is an offer', ['delivery']);
+}
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
@@ -437,8 +686,9 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
       action: z.literal('execute'),
       id: IdSchema,
       ...CapabilityFields,
-      /** The x402 URL a lookup would pay, for the line the server writes. */
-      endpoint: z.string().min(1).max(2_048),
+      /** The x402 URL a lookup would pay, for the line the server writes. An
+       *  account lead has none: this client calls the account it connected. */
+      endpoint: z.string().min(1).max(2_048).optional(),
       /** What to pass in `query`, in the service's own terms. */
       usage: z.string().min(1).max(300),
       /**
@@ -449,7 +699,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * bound as a discovered line's.
        */
       hint: z.string().min(1).max(2_000),
-      specs: SpecsSchema,
+      specs: ExecuteSpecsSchema,
       /**
        * HOW THE OFFER IS DELIVERED, sent because this build lists `fields`.
        * `note` is the free docs lookup before a search, for a client that
@@ -461,8 +711,10 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        */
       delivery: z.enum(['offer', 'augment', 'note']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
+      bound: BoundSchema.optional(),
     })
-    .superRefine(checkHint),
+    .superRefine(checkHint)
+    .superRefine(checkExecute),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -485,7 +737,7 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     .object({
       action: z.literal('spec'),
       id: IdSchema,
-      spec: ToolSpecSchema,
+      spec: z.union([ToolSpecSchema, AccountSpecSchema]),
       hint: z.string().min(1).max(2_000),
     })
     .superRefine(checkHint),
@@ -498,6 +750,14 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
   return z.object({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
+    /**
+     * The request's own settings hash, verbatim, on an answer the server
+     * decided under the user's rules (to a client that lists `settings` in
+     * `accepts`). The check before every call compares it with the rules
+     * saved now (`settings-check.ts`); it names a rule set and authorizes
+     * nothing.
+     */
+    settingsHash: SettingsHashSchema.optional(),
     decision,
     /** A plain sentence about the CALL, such as an id that had expired. Never a
      *  failure: the decision beside it ran anyway. */
@@ -537,6 +797,129 @@ const BrowseResponseSchema = z.object({
   rows: z.array(BrowseRowSchema).max(200),
 });
 export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
+
+const Labelled = { id: TargetIdSchema, label: z.string().min(1).max(120) };
+
+/** How an account signs in: `oauth` is the MCP sign-in, `key` a pasted key
+ *  sent as `Authorization: <keyScheme> <key>`. */
+export const SIGN_IN = ['oauth', 'key'] as const;
+export type SignIn = (typeof SIGN_IN)[number];
+export const KEY_SCHEMES = ['Bearer', 'Key'] as const;
+export type KeyScheme = (typeof KEY_SCHEMES)[number];
+
+/** Where a connected account is called. A user's token goes here, so it is
+ *  https, with no credentials, query, fragment or trailing slash to make it
+ *  another server or carry anything else. One the user typed (`typed`) may
+ *  also be http on this machine (`localhost`, 127.0.0.0/8, `[::1]`); the
+ *  router's never is. */
+export function isAccountUrl(value: string, opts: { typed?: boolean } = {}): boolean {
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  return (
+    url !== undefined &&
+    (url.protocol === 'https:' ||
+      (opts.typed === true && url.protocol === 'http:' && isLoopbackHost(url.hostname))) &&
+    !url.username &&
+    !url.password &&
+    !value.includes('?') &&
+    !value.includes('#') &&
+    !value.endsWith('/')
+  );
+}
+
+const twice = (keys: readonly string[]) => new Set(keys).size !== keys.length;
+
+/**
+ * HOW THIS CLIENT CONNECTS AN ACCOUNT, on a source row of the identities read
+ * because this build lists `mcp`: its MCP server, the sign-ins it takes, how a
+ * pasted key is sent, and every tool its maps call, which the free
+ * connect-time `tools/list` must hold for those maps to run on this machine.
+ * `tenjin` never has one.
+ */
+export const ConnectableSchema = z
+  .object({
+    mcpUrl: z
+      .string()
+      .max(2_048)
+      .refine(
+        (value) => isAccountUrl(value),
+        'an https URL with no credentials, query, fragment or trailing slash',
+      ),
+    signIn: z.array(z.enum(SIGN_IN)).min(1).max(2),
+    keyScheme: z.enum(KEY_SCHEMES).optional(),
+    expectTools: z.array(McpToolSchema).min(1).max(64),
+  })
+  .superRefine((connectable, ctx) => {
+    const issue = (message: string, path: string[]) =>
+      ctx.addIssue({ code: 'custom', message, path });
+    if (twice(connectable.signIn)) issue('each sign-in is listed once', ['signIn']);
+    if (connectable.signIn.includes('key') !== (connectable.keyScheme !== undefined))
+      issue('a key sign-in says how the key is sent, and only it does', ['keyScheme']);
+    if (twice(connectable.expectTools)) issue('each tool is listed once', ['expectTools']);
+  });
+export type Connectable = z.infer<typeof ConnectableSchema>;
+
+/**
+ * EVERY ID A SETTING CAN NAME, free: the categories with their tasks, the
+ * tasks, providers, sellers, services (with the task, providers and seller
+ * each is identified by) and sources, each with its label. `tenjin config`
+ * resolves a typed name against it and names saved rules by it; it never
+ * decides with it. Built by the server from its catalog, with no gate, no
+ * model and no payment. Read tolerantly like every answer here.
+ */
+const IdentitiesResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  categories: z.array(z.object({ ...Labelled, tasks: z.array(TargetIdSchema).max(256) })).max(256),
+  /** `speed`: a task the speed preference changes (it has a speed criterion). */
+  tasks: z
+    .array(
+      z.object({
+        ...Labelled,
+        category: TargetIdSchema.optional(),
+        speed: z.literal(true).optional(),
+      }),
+    )
+    .max(1_024),
+  providers: z.array(z.object(Labelled)).max(2_048),
+  sellers: z.array(z.object(Labelled)).max(2_048),
+  services: z
+    .array(
+      z.object({
+        ...Labelled,
+        task: TargetIdSchema.optional(),
+        providers: z.array(TargetIdSchema).max(16),
+        seller: TargetIdSchema.optional(),
+      }),
+    )
+    .max(4_096),
+  /** `connectable`, for a build that lists `mcp`: an account this client can
+   *  connect, never `tenjin`. */
+  sources: z
+    .array(
+      z
+        .object({ ...Labelled, connectable: ConnectableSchema.optional() })
+        .refine(
+          ({ id, connectable }) => connectable === undefined || isAccountId(id),
+          'only an account id is connectable, never tenjin',
+        ),
+    )
+    .max(64),
+});
+export type IdentitiesResponse = z.infer<typeof IdentitiesResponseSchema>;
+
+/** A hook answer reread from disk (`decided.ts`), held to the same schema as
+ *  the router's: anything else reads as absent. */
+export function parseHookResponse(value: unknown): HookResponse | undefined {
+  const parsed = HookResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** The identities read reread from disk (`identities.ts`), held to the same
+ *  schema as the router's answer: anything else reads as absent. */
+export function parseIdentities(value: unknown): IdentitiesResponse | undefined {
+  const parsed = IdentitiesResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
@@ -668,6 +1051,8 @@ const CLIENT_FEATURES: ReadonlySet<string> = new Set([
   ...CLIENT_ACCEPTS,
   BAZAAR_ACCEPT,
   FREE_QUERY_ACCEPT,
+  SETTINGS_ACCEPT,
+  MCP_ACCEPT,
 ]);
 
 /** The features a `requires` list names that this build lacks; none when it
@@ -676,9 +1061,20 @@ export function unmetRequires(requires: readonly string[] | undefined): string[]
   return (requires ?? []).filter((token) => !CLIENT_FEATURES.has(token));
 }
 
-/** The `accepts` this build sends, with the open Bazaar or without it. */
-export function acceptsFor(bazaar: boolean): string[] {
-  return bazaar ? [...CLIENT_ACCEPTS, BAZAAR_ACCEPT] : [...CLIENT_ACCEPTS];
+/** The `accepts` this build sends, with the open Bazaar or without it, and
+ *  `settings` beside the `settings` field, which every production routing
+ *  call carries (also when the user has no rules). `mcp` rides with it: a
+ *  call on a connected account is offered only for an account the
+ *  settings' `sources` names, so it means nothing without them. It takes a
+ *  spec whose call is an MCP tool call on that account, the `execute` that
+ *  offers one with no `endpoint`, `connectable` on the identities read, and
+ *  the `{refused}` re-ask ({@link requestRefused}). */
+export function acceptsFor(bazaar: boolean, settings = false): string[] {
+  return [
+    ...CLIENT_ACCEPTS,
+    ...(bazaar ? [BAZAAR_ACCEPT] : []),
+    ...(settings ? [SETTINGS_ACCEPT, MCP_ACCEPT] : []),
+  ];
 }
 
 /**
@@ -707,6 +1103,7 @@ export function buildHookBody(
     harness?: Harness;
     improve?: boolean;
     budgetMs?: number;
+    settings?: WireSettings;
   } = {},
 ): Record<string, unknown> {
   return {
@@ -717,6 +1114,9 @@ export function buildHookBody(
     ...(extras.budgetMs !== undefined ? { budgetMs: extras.budgetMs } : {}),
     packet,
     ...(extras.improve === true ? { improve: true } : {}),
+    // A SIBLING OF THE PACKET, never inside it: the packet is what the
+    // server's model reads, and the user's settings are for code alone.
+    ...(extras.settings !== undefined ? { settings: extras.settings } : {}),
   };
 }
 
@@ -730,6 +1130,7 @@ export function buildToolBody(request: {
   accepts?: readonly string[];
   harness?: Harness;
   improve?: boolean;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -739,6 +1140,29 @@ export function buildToolBody(request: {
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
     ...(request.improve === true ? { improve: true } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
+  };
+}
+
+/**
+ * THE RE-ASK AFTER AN ACCOUNT REFUSED (plan 37, review round 1): the usual
+ * envelope with `refused`, the id of the offer the account refused, and no
+ * query. The server routes that offer's own turn again with the account left
+ * out for this one answer, under the settings sent, and answers as it answers
+ * a query: an offer, or native.
+ */
+export function buildRefusedBody(request: {
+  refused: string;
+  accepts: readonly string[];
+  harness?: Harness;
+  settings?: WireSettings;
+}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    refused: request.refused,
+    accepts: [...request.accepts],
+    ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
 }
 
@@ -748,12 +1172,14 @@ export function buildBrowseBody(request: {
   browse: string;
   accepts: readonly string[];
   harness?: Harness;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     browse: request.browse,
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
 }
 
@@ -763,6 +1189,7 @@ export function buildToolSpecBody(request: {
   query?: string;
   accepts: readonly string[];
   harness?: Harness;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -770,7 +1197,44 @@ export function buildToolSpecBody(request: {
     ...(request.query !== undefined ? { query: request.query } : {}),
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
+}
+
+/** The free identities read: every id a setting can name. No settings and
+ *  no harness ride on it: its answer is the same for every client. */
+export function buildIdentitiesBody(): Record<string, unknown> {
+  return { schemaVersion: 1, identities: true, accepts: acceptsFor(false, true) };
+}
+
+/**
+ * THE PAID ROUTE'S `warm` CALL, a channel deposit's carrier. The payer's
+ * background top-up sends it and nothing else does: the batch-settlement spec
+ * has no deposit-only payload, so the deposit rides a paid request the server
+ * answers in code, with no gate and nothing stored, and settles at $0.
+ */
+export function buildWarmBody(
+  extras: { accepts?: readonly string[]; harness?: Harness } = {},
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    warm: true,
+    ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
+    ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
+  };
+}
+
+/** The `warm` answer, read tolerantly like every answer: no decision. */
+const WarmResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  warm: z.literal(true),
+});
+
+/** Whether a body is the `warm` answer. A router without the form answers
+ *  anything else: a 400 for an unknown field, or a decision. */
+export function isWarmAnswer(body: unknown): boolean {
+  return WarmResponseSchema.safeParse(body).success;
 }
 
 /** The parsers, exposed so the shared wire fixtures are checked against the
@@ -823,21 +1287,37 @@ export interface DecisionDeps {
   /** `router.improve`: the person turned on "Help improve routing", so the
    *  call says `improve: true`. Off by default. */
   improve?: boolean;
+  /**
+   * The user's settings as the wire carries them, resolved from the global
+   * file on every call (`routerSettings`) and never cached: sent with
+   * `settings` in `accepts` on every routing form. Absent only in tests and
+   * the free identities read.
+   */
+  settings?: WireSettings;
 }
 
-/** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
- *  no paid answer for the call, which then is skipped, or read as the
+/** One decision's payment transport; do not share it between concurrent decisions.
+ * `send` throws {@link RouteSkipped} when it has
+ *  no usable answer for the call, which then is skipped, or read as the
  *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
-  /** What this route's calls deposited into the routing channel and the
-   *  router took, 0n for none: the caller says so once, where it is read. */
+  /** What this route's own calls deposited into the routing channel and the
+   *  router took (only on a router with no `warm` form), 0n for none: the
+   *  caller says so once, where it is read. */
   deposited?: () => bigint;
+  /** What the payer's background top-ups deposited since this was last
+   *  read, 0n for none, and taken by the read. Only a hook leg reads it, so
+   *  the person is told, in its `systemMessage`. */
+  toppedUp?: () => bigint;
+  /** The most recent call completed a signed routing payment successfully.
+   *  Free answers, background top-ups and payments still settling do not count. */
+  paid?: () => boolean;
 }
 
 /** The paid route gave this call no answer: the wallet locked, low or over
- *  its spend limits, the fee quoted above the ceiling, the channel busy, or
- *  the payment failed. */
+ *  its spend limits, the fee quoted above the ceiling, the channel busy or
+ *  being topped up, or the payment failed. */
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
    *  ({@link isUnreachable}), so the call reads as that transport failure.
@@ -866,6 +1346,19 @@ export const PAYMENT_FAILED = 'payment_failed';
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
 /** The route asked for the fee, and this call had no payer to pay it. */
 export const NO_PAYER = 'no_payer';
+/** The channel needed a deposit, and this process's background top-up did
+ *  not land inside the call's budget: no fault. The next call pays from it if
+ *  it lands, or gets its refusal if it was refused. */
+export const TOPPING_UP = 'topping_up';
+/** The background top-up got no usable answer: the router rate-limited it,
+ *  or no connection reached it. No fault, as on any routing call, and never
+ *  the machine-wide unreachable pause: the call it served reached the router.
+ *  The top-up is tried again after its backoff. */
+export const TOP_UP_UNAVAILABLE = 'top_up_unavailable';
+/** The channel needed a deposit, which only the background top-up makes, and
+ *  this process's could not make it now (another session's top-up of the same
+ *  wallet is in flight, or the channel was busy): no fault. */
+export const DEPOSIT_DEFERRED = 'deposit_deferred';
 
 export type DecisionOutcome<T> =
   /** `skipped`: offers in it this build cannot run, already taken out
@@ -932,22 +1425,64 @@ export async function requestDecision(
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
             budgetMs: Math.min(5_000, Math.max(0, timeoutMs)),
+            ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
+            ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
+  return kind === 'hook'
+    ? sendPaid(url, options, HookResponseSchema, deps)
+    : sendPaid(url, options, ToolResponseSchema, deps);
+}
+
+/**
+ * `{refused}` ON THE PAID ROUTE, paid or skipped like a query
+ * ({@link requestDecision}), and answered the same way: an offer, or native.
+ * It needs `mcp`, which rides with the settings.
+ */
+export async function requestRefused(
+  refused: string,
+  deps: DecisionDeps,
+): Promise<DecisionOutcome<ToolResponse>> {
+  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
+  return sendPaid(
+    url,
+    {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildRefusedBody({
+        refused,
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+        harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
+      }),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    },
+    ToolResponseSchema,
+    deps,
+  );
+}
+
+/** One request on the paid route: sent by the payer, or unpaid with none. */
+async function sendPaid<R extends HookResponse | ToolResponse>(
+  url: string,
+  options: HttpRequestOptions,
+  schema: z.ZodType<R>,
+  deps: Pick<DecisionDeps, 'route'>,
+): Promise<DecisionOutcome<R>> {
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);
@@ -986,8 +1521,9 @@ export async function requestBrowse(
       blockRedirects: true,
       jsonBody: buildBrowseBody({
         browse,
-        accepts: acceptsFor(deps.acceptsBazaar === true),
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
         harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
@@ -1009,13 +1545,37 @@ export async function requestToolSpec(
       jsonBody: buildToolSpecBody({
         tool,
         ...(query !== undefined ? { query } : {}),
-        accepts: [...acceptsFor(deps.acceptsBazaar === true), FREE_QUERY_ACCEPT],
+        accepts: [
+          ...acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+          FREE_QUERY_ACCEPT,
+        ],
         harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
-  ) as DecisionOutcome<ToolResponse>;
+  );
+}
+
+/**
+ * EVERY ID A SETTING CAN NAME, ALWAYS FREE: no gate, no model, no payment, so
+ * it takes the free route whatever `deps.route` says. `tenjin config` resolves
+ * a typed name against it before it writes anything.
+ */
+export async function requestIdentities(
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'timeoutMs'>,
+): Promise<DecisionOutcome<IdentitiesResponse>> {
+  return readDecision(
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildIdentitiesBody(),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+    IdentitiesResponseSchema,
+  );
 }
 
 /** Why a call from a spec stopped before anything was signed: the input did
@@ -1035,6 +1595,9 @@ export interface SpecOutcome {
   reason?: UnpaidReason;
   httpStatus?: number;
   ms?: number;
+  /** The path that made the call, when it was not an ordinary request:
+   *  `swap`, a native search or fetch answered in place. */
+  via?: 'swap';
 }
 
 /**
@@ -1097,6 +1660,7 @@ export function buildOutcomeBody(
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     ...(spec.httpStatus !== undefined ? { httpStatus: spec.httpStatus } : {}),
     ...(spec.ms !== undefined ? { ms: Math.max(0, Math.round(spec.ms)) } : {}),
+    ...(spec.via !== undefined ? { via: spec.via } : {}),
   };
 }
 
@@ -1168,16 +1732,16 @@ function readDecision<T extends z.ZodTypeAny>(
 
 /** A hook or tool answer, read, with each offer this build cannot run taken
  *  out ({@link withoutUnmet}). */
-function readOffer(
+function readOffer<R extends HookResponse | ToolResponse>(
   response: HttpResult,
-  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
-): DecisionOutcome<HookResponse | ToolResponse> {
-  const read = readDecision<z.ZodType<HookResponse | ToolResponse>>(response, schema);
+  schema: z.ZodType<R>,
+): DecisionOutcome<R> {
+  const read = readDecision(response, schema);
   if (read.status !== 'decided') return read;
   const { decision, skipped } = withoutUnmet(read.decision.decision);
   return {
     ...read,
-    decision: { ...read.decision, decision } as HookResponse | ToolResponse,
+    decision: { ...read.decision, decision },
     ...(skipped.length > 0 ? { skipped } : {}),
   };
 }

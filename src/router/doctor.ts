@@ -32,13 +32,7 @@ import {
 import { claudeInstallAt, settingsInstallPaths } from './claude-install';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
-import {
-  MAX_CHANNEL_DEPOSIT_ATOMIC,
-  ROUTING_FEE_CEILING_ATOMIC,
-  SUGGESTED_FUND_USD,
-  unpaid,
-  usd,
-} from './fee';
+import { SUGGESTED_FUND_USD, unpaid, usd } from './fee';
 import { NEW_SESSION_STEP, pluginProof, projectInstallHere } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -1352,7 +1346,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `the router's quote, paid only when it is at most $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call, from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: 'can cover the standard fee',
     };
   }
   const why = v.reason;
@@ -1361,7 +1355,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'warn',
       required: false,
-      detail: `${WALLET_REASONS[why as keyof typeof WALLET_REASONS].reason}, so Tenjin is not routing calls`,
+      detail: WALLET_REASONS[why as keyof typeof WALLET_REASONS].reason,
       fix: v.fix,
     };
   }
@@ -1377,7 +1371,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
     name,
     status: 'warn',
     required: false,
-    detail: `${u?.reason ?? v.detail}, so Tenjin is not routing calls`,
+    detail: why === 'wallet_low' ? 'balance too low for the standard fee' : (u?.reason ?? v.detail),
     fix: fixes[why] ?? u?.fix ?? v.fix,
   };
 }

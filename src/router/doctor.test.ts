@@ -111,8 +111,7 @@ describe('routingFeeRow', () => {
       name: 'routing fee',
       status: 'ok',
       required: false,
-      detail:
-        "the router's quote, paid only when it is at most $0.003 a call, from funds set aside up to $0.25 at a time; deposits count against the spend limits",
+      detail: 'can cover the standard fee',
     };
     expect(routingFeeRow({ canPayRouting: routing(READY) }, 'tenjin.sh')).toEqual(ok);
     expect(
@@ -138,31 +137,31 @@ describe('routingFeeRow', () => {
     [
       'wallet_low',
       routing(READY, { balanceAtomic: 20_000n }),
-      'the wallet holds less than the $0.013 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+      'balance too low for the standard fee',
       'Add funds with `tenjin fund 5`.',
     ],
     [
       'no_wallet',
       routing(canSign({ envKey: 'absent', walletFile: 'absent' })),
-      'this machine has no wallet, so Tenjin is not routing calls',
+      'this machine has no wallet',
       'Run `tenjin wallet create`, then `tenjin fund 5`.',
     ],
     [
       'limit_below_deposit',
       routing(READY, { depositRefusal: 'limit_below_deposit' }),
-      'the per-call spend limit cannot cover the routing fee or its deposit, so Tenjin is not routing calls',
+      'the per-call spend limit cannot cover the routing fee or its deposit',
       'Raise it with `tenjin config set maxAutoSpend 0.25`.',
     ],
     [
       'budget_reached',
       routing(READY, { feeRefusal: 'budget_reached' }),
-      "today's spend limit is used up, so Tenjin is not routing calls",
+      "today's spend limit is used up",
       'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     ],
     [
       'not_allowlisted',
       routing(READY, { feeRefusal: 'not_allowlisted' }),
-      'allowlistCreators does not include the router, so Tenjin is not routing calls',
+      'allowlistCreators does not include the router',
       'Add tenjin.sh to allowlistCreators, or clear the allowlist.',
     ],
   ])('names %s in today’s words and fix', (_why, verdict, detail, fix) => {
@@ -183,9 +182,7 @@ describe('routingFeeRow', () => {
   ])('gives a wallet that cannot sign (%s) the person fix', (reason) => {
     const row = routingFeeRow({ canPayRouting: routing(blockedSign(reason)) }, 'tenjin.sh');
     expect(row.status).toBe('warn');
-    expect(row.detail).toBe(
-      `${WALLET_REASONS[reason as keyof typeof WALLET_REASONS].reason}, so Tenjin is not routing calls`,
-    );
+    expect(row.detail).toBe(`${WALLET_REASONS[reason as keyof typeof WALLET_REASONS].reason}`);
     expect(row.fix).toBe(WALLET_REASONS[reason as keyof typeof WALLET_REASONS].fix);
     expectPersonFix(row.fix);
   });
@@ -660,8 +657,7 @@ describe('runRouterDoctor, with its seams injected', () => {
     const act = checks.filter((c) => c.status !== 'ok' && c.checked !== false);
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
-      detail:
-        'the wallet holds less than the $0.013 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+      detail: 'balance too low for the standard fee',
       fix: 'Add funds with `tenjin fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(

@@ -9,10 +9,15 @@ import {
   buildOutcomeBody,
   buildToolBody,
   buildToolSpecBody,
+  buildIdentitiesBody,
+  buildRefusedBody,
+  buildWarmBody,
   acceptsFor,
   CLIENT_ACCEPTS,
+  isWarmAnswer,
   MAX_SPEC_TIMEOUT_S,
   parseForTests,
+  parseIdentities,
   REQUIRES_UNMET,
   unmetRequires,
   withoutUnmet,
@@ -23,6 +28,8 @@ import {
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
+import { personalSettings } from './settings';
+import type { WireSettings } from './settings-wire';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, UNPAID_GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
@@ -247,6 +254,54 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  /**
+   * THE BACKGROUND TOP-UP'S CARRIER: the paid route's `warm`
+   * call, byte for byte, and its answer, which carries no decision. A router
+   * without the form answers anything else, which the top-up reads as absent.
+   */
+  it('sends warm byte for byte, and reads its answer and nothing else as warm', () => {
+    // What the top-up really sends: this build's accepts, `tolerant` included,
+    // so the answer carries `honored`.
+    const canonical = fixture('wire-warm-request.json');
+    expect(buildWarmBody({ accepts: acceptsFor(false), harness: 'claude' })).toEqual(canonical);
+    expect(buildWarmBody()).toEqual({ schemaVersion: 1, warm: true });
+    expect(JSON.stringify(canonical)).not.toMatch(/billing|admission|payment/i);
+    const answer = fixture('wire-warm.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'warm', 'accepts', 'harness']);
+    expect(isWarmAnswer(answer)).toBe(true);
+    expect(isWarmAnswer({ ...answer, surprise: 1 })).toBe(true);
+    expect(isWarmAnswer({ ...answer, warm: false })).toBe(false);
+    expect(isWarmAnswer(fixture('wire-hook-native.json'))).toBe(false);
+    expect(isWarmAnswer({ error: { code: 'bad_request', message: 'warm' } })).toBe(false);
+    // A warm answer is no decision on either call.
+    expect(parseForTests('hook', answer).success).toBe(false);
+    expect(parseForTests('tool', answer).success).toBe(false);
+  });
+
+  /**
+   * THE TOLERANT EXCHANGE: what this build sends for a browse row's id, and
+   * the answer only a `tolerant` client gets, with `honored` and the spec's
+   * `requires`. The reader keeps what it knows and drops `honored`.
+   */
+  it('sends the tolerant by-id request byte for byte, and reads its answer with requires kept', () => {
+    const canonical = fixture('wire-tool-request-by-id-tolerant.json');
+    expect(
+      buildToolSpecBody({
+        tool: canonical.tool as string,
+        accepts: acceptsFor(false),
+        harness: 'claude',
+      }),
+    ).toEqual(canonical);
+    const answer = fixture('wire-lookup-spec-tolerant.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'tool', 'accepts', 'harness']);
+    const parsed = parseForTests('tool', answer);
+    expect(parsed.success).toBe(true);
+    const read = parsed.data as { honored?: unknown; decision: { spec: ToolSpec } };
+    expect(read).not.toHaveProperty('honored');
+    expect(read.decision.spec.requires).toEqual(['jobs']);
+    expect(unmetRequires(read.decision.spec.requires)).toEqual([]);
+  });
+
   it('keeps the selected free tool beside its query, byte for byte', () => {
     const canonical = fixture('wire-tool-request-free-query.json');
     expect(
@@ -389,6 +444,9 @@ describe('the request bodies', () => {
         harness: 'claude',
         improve: canonical.improve === true,
         budgetMs: canonical.budgetMs as number,
+        ...(canonical.settings !== undefined
+          ? { settings: canonical.settings as WireSettings }
+          : {}),
       });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
@@ -403,8 +461,18 @@ describe('the request bodies', () => {
               ...(typeof canonical.query === 'string' ? { query: canonical.query } : {}),
               accepts,
               harness: 'claude',
+              ...(canonical.settings !== undefined
+                ? { settings: canonical.settings as WireSettings }
+                : {}),
             })
-          : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
+          : buildToolBody({
+              query: canonical.query as string,
+              accepts,
+              harness: 'claude',
+              ...(canonical.settings !== undefined
+                ? { settings: canonical.settings as WireSettings }
+                : {}),
+            });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
     const browse = fixture('wire-browse-request.json');
@@ -419,6 +487,7 @@ describe('the request bodies', () => {
       'wire-outcome-request.json',
       'wire-outcome-unpaid.json',
       'wire-outcome-ignored.json',
+      'wire-outcome-via.json',
     ]) {
       const canonical = fixture(name);
       const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
@@ -440,9 +509,14 @@ describe('the request bodies', () => {
       'wire-browse-request.json',
       'wire-tool-request-by-id.json',
       'wire-hook-request-harness.json',
+      'wire-tool-request-by-id-tolerant.json',
       'wire-hook-request-improve.json',
       'wire-hook-request-quoted.json',
       'wire-forget-request.json',
+      'wire-hook-request-settings.json',
+      'wire-tool-request-by-id-settings.json',
+      'wire-browse-request-settings.json',
+      'wire-identities-request.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -928,6 +1002,8 @@ describe('every answer payload on disk', () => {
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+    // One decided under the user's rules reads the same: its echoed hash is unread.
+    expect(parseForTests('browse', fixture('wire-browse-settings.json')).success).toBe(true);
   });
 });
 
@@ -1075,3 +1151,269 @@ describe('the hook time budget', () => {
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });
+
+/**
+ * THE USER'S SETTINGS ON THE WIRE (plan 36). Every routing form carries the
+ * `settings` field with `settings` in `accepts`; an answer the server decided
+ * under them echoes their hash, which the check before every call compares
+ * with the rules saved now. The field is built
+ * from the saved config by the one resolver, and its hash is the CLI's alone.
+ */
+describe('the settings field', () => {
+  const sent = fixture('wire-hook-request-settings.json');
+  const settings = sent.settings as { hash: string };
+  const saved = {
+    policy: { version: 1, ...(sent.settings as { policy: object }).policy },
+    nativeReplacement: 'when-routed',
+    nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+  };
+
+  it('is what the resolver builds from the saved rules, hash and all', () => {
+    const { wire } = personalSettings(saved);
+    expect(wire).toEqual({ status: 'ok', hasRules: true, settings: sent.settings });
+  });
+
+  it('rides every routing form byte for byte, beside the packet and never in it', () => {
+    const { wire } = personalSettings(saved);
+    if (wire.status !== 'ok') throw new Error('unreadable');
+    expect(
+      buildHookBody(sent.packet as Packet, {
+        sessionId: sent.sessionId as string,
+        accepts: acceptsFor(false, true),
+        harness: 'claude',
+        budgetMs: sent.budgetMs as number,
+        settings: wire.settings,
+      }),
+    ).toEqual(sent);
+    const byId = fixture('wire-tool-request-by-id-settings.json');
+    expect(
+      buildToolSpecBody({
+        tool: byId.tool as string,
+        accepts: [...acceptsFor(false, true), 'free-query'],
+        harness: 'claude',
+        settings: wire.settings,
+      }),
+    ).toEqual(byId);
+    const browse = fixture('wire-browse-request-settings.json');
+    expect(
+      buildBrowseBody({
+        browse: browse.browse as string,
+        accepts: acceptsFor(false, true),
+        harness: 'claude',
+        settings: wire.settings,
+      }),
+    ).toEqual(browse);
+    expect(
+      buildToolBody({
+        query: 'btc price',
+        accepts: acceptsFor(false, true),
+        settings: wire.settings,
+      }),
+    ).toMatchObject({ settings: wire.settings, accepts: expect.arrayContaining(['settings']) });
+  });
+
+  it('asks for the identities with the free form, and reads their answer', () => {
+    expect(buildIdentitiesBody()).toEqual(fixture('wire-identities-request.json'));
+    expect(parseIdentities(fixture('wire-identities.json'))).toMatchObject({
+      sources: [{ id: 'tenjin', label: "Tenjin's tools" }],
+      services: expect.arrayContaining([
+        expect.objectContaining({ id: 'exa-search', providers: ['exa'], task: 'web research' }),
+      ]),
+    });
+  });
+
+  it.each([
+    ['hook', 'wire-hook-execute-settings.json'],
+    ['hook', 'wire-hook-execute-bound.json'],
+    ['tool', 'wire-lookup-spec-settings.json'],
+  ] as const)('reads the echoed hash on a %s answer (%s)', (kind, name) => {
+    const read = parseForTests(kind, fixture(name));
+    expect(read.success).toBe(true);
+    expect(read.data).toMatchObject({ settingsHash: settings.hash });
+  });
+
+  it('reads `bound` as the offer id and the input, beside an offer whose spec it fills', () => {
+    const answer = fixture('wire-hook-execute-bound.json');
+    const read = parseForTests('hook', answer) as {
+      success: boolean;
+      data?: {
+        decision: { id: string; bound?: unknown; specs?: { id: string; holds?: unknown }[] };
+      };
+    };
+    expect(read.success).toBe(true);
+    const decision = read.data!.decision;
+    expect(decision.bound).toEqual({ id: decision.id, input: { query: 'btc eth price today' } });
+    expect(decision.specs?.map((spec) => spec.id)).toContain(decision.id);
+    // A bound whose input is not an object is a protocol error, never read.
+    const broken = structuredClone(answer) as { decision: { bound: unknown } };
+    broken.decision.bound = { id: decision.id, input: 'btc' };
+    expect(parseForTests('hook', broken).success).toBe(false);
+  });
+});
+
+/**
+ * THE USER'S OWN ACCOUNTS ON THE WIRE (plan 37). `mcp` rides with `settings`;
+ * an account the settings' `sources` names can lead an offer, carrying its
+ * `source` and the MCP call in place of a price and a URL; a refusal asks
+ * again with `{refused}`; and the identities read lists the accounts this
+ * client can connect.
+ */
+describe('the accounts wire', () => {
+  const settings = fixture('wire-hook-request-account.json').settings as WireSettings;
+
+  it('sends mcp beside settings, and the connected accounts in their sources', async () => {
+    expect(unmetRequires(['mcp'])).toEqual([]);
+    // The fixture's settings are what a machine with Apify, fal and Firecrawl
+    // connected sends: each descriptor saved and its vault here, and the
+    // preference connecting Apify wrote.
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const data = await mkdtemp(join(tmpdir(), 'tenjin-wire-accounts-'));
+    const accounts = [
+      { id: 'apify', mcpUrl: 'https://mcp.apify.com' },
+      { id: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay' },
+      { id: 'firecrawl', mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth' },
+    ];
+    try {
+      await mkdir(join(data, 'sources'));
+      for (const { id } of accounts) await writeFile(join(data, 'sources', `${id}.json`), '{}');
+      const router = {
+        policy: { version: 1, ...settings.policy },
+        sources: [
+          ...accounts.map((account) => ({ ...account, label: account.id, mapped: true })),
+          // An address connected by its URL alone is never named to the router.
+          { id: 'mcp-example-test', mcpUrl: 'https://mcp.example.test/mcp' },
+        ],
+      };
+      await writeFile(join(data, 'sources', 'mcp-example-test.json'), '{}');
+      expect(personalSettings(router, data).wire).toMatchObject({ status: 'ok', settings });
+      // Without their vaults, the same descriptors connect nothing.
+      for (const { id } of accounts) await rm(join(data, 'sources', `${id}.json`));
+      const bare = personalSettings(router, data).wire;
+      expect(bare.status === 'ok' && bare.settings.sources).toEqual(['tenjin']);
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an account lead alone, with its source and its call', () => {
+    const read = parseForTests('hook', fixture('wire-hook-execute-account.json')) as {
+      success: boolean;
+      data?: { decision: Record<string, unknown> & { specs: Record<string, unknown>[] } };
+    };
+    expect(read.success).toBe(true);
+    const decision = read.data!.decision;
+    expect(decision.endpoint).toBeUndefined();
+    expect(decision.providerPriceAtomic).toBe('0');
+    expect(decision.specs).toHaveLength(1);
+    expect(decision.specs[0]).toMatchObject({
+      source: 'apify',
+      requires: ['mcp'],
+      mcp: { tool: 'call-actor', next: { tool: 'get-dataset-items' } },
+    });
+    expect(decision.specs[0]).not.toHaveProperty('priceAtomic');
+    expect(decision).not.toHaveProperty('fallback');
+  });
+
+  it('reads an account lead from a server that still marks it verified, either way', () => {
+    // The check is gone (owner, 2026-11-13): connected is used. A server
+    // that still sends the old field must not lose the offer.
+    for (const verified of [true, false]) {
+      const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+      spec(answer.decision as Json).verified = verified;
+      const read = parseForTests('hook', answer) as {
+        success: boolean;
+        data?: { decision: { specs: Record<string, unknown>[] } };
+      };
+      expect(read.success).toBe(true);
+      expect(read.data!.decision.specs[0]).not.toHaveProperty('verified');
+    }
+  });
+
+  it.each([
+    ['an endpoint on an account lead', (d: Json) => (d.endpoint = 'https://mcp.apify.com')],
+    ['a balance price on an account lead', (d: Json) => (d.providerPriceAtomic = '1000')],
+    [
+      'a poll that repeats the call that bills',
+      (d: Json) => ((((spec(d).mcp as Json).next as Json).poll as Json).tool = 'call-actor'),
+    ],
+    ['an account spec without requires mcp', (d: Json) => (spec(d).requires = [])],
+    ['an account spec on tenjin', (d: Json) => (spec(d).source = 'tenjin')],
+  ])('refuses %s', (_, breakIt) => {
+    const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+    breakIt(answer.decision as Json);
+    expect(parseForTests('hook', answer).success).toBe(false);
+  });
+
+  it('reads a spec on an account, picked for a query or named by its id', () => {
+    const picked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
+    expect(picked.success).toBe(true);
+    expect(picked.data).toMatchObject({
+      decision: { action: 'spec', spec: { source: 'fal', requires: ['mcp'] } },
+    });
+    const named = parseForTests('tool', fixture('wire-lookup-spec-account-by-id.json'));
+    expect(named.data).toMatchObject({
+      decision: { spec: { capabilityId: 'fal.flux-pro-ultra' } },
+    });
+  });
+
+  /**
+   * THE RE-ASK (review round 1): after an account refused an offer, the
+   * client's usual envelope with `refused` and no query, answered as a query
+   * is, with the settings hash the client sent.
+   */
+  it('builds the re-ask after a refusal byte for byte, and reads both its answers', () => {
+    const canonical = fixture('wire-refused-request.json');
+    const built = buildRefusedBody({
+      refused: canonical.refused as string,
+      accepts: canonical.accepts as string[],
+      harness: canonical.harness as 'claude',
+      settings: canonical.settings as WireSettings,
+    });
+    expect(JSON.stringify(built)).toBe(JSON.stringify(canonical));
+    const hash = (canonical.settings as WireSettings).hash;
+    const offer = parseForTests('tool', fixture('wire-refused-offer.json')) as {
+      success: boolean;
+      data?: { decision: Json & { spec: Json }; settingsHash?: string };
+    };
+    expect(offer.success).toBe(true);
+    expect(offer.data!.decision).toMatchObject({
+      action: 'spec',
+      spec: { capabilityId: 'munition-scrape', priceAtomic: '15000' },
+    });
+    expect(offer.data!.decision.spec).not.toHaveProperty('source');
+    expect(offer.data!.settingsHash).toBe(hash);
+    const native = parseForTests('tool', fixture('wire-refused-native.json')) as {
+      success: boolean;
+      data?: { decision: Json };
+    };
+    expect(native.data!.decision).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: 'native_sufficient' },
+    });
+  });
+
+  it('reads the accounts this client can connect from the identities read', () => {
+    const read = parseIdentities(fixture('wire-identities-mcp.json'));
+    expect(read).toBeDefined();
+    const sources = read!.sources;
+    expect(sources.find(({ id }) => id === 'tenjin')?.connectable).toBeUndefined();
+    expect(sources.find(({ id }) => id === 'apify')?.connectable).toMatchObject({
+      mcpUrl: 'https://mcp.apify.com',
+      signIn: ['oauth', 'key'],
+      keyScheme: 'Bearer',
+      expectTools: ['call-actor', 'get-actor-run', 'get-dataset-items'],
+    });
+    const broken = structuredClone(fixture('wire-identities-mcp.json')) as {
+      sources: Json[];
+    };
+    broken.sources[0]!.connectable = sources.find(({ id }) => id === 'apify')!.connectable;
+    expect(parseIdentities(broken)).toBeUndefined();
+  });
+});
+
+type Json = Record<string, unknown>;
+
+function spec(decision: Json): Json {
+  return (decision.specs as Json[])[0]!;
+}

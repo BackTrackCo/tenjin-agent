@@ -1,6 +1,6 @@
 import { DEFAULT_MAX_AUTO_SPEND, DEFAULT_SESSION_BUDGET } from '../lib/config';
 import { toMoney } from '../lib/money';
-import { MAX_CHANNEL_DEPOSIT_ATOMIC, usd } from './fee';
+import { usd } from './fee';
 
 /**
  * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: how much the
@@ -53,13 +53,9 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
   };
 }
 
-/**
- * Setup states the current price; payment checks enforce the ceiling in fee.ts.
- * One line with every fee fact: the price per call, that tool charges are
- * separate, the set-aside and its ceiling, and that it is counted inside the
- * limits the question sets.
- */
-export const ROUTING_FEE_TERMS = `Routing costs $0.001 a call; tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for it, counted in these limits.`;
+/** The fee terms approved with either spending-limit choice. */
+export const ROUTING_FEE_TERMS =
+  'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits.';
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either choice approves this.';

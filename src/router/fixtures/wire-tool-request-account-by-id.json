@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "tool": "fal.flux-pro-ultra",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:06e2c79f2d8d7eb6fb8f4df109007f446a39c273606b03f7d00a1edfc2874c59",
+    "policy": {},
+    "sources": ["tenjin", "fal"]
+  }
+}

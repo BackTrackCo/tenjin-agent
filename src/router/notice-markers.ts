@@ -22,7 +22,7 @@ import { PRIVATE, sweep, writePrivate } from './store-files';
  * Once per (session, reason), with a clear line. A wallet that
  * goes from "no passphrase" to "wrong passphrase" is news twice; the same
  * reason on every prompt is news once. Once a paid call succeeds after a
- * wallet-class reason was told, the session hears that it cleared, once
+ * wallet-class reason was told, the session hears paid routing recovered, once
  * ({@link noticeCleared}), and the reason's marker goes with it, so a relapse is
  * told again.
  *
@@ -102,9 +102,9 @@ export async function noticeFor(
 }
 
 /**
- * THE CLEAR LINE, after a paid call succeeded: `Tenjin wallet unlocked.` or
- * `Tenjin wallet funded.` when the reason told last in this session was a
- * wallet-class one, else null.
+ * THE CLEAR LINE, only after a completed signed routing payment: paid routing
+ * is working again when the reason told last was wallet-class, else null.
+ * A free answer or background deposit alone must not call this.
  *
  * CLAIM BY UNLINK. Two legs can finish paid calls at once and both read the
  * same `.current`; only the one that takes that reason's marker away returns
