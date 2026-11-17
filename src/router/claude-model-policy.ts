@@ -142,6 +142,11 @@ export function claudeDeepSeekWorkerSettingsEnv(
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(MODEL_OUTPUT_TOKENS),
     // Native's explicit false disable flag otherwise forces memory on ahead of settings.
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    // A native subagent uses the parent's MCP servers as they are and waits for none.
+    // Without this the worker's first turn waits for the slowest server it is still
+    // starting; with it, a server that connects later announces its tools and tool
+    // search loads them, as in a session whose servers are still connecting.
+    CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0',
     TENJIN_MODEL_WORKER: '1',
     ANTHROPIC_MAX_RETRIES: '0',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
