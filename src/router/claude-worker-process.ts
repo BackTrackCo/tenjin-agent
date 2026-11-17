@@ -26,6 +26,14 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
   }> = [];
   const folders: string[] = [];
   let closing = false;
+  let childExited = false;
+  let markExit!: () => void;
+  const exited = new Promise<void>((resolve) => {
+    markExit = () => {
+      childExited = true;
+      resolve();
+    };
+  });
   /**
    * The child's whole process group (it leads one of its own): Claude Code, the MCP
    * servers and the commands it started. Signalled after the child itself, so nothing
@@ -84,6 +92,9 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
     return { successful: successful.every(Boolean) };
   };
   return {
+    /** The native child exited or could not be spawned, before stdio cleanup. */
+    exited,
+    hasExited: () => childExited,
     /** The settings, in a file only this user can read: its path, for the SDK's `settings`. */
     settingsFile(settings: Settings): string {
       if (closing) throw new Error('Claude worker is already draining');
@@ -120,6 +131,7 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
       child.stderr.resume();
       let isClosed = false,
         failed = false;
+      child.once('exit', markExit);
       const closed = new Promise<void>((resolve) => {
         child.once('close', () => {
           isClosed = true;
@@ -127,6 +139,7 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
         });
         child.once('error', () => {
           if (child.pid === undefined) {
+            markExit();
             failed = true;
             isClosed = true;
             resolve();

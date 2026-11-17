@@ -1386,6 +1386,55 @@ it('keeps the initialized worker input and its model and Exa bridge closed befor
   expect(query).toHaveBeenCalledOnce();
 });
 
+it('reports a warm child that exits without ever releasing an assignment', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 42,
+    exitCode: 1,
+    signalCode: null,
+    killed: false,
+    kill: vi.fn(() => true),
+  });
+  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  let initialized!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    initialized = resolve;
+  });
+  sdkResult({ subtype: 'success', result: 'unexpected' });
+  const sdk = vi.mocked(query).getMockImplementation()!;
+  vi.mocked(query).mockImplementation((call) => {
+    call.options?.spawnClaudeCodeProcess?.({
+      command: '/fixture/claude',
+      args: ['--fixture'],
+      cwd: '/repo',
+      env: {},
+      signal: new AbortController().signal,
+    });
+    const instance = sdk(call);
+    const account = instance.accountInfo;
+    instance.accountInfo = async () => {
+      const result = await account();
+      initialized();
+      return result;
+    };
+    return instance;
+  });
+  const onRelease = vi.fn();
+  const run = runModelWorker(job, {
+    ...options(),
+    early: { accept: new Promise(() => {}), onRelease },
+  });
+  await Promise.race([ready, run]);
+
+  child.emit('exit', 1, null);
+  child.emit('close', 1, null);
+  await expect(run).rejects.toThrow(/exited before its assignment/);
+  expect(onRelease).not.toHaveBeenCalled();
+  expect(native.promptMessages).toEqual([]);
+});
+
 it.each(['settings', 'consent', 'binary', 'agent definition'] as const)(
   'withholds the assignment when the %s changes after warm initialization',
   async (changed) => {

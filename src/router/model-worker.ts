@@ -1135,10 +1135,18 @@ async function runQualifiedWorker(
       stopAuthentication = () => reject(controller.signal.reason);
     });
     controller.signal.addEventListener('abort', stopAuthentication, { once: true });
+    const stoppedBeforeAssignment = early
+      ? Promise.race([
+          authenticationStopped,
+          nativeProcess.exited.then(() => {
+            throw new Error('The warm Claude worker exited before its assignment');
+          }),
+        ])
+      : authenticationStopped;
     try {
       // accountInfo is the maintained SDK initialize response, before a task is
       // sent. A saved gateway can override env/helper auth without an env flag.
-      const account = await Promise.race([worker.accountInfo(), authenticationStopped]);
+      const account = await Promise.race([worker.accountInfo(), stoppedBeforeAssignment]);
       if (
         account?.apiProvider !== 'firstParty' ||
         !['apiKeyHelper', 'ANTHROPIC_API_KEY'].includes(account.apiKeySource ?? '') ||
@@ -1155,7 +1163,7 @@ async function runQualifiedWorker(
         // SDK initialization can finish before an assignment is sent. Release inference
         // only after the accept path has won the job and this child still fits its scope.
         diagnostics.mark('earlyReady');
-        const accept = await Promise.race([early.accept, authenticationStopped]);
+        const accept = await Promise.race([early.accept, stoppedBeforeAssignment]);
         assertCurrentMode();
         const current = await assertCurrentWorkspace();
         const selected = await readClaudeCodeCached(process.env, job.root);
@@ -1184,6 +1192,8 @@ async function runQualifiedWorker(
         )
           throw new Error('The warm Claude worker no longer matches the accepted job');
         controller.signal.throwIfAborted();
+        if (nativeProcess.hasExited())
+          throw new Error('The warm Claude worker exited before its assignment');
         assertCurrentMode();
         job = accept.job;
         web.job = accept.job;
