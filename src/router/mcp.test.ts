@@ -229,7 +229,11 @@ describe('the router MCP server', () => {
       ]);
       const activity = tools.tools.find((tool) => tool.name === 'subagent_activity')!;
       expect(activity.annotations?.readOnlyHint).toBe(true);
-      expect(Object.keys(activity.inputSchema.properties ?? {})).toEqual(['offer_id', 'follow']);
+      expect(Object.keys(activity.inputSchema.properties ?? {})).toEqual([
+        'offer_id',
+        'follow',
+        'after',
+      ]);
       expect(activity.inputSchema).toMatchObject({
         type: 'object',
         required: ['offer_id'],
