@@ -72,6 +72,12 @@ describe('probeRouter on the paid route', () => {
       'quotes $0.250001 a routing call, above this CLI’s current routing limit',
     );
     expect(await probe(answer(402))).toMatchObject({ status: 'warn' });
+    // An empty header, or one that does not decode, is no quote either: never a throw.
+    for (const header of ['', 'not a payment header']) {
+      expect(await probe(answer(402, { 'PAYMENT-REQUIRED': header }))).toMatchObject({
+        status: 'warn',
+      });
+    }
   });
 
   it('fails on the paid route switched off or erroring', async () => {
