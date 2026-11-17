@@ -2066,7 +2066,10 @@ test("an accept call still being written draws nothing of the host's, and its gr
   expect(await row({}, { isRunning: false, output: 'Invalid input' })).toBe(
     'plugin:tenjin:router - subagent (MCP)',
   );
-  expect(await row({}, { isExpanded: true })).toBe('plugin:tenjin:router - subagent (MCP)');
+  // A row of a folded run the mod unfolds reads as expanded too: it draws nothing either
+  // (live on alpha.66 the host's `plugin:` row showed for a split second from there).
+  expect(await row({}, { isExpanded: true })).toBe('');
+  expect(await row({ offer_id: OFFER.slice(0, 8) }, { isExpanded: true })).toBe('');
   const group = async (input: unknown) => {
     unfolded = undefined;
     const ui = await $.ui.mount({
@@ -2610,6 +2613,9 @@ test("a DeepSeek worker's own accept passes through with no row or viewer", asyn
 // WebFetch, a Bash grep, and the answer.
 test('the live sequence draws each call as Claude Code does, in the worker’s order, and nothing after the answer', async ($, on) => {
   const f = setup($, on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine row'] }),
+  );
   let release: () => void = () => undefined;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -2634,12 +2640,14 @@ test('the live sequence draws each call as Claude Code does, in the worker’s o
     row('web', 'm2', {
       name: 'WebSearch',
       target: 'pnpm newest stable release',
+      via: 'Exa search',
       figures: { durationSeconds: 4.4 },
       outputPreview: 'Web search results for query: "pnpm newest stable release"',
     }),
     row('fetch', 'm3', {
       name: 'WebFetch',
       target: 'https://pnpm.io/blog/tags/release',
+      via: 'Exa page read',
       inputSummary: '{"url":"[text: 33 chars]","prompt":"[text: 40 chars]"}',
       figures: { bytes: 48_213, code: 200, codeText: 'OK', durationMs: 5100 },
       outputPreview: 'The latest release is **"pnpm 12.21.0"**.',
@@ -2695,6 +2703,28 @@ test('the live sequence draws each call as Claude Code does, in the worker’s o
       durationMs: 5100,
     },
   ]);
+  // A call a router tool served names it, as the router's rows do; the host's own line
+  // stays under it. Any other call's row is the host's.
+  const drawn = async (chunks: TurnStepChunk[], input: unknown) => {
+    const call = chunks.find((c) => c.kind === 'tool');
+    if (call?.kind !== 'tool') return undefined;
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props: { ...toolRow(call.id, call.name, input, 'done'), isRunning: false },
+    });
+    const lines = (await shownLines(ui)).join('');
+    await ui.unmount();
+    return lines;
+  };
+  expect(await drawn(steps[1]!, { query: 'pnpm newest stable release' })).toBe(
+    '⏺Exa search("pnpm newest stable release")',
+  );
+  expect(await drawn(steps[2]!, { url: 'https://pnpm.io/blog/tags/release' })).toBe(
+    '⏺Exa page read(https://pnpm.io/blog/tags/release)',
+  );
+  expect(await drawn(steps[0]!, { command: grep })).toBe('engine row');
   expect(shown(await next())).toEqual(['Bash']);
   f.state.rows = [];
   f.state.sequence = 9;

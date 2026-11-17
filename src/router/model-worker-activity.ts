@@ -54,6 +54,8 @@ export type ModelWorkerActivityRow = {
   target?: string;
   /** A web call's own figures from Claude Code's record, for the viewer's native line. */
   figures?: ModelWorkerActivityFigures;
+  /** The router tool that served the call (`Exa search`, `Exa page read`), as its rows name it. */
+  via?: string;
 };
 export type ModelWorkerActivityFigures = {
   bytes?: number;
@@ -345,6 +347,8 @@ export class ModelWorkerActivity {
   private listeners = new Set<() => void>();
   private holding = false;
   private held = false;
+  /** Calls a router tool served, by row id, until their rows have settled. */
+  private servedBy = new Map<string, Pick<ModelWorkerActivityRow, 'via' | 'figures'>>();
   private readonly key: string;
   private readonly activationToken = Symbol();
 
@@ -551,6 +555,7 @@ export class ModelWorkerActivity {
               ? 'Tool reported an error; inspect its native history for details.'
               : toolPreview(block.content);
           if (block.is_error !== true) Object.assign(row, figuresOf(row.name, record));
+          this.applyServed(row);
           row.sequence = ++this.value.sequence;
           this.boundSnapshot();
         }
@@ -655,8 +660,52 @@ export class ModelWorkerActivity {
   }
 
   private add(row: Omit<ModelWorkerActivityRow, 'sequence'>): void {
-    this.value.rows.push({ ...row, sequence: ++this.value.sequence });
+    const added = { ...row, sequence: ++this.value.sequence };
+    this.applyServed(added);
+    this.value.rows.push(added);
     this.boundSnapshot();
+  }
+
+  /**
+   * A call a router tool served: a worker's WebSearch (Exa search, always), or a WebFetch
+   * whose local fetch failed and Exa page read stood in for (its figures are then Exa's
+   * page, not the failed fetch's). Display only; told by the worker's tool hooks, which
+   * may run before the call's result is seen.
+   */
+  served(
+    toolUseId: string,
+    via: string,
+    figures?: ModelWorkerActivityFigures,
+    generation = this.value.binding.generation,
+  ): void {
+    try {
+      if (!this.current(generation) || this.terminal() || toolUseId.length > 200) return;
+      const key = 'tool:' + canonicalHash(toolUseId);
+      this.servedBy.set(key, { via: preview(via).slice(0, 64), ...(figures ? { figures } : {}) });
+      if (this.servedBy.size > MAX_ROWS) this.servedBy.delete(this.servedBy.keys().next().value!);
+      const row = this.value.rows.find((row) => row.id === key && row.kind === 'tool');
+      if (row && this.applyServed(row)) {
+        row.sequence = ++this.value.sequence;
+        this.boundSnapshot();
+      }
+    } catch {
+      // Display only.
+    }
+  }
+
+  private applyServed(row: ModelWorkerActivityRow): boolean {
+    const served = this.servedBy.get(row.id);
+    if (!served) return false;
+    row.via = served.via;
+    if (served.figures) {
+      // The page Exa read is the call's result: the local fetch's failure is not shown.
+      row.figures = served.figures;
+      if (row.state === 'error') {
+        row.state = 'completed';
+        delete row.outputPreview;
+      }
+    }
+    return true;
   }
 
   private boundSnapshot(): void {

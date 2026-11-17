@@ -591,14 +591,17 @@ it('reads a page through Exa when the local WebFetch failed on the network, and 
   await configure();
   const { fetchImpl, seen } = network();
   const { job, transport, deps } = setup(fetchImpl);
+  const read: number[] = [];
   const context = await workerFetchFallback(
     {
       input: { url: 'https://x402.org', prompt: 'Summarize' },
       error: 'getaddrinfo ENOTFOUND x402.org',
     },
-    { ...deps, redact: (text) => text },
+    { ...deps, redact: (text) => text, onRead: (bytes) => read.push(bytes) },
   );
   expect(context).toContain('The whole page.');
+  // The worker's viewer is told the page Exa read stood in, and its size.
+  expect(read).toEqual([Buffer.byteLength('The whole page.')]);
   expect(seen.find((call) => call.url === EXA_CONTENTS && call.paid)?.body).toMatchObject({
     urls: ['https://x402.org'],
   });

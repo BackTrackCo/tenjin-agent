@@ -65,6 +65,8 @@ export type TenjinModelActivity = {
     lines?: number;
     /** A web call's URL or query, with the job's replacements already applied by the CLI. */
     target?: string;
+    /** The router tool that served the call (`Exa search`), as the router's rows name it. */
+    via?: string;
     /** A web call's own figures from Claude Code's record: never its content. */
     figures?: {
       bytes?: number;

@@ -99,6 +99,8 @@ type View = {
 const views = new Map<string, View>();
 /** The calls viewer steps made, by the id each step gave them, until each is answered. */
 const viewerCalls = new Map<string, { row: Row; input: Json }>();
+/** A viewer call a router tool served, by its id: its row names that tool (`Exa search`). */
+const servedCalls = new Map<string, string>();
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -438,6 +440,7 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
           ? { lines: Number(r.lines) }
           : {}),
         ...(typeof r.target === 'string' ? { target: clean(r.target, 1024) } : {}),
+        ...(short(r.via, 64) ? { via: clean(r.via, 64) } : {}),
         ...figuresOf(record(r.figures)),
         ...(typeof r.name === 'string' ? { name: clean(r.name, 120) } : {}),
         ...(typeof r.text === 'string' ? { text: clean(r.text) } : {}),
@@ -707,6 +710,8 @@ function blocksOf(rows: Row[], cwd: string, view: View) {
       const id = CALL_ID + row.id.replace(/[^A-Za-z0-9]/g, '').slice(-24);
       viewerCalls.set(id, { row, input });
       if (viewerCalls.size > 256) viewerCalls.delete(viewerCalls.keys().next().value!);
+      if (row.via) servedCalls.set(id, row.via);
+      if (servedCalls.size > 512) servedCalls.delete(servedCalls.keys().next().value!);
       blocks.push({ id, name: row.name, input });
       // Claude Code draws no row for a tool search, a native subagent's too.
     } else if (row.kind === 'tool' && row.name !== 'ToolSearch') say(callLine(row, cwd));
@@ -1839,6 +1844,20 @@ export function registerModelViewer(on: On): void {
   // engine's result block shows only where rows show in full (ctrl+o).
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const { tool, input, output, isInterrupted, isErrored } = e.props;
+    // A WORKER'S CALL A ROUTER TOOL SERVED names that tool, as the router's own rows do
+    // (`Exa search("q")`): in the worker nothing was replaced, Exa is what searched. Its
+    // result line under the row stays the host's own.
+    const via = servedCalls.get(e.props.tool_use_id);
+    if (via && (tool === 'WebSearch' || tool === 'WebFetch')) {
+      const given = record(input) ?? {};
+      const argument =
+        tool === 'WebSearch' ? '"' + String(given.query ?? '') + '"' : String(given.url ?? '');
+      return workerRow($.ui.resolve(e), {
+        state: e.props.isRunning ? 'running' : isErrored || isInterrupted ? 'error' : 'done',
+        name: via,
+        argument: clean(argument, 400),
+      });
+    }
     if (tool === ACCEPT) {
       const offerId = record(input)?.offer_id;
       if (!short(offerId) || !UUID.test(offerId)) {
@@ -1846,9 +1865,10 @@ export function registerModelViewer(on: On): void {
         // own row would stand here for that moment as `plugin:tenjin:router - subagent`,
         // between the offer row and the DeepSeek row. Nothing is drawn until the input
         // says which call it is. A cancel, a capture and a call with an answer keep the
-        // host's row.
+        // host's row. Also where the row reads as expanded: a folded run this mod unfolds
+        // (the ToolGroup hook below) hands its rows down expanded, so passing those on
+        // drew the host's row for that moment (live on alpha.66: `plugin:` for a split second).
         if (undecided(input) && output === undefined && !isErrored && !isInterrupted) {
-          if (e.props.isExpanded === true) return next(e);
           const { Box } = $.ui.resolve(e);
           return <Box display="none" />;
         }

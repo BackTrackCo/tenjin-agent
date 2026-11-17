@@ -554,3 +554,26 @@ it('keeps a web call’s URL or query for the local display and its record’s f
   f.activity.finish('unknown');
   expect(JSON.stringify(partialHandback(f.activity.snapshot()))).not.toContain('pnpm.io');
 });
+
+// The viewer names a worker call the router served by that tool, as the router's rows do.
+it('marks a call a router tool served, also when its hook runs before the call is seen', () => {
+  const f = fixture();
+  f.activity.running();
+  // Exa page read stood in for a fetch the site refused: its page, not the 403, is the result.
+  f.activity.observe(f.tool('fetch-one', 'WebFetch', { url: 'https://npmjs.com/next' }));
+  f.activity.served('fetch-one', 'Exa page read', { bytes: 23_400, code: 200, codeText: 'OK' });
+  f.activity.observe({
+    ...f.result('fetch-one', 'Request failed with status code 403'),
+    tool_use_result: { bytes: 0, code: 403, codeText: 'Forbidden', result: '', durationMs: 90 },
+  });
+  // A search's hook can be told before the activity has seen the call.
+  f.activity.served('search-one', 'Exa search');
+  f.activity.observe(f.tool('search-one', 'WebSearch', { query: 'next 16' }));
+  const [fetch, search] = f.activity.snapshot().rows;
+  expect(fetch).toMatchObject({
+    via: 'Exa page read',
+    state: 'completed',
+    figures: { bytes: 23_400, code: 200, codeText: 'OK' },
+  });
+  expect(search).toMatchObject({ via: 'Exa search' });
+});

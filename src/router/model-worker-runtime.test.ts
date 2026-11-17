@@ -2607,17 +2607,25 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
       { signal: new AbortController().signal },
     );
   });
+  const activity = { running: vi.fn(), observe: vi.fn(), served: vi.fn() };
   try {
     await runModelWorker(job, {
       ...options(),
       dataDir,
       transport: { toolCall } as unknown as ModelTransport,
       web: web as never,
+      activity,
     });
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
   expect(toolCall).toHaveBeenCalledWith(job, 'exa-contents', 1000n, expect.any(Function));
+  // The viewer names the fetch by the router tool that read the page, with its size.
+  expect(activity.served).toHaveBeenCalledWith('fetch-1', 'Exa page read', {
+    bytes: Buffer.byteLength('Read through Exa.'),
+    code: 200,
+    codeText: 'OK',
+  });
   expect(context).toMatchObject({
     hookSpecificOutput: {
       hookEventName: 'PostToolUseFailure',

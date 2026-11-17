@@ -4,6 +4,8 @@ import {
   answerWorkerWebSearch,
   workerFetchFallback,
   workerWebSearch,
+  WORKER_PAGE_READ_LABEL,
+  WORKER_SEARCH_LABEL,
   type WorkerFetchEvent,
   type WorkerRequest,
   type WorkerWebDeps,
@@ -188,6 +190,11 @@ export async function runModelWorker(
       observe: (message: unknown) => void;
       running: () => void;
       rescrub?: (redact: (text: string) => string) => void;
+      served?: (
+        toolUseId: string,
+        via: string,
+        figures?: { bytes: number; code: number; codeText: string },
+      ) => void;
     };
     permission: (
       tool: string,
@@ -430,8 +437,28 @@ async function runQualifiedWorker(
     ...(options.webIdentities ? { identities: options.webIdentities } : {}),
     signal: controller.signal,
   };
-  const fetchFallback = async (event: WorkerFetchEvent) =>
-    controller.signal.aborted ? null : workerFetchFallback(event, { ...web, redact: redactAll });
+  // The viewer names a call a router tool served by that tool, as the router's rows do: a
+  // WebSearch is always Exa search here, a WebFetch only when Exa page read stood in.
+  const served = (id: unknown, via: string, bytes?: number) => {
+    try {
+      if (typeof id === 'string')
+        options.activity?.served?.(
+          id,
+          via,
+          bytes === undefined ? undefined : { bytes, code: 200, codeText: 'OK' },
+        );
+    } catch {
+      // Display only.
+    }
+  };
+  const fetchFallback = async (event: WorkerFetchEvent, id: unknown) =>
+    controller.signal.aborted
+      ? null
+      : workerFetchFallback(event, {
+          ...web,
+          redact: redactAll,
+          onRead: (bytes) => served(id, WORKER_PAGE_READ_LABEL, bytes),
+        });
   const bridge = createServer((req, res) => {
     const handle = async () => {
       try {
@@ -879,13 +906,15 @@ async function runQualifiedWorker(
               hooks: [
                 async (input) => {
                   if (input.hook_event_name !== 'PostToolUse') return {};
+                  if (input.tool_name === 'WebSearch')
+                    served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
                     repeats.observe(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch'
-                      ? await fetchFallback({
-                          input: input.tool_input,
-                          response: input.tool_response,
-                        })
+                      ? await fetchFallback(
+                          { input: input.tool_input, response: input.tool_response },
+                          input.tool_use_id,
+                        )
                       : null,
                   ].filter((text) => typeof text === 'string');
                   return context.length
@@ -905,10 +934,15 @@ async function runQualifiedWorker(
               hooks: [
                 async (input) => {
                   if (input.hook_event_name !== 'PostToolUseFailure') return {};
+                  if (input.tool_name === 'WebSearch')
+                    served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
                     repeats.observe(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch' && input.is_interrupt !== true
-                      ? await fetchFallback({ input: input.tool_input, error: input.error })
+                      ? await fetchFallback(
+                          { input: input.tool_input, error: input.error },
+                          input.tool_use_id,
+                        )
                       : null,
                   ].filter((text) => typeof text === 'string');
                   return context.length
