@@ -104,6 +104,8 @@ vi.mock('node:http', async (original) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The worker reads its config folder's settings files: never the real one in a test.
+  vi.stubEnv('CLAUDE_CONFIG_DIR', join(tmpdir(), 'tenjin-test-no-claude-config'));
   native.promptMessages.length = 0;
   native.worktrees = [];
   vi.mocked(readClaudeCode).mockResolvedValue({
@@ -572,10 +574,15 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   expect(call.options?.settings).toMatchObject({
     permissions: {
       workingDirectoriesAsGiven: ['/repo', '/sibling'],
-      blockReadsExemptPaths: ['/read-only'],
+      // Beside the session history and user settings every worker may read.
+      blockReadsExemptPaths: expect.arrayContaining(['/read-only']),
       blockWritesOutsideWorkingDirectories: true,
     },
   });
+  expect(call.options?.settings).not.toHaveProperty(
+    'permissions.blockReadsExemptPaths',
+    expect.arrayContaining(['/shell-write']),
+  );
   // Env files in a working directory follow the native defaults; in an exception they stay private.
   const deny = (call.options?.settings as { permissions: { deny: string[] } }).permissions.deny;
   expect(deny.filter((rule) => rule.startsWith('Read(//sibling') && rule.includes('.env'))).toEqual(
@@ -717,7 +724,8 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   );
   // Only on macOS: gh verifies TLS through the system trust service.
   expect(sandbox?.enableWeakerNetworkIsolation === true).toBe(process.platform === 'darwin');
-  expect(sandbox?.filesystem).toMatchObject({ allowRead: ['/job'], allowWrite: ['/job'] });
+  expect(sandbox?.filesystem?.allowRead).toContain('/job');
+  expect(sandbox?.filesystem?.allowWrite).toEqual(['/job']);
   expect(native.githubClose).toHaveBeenCalledOnce();
 });
 
@@ -824,6 +832,155 @@ it("reads its working directories' env files natively, and only their placeholde
     expect(handedBack).toBe('connected with [env:POSTGRES_URL]');
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A worker whose one tool result goes out through the bridge; what left the machine. */
+async function throughBridge(
+  content: string,
+  result: string,
+  mode: 'default' | 'auto' = 'default',
+  before: () => Promise<void> = async () => {},
+) {
+  const toolResult = { type: 'tool_result', tool_use_id: 'read', content };
+  const messages = vi.fn(async () => ({ fixture: true }));
+  vi.mocked(query).mockImplementation((call) => {
+    let complete!: () => void;
+    const forwarded = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    void before().then(() =>
+      handle(
+        {
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from(
+              JSON.stringify({
+                model: 'deepseek-flash',
+                max_tokens: 32000,
+                messages: [{ role: 'user', content: [toolResult] }],
+              }),
+            );
+          },
+        },
+        {
+          headersSent: false,
+          destroyed: false,
+          writeHead() {
+            return this;
+          },
+          end(_body: string, done?: () => void) {
+            done?.();
+            complete();
+            return this;
+          },
+        },
+      ),
+    );
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'system', subtype: 'init', permissionMode: mode, cwd: '/repo' };
+        yield { type: 'user', uuid: 'read', message: { role: 'user', content: [toolResult] } };
+        await forwarded;
+        yield { type: 'result', subtype: 'success', result };
+      },
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+  const activity = { running: vi.fn(), observe: vi.fn() };
+  const handedBack = await runModelWorker(
+    { ...job, decision: { ...job.decision, claudePermissionMode: mode } } as unknown as ModelJob,
+    {
+      ...options(),
+      claudePermissionMode: mode,
+      currentClaudePermissionMode: () => mode,
+      transport: { messages } as unknown as ModelTransport,
+      activity,
+    },
+  );
+  return {
+    forwarded: JSON.stringify(messages.mock.calls),
+    observed: JSON.stringify(activity.observe.mock.calls),
+    handedBack,
+    sent: vi.mocked(query).mock.calls[0]![0].options!,
+  };
+}
+
+it("replaces a settings env value that the worker's commands print, as an env file value is", async () => {
+  // Claude Code hands a settings file's env block to every worker command.
+  const value = 'hunter2-Kq9xLm-settings';
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { env: { DB_PASSWORD: value, NODE_ENV: 'development' } },
+  } as never);
+  const out = await throughBridge(
+    `DB_PASSWORD=${value}\nNODE_ENV=development`,
+    `logged in with ${value}`,
+  );
+  for (const text of [out.forwarded, out.observed]) {
+    expect(text).not.toContain(value);
+    expect(text).toContain('DB_PASSWORD=[env:DB_PASSWORD]');
+    expect(text).toContain('NODE_ENV=development');
+  }
+  expect(out.handedBack).toBe('logged in with [env:DB_PASSWORD]');
+});
+
+it('lets the worker read session history and the user settings, with every settings env value replaced', async () => {
+  const config = await mkdtemp(join(tmpdir(), 'worker-claude-config-'));
+  vi.stubEnv('CLAUDE_CONFIG_DIR', config);
+  const first = 'first-Kq9xLm-settings';
+  const later = 'later-Rt55Wx-settings';
+  const settings = join(config, 'settings.json');
+  try {
+    // Known only from the file: the merged settings do not hold it.
+    await writeFile(settings, JSON.stringify({ env: { FIRST_TOKEN: first } }));
+    await writeFile(join(config, 'settings.json.bak-1'), '{}');
+    const changed = JSON.stringify({ env: { FIRST_TOKEN: first, LATER_TOKEN: later } });
+    // The person adds a value during the job, and the worker reads the file after that.
+    const out = await throughBridge(changed, 'read the settings', 'auto', () =>
+      writeFile(settings, changed),
+    );
+    for (const text of [out.forwarded, out.observed]) {
+      expect(text).not.toContain(first);
+      expect(text).not.toContain(later);
+    }
+    expect(out.forwarded).toContain('[env:FIRST_TOKEN]');
+    expect(out.forwarded).toContain('[env:LATER_TOKEN]');
+    const opened = ['projects', 'history.jsonl', 'settings.json', 'settings.local.json'].map(
+      (name) => join(config, name),
+    );
+    const closed = ['.credentials.json', '.claude.json', 'debug'].map((name) => join(config, name));
+    const filesystem = out.sent.sandbox!.filesystem!;
+    const permissions = (out.sent.settings as { permissions: Record<string, string[]> })
+      .permissions;
+    const rule = (tool: string, path: string) => `${tool}(/${path}/**)`;
+    for (const path of opened) {
+      expect(filesystem.allowRead).toContain(path);
+      expect(permissions.blockReadsExemptPaths).toContain(path);
+      expect(permissions.allow).toContain(rule('Read', path));
+      expect(filesystem.denyRead).not.toContain(path);
+      expect(permissions.deny).not.toContain(rule('Read', path));
+      // Readable, never writable.
+      expect(filesystem.denyWrite).toContain(path);
+      expect(permissions.deny).toContain(rule('Edit', path));
+    }
+    for (const path of closed) {
+      expect(filesystem.denyRead).toContain(path);
+      expect(permissions.deny).toContain(rule('Read', path));
+    }
+    // Nothing else is opened: backups, ~/.tenjin and the rest stay under the read block.
+    expect(new Set(filesystem.allowRead)).toEqual(new Set(['/job', ...opened]));
+    expect(new Set(permissions.blockReadsExemptPaths)).toEqual(new Set(opened));
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(config, { recursive: true, force: true });
   }
 });
 

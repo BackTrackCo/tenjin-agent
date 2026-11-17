@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { codexHome } from '../lib/codex-home';
-import { claudePrivatePaths, secretHomePaths } from './model-worker-privacy';
+import {
+  CLAUDE_WORKER_READABLE,
+  CLAUDE_WORKER_SETTINGS,
+  claudePrivatePaths,
+  secretHomePaths,
+  settingsFileEnv,
+} from './model-worker-privacy';
 
 /** Only the owned conversation controller supplies native session identities. */
 export type ClaudeWorkerSession = {
@@ -146,14 +152,47 @@ export async function claudeWorkerPrivatePaths(
     }),
   ];
   const canonical = await Promise.all(paths.map((path) => realpath(path).catch(() => path)));
-  const protectedPaths = [...new Set([...paths, ...canonical])];
-  const deny = protectedPaths.flatMap((path) => {
-    // Native permission rules use // for an absolute filesystem pattern.
+  // Session transcripts, memory, prompt history and the user's settings files stay
+  // readable, as for a native subagent. A settings file opens only when its env block
+  // could be read, so its values are known and replaced before anything leaves.
+  const configs = [
+    ...new Set(
+      [env, { ...env, ...settingsEnv }].map((source) => claudeWorkerConfigDir(cwd, source)),
+    ),
+  ];
+  const settings = await Promise.all(
+    configs
+      .flatMap((config) => CLAUDE_WORKER_SETTINGS.map((name) => join(config, name)))
+      .map(async (path) => ({ path, env: await settingsFileEnv(path) })),
+  );
+  const known = settings.filter((file) => file.env !== undefined);
+  const opened = [
+    ...configs.flatMap((config) => CLAUDE_WORKER_READABLE.map((name) => join(config, name))),
+    ...known.map((file) => file.path),
+  ];
+  const readable = [
+    ...new Set([
+      ...opened,
+      ...(await Promise.all(opened.map((path) => realpath(path).catch(() => path)))),
+    ]),
+  ];
+  const protectedPaths = [...new Set([...paths, ...canonical])].filter(
+    (path) => !readable.includes(path),
+  );
+  // Native permission rules use // for an absolute filesystem pattern.
+  const rules = (path: string, tools: readonly string[]) => {
     const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-    return ['Read', 'Edit', 'Write'].flatMap((tool) => [
-      `${tool}(${absolute})`,
-      `${tool}(${absolute}/**)`,
-    ]);
-  });
-  return { paths: protectedPaths, deny };
+    return tools.flatMap((tool) => [`${tool}(${absolute})`, `${tool}(${absolute}/**)`]);
+  };
+  const deny = [
+    ...protectedPaths.flatMap((path) => rules(path, ['Read', 'Edit', 'Write'])),
+    ...readable.flatMap((path) => rules(path, ['Edit', 'Write'])),
+  ];
+  return {
+    paths: protectedPaths,
+    deny,
+    readable,
+    settingsFiles: known.map((file) => file.path),
+    settingsEnv: known.map((file) => file.env),
+  };
 }

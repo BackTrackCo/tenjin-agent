@@ -48,6 +48,7 @@ import {
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
+import { SettingsEnvValues, settingsFileEnv } from './model-worker-privacy';
 import { workerCredentialProbe } from './worker-credential-probes';
 import {
   readBlockUnchecked,
@@ -237,6 +238,7 @@ async function runQualifiedWorker(
   assertCurrentMode();
   const workspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
   if (!workspace) throw new Error('Owned Claude workspace scope is unavailable');
+  const settingsEnv = new SettingsEnvValues();
   const assertCurrentWorkspace = async () => {
     if (!claudeWorkerAuthCompatible(process.env))
       throw new Error('Native Claude authentication is owned by its host; keep native');
@@ -263,6 +265,8 @@ async function runQualifiedWorker(
       !sameClaudeWorkspace(workspace, current)
     )
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
+    // Checked before each tool call and request, so a value added mid-job is known too.
+    settingsEnv.add(resolved.effective.env);
     return resolved;
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
@@ -300,13 +304,23 @@ async function runQualifiedWorker(
       envFiles.scanned,
     ),
   );
-  const redactAll = (text: string) => envFiles.redact(redactWorkerSecrets(text, secrets));
+  const redactEnv = (text: string) => envFiles.redact(settingsEnv.redact(text));
+  const redactAll = (text: string) => redactEnv(redactWorkerSecrets(text, secrets));
+  // The user's settings files the worker may read, set at start.
+  let settingsFiles: readonly string[] = [];
   // A value found late is also removed from activity rows made before it was known.
   let envValues = envFiles.size;
   const refreshEnv = async () => {
     await envFiles.refresh();
-    if (envFiles.size === envValues) return;
-    envValues = envFiles.size;
+    // A settings file the worker may read is read again, so a value added since is
+    // known. One that no longer parses has unknown values: nothing more leaves.
+    for (const path of settingsFiles) {
+      const env = await settingsFileEnv(path);
+      if (env === undefined) throw new Error('A Claude settings file could not be read');
+      settingsEnv.add(env);
+    }
+    if (envFiles.size + settingsEnv.size === envValues) return;
+    envValues = envFiles.size + settingsEnv.size;
     try {
       options.activity?.rescrub?.(redactAll);
     } catch {
@@ -390,7 +404,8 @@ async function runQualifiedWorker(
           if (size > 8 * 1024 * 1024) throw new Error('Worker request too large');
           chunks.push(chunk);
         }
-        // An env file a command just wrote is read before this request leaves.
+        // An env file a command just wrote, or a settings file the person just changed, is
+        // read before this request leaves.
         await refreshEnv();
         // One that cannot be read in full cannot be replaced, and the worker's denies
         // are fixed at start: nothing more leaves this job.
@@ -404,7 +419,7 @@ async function runQualifiedWorker(
               workspace.droppedDirectories,
             ),
           ),
-          envFiles.redact,
+          redactEnv,
         ) as Record<string, unknown>;
         const messages = workerMessages(raw);
         assertCurrentMode();
@@ -472,6 +487,9 @@ async function runQualifiedWorker(
         workingDirectories: [...workspace.workingDirectories, ...worktrees],
       },
     );
+    // Known before the worker starts, so a first read of a settings file is replaced too.
+    for (const values of privatePaths.settingsEnv) settingsEnv.add(values);
+    settingsFiles = privatePaths.settingsFiles;
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
@@ -545,7 +563,19 @@ async function runQualifiedWorker(
                 ...(temp ? [temp.directory] : []),
               ]),
             ].sort(),
-            blockReadsExemptPaths: workspace.readExceptions,
+            // Session history and the user's settings, as a native subagent reads them.
+            blockReadsExemptPaths: [...workspace.readExceptions, ...privatePaths.readable],
+            // The read block still asks about a command that names one of them, and in auto
+            // and bypass mode nobody can answer: a Read rule lifts that ask, and the mode
+            // still judges the command. Default mode keeps the native asks.
+            ...(nobodyAsked
+              ? {
+                  allow: privatePaths.readable.flatMap((path) => {
+                    const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                    return [`Read(${absolute})`, `Read(${absolute}/**)`];
+                  }),
+                }
+              : {}),
             deny: [
               ...privatePaths.deny,
               ...protectedRoots.flatMap((root) => {
@@ -602,7 +632,8 @@ async function runQualifiedWorker(
             ? { enableWeakerNetworkIsolation: true }
             : {}),
           filesystem: {
-            ...(github ? { allowRead: [github.directory], allowWrite: [github.directory] } : {}),
+            allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
+            ...(github ? { allowWrite: [github.directory] } : {}),
             denyRead: [
               ...privatePaths.paths,
               ...protectedRoots.flatMap((root) => [
@@ -622,7 +653,7 @@ async function runQualifiedWorker(
               // Other sessions' temp files; this job's own are in its temp folder.
               ...(temp?.shared ?? []),
             ],
-            denyWrite: [...privatePaths.paths, ...dropped],
+            denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
           },
         },
         // Direct callers remain ephemeral; only the owned controller may retain

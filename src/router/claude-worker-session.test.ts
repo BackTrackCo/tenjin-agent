@@ -10,10 +10,18 @@ import {
 import { isSecretPath } from './model-worker-privacy';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
-vi.mock('node:fs/promises', () => ({ realpath: async (path: string) => path }));
+const files = vi.hoisted(() => ({}) as Record<string, string>);
+vi.mock('node:fs/promises', () => ({
+  realpath: async (path: string) => path,
+  readFile: async (path: string) => {
+    if (path in files) return files[path];
+    throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+  },
+}));
 const id = '11111111-2222-4333-8444-555555555555';
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const path of Object.keys(files)) delete files[path];
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(homedir(), '.claude'));
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -65,20 +73,24 @@ it('preserves native config override semantics and refuses mismatched relative s
   expect(getSessionInfo).not.toHaveBeenCalled();
 });
 
-it('protects an in-repository registry and native history from file tools and sandboxed commands', async () => {
+it('protects an in-repository registry and credentials, and opens native history read-only', async () => {
   vi.stubEnv('CLAUDE_CONFIG_DIR', '/repo/native config');
   const protectedPaths = await claudeWorkerPrivatePaths('/repo/private', '/repo');
   expect(protectedPaths.paths).toEqual(
     expect.arrayContaining([
       '/repo/private',
-      '/repo/native config/projects',
       '/repo/native config/.credentials.json',
       '/repo/native config/.claude.json',
-      '/repo/native config/history.jsonl',
     ]),
   );
+  // Session transcripts, memory and prompt history, as a native subagent reads them.
+  for (const path of ['/repo/native config/projects', '/repo/native config/history.jsonl']) {
+    expect(protectedPaths.readable).toContain(path);
+    expect(protectedPaths.paths).not.toContain(path);
+    expect(protectedPaths.deny).not.toContain(`Read(/${path}/**)`);
+    expect(protectedPaths.deny).toContain(`Edit(/${path}/**)`);
+  }
   expect(protectedPaths.deny).toContain('Read(//repo/private/**)');
-  expect(protectedPaths.deny).toContain('Edit(//repo/native config/projects/**)');
   expect(protectedPaths.deny).toContain('Write(//repo/private/**)');
   expect(isSecretPath('/repo/native config/skills/example/SKILL.md', protectedPaths.paths)).toBe(
     false,
@@ -100,13 +112,10 @@ it('protects both declared config layers and secure storage without blocking the
   );
   for (const path of [
     '/repo/parent-profile/.credentials.json',
-    '/repo/parent-profile/projects/session.jsonl',
     '/repo/effective-profile/.claude.json',
-    '/repo/effective-profile/settings.json',
-    '/repo/effective-profile/settings.local.json',
     '/repo/parent-profile/.mcp.json',
     '/repo/parent-profile/mcp.json',
-    '/repo/effective-profile/history.jsonl',
+    '/repo/parent-profile/debug/session.txt',
     '/repo/secure-store/.credentials.json',
     '/repo/codex-profile/auth.json',
     '/repo/private/owned.json',
@@ -116,8 +125,28 @@ it('protects both declared config layers and secure storage without blocking the
     '/repo/parent-profile/agents/reviewer.md',
     '/repo/effective-profile/commands/check.md',
     '/repo/effective-profile/skills/example/settings.json',
+    '/repo/parent-profile/projects/session.jsonl',
+    '/repo/effective-profile/history.jsonl',
+    // Absent at start, so it holds no value the worker could forward unreplaced.
+    '/repo/effective-profile/settings.json',
+    '/repo/effective-profile/settings.local.json',
   ])
     expect(isSecretPath(path, protectedPaths.paths)).toBe(false);
+});
+
+it('opens a user settings file only when its env block can be read, and returns its values', async () => {
+  files['/cfg/settings.json'] = JSON.stringify({ env: { API_TOKEN: 'v-Kq9xLm-1' } });
+  files['/cfg/settings.local.json'] = '{ not json';
+  const result = await claudeWorkerPrivatePaths('/repo/private', '/repo', {
+    CLAUDE_CONFIG_DIR: '/cfg',
+  });
+  expect(result.settingsFiles).toEqual(['/cfg/settings.json']);
+  expect(result.settingsEnv).toEqual([{ API_TOKEN: 'v-Kq9xLm-1' }]);
+  expect(result.deny).not.toContain('Read(//cfg/settings.json)');
+  expect(result.deny).toContain('Edit(//cfg/settings.json)');
+  // Its values are unknown, so nothing in it may reach the worker.
+  expect(result.paths).toContain('/cfg/settings.local.json');
+  expect(result.deny).toContain('Read(//cfg/settings.local.json)');
 });
 
 it('protects exact native workspace and discovered source files without an ancestor scan or basename ban', async () => {
