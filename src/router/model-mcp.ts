@@ -359,6 +359,9 @@ export function registerModelTool(
       },
     },
     async (args, extra) => {
+      // The start phases of an accept, timed from here for the worker's diagnostic record.
+      const acceptedAt = Date.now();
+      const startMarks: Record<string, number> = { cliProcess: Math.round(performance.timeOrigin) };
       let ownedContinuation = args.capture
         ? ownedModelReference(args.capture.input, args.capture.tool ?? 'Agent').owned
         : false;
@@ -542,6 +545,7 @@ export function registerModelTool(
               );
             }
           }
+          startMarks.checked = Date.now();
           const qualified = await qualifiedModelWorker(
             session.cwd,
             String(
@@ -554,6 +558,7 @@ export function registerModelTool(
             signal,
             options.harness === 'claude' ? currentClaudeMode() : undefined,
           );
+          startMarks.qualified = Date.now();
           const offeredWorkspace = savedClaudeWorkspace(pending?.decision.claudeWorkspace);
           if (
             !qualified ||
@@ -729,6 +734,7 @@ export function registerModelTool(
               signal.throwIfAborted();
               const result = await runModelWorker(executionJob, {
                 dataDir: options.dataDir,
+                accepted: { at: acceptedAt, marks: startMarks },
                 transport,
                 signal: abort.signal,
                 ...(activity ? { activity } : {}),

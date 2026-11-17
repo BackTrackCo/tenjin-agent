@@ -41,6 +41,10 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
     record.repeat('Bash', 'the same tool and arguments have repeated 3 times consecutively.');
     record.repeat('Read', undefined);
     record.retry(1, { cause: 'provider', status: 500 });
+    // Start phases, from the accept on, each the first time it is reached.
+    record.accepted(1_000, { cliProcess: 400, checked: 1_020, qualified: 1_350 });
+    record.mark('childReady', 2_900);
+    record.mark('childReady', 9_999);
     record.stop({ subtype: 'success', num_turns: 2, stop_reason: 'end_turn' });
     await record.write(dataDir, 'job-1');
     const path = join(dataDir, 'model-jobs', 'job-1.diagnostics.json');
@@ -61,6 +65,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
       reasoning: { turns: 2, withThinking: 2, textTurns: 1, textWithThinking: 1 },
       repeats: [{ tool: 'Bash', count: 3 }],
       retries: [{ attempt: 1, cause: 'provider', status: 500 }],
+      phases: { cliProcess: -600, checked: 20, qualified: 350, childReady: 1_900 },
       stop: { subtype: 'success', turns: 2, stopReason: 'end_turn' },
     });
     expect(written).not.toContain('PRIVATE_');

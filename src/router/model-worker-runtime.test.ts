@@ -2631,6 +2631,10 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
     root: job.root,
     settings: { compactWindow: 786_432, maxTurns: null },
     stop: { subtype: 'success' },
+    phases: expect.objectContaining({
+      childSpawned: expect.any(Number),
+      childReady: expect.any(Number),
+    }),
   });
   // The viewer names the fetch by the router tool that read the page, with its size.
   expect(activity.served).toHaveBeenCalledWith('fetch-1', 'Exa page read', {

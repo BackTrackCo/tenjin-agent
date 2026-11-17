@@ -185,6 +185,8 @@ export async function runModelWorker(
     claudeSession?: ClaudeWorkerSession;
     /** Tests only: a start-up window. A job has none; its start is bounded by the wall time and by cancel. */
     startupMs?: number;
+    /** When the accept reached `tenjin mcp`, and the start phases marked before the run. */
+    accepted?: { at: number; marks: Record<string, number> };
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
      *  each search answers that it is not available. */
     web?: WorkerRequest;
@@ -526,6 +528,7 @@ async function runQualifiedWorker(
         let messages: ReturnType<typeof workerMessages>;
         try {
           messages = workerMessages(raw);
+          diagnostics.mark('firstRequest');
           diagnostics.request(raw);
         } catch (error) {
           // The router would refuse it, and every call after it that offers as many.
@@ -547,6 +550,7 @@ async function runQualifiedWorker(
         ).catch((error: unknown) => {
           throw controller.signal.aborted ? error : modelCallStop(error);
         });
+        diagnostics.mark('firstAnswer');
         send(message);
       } catch (error) {
         // ONE REQUEST THE BRIDGE CANNOT SEND fails alone, as a provider's 400 does: nothing
@@ -605,6 +609,7 @@ async function runQualifiedWorker(
     CLAUDE_DEEPSEEK_COMPACT_WINDOW,
     MODEL_OUTPUT_TOKENS,
   );
+  if (options.accepted) diagnostics.accepted(options.accepted.at, options.accepted.marks);
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
     diagnostics.repeat(tool, reminder);
@@ -661,6 +666,7 @@ async function runQualifiedWorker(
         ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
         signal: controller.signal,
       });
+      diagnostics.mark('promptRead');
     } catch (error) {
       if (controller.signal.aborted) throw error;
       // The worker still starts, with Claude Code's main prompt and the subagent note.
@@ -670,6 +676,7 @@ async function runQualifiedWorker(
     }
     assertCurrentMode();
     options.signal.throwIfAborted();
+    diagnostics.mark('childSpawned');
     worker = query({
       prompt: prompt(),
       options: {
@@ -1060,7 +1067,9 @@ async function runQualifiedWorker(
     }
     let activityReady = false;
     for await (const message of worker) {
+      if (message.type === 'assistant') diagnostics.mark('firstActivity');
       if (message.type === 'system' && message.subtype === 'init') {
+        diagnostics.mark('childReady');
         diagnostics.init(message);
         const matches = message.permissionMode === permissionMode;
         if (session) {

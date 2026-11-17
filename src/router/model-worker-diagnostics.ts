@@ -34,6 +34,16 @@ export type WorkerDiagnostics = {
   /** The latest request's history: assistant turns, and how many carried their reasoning back. */
   reasoning: { turns: number; withThinking: number; textTurns: number; textWithThinking: number };
   repeats: { tool: string; count: number }[];
+  /**
+   * Milliseconds from the accept call reaching `tenjin mcp` to each start phase, the first
+   * time it happens: `cliProcess` (negative: when that process started), `checked` (consent
+   * and offer checks), `qualified` (worker qualification and the Claude Code version
+   * read), `promptRead` (the native agent prompt), `childSpawned`, `childReady` (the SDK's
+   * init), `firstRequest` (the bridge's first model request, before its quote round trip),
+   * `firstAnswer` (that call answered), `firstActivity` (the first worker reply observed,
+   * which the viewer's first row draws from).
+   */
+  phases: Record<string, number>;
   /** Model calls tried again after a failure the router confirmed cost nothing. */
   retries: { attempt: number; cause: string; status?: number }[];
   stop?: { subtype: string; turns?: number; stopReason?: string };
@@ -52,6 +62,7 @@ const blocks = (message: unknown): Record<string, unknown>[] => {
 
 export class WorkerDiagnosticsRecord {
   private value: WorkerDiagnostics;
+  private acceptedAt: number;
 
   constructor(root: string, compactWindow: number, outputCap: number) {
     this.value = {
@@ -63,7 +74,9 @@ export class WorkerDiagnosticsRecord {
       reasoning: { turns: 0, withThinking: 0, textTurns: 0, textWithThinking: 0 },
       repeats: [],
       retries: [],
+      phases: {},
     };
+    this.acceptedAt = Date.now();
   }
 
   /** The SDK's `init` message: the model, tools and MCP servers the run has. */
@@ -108,6 +121,18 @@ export class WorkerDiagnosticsRecord {
     const count = /repeated (\d+) times/.exec(reminder ?? '')?.[1];
     if (!count || this.value.repeats.length >= MAX_REPEATS) return;
     this.value.repeats.push({ tool: tool.slice(0, 200), count: Number(count) });
+  }
+
+  /** Times from the accept on: the accept's own time and the marks made before the run. */
+  accepted(at: number, marks: Record<string, number> = {}): void {
+    this.acceptedAt = at;
+    for (const [name, when] of Object.entries(marks).slice(0, 16)) this.mark(name, when);
+  }
+
+  /** A start phase reached, once: milliseconds since the accept. */
+  mark(name: string, at = Date.now()): void {
+    if (name in this.value.phases || Object.keys(this.value.phases).length >= 32) return;
+    this.value.phases[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
   }
 
   /** A model call tried again: which try failed, and why (fixed codes). */
