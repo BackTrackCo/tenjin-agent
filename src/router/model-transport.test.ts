@@ -890,3 +890,103 @@ it('preserves a second in-flight reservation when the first call settles', async
   });
   expect(f.router.paidRequests()).toBe(2);
 });
+
+async function reconcileFixture(
+  server: Record<string, { state: string; voucherState: string; actualAtomic?: string }>,
+) {
+  const f = await fixture();
+  const job = { ...f.job, decision: { ...f.job.decision, routerOrigin: BASE } };
+  const ids = Object.fromEntries(Object.keys(server).map((name) => [name, randomUUID()]));
+  const settled = randomUUID();
+  const budget = join(f.dir, 'model-jobs', `${job.id}.budget.json`);
+  await mkdir(join(f.dir, 'model-jobs'));
+  await writeFile(
+    budget,
+    JSON.stringify({
+      charged: String(3000 + 2000 + 500000 * Object.keys(server).length),
+      calls: {
+        settled: { invocationId: settled, quote: '500000', completed: true, actual: '2000' },
+        ...Object.fromEntries(
+          Object.entries(ids).map(([name, invocationId]) => [
+            name,
+            { invocationId, quote: '500000' },
+          ]),
+        ),
+      },
+    }),
+  );
+  const requests: Request[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const id = new URL(request.url).pathname.split('/').at(-1)!;
+    const name = Object.keys(ids).find((key) => ids[key] === id);
+    const row = name ? server[name] : undefined;
+    return row && row.state !== 'absent'
+      ? Response.json({ invocationId: id, actualAtomic: '0', result: null, ...row })
+      : Response.json({ error: 'not_found' }, { status: 404 });
+  };
+  const transport = new ModelTransport({
+    dataDir: f.dir,
+    baseUrl: BASE,
+    payerDeps: { ...f.deps, fetchImpl },
+  });
+  const read = async () =>
+    JSON.parse(await readFile(budget, 'utf8')) as {
+      charged: string;
+      calls: Record<string, { completed?: boolean; actual?: string }>;
+    };
+  return { f, job, ids, settled, transport, requests, read };
+}
+
+it('settles what an ended run left uncertain from the server record: spent at its cost, released when nothing was charged, kept otherwise', async () => {
+  const r = await reconcileFixture({
+    finished: { state: 'completed', voucherState: 'accepted', actualAtomic: '1000' },
+    failed: { state: 'unknown', voucherState: 'unknown' },
+    disconnected: { state: 'running', voucherState: 'cancelled' },
+    // Each of these may still cost its full quote, so each keeps its reservation.
+    going: { state: 'running', voucherState: 'unknown' },
+    failedAfterVoucher: { state: 'unknown', voucherState: 'accepted' },
+    overQuote: { state: 'completed', voucherState: 'accepted', actualAtomic: '500001' },
+    neverSeen: { state: 'absent', voucherState: '' },
+  });
+  await r.transport.reconcile(r.job, new AbortController().signal);
+  const budget = await r.read();
+  expect(budget.calls.finished).toMatchObject({ completed: true, actual: '1000' });
+  expect(Object.keys(budget.calls).sort()).toEqual(
+    ['failedAfterVoucher', 'finished', 'going', 'neverSeen', 'overQuote', 'settled'].sort(),
+  );
+  // Routing fee, the settled call, the finished one, and four full quotes still reserved.
+  expect(budget.charged).toBe(String(3000 + 2000 + 1000 + 4 * 500000));
+  expect((await r.transport.summary(r.job)).uncertain.sort()).toEqual(
+    [r.ids.going, r.ids.failedAfterVoucher, r.ids.overQuote, r.ids.neverSeen].sort(),
+  );
+  // One signed owner read per uncertain call: nothing is bought and no payment is signed.
+  expect(r.requests).toHaveLength(7);
+  expect(r.requests.every((request) => request.method === 'GET')).toBe(true);
+  expect(r.requests.every((request) => request.headers.has(SIWX_HEADER))).toBe(true);
+  expect(r.requests.some((request) => request.url.endsWith(r.settled))).toBe(false);
+  expect((await lstat(join(r.f.dir, 'model-jobs', `${r.job.id}.budget.json`))).mode & 0o777).toBe(
+    0o600,
+  );
+  // Settled once: a second pass asks only about what is still uncertain and changes nothing.
+  await r.transport.reconcile(r.job, new AbortController().signal);
+  expect(r.requests).toHaveLength(11);
+  expect((await r.read()).charged).toBe(budget.charged);
+});
+
+it.each(['revoked', 'other router'] as const)(
+  'asks the server nothing about a job whose consent is %s, and keeps every reservation',
+  async (kind) => {
+    const r = await reconcileFixture({ failed: { state: 'unknown', voucherState: 'unknown' } });
+    if (kind === 'revoked')
+      await writeFile(join(r.f.dir, 'config.json'), JSON.stringify({ router: {} }));
+    const job =
+      kind === 'revoked'
+        ? r.job
+        : { ...r.job, decision: { ...r.job.decision, routerOrigin: 'https://other.example' } };
+    await r.transport.reconcile(job, new AbortController().signal);
+    expect(r.requests).toHaveLength(0);
+    expect((await r.read()).charged).toBe(String(3000 + 2000 + 500000));
+  },
+);
