@@ -170,13 +170,50 @@ it('opens a user settings file only when its env block can be read, and returns 
   const result = await claudeWorkerPrivatePaths('/repo/private', '/repo', {
     CLAUDE_CONFIG_DIR: '/cfg',
   });
-  expect(result.settingsFiles).toEqual(['/cfg/settings.json']);
-  expect(result.settingsEnv).toEqual([{ API_TOKEN: 'v-Kq9xLm-1' }]);
+  expect(result.settingsFiles).toContain('/cfg/settings.json');
+  expect(result.settingsFiles).not.toContain('/cfg/settings.local.json');
+  expect(result.settingsEnv).toContainEqual({ API_TOKEN: 'v-Kq9xLm-1' });
   expect(result.deny).not.toContain('Read(//cfg/settings.json)');
   expect(result.deny).toContain('Edit(//cfg/settings.json)');
   // Its values are unknown, so nothing in it may reach the worker.
   expect(result.paths).toContain('/cfg/settings.local.json');
   expect(result.deny).toContain('Read(//cfg/settings.local.json)');
+});
+
+it("opens a repository's own .claude/settings.json for reading when its env block parses, never for writing", async () => {
+  // The failure: a tracked project settings file was closed, which a native subagent reads.
+  files['/repo/.claude/settings.json'] = JSON.stringify({ env: { DEPLOY_KEY: 'dk-Zq81-xY7w' } });
+  files['/sibling/.claude/settings.json'] = '{ "env": ';
+  const result = await claudeWorkerPrivatePaths(
+    '/repo/private',
+    '/repo',
+    { CLAUDE_CONFIG_DIR: '/cfg' },
+    {},
+    {
+      workingDirectories: ['/repo', '/sibling'],
+      sources: [{ source: 'project', path: '/repo/.claude/settings.json' }],
+    },
+  );
+  expect(result.readable).toContain('/repo/.claude/settings.json');
+  expect(result.deny).not.toContain('Read(//repo/.claude/settings.json)');
+  expect(result.deny).toEqual(
+    expect.arrayContaining([
+      'Edit(//repo/.claude/settings.json)',
+      'Write(//repo/.claude/settings.json)',
+    ]),
+  );
+  // Read again before each request, so its values are replaced before anything leaves.
+  expect(result.settingsFiles).toContain('/repo/.claude/settings.json');
+  expect(result.settingsEnv).toContainEqual({ DEPLOY_KEY: 'dk-Zq81-xY7w' });
+  // One that cannot be parsed holds values nobody knows; the local file and MCP config stay closed.
+  for (const file of [
+    '/sibling/.claude/settings.json',
+    '/repo/.claude/settings.local.json',
+    '/repo/.mcp.json',
+  ]) {
+    expect(result.paths).toContain(file);
+    expect(result.deny).toContain(`Read(/${file})`);
+  }
 });
 
 it('protects exact native workspace and discovered source files without an ancestor scan or basename ban', async () => {
@@ -194,6 +231,7 @@ it('protects exact native workspace and discovered source files without an ances
     },
   );
   for (const file of [
+    // Outside the working directories: closed, whatever it holds.
     '/repo/.claude/settings.json',
     '/repo/.claude/settings.local.json',
     '/repo/.mcp.json',

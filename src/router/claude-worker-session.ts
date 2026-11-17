@@ -116,9 +116,12 @@ export async function claudeWorkerPrivatePaths(
   const sources = (native.sources ?? [])
     .filter((source) => typeof source.path === 'string' && source.path.length > 0)
     .map((source) => ({ source: source.source, path: resolve(cwd, source.path!) }));
-  const roots = new Set([
+  const working = [
     resolve(cwd),
     ...(native.workingDirectories ?? []).map((root) => resolve(cwd, root)),
+  ];
+  const roots = new Set([
+    ...working,
     ...sources
       .filter(
         (source) =>
@@ -151,18 +154,24 @@ export async function claudeWorkerPrivatePaths(
       ];
     }),
   ];
-  // Session transcripts, memory, prompt history and the user's settings files stay
-  // readable, as for a native subagent. A settings file opens only when its env block
-  // could be read, so its values are known and replaced before anything leaves.
+  // Session transcripts, memory, prompt history, the user's settings files and each
+  // working directory's own `.claude/settings.json` stay readable, as for a native
+  // subagent. A settings file opens only when its env block could be read, so its values
+  // are known and replaced before anything leaves. A repository's `settings.local.json`
+  // and `.mcp.json` stay closed, and so does a project settings file outside the working
+  // directories.
   const configs = [
     ...new Set(
       [env, { ...env, ...settingsEnv }].map((source) => claudeWorkerConfigDir(cwd, source)),
     ),
   ];
   const settings = await Promise.all(
-    configs
-      .flatMap((config) => CLAUDE_WORKER_SETTINGS.map((name) => join(config, name)))
-      .map(async (path) => ({ path, env: await settingsFileEnv(path) })),
+    [
+      ...new Set([
+        ...configs.flatMap((config) => CLAUDE_WORKER_SETTINGS.map((name) => join(config, name))),
+        ...working.map((root) => join(root, '.claude', 'settings.json')),
+      ]),
+    ].map(async (path) => ({ path, env: await settingsFileEnv(path) })),
   );
   const known = settings.filter((file) => file.env !== undefined);
   const opened = [

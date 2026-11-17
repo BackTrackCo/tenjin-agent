@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isRecord } from '../lib/guards';
+import { MODEL_MESSAGES_MAX_TOOLS } from './model-limits';
 /** The proxy's blocks, and the two of Tenjin's own answer to a worker's web search. */
 const block = z.object({
   type: z.enum(['text', 'thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result']),
@@ -101,6 +102,13 @@ export function completedMessageSse(raw: unknown): string {
 
 type Reference = { type: 'tool_reference'; tool_name?: unknown };
 
+/** A request that offers more tools than the router takes: every model call would fail. */
+export class TooManyTools extends Error {
+  constructor(readonly count: number) {
+    super(`The request offers ${count} tools; the router takes ${MODEL_MESSAGES_MAX_TOOLS}`);
+  }
+}
+
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
 export function workerMessages(raw: Record<string, unknown>) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
@@ -178,6 +186,8 @@ export function workerMessages(raw: Record<string, unknown>) {
       ...(t.description ? { description: t.description } : {}),
       input_schema: t.input_schema,
     }));
+  // Counted as sent: a deferred tool not yet loaded is not offered.
+  if (tools && tools.length > MODEL_MESSAGES_MAX_TOOLS) throw new TooManyTools(tools.length);
   return {
     model: 'deepseek-flash',
     max_tokens:

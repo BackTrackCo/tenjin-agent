@@ -162,3 +162,24 @@ it('serves tool search as the Messages API does, so a ToolSearch result never st
   ]);
   expect(JSON.stringify(result)).not.toMatch(/tool_reference|defer_loading/);
 });
+
+it('refuses a request that offers more tools than the router takes, counting only the tools it sends', () => {
+  // The failure: the router refuses a request over its cap, so every model call of the job failed.
+  const tool = (n: number, deferred = false) => ({
+    name: `mcp__many__tool_${n}`,
+    input_schema: { type: 'object' },
+    ...(deferred ? { defer_loading: true } : {}),
+  });
+  const request = (tools: unknown[]) => ({ model: 'deepseek-flash', tools, messages: [] });
+  expect(() => workerMessages(request(Array.from({ length: 257 }, (_, n) => tool(n))))).toThrow(
+    expect.objectContaining({ count: 257 }),
+  );
+  // Tool search on: a deferred tool nothing loaded is not sent, so it does not count.
+  const sent = workerMessages(
+    request([
+      ...Array.from({ length: 256 }, (_, n) => tool(n)),
+      ...Array.from({ length: 300 }, (_, n) => tool(1000 + n, true)),
+    ]),
+  );
+  expect(sent.tools).toHaveLength(256);
+});

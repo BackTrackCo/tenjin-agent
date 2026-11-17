@@ -232,6 +232,57 @@ it.skipIf(process.getuid?.() === 0)(
   },
 );
 
+// Root lists any folder, so there is nothing to refuse.
+it.skipIf(process.getuid?.() === 0)(
+  'stops forwarding once a folder that held an env file can no longer be listed, until it can again',
+  async () => {
+    // The failure: the listing error was swallowed, so an env file a command then opened
+    // there by name went out with its values never learned.
+    const root = await workspace({ 'apps/api/.env': 'FIRST=first-value-0x01' });
+    const folder = join(root, 'apps/api');
+    const env = await WorkerEnvSecrets.start([root], { watch: false });
+    await chmod(folder, 0o111);
+    try {
+      await env.refresh();
+      expect([...env.uncovered]).toEqual([folder]);
+    } finally {
+      await chmod(folder, 0o755);
+    }
+    await env.refresh();
+    expect([...env.uncovered]).toEqual([]);
+  },
+);
+
+it("replaces the env values of a repository's .claude/settings.json at any depth, and denies one it cannot parse", async () => {
+  // The failure: these files were closed to the worker, which a native subagent reads.
+  const root = await workspace({
+    '.claude/settings.json': JSON.stringify({ env: { OWN_TOKEN: 'own-value-0x0a', RETRIES: 3 } }),
+    'apps/web/.claude/settings.json': JSON.stringify({ env: { NESTED_KEY: 'nested-value-0x0b' } }),
+    'apps/old/.claude/settings.json': '{ "env": { "BROKEN_KEY": "broken-value-0x0c" ',
+    // Not a Claude settings file: read only by name, never scanned.
+    'config/settings.json': JSON.stringify({ env: { OTHER: 'other-value-0x0d' } }),
+  });
+  const env = await WorkerEnvSecrets.start([root], { watch: false });
+  expect(env.scanned).toBe(true);
+  expect(env.redact('own-value-0x0a nested-value-0x0b other-value-0x0d')).toBe(
+    '[env:OWN_TOKEN] [env:NESTED_KEY] other-value-0x0d',
+  );
+  // No line of it is known as an env file's would be: the whole file is denied by its path.
+  expect(env.withheld).toEqual([join(root, 'apps/old/.claude/settings.json')]);
+  // One that stops parsing during the job stops forwarding, as an unreadable env file does.
+  await writeFile(join(root, 'apps/web/.claude/settings.json'), '{ "env": ');
+  await env.refresh();
+  expect([...env.uncovered]).toEqual([join(root, 'apps/web/.claude/settings.json')]);
+  // One that appears during the job and is read by name is learned first.
+  await mkdir(join(root, 'apps/new/.claude'), { recursive: true });
+  await writeFile(
+    join(root, 'apps/new/.claude/settings.json'),
+    JSON.stringify({ env: { LATER_KEY: 'later-value-0x0e' } }),
+  );
+  await env.add(join(root, 'apps/new/.claude/settings.json'));
+  expect(env.redact('later-value-0x0e')).toBe('[env:LATER_KEY]');
+});
+
 it('lists the forms of a value it replaces, never a plain one', () => {
   expect(envPieces({ key: 'PORT', value: '3000', written: '3000' })).toEqual([]);
   expect(envPieces({ key: 'K', value: 'abc', written: 'abc#Zx9Qw2Lp7' })).toEqual(

@@ -119,6 +119,18 @@ const SESSION_TOKENS = [
   'GITHUB_ENTERPRISE_TOKEN',
 ] as const;
 
+/**
+ * A token named for workers stands in place of the session's own, also when it cannot be
+ * read or the job's GitHub setup failed: the worker inherits its parent's environment, and
+ * without this the broader token would still be there under these names.
+ */
+export function sessionTokenClears(parent: NodeJS.ProcessEnv): Record<string, string> {
+  const named = Boolean(
+    parent.TENJIN_WORKER_GITHUB_TOKEN?.trim() || parent.TENJIN_WORKER_GITHUB_TOKEN_FILE?.trim(),
+  );
+  return named ? Object.fromEntries(SESSION_TOKENS.map((key) => [key, ''])) : {};
+}
+
 /** GitHub token values an environment hands the worker's commands, for redaction. */
 export function workerTokenValues(source: Record<string, string | undefined>): string[] {
   return ['GH_TOKEN', 'GITHUB_TOKEN', 'TENJIN_WORKER_GITHUB_TOKEN']
@@ -144,12 +156,6 @@ export async function prepareWorkerGithub(
     await mkdir(gh, { mode: 0o700 });
     await mkdir(cache, { mode: 0o700 });
     await writeFile(config, gitConfig(identity, token !== null), { mode: 0o600 });
-    // A token named for workers stands in place of the session's own, also when it
-    // cannot be read: the worker inherits its parent's environment, and without this
-    // the broader token would still be there under these names.
-    const named = Boolean(
-      parent.TENJIN_WORKER_GITHUB_TOKEN?.trim() || parent.TENJIN_WORKER_GITHUB_TOKEN_FILE?.trim(),
-    );
     return {
       directory,
       env: {
@@ -160,7 +166,7 @@ export async function prepareWorkerGithub(
         GH_PROMPT_DISABLED: '1',
         GH_NO_UPDATE_NOTIFIER: '1',
         GIT_TERMINAL_PROMPT: '0',
-        ...(named ? Object.fromEntries(SESSION_TOKENS.map((key) => [key, ''])) : {}),
+        ...sessionTokenClears(parent),
         ...(token ? { GH_TOKEN: token } : {}),
       },
       secrets: [...new Set([...(token ? [token] : []), ...workerTokenValues(parent)])],

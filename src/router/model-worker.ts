@@ -1,4 +1,4 @@
-import { completedMessageSse, workerMessages } from './model-messages';
+import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
 import {
   answerWorkerWebSearch,
   workerFetchFallback,
@@ -33,7 +33,7 @@ import {
 } from './codex-native-worker';
 import { readClaudeCode, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
-import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
+import { MODEL_MESSAGES_MAX_TOOLS, MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import {
@@ -88,6 +88,7 @@ import {
   prepareWorkerGithub,
   redactWorkerMessage,
   redactWorkerSecrets,
+  sessionTokenClears,
   WORKER_ALLOWED_DOMAINS,
   workerTokenValues,
   type WorkerGithub,
@@ -302,8 +303,11 @@ async function runQualifiedWorker(
   const github: WorkerGithub | undefined = await prepareWorkerGithub(process.env).catch(
     () => undefined,
   );
+  // The job's GitHub env: its token or none, and with a token named for workers the
+  // session's own cleared, also when the setup failed.
+  const githubEnv = github?.env ?? sessionTokenClears(process.env);
   // Literal GitHub token values; the bridge removes them before anything leaves.
-  let secrets: readonly string[] = github?.secrets ?? [];
+  let secrets: readonly string[] = github?.secrets ?? workerTokenValues(process.env);
   // Also before the timer: the worker reads its env files as a native subagent does, and
   // their values are replaced in everything that leaves this process. A scan that stops
   // short keeps every env file denied.
@@ -360,7 +364,9 @@ async function runQualifiedWorker(
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
   const token = randomBytes(32).toString('hex');
-  const nativeProcess = claudeWorkerProcess();
+  // The worker's settings carry the bridge token and the job's GitHub env: in a private
+  // file, never on its command line.
+  const nativeProcess = claudeWorkerProcess({ secrets: () => [token, ...secrets] });
   const pending = new Set<Promise<void>>();
   let worker: ReturnType<typeof query> | undefined;
   let proxyFailure: { error: unknown } | undefined;
@@ -477,7 +483,12 @@ async function runQualifiedWorker(
         let messages: ReturnType<typeof workerMessages>;
         try {
           messages = workerMessages(raw);
-        } catch {
+        } catch (error) {
+          // The router would refuse it, and every call after it that offers as many.
+          if (error instanceof TooManyTools)
+            throw new UnsupportedRequest(
+              `it offers ${error.count} tools, more than the ${MODEL_MESSAGES_MAX_TOOLS} one request may carry`,
+            );
           throw new UnsupportedRequest('the request has a field or tool the bridge does not send');
         }
         assertCurrentMode();
@@ -611,7 +622,7 @@ async function runQualifiedWorker(
           // Sandboxed commands reach the network only through the sandbox proxy; Node's
           // fetch ignores the proxy variables unless told, and fails DNS instead.
           NODE_USE_ENV_PROXY: '1',
-          ...github?.env,
+          ...githubEnv,
           TENJIN_WORKER_GITHUB_TOKEN: undefined,
           TENJIN_WORKER_GITHUB_TOKEN_FILE: undefined,
           ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
@@ -648,6 +659,11 @@ async function runQualifiedWorker(
           apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
           env: {
             ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
+            // Above a GitHub token in the person's settings env, which Claude Code would
+            // otherwise hand the worker's commands in place of the job's own, or of none.
+            ...githubEnv,
+            TENJIN_WORKER_GITHUB_TOKEN: '',
+            TENJIN_WORKER_GITHUB_TOKEN_FILE: '',
             // Above a value in the person's settings, which would move the temp root back.
             ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
           },
@@ -691,11 +707,19 @@ async function runQualifiedWorker(
                   // A consented workspace holds other repositories' native settings too.
                   ...NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`),
                 ];
-                return ['Read', 'Edit', 'Write'].flatMap((tool) =>
-                  patterns.map((pattern) => `${tool}(${pattern})`),
-                );
+                return [
+                  ...['Read', 'Edit', 'Write'].flatMap((tool) =>
+                    patterns.map((pattern) => `${tool}(${pattern})`),
+                  ),
+                  // A repository's `.claude/settings.json` is read as a native subagent reads
+                  // it where the env scan covered it: its env values are known, and one that
+                  // could not be parsed is denied by its path below. It is never written.
+                  ...(envDenied.has(root) ? ['Read', 'Edit', 'Write'] : ['Edit', 'Write']).map(
+                    (tool) => `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
+                  ),
+                ];
               }),
-              // An env file that could not be read in full at start cannot be redacted.
+              // An env or settings file that could not be read in full at start cannot be redacted.
               ...envFiles.withheld.flatMap((path) => {
                 const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
@@ -706,6 +730,7 @@ async function runQualifiedWorker(
                 return ['Read', 'Edit', 'Write'].flatMap((tool) => [
                   `${tool}(${absolute}/.env*)`,
                   `${tool}(${absolute}/**/.env*)`,
+                  `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
                 ]);
               }),
               // Native settings still add these; the worker may not use them.
@@ -743,6 +768,7 @@ async function runQualifiedWorker(
                     ]
                   : []),
                 ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
+                ...(envDenied.has(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
               ]),
               ...envFiles.withheld,
               // Commands cannot read inside a folder the scan could not list.
@@ -1050,8 +1076,16 @@ async function runQualifiedWorker(
   return redactAll(result!);
 }
 
-/** Native settings and MCP config of repositories nested in a worker root. */
-const NESTED_PRIVATE = ['.claude/settings.json', '.claude/settings.local.json', '.mcp.json'];
+/** Native local settings and MCP config of repositories nested in a worker root: closed. */
+const NESTED_PRIVATE = ['.claude/settings.local.json', '.mcp.json'];
+/**
+ * A repository's shared settings, at any depth: readable where the env scan covered its
+ * folder, which learns its env values, and never written by the file tools. A working
+ * directory's own copy is in the sandbox's write denies too, so a merge or checkout that
+ * must rewrite it fails at that write, as a native sandboxed command does before it asks
+ * to run unsandboxed, which a worker's command cannot.
+ */
+const NESTED_SETTINGS = '.claude/settings.json';
 
 /** A worker request the bridge refuses before anything is sent on or paid; the message
  *  is fixed text, never the request's content. */

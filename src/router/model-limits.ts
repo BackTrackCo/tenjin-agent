@@ -11,3 +11,5 @@ export const MODEL_RESPONSE_ENVELOPE_BYTES = 4_500_000;
 export const MODEL_MESSAGES_RESULT_BYTES = 2_000_000;
 /** Raw wire has this upper bound; its complete JSON envelope must also fit above. */
 export const MODEL_RESPONSES_WIRE_BYTES = MODEL_RESPONSE_ENVELOPE_BYTES;
+/** The router refuses a Messages request that offers more tools than this. */
+export const MODEL_MESSAGES_MAX_TOOLS = 256;

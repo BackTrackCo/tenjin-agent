@@ -605,6 +605,25 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   const denyRead = call.options?.sandbox?.filesystem?.denyRead ?? [];
   expect(denyRead.filter((path) => /^\/(repo|sibling)\/.*\.env/.test(path))).toEqual([]);
   expect(denyRead).toEqual(expect.arrayContaining(['/read-only/**/.env*', '/shell-write/.env*']));
+  // So are other repositories' `.claude/settings.json`: read where the scan learns their
+  // env values, never written; closed outside. Local settings and MCP config stay closed.
+  expect(deny).not.toContain('Read(//sibling/**/.claude/settings.json)');
+  expect(denyRead).not.toContain('/sibling/**/.claude/settings.json');
+  expect(deny).toEqual(
+    expect.arrayContaining([
+      'Edit(//sibling/**/.claude/settings.json)',
+      'Write(//sibling/**/.claude/settings.json)',
+      'Read(//sibling/**/.claude/settings.local.json)',
+      'Read(//sibling/**/.mcp.json)',
+      'Read(//read-only/**/.claude/settings.json)',
+    ]),
+  );
+  expect(denyRead).toEqual(
+    expect.arrayContaining([
+      '/sibling/**/.claude/settings.local.json',
+      '/read-only/**/.claude/settings.json',
+    ]),
+  );
 });
 
 it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
@@ -738,6 +757,49 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   expect(sandbox?.filesystem?.allowRead).toContain('/job');
   expect(sandbox?.filesystem?.allowWrite).toEqual(['/job']);
   expect(native.githubClose).toHaveBeenCalledOnce();
+});
+
+it("puts the job's GitHub env above a GitHub token in the person's settings env", async () => {
+  // The failure: Claude Code hands its settings env to the worker's commands over the
+  // process env, so the person's own token there beat the job's, which was only in the
+  // process env.
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { env: { GH_TOKEN: `ghp_${'Pq7r'.repeat(9)}` } },
+  } as never);
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(job, options());
+  const call = vi.mocked(query).mock.calls[0]![0];
+  // The flag layer outranks user, project and local settings; it reaches Claude Code in a
+  // private file, never on its command line (`claude-worker-process`).
+  expect((call.options?.settings as { env: Record<string, string> }).env).toMatchObject({
+    GH_TOKEN: GITHUB_TOKEN,
+    GH_CONFIG_DIR: '/job/gh',
+    GIT_CONFIG_GLOBAL: '/job/gitconfig',
+    TENJIN_WORKER_GITHUB_TOKEN: '',
+    TENJIN_WORKER_GITHUB_TOKEN_FILE: '',
+  });
+});
+
+it("clears the session's GitHub tokens for a named worker token also when the job's GitHub setup failed", async () => {
+  // The failure: with no per-job setup, the session's broader token stayed in the worker's commands.
+  vi.mocked(prepareWorkerGithub).mockRejectedValueOnce(new Error('no temp folder'));
+  vi.stubEnv('TENJIN_WORKER_GITHUB_TOKEN_FILE', '/nowhere/worker-token');
+  vi.stubEnv('GH_TOKEN', `gho_${'Se55'.repeat(9)}`);
+  try {
+    sdkResult({ subtype: 'success', result: 'done' });
+    await runModelWorker(job, options());
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  const call = vi.mocked(query).mock.calls[0]![0];
+  const cleared = {
+    GH_TOKEN: '',
+    GITHUB_TOKEN: '',
+    GH_ENTERPRISE_TOKEN: '',
+    GITHUB_ENTERPRISE_TOKEN: '',
+  };
+  expect(call.options?.env).toMatchObject(cleared);
+  expect((call.options?.settings as { env: Record<string, string> }).env).toMatchObject(cleared);
 });
 
 it("reads its working directories' env files natively, and only their placeholders leave", async () => {
@@ -987,8 +1049,11 @@ it('lets the worker read session history and the user settings, with every setti
       expect(permissions.deny).toContain(rule('Read', path));
     }
     // Nothing else is opened: backups, ~/.tenjin and the rest stay under the read block.
-    expect(new Set(filesystem.allowRead)).toEqual(new Set(['/job', ...opened]));
-    expect(new Set(permissions.blockReadsExemptPaths)).toEqual(new Set(opened));
+    // The job root's own settings file is listed too, absent here, and is never writable.
+    const project = '/repo/.claude/settings.json';
+    expect(new Set(filesystem.allowRead)).toEqual(new Set(['/job', ...opened, project]));
+    expect(new Set(permissions.blockReadsExemptPaths)).toEqual(new Set([...opened, project]));
+    expect(filesystem.denyWrite).toContain(project);
   } finally {
     vi.unstubAllEnvs();
     await rm(config, { recursive: true, force: true });
@@ -1024,7 +1089,13 @@ it.skipIf(process.getuid?.() === 0)(
       const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
       // The file tools are refused its env files, and commands the whole folder: a
       // command could open `locked/.env.local` by name, and its value was never learned.
-      expect(deny).toEqual(expect.arrayContaining([`Read(//${locked.replace(/^\/+/, '')}/.env*)`]));
+      expect(deny).toEqual(
+        expect.arrayContaining([
+          `Read(//${locked.replace(/^\/+/, '')}/.env*)`,
+          // A repository's settings file there too: its env values were never learned.
+          `Read(//${locked.replace(/^\/+/, '')}/**/.claude/settings.json)`,
+        ]),
+      );
       expect(sent?.sandbox?.filesystem?.denyRead).toContain(locked);
       // The readable env file next to it stays the worker's to read.
       expect(deny.filter((rule) => rule.includes(`${root.replace(/^\/+/, '')}/.env*`))).toEqual([]);
@@ -1034,6 +1105,44 @@ it.skipIf(process.getuid?.() === 0)(
     }
   },
 );
+
+it("denies by its path a repository's settings file that cannot be parsed, and leaves the others readable", async () => {
+  // Its env values cannot be known, so it cannot be read; one that parses can be.
+  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
+  const broken = join(root, 'old/.claude/settings.json');
+  try {
+    await mkdir(join(root, 'old/.claude'), { recursive: true });
+    await mkdir(join(root, 'web/.claude'), { recursive: true });
+    await writeFile(broken, '{ "env": ');
+    await writeFile(join(root, 'web/.claude/settings.json'), '{"env":{"K":"web-value-0x0b"}}');
+    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+    const workspace = {
+      version: 1,
+      root,
+      workingDirectories: [root],
+      workingDirectorySpellings: [root],
+      readExceptions: [],
+      writeExceptions: [],
+    };
+    sdkResult({ subtype: 'success', result: 'done' });
+    await runModelWorker(
+      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
+      options(),
+    );
+    const sent = vi.mocked(query).mock.calls[0]![0].options;
+    const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
+    const absolute = `//${broken.replace(/^\/+/, '')}`;
+    expect(deny).toEqual(
+      expect.arrayContaining([`Read(${absolute})`, `Edit(${absolute})`, `Write(${absolute})`]),
+    );
+    expect(sent?.sandbox?.filesystem?.denyRead).toContain(broken);
+    expect(deny.filter((rule) => rule.startsWith('Read(') && rule.includes('web/.claude'))).toEqual(
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it('forwards and shows nothing more once an env file appears that is too large to read in full', async () => {
   const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
@@ -2271,18 +2380,33 @@ it("answers a worker's WebSearch at the bridge in WebSearch's own stream, sends 
 });
 
 it.each([
-  ['another model', JSON.stringify({ model: 'claude-opus-4', messages: [], max_tokens: 10 })],
+  ['another model', JSON.stringify({ model: 'claude-opus-4', messages: [], max_tokens: 10 }), ''],
   [
     'a server tool beside its own tools',
     JSON.stringify({
       ...NESTED_SEARCH,
       tools: [...NESTED_SEARCH.tools, { name: 'Read', input_schema: { type: 'object' } }],
     }),
+    '',
   ],
-  ['a body that is not JSON', '{"model":'],
+  ['a body that is not JSON', '{"model":', ''],
+  // The router takes 256 tools a request: one over it would fail every model call.
+  [
+    'more tools than the router takes',
+    JSON.stringify({
+      model: 'deepseek-flash',
+      max_tokens: 32000,
+      messages: [{ role: 'user', content: 'Go.' }],
+      tools: Array.from({ length: 300 }, (_, n) => ({
+        name: `mcp__many__tool_${n}`,
+        input_schema: { type: 'object' },
+      })),
+    }),
+    'it offers 300 tools, more than the 256 one request may carry',
+  ],
 ])(
   'answers a request with %s as that request alone, a 400 with nothing sent or paid, and the job goes on',
-  async (_label, body) => {
+  async (_label, body, said) => {
     // The failure: any request the bridge could not send ended the whole job.
     const messages = vi.fn();
     let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
@@ -2296,7 +2420,7 @@ it.each([
     expect(answered.status).toBe(400);
     expect(JSON.parse(answered.body!)).toMatchObject({
       type: 'error',
-      error: { type: 'invalid_request_error' },
+      error: { type: 'invalid_request_error', message: expect.stringContaining(said) },
     });
   },
 );

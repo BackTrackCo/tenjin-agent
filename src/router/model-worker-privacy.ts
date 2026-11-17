@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
-import { envPieces } from './worker-env-secrets';
+import { envPieces, parseSettingsEnv } from './worker-env-secrets';
 
 /** Provider secrets excluded from worker commands, not unrelated MCP credentials. */
 export const MODEL_WORKER_PROVIDER_CREDENTIAL_KEYS = [
@@ -56,17 +56,7 @@ export async function settingsFileEnv(
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
   }
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-    const env = (parsed as { env?: unknown }).env;
-    if (env === undefined) return {};
-    return env !== null && typeof env === 'object' && !Array.isArray(env)
-      ? (env as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  return parseSettingsEnv(text);
 }
 
 /**

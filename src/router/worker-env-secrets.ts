@@ -1,4 +1,4 @@
-import { type FSWatcher, watch } from 'node:fs';
+import { type Dirent, type FSWatcher, watch } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -10,7 +10,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
  * its size up to `MAX_ENV_FILE_BYTES`, each time it changes. The set lives in
  * this process's memory only, is never logged or saved, and only grows during a
  * job, because a value already in the conversation stays there after its file
- * changes.
+ * changes. A repository's `.claude/settings.json` is covered the same way: the
+ * values of its `env` block are replaced, and one that cannot be parsed is denied.
  *
  * Builtins only: this module must load without the bundle.
  */
@@ -35,6 +36,53 @@ const SETTLE_MS = 120;
 
 export type EnvAssignment = { key: string; value: string; written: string };
 export type ParsedEnv = { ok: true; assignments: EnvAssignment[] } | { ok: false; lines: string[] };
+
+/**
+ * A repository's Claude Code settings file, `.claude/settings.json`, at any depth. The
+ * worker reads it as a native subagent does, and its `env` block's values are replaced as
+ * an env file's are. One that cannot be parsed is not read line by line: it is denied.
+ */
+export function isClaudeSettingsFile(path: string): boolean {
+  return basename(path) === 'settings.json' && basename(dirname(path)) === '.claude';
+}
+
+/** A file this scan covers: an env file, or a repository's Claude Code settings file. */
+function covered(path: string): boolean {
+  return basename(path).startsWith('.env') || isClaudeSettingsFile(path);
+}
+
+/**
+ * A Claude Code settings file's `env` block: `{}` when it has none, undefined when the
+ * file is not a JSON object or its `env` is not one, so its values are unknown.
+ */
+export function parseSettingsEnv(text: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const env = (parsed as { env?: unknown }).env;
+  if (env === undefined) return {};
+  return env !== null && typeof env === 'object' && !Array.isArray(env)
+    ? (env as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * A settings file's `env` values as Claude Code hands them to commands (strings, numbers,
+ * booleans), or undefined when the file cannot be parsed.
+ */
+function parseSettingsFile(text: string): ParsedEnv | undefined {
+  const env = parseSettingsEnv(text);
+  if (!env) return undefined;
+  const assignments = Object.entries(env).flatMap(([key, raw]) => {
+    const value = typeof raw === 'number' || typeof raw === 'boolean' ? String(raw) : raw;
+    return typeof value === 'string' ? [{ key, value, written: value }] : [];
+  });
+  return { ok: true, assignments };
+}
 
 const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:(?=\s))[ \t]*(.*)$/;
 
@@ -242,9 +290,10 @@ export class WorkerEnvSecrets {
    */
   readonly unlisted: string[] = [];
   /**
-   * Env files that appeared or changed after start and cannot be read in full.
-   * The worker's denies are fixed at start, so while one is here nothing more
-   * may be forwarded or shown.
+   * Env files that appeared or changed after start and cannot be read in full,
+   * and folders that held one and can no longer be listed. The worker's denies
+   * are fixed at start, so while one is here nothing more may be forwarded or
+   * shown.
    */
   readonly uncovered = new Set<string>();
   private readonly roots: string[];
@@ -335,9 +384,9 @@ export class WorkerEnvSecrets {
     return next;
   }
 
-  /** Loads one env file the worker is about to read, if it is in a working root. */
+  /** Loads one env or settings file the worker is about to read, if it is in a working root. */
   async add(path: unknown): Promise<void> {
-    if (typeof path !== 'string' || !basename(path).startsWith('.env')) return;
+    if (typeof path !== 'string' || !covered(path)) return;
     const absolute = resolve(path);
     if (this.roots.some((root) => inside(root, absolute))) await this.load(absolute);
   }
@@ -353,10 +402,26 @@ export class WorkerEnvSecrets {
     this.dirty.clear();
     await Promise.all(
       [...this.hot].map(async (directory) => {
-        const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-        for (const entry of entries)
-          if (entry.name.startsWith('.env') && !entry.isDirectory())
-            paths.add(join(directory, entry.name));
+        let entries: Dirent[];
+        try {
+          entries = await readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          // A folder this user can no longer list may still be entered: a command can open
+          // an env file in it by name, with values never learned here. One the start scan
+          // could not list is denied already, and so is every env file of an unscanned job.
+          if (
+            UNREADABLE_BY_ANYONE.has((error as NodeJS.ErrnoException).code ?? '') &&
+            this.scanned &&
+            !this.unlisted.some((folder) => inside(folder, directory))
+          )
+            this.uncovered.add(directory);
+          return;
+        }
+        this.uncovered.delete(directory);
+        for (const entry of entries) {
+          const path = join(directory, entry.name);
+          if (covered(path) && !entry.isDirectory()) paths.add(path);
+        }
       }),
     );
     await Promise.all([...paths].map((path) => this.load(path).catch(() => undefined)));
@@ -390,9 +455,10 @@ export class WorkerEnvSecrets {
             .then(
               (entries) => {
                 for (const entry of entries) {
+                  const path = join(directory, entry.name);
                   if (entry.isDirectory()) {
-                    if (!SKIP.has(entry.name)) queue.push(join(directory, entry.name));
-                  } else if (entry.name.startsWith('.env')) found.push(join(directory, entry.name));
+                    if (!SKIP.has(entry.name)) queue.push(path);
+                  } else if (covered(path)) found.push(path);
                 }
                 if (found.length > maxFiles) complete = false;
               },
@@ -424,8 +490,7 @@ export class WorkerEnvSecrets {
     )) {
       try {
         const watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => {
-          if (name && basename(String(name)).startsWith('.env'))
-            this.dirty.add(join(root, String(name)));
+          if (name && covered(join(root, String(name)))) this.dirty.add(join(root, String(name)));
         });
         // A watcher that fails leaves the per-request checks of known folders.
         watcher.on('error', () => watcher.close());
@@ -461,13 +526,21 @@ export class WorkerEnvSecrets {
         if (!atStart && UNREADABLE_BY_ANYONE.has(code ?? '')) return;
         readable = false;
       }
-    if (!readable || !bytes) {
+    const text = readable && bytes ? bytes.toString('utf8') : undefined;
+    // A settings file is JSON: one that does not parse has no lines to withhold, so it is
+    // denied by its path at start, and after start it stops forwarding until it parses.
+    const parsed =
+      text === undefined
+        ? undefined
+        : isClaudeSettingsFile(path)
+          ? parseSettingsFile(text)
+          : parseEnvFile(text);
+    if (!parsed) {
       // Not remembered as seen: the next check reads it again.
       if (atStart) this.withheld.push(path);
       else this.uncovered.add(path);
       return;
     }
-    const parsed = parseEnvFile(bytes.toString('utf8'));
     let learned = 0;
     // A large file must not hold the process: other work runs between batches.
     const pause = async () => {
