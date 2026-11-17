@@ -2,6 +2,7 @@ import { getAddress, isAddress } from 'viem';
 import { CliError } from '../lib/errors';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { deviceName as readDeviceName } from '../lib/device-name';
+import { machineHash as readMachineHash } from '../lib/machine-id';
 import { httpRequest, fetchFailureToCliError, type HttpRequestOptions } from '../lib/http';
 import { liveLine, type LiveLine } from '../lib/live-line';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
@@ -63,7 +64,7 @@ const HOSTED_LIFETIME_MS = 5 * 60_000;
  * not the env, not config. Cutting the surface entirely is what lets the verb
  * sit in the free allowlist tier with nothing to caveat.
  */
-const FUND_ORIGIN = PRODUCTION_ORIGIN;
+export const FUND_ORIGIN = PRODUCTION_ORIGIN;
 /**
  * The only hosts a returned link may point at; anything else is refused unopened.
  * The first is the host of the pinned origin (the Tenjin /fund page), so it
@@ -123,6 +124,12 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   priceUsd?: string;
   /** Overrides the derived source; install passes `install`. */
   source?: FundSource;
+  /**
+   * INTERNAL, no flag: `tenjin redeem` off a terminal, for a code that needs a
+   * GitHub sign-in. The link carries it, and the fund page opens in redeem
+   * mode with it filled in.
+   */
+  code?: string;
   /** The "Add funds to Tenjin" title and balance; install has its own heading. */
   header?: boolean;
   /** Printed after "Stopped watching" on Ctrl-C: install's limits, next step and disclosure. */
@@ -130,6 +137,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   fetchImpl?: typeof fetch;
   openUrl?: typeof openInBrowser;
   deviceName?: () => Promise<string | undefined>;
+  /** This computer's hash for the per-computer code check (`lib/machine-id.ts`). */
+  machineHash?: () => Promise<string | undefined>;
   /** One key from the person, for the expired link's `r` / `q`; null when nobody can answer. */
   readKey?: (keys: readonly string[]) => Promise<string | null>;
   /** Poll seams so tests never sleep for real. */
@@ -193,10 +202,12 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   }
 
   // A PAYMENT ALREADY ON ITS WAY is waited on, never doubled: a rerun while
-  // money is landing is exactly how a second top-up happens.
+  // money is landing is exactly how a second top-up happens. A code to redeem
+  // always mints: the link on its way does not carry the code, and the page it
+  // opens is not a payment.
   const prior = await recallLink(ctx.dataDir, address, now());
   const onItsWay =
-    prior !== null && now() - prior.issuedAt < DUPLICATE_WINDOW_MS
+    prior !== null && now() - prior.issuedAt < DUPLICATE_WINDOW_MS && opts.code === undefined
       ? await paymentOnItsWay(prior, startBalance, opts.fetchImpl)
       : undefined;
 
@@ -206,11 +217,17 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   let signer: TenjinSigner | undefined;
   const mint = async (): Promise<Issued> => {
     signer ??= await provider.getSigner();
+    const [deviceName, machineHash] = await Promise.all([
+      (opts.deviceName ?? readDeviceName)().catch(() => undefined),
+      (opts.machineHash ?? readMachineHash)().catch(() => undefined),
+    ]);
     const url = await mintLink(ctx, signer, address, {
       ...(preset !== undefined ? { presetAmount: preset } : {}),
       ...(need !== undefined ? { need } : {}),
       source,
-      deviceName: await (opts.deviceName ?? readDeviceName)().catch(() => undefined),
+      deviceName,
+      machineHash,
+      ...(opts.code !== undefined ? { code: opts.code } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     const token = tokenOf(url);
@@ -254,7 +271,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   if (!human) {
     emitWriteNotice(
       ctx.io,
-      `${onItsWay !== undefined ? 'Payment on its way, from' : 'Checkout'}: ${link.url}`,
+      `${onItsWay !== undefined ? 'Payment on its way, from' : opts.code !== undefined ? `Redeem ${opts.code}` : 'Checkout'}: ${link.url}`,
     );
     emitWriteNotice(
       ctx.io,
@@ -428,6 +445,10 @@ function humanEnding(
   ];
 }
 
+/** How an agent waits for money it did not wait on, after `then`; `tenjin redeem` says it too. */
+export const BALANCE_WAIT_STEP =
+  'run `tenjin balance --wait` in the background, with the same Tenjin executable and shell as this command (in Claude Code, as a background Bash command, so you are woken when it exits), and continue the task when it exits: exit 0 means the funds arrived, and its output says how much. If it exits without funds, say once that nothing arrived and nothing went wrong, and continue without paid tools.';
+
 /**
  * THE AGENT'S NEXT STEP after a link it did not wait on: say what the money is
  * for, wait in the background, carry on when it lands. It never asks the
@@ -439,10 +460,8 @@ function agentNextStep(o: {
   inFlight: boolean;
   need?: FundNeed;
 }): string {
-  const wait =
-    'run `tenjin balance --wait` in the background, with the same Tenjin executable and shell as this command (in Claude Code, as a background Bash command, so you are woken when it exits), and continue the task when it exits: exit 0 means the funds arrived, and its output says how much. If it exits without funds, say once that nothing arrived and nothing went wrong, and continue without paid tools.';
   if (o.inFlight) {
-    return `A payment for this machine is already on its way, so no second checkout was opened; do not open another. Tell the person in one sentence, then ${wait} Never ask the person to type "done" or to tell you when the money arrives.`;
+    return `A payment for this machine is already on its way, so no second checkout was opened; do not open another. Tell the person in one sentence, then ${BALANCE_WAIT_STEP} Never ask the person to type "done" or to tell you when the money arrives.`;
   }
   const what =
     o.need !== undefined
@@ -451,7 +470,7 @@ function agentNextStep(o: {
   const where = o.opened
     ? `that checkout is open in their browser with $${o.amount} filled in`
     : `that checkout is ready with $${o.amount} filled in, and show checkoutUrl as a clickable link`;
-  return `Tell the person in one or two sentences ${what} and ${where}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
+  return `Tell the person in one or two sentences ${what} and ${where}. Then ${BALANCE_WAIT_STEP} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
 }
 
 /**
@@ -608,6 +627,8 @@ async function mintLink(
     need?: FundNeed;
     source: FundSource;
     deviceName: string | undefined;
+    machineHash: string | undefined;
+    code?: string;
     fetchImpl?: typeof fetch;
   },
 ): Promise<string> {
@@ -619,7 +640,9 @@ async function mintLink(
     method: 'POST',
     timeoutMs: ctx.flags.timeout,
     headers: { [SIWX_HEADER]: siwxHeader },
-    // `deviceName`, `source` and `need` are display context for the page; a
+    // `deviceName`, `source` and `need` are display context for the page;
+    // `machineHash` is for the per-computer check when the page redeems a
+    // code, and `code` opens it in redeem mode with that code filled in. A
     // server without them ignores them (its body schema is not strict).
     jsonBody: {
       address,
@@ -627,6 +650,8 @@ async function mintLink(
       ...(extra.deviceName !== undefined ? { deviceName: extra.deviceName } : {}),
       source: extra.source,
       ...(extra.need !== undefined ? { need: extra.need } : {}),
+      ...(extra.machineHash !== undefined ? { machineHash: extra.machineHash } : {}),
+      ...(extra.code !== undefined ? { code: extra.code } : {}),
     },
   };
   const res = await httpRequest(`${FUND_ORIGIN}/api/fund/link`, {
@@ -702,7 +727,7 @@ async function readKey(keys: readonly string[]): Promise<string | null> {
  * file would earn an unactionable 400 on a purely local condition. Normalize here
  * instead, as `send` does for its recipient.
  */
-function checksummed(address: string): string {
+export function checksummed(address: string): string {
   if (!isAddress(address, { strict: false })) {
     throw new CliError(
       'USAGE',
@@ -838,7 +863,10 @@ async function balanceOrUndefined(address: string, rpcUrl: string): Promise<bigi
 }
 
 /** `p`, or undefined once `ms` has passed. */
-async function withTimeout<T>(p: Promise<T | undefined>, ms: number): Promise<T | undefined> {
+export async function withTimeout<T>(
+  p: Promise<T | undefined>,
+  ms: number,
+): Promise<T | undefined> {
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => resolve(undefined), ms);

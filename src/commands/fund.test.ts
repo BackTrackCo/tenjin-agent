@@ -132,11 +132,17 @@ function stubFetch(status: number, json: unknown): { fetchImpl: typeof fetch; ca
 
 /**
  * runFund with this machine kept out of it: no harness variables from the
- * shell running the suite, no `scutil` for the device name, and a desktop
- * with a browser (a Linux CI runner has no display).
+ * shell running the suite, no `scutil` for the device name, no machine ID,
+ * and a desktop with a browser (a Linux CI runner has no display).
  */
 function fund(ctx: CommandContext, opts: FundOptions = {}) {
-  return runFund(ctx, { env: {}, platform: 'darwin', deviceName: async () => 'Test Mac', ...opts });
+  return runFund(ctx, {
+    env: {},
+    platform: 'darwin',
+    deviceName: async () => 'Test Mac',
+    machineHash: async () => undefined,
+    ...opts,
+  });
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {
@@ -761,6 +767,46 @@ describe('runFund: the link, its context and its status', () => {
     expect(server.mints[0]!.body).not.toHaveProperty('deviceName');
   });
 
+  /**
+   * The fund page's "Have a code?" box checks one redemption per computer by
+   * this hash, and `tenjin redeem` hands a code that needs a GitHub sign-in to
+   * the page by `code`. A plain `tenjin fund` never sends a code: the page
+   * would open in redeem mode instead of checkout.
+   */
+  it('mints with the machine hash, and with the code only when redeem passes one', async () => {
+    const { provider } = fakeProvider();
+    const server = fundServer([CHECKOUT]);
+    const hash = 'a'.repeat(64);
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      machineHash: async () => hash,
+    });
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      machineHash: async () => hash,
+      code: 'NCSTATE26',
+    });
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      machineHash: async () => {
+        throw new Error('ioreg gone');
+      },
+    });
+    expect(server.mints[0]!.body).toMatchObject({ machineHash: hash });
+    expect(server.mints[0]!.body).not.toHaveProperty('code');
+    expect(server.mints[1]!.body).toMatchObject({ machineHash: hash, code: 'NCSTATE26' });
+    expect(server.mints[2]!.body).not.toHaveProperty('machineHash');
+  });
+
   it('waits on a payment already on its way instead of opening a second checkout', async () => {
     const { provider } = fakeProvider();
     const link = pageLink(Date.now() + 600_000);
@@ -786,6 +832,21 @@ describe('runFund: the link, its context and its status', () => {
     expect(openUrl).not.toHaveBeenCalled();
     expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
     expect((res.data as { nextStep: string }).nextStep).toContain('already on its way');
+
+    // A code to redeem still mints: the link on its way does not carry it.
+    const redeem = fundServer(
+      [pageLink(Date.now() + 600_000)],
+      [[200, { state: 'paying', updatedAt: 'x' }]],
+    );
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: redeem.fetchImpl,
+      wait: false,
+      open: false,
+      code: 'NCSTATE26',
+    });
+    expect(redeem.mints).toHaveLength(1);
+    expect(redeem.mints[0]!.body).toMatchObject({ code: 'NCSTATE26' });
 
     // Once that money is in the balance, a rerun is a new top-up.
     mockedBalance.mockResolvedValue(5_000_000n);
