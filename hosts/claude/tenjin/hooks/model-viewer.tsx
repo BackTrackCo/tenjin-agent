@@ -925,6 +925,11 @@ function displayState(item: TenjinModelViewerRecord): string {
     : (item.activity?.state ?? 'activity unavailable');
 }
 
+/** Whether a call of the activity read is this plugin's own, by who raised it. */
+export function ownActivityRead(origin: { plugin?: string } | undefined): boolean {
+  return origin?.plugin === 'tenjin';
+}
+
 export function registerModelViewer(on: On): void {
   on('agent.offer', { agent: TYPE }, () => ({ isOffered: false }));
   on('session.start', async ($, e, next) => {
@@ -975,13 +980,19 @@ export function registerModelViewer(on: On): void {
     }
   }).catch(() => ({ deny: 'DeepSeek activity viewer is unavailable.' }));
 
-  // THE ACTIVITY READ IS THE VIEWER'S OWN (`$.mcp.call`, which is not a tool call).
-  // A parent that polls a running worker with it reads the whole activity into its
-  // context and draws a `Called plugin:tenjin:router` line; a native subagent's
-  // parent does not check on it at all. So the model's own call is refused.
-  on('tool.call', { tool: ACTIVITY }, () => ({
-    deny: "This read is the Tenjin plugin's own, for the DeepSeek worker's viewer. A worker's result arrives by itself: as the result of your subagent call, or as that task's notification when the call was moved to the background. Do not check on it. If someone asks how it is doing, say it is still running and that they can open the DeepSeek agent in the agent list. To stop it, call subagent with cancel.",
-  }));
+  // THE ACTIVITY READ IS THE VIEWER'S OWN. A parent that polls a running worker with
+  // it reads the whole activity into its context and draws a `Called
+  // plugin:tenjin:router` line; a native subagent's parent does not check on it at
+  // all. So the model's own call is refused. The host raises this plugin's own
+  // `$.mcp.call` as a `tool.call` of the tool too, under this plugin's origin (seen
+  // on 2.1.326): refused there, the viewer's first read threw, and its agent ended
+  // within a second of the accept and left the agent list.
+  on('tool.call', { tool: ACTIVITY }, (_$, e, next) => {
+    if (ownActivityRead(next.origin)) return next(e);
+    return {
+      deny: "This read is the Tenjin plugin's own, for the DeepSeek worker's viewer. A worker's result arrives by itself: as the result of your subagent call, or as that task's notification when the call was moved to the background. Do not check on it. If someone asks how it is doing, say it is still running and that they can open the DeepSeek agent in the agent list. To stop it, call subagent with cancel.",
+    };
+  });
 
   // THE VETO IS THE SAME CALL SENT AGAIN, which the CLI lets run native. Its offer
   // is then settled, and its row gives way to the native call's own: one row a task.
