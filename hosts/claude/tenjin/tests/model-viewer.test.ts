@@ -2054,6 +2054,9 @@ test("an accept call still being written draws nothing of the host's, and its gr
   // No offer id yet: the host's own row would name the server for that moment.
   expect(await row({})).toBe('');
   expect(await row(undefined)).toBe('');
+  // Part of the id, as the host draws the input while it streams (live on alpha.64).
+  expect(await row({ offer_id: OFFER.slice(0, 13) })).toBe('');
+  expect(await row({ offer_id: '' })).toBe('');
   // Whole: the DeepSeek row, from the first frame it can be told from a cancel. The
   // accept hook has not run yet, so the offer's own record names the task.
   await remember($);
@@ -2080,6 +2083,7 @@ test("an accept call still being written draws nothing of the host's, and its gr
     return unfolded;
   };
   expect(await group({})).toBe(true);
+  expect(await group({ offer_id: OFFER.slice(0, 13) })).toBe(true);
   expect(await group({ offer_id: OFFER })).toBe(true);
   expect(await group({ cancel: OFFER })).toBe(false);
 });
@@ -2707,4 +2711,28 @@ test('the live sequence draws each call as Claude Code does, in the worker’s o
   expect(JSON.stringify(steps)).not.toContain('**');
   expect(JSON.stringify(steps)).not.toContain('observation');
   expect(f.state.nativeSteps).toBe(0);
+});
+
+// The accept was allowed by a PreToolUse command leg in the hooks file, whose run Claude
+// Code draws as a row of its own beside the accept's. The mod's `tool.check` allows it.
+test("the accept and cancel of an offer are allowed by the mod, and every other input gets the host's verdict", async ($, on) => {
+  setup($, on);
+  on('tool.check', () => ({ decision: 'ask', reason: 'engine verdict' }));
+  const check = (input: unknown) =>
+    $.tool.check({ tool: ACCEPT, input } as never).then((verdict) => verdict.decision);
+  expect(await check({ offer_id: OFFER })).toBe('allow');
+  expect(await check({ cancel: OFFER })).toBe('allow');
+  for (const input of [
+    { offer_id: 'not-an-offer' },
+    { offer_id: OFFER, reason: 'agent_stopped' },
+    { capture: { tool: 'Agent' } },
+    { delegation_id: OFFER, task: 'do it' },
+    {},
+  ])
+    expect(await check(input)).toBe('ask');
+  // Another tool is never answered here.
+  expect(
+    (await $.tool.check({ tool: 'mcp__plugin_tenjin_router__request', input: {} } as never))
+      .decision,
+  ).toBe('ask');
 });

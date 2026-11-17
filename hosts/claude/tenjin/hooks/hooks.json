@@ -122,7 +122,7 @@
         ]
       },
       {
-        "matcher": "mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent",
+        "matcher": "mcp__plugin_tenjin_router__request",
         "hooks": [
           {
             "type": "command",

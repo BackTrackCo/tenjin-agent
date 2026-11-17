@@ -236,7 +236,9 @@ export function renderPluginHooks(
     { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(o)) },
     {
       event: 'PreToolUse',
-      matcher: `${REQUEST_TOOL}|${SUBAGENT_TOOL}`,
+      // With the mod, its `tool.check` allows an accept of an offer, and no hook runs
+      // for it, so the host draws no row of its own beside the accept's.
+      matcher: o.mod !== undefined ? REQUEST_TOOL : `${REQUEST_TOOL}|${SUBAGENT_TOOL}`,
       hooks: command(allowHook(o)),
     },
   ];

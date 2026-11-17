@@ -1319,9 +1319,36 @@ function displayState(item: TenjinModelViewerRecord): string {
  */
 function undecided(input: unknown): boolean {
   const given = record(input) ?? {};
-  return !['offer_id', 'cancel', 'capture', 'delegation_id', 'task'].some(
-    (key) => given[key] !== undefined,
+  if (
+    !['offer_id', 'cancel', 'capture', 'delegation_id', 'task'].some(
+      (key) => given[key] !== undefined,
+    )
+  )
+    return true;
+  // ITS OFFER ID STILL STREAMING: the host draws the input as it arrives, so for that
+  // moment the call holds part of an id (live on alpha.64: the host's own
+  // `plugin:tenjin:router` row stood between the offer row and the DeepSeek row).
+  const id = given.offer_id;
+  return (
+    typeof id === 'string' &&
+    !UUID.test(id) &&
+    /^[0-9a-f-]{0,35}$/i.test(id) &&
+    Object.keys(given).every((key) => key === 'offer_id')
   );
+}
+/**
+ * The accept calls a person's permission settings never ask about, as the plugin's
+ * allow leg answered them before (it ran for each, and the host drew its run): the
+ * model's accept or cancel of an offer by its id, and this plugin's own capture. Any
+ * other input gets the host's own verdict; the CLI still checks the offer is this
+ * session's own.
+ */
+function allowedAccept(input: unknown, ownCall: boolean): boolean {
+  const given = record(input);
+  const keys = given ? Object.keys(given) : [];
+  if (ownCall) return keys.length === 1 && record(given?.capture) !== undefined;
+  const id = keys.length === 1 ? given?.[keys[0]!] : undefined;
+  return (keys[0] === 'offer_id' || keys[0] === 'cancel') && short(id) && UUID.test(id);
 }
 
 /** Whether a call is this plugin's own (its activity read, its viewer agent), by who raised it. */
@@ -1429,10 +1456,16 @@ export function registerModelViewer(on: On): void {
     reason: 'The DeepSeek activity viewer runs no tool.',
   } as const;
   on('tool.check', async ($, e, next) => {
-    if (e.agentId === undefined) return next(e);
-    const viewer =
-      liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => false));
-    return viewer ? refused : next(e);
+    if (e.agentId !== undefined) {
+      const viewer =
+        liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => false));
+      if (viewer) return refused;
+    }
+    // In place of the allow leg the plugin's hooks file runs for other hosts, whose run
+    // the host draws as a row of its own beside the accept's.
+    if (e.tool === ACCEPT && allowedAccept(e.input, raisedByThisPlugin(next.origin)))
+      return { decision: 'allow', reason: 'Tenjin subagent' };
+    return next(e);
   }).catch((_$, e, next) =>
     e.agentId !== undefined && liveViewerGuards.has(e.agentId) ? refused : next(e),
   );

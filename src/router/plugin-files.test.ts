@@ -123,10 +123,19 @@ describe('the mod', () => {
       types: './types/index.d.ts',
     });
     expect(withMod['hooks/register.tsx']).toBe(mod['hooks/register.tsx']);
+    // With the mod, its `tool.check` allows the accept: the allow leg names the request tool alone.
+    const legs = (files: Record<string, string>) =>
+      (
+        JSON.parse(files['hooks/hooks.json']!) as { hooks: { PreToolUse: { matcher: string }[] } }
+      ).hooks.PreToolUse.at(-1)?.matcher;
+    expect(legs(withMod)).toBe('mcp__plugin_tenjin_router__request');
     // A folder written without the mod's sources names no module that is not there.
     const bare = renderPluginFiles('1.2.3');
     expect(Object.keys(bare)).not.toContain('hooks/register.tsx');
     expect(JSON.parse(bare['hooks/hooks.json']!)).not.toHaveProperty('modules');
+    expect(legs(bare)).toBe(
+      'mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent',
+    );
     expect(JSON.parse(bare['.claude-plugin/plugin.json']!)).not.toHaveProperty('types');
   });
 
