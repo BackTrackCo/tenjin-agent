@@ -64,8 +64,23 @@ function setup(_$: Engine, on: On) {
     accepted: 0,
     snapshot: undefined as TenjinModelViewerState | undefined,
     liveFile: true,
-    work: (() => ({ result: 'actual worker result' })) as () =>
-      ToolCallResult | Promise<ToolCallResult>,
+    toolUses: 1,
+    tokens: 41_234,
+    actualAtomic: '4300',
+    /** By offer id: what another worker's activity has of its own. */
+    per: {} as Record<
+      string,
+      { phase?: string; toolUses?: number; tokens?: number; actualAtomic?: string }
+    >,
+    /** How the job ended, as the CLI reads it from the job's own record. */
+    ended: undefined as Record<string, unknown> | undefined,
+    /** False: the CLI process holds no live view (it restarted, or the session was resumed). */
+    liveView: true,
+    /** Every plugin read refused, as the plugin's own hook did on alpha.52 (fault J). */
+    readsRefused: false,
+    work: (() => ({ result: 'actual worker result' })) as (e: {
+      offer_id?: unknown;
+    }) => ToolCallResult | Promise<ToolCallResult>,
   };
   on('session.cwd', () => ({ value: state.cwd }));
   on('session.id', () => ({ value: state.parentSessionId }));
@@ -121,20 +136,20 @@ function setup(_$: Engine, on: On) {
     return { model: 'inherit' };
   });
   // What the CLI reports for the owned worker, through MCP or its live file alike.
-  const activity = () => ({
+  const activity = (offer: string = state.offer) => ({
     status: 'activity',
     activity: {
       version: 1,
-      offerId: state.offer,
+      offerId: offer,
       workerHandle: WORKER,
       generation: 'owned-generation',
       nativeProfile: state.nativeProfile,
-      sequence: state.sequence ?? (state.phase === 'running' ? 2 : 3),
-      state: state.phase,
+      sequence: state.sequence ?? ((state.per[offer]?.phase ?? state.phase) === 'running' ? 2 : 3),
+      state: state.per[offer]?.phase ?? state.phase,
       started: state.started,
       droppedRows: 8,
-      toolUses: 1,
-      tokens: 41_234,
+      toolUses: state.per[offer]?.toolUses ?? state.toolUses,
+      tokens: state.per[offer]?.tokens ?? state.tokens,
       ...(state.result !== undefined ? { result: state.result } : {}),
       rows: state.rows ?? [
         {
@@ -149,7 +164,7 @@ function setup(_$: Engine, on: On) {
         { id: 'not-a-row', kind: 'thinking', text: 'PRIVATE_RAW_THINKING' },
       ],
       spend: {
-        actualAtomic: '4300',
+        actualAtomic: state.per[offer]?.actualAtomic ?? state.actualAtomic,
         reservedAtomic: '8000',
         uncertain: [],
         extra: 'PRIVATE_SPEND',
@@ -159,12 +174,13 @@ function setup(_$: Engine, on: On) {
   });
   // The live file the CLI writes while the accept call runs (`model-worker-progress.ts`).
   on('fs.read', async (_$, e) => {
-    if (
-      state.liveFile &&
-      e.path ===
-        `${DATA}/progress/model-workers/${await sha256Hex(state.parentSessionId)}-${await sha256Hex(state.offer)}.json`
-    )
-      return { value: JSON.stringify(activity()) };
+    for (const offer of new Set([state.offer, ...Object.keys(state.per)]))
+      if (
+        state.liveFile &&
+        e.path ===
+          `${DATA}/progress/model-workers/${await sha256Hex(state.parentSessionId)}-${await sha256Hex(offer)}.json`
+      )
+        return { value: JSON.stringify(activity(offer)) };
     const text = files.get(e.path);
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
   });
@@ -202,26 +218,27 @@ function setup(_$: Engine, on: On) {
       await state.inspectionBlocked;
       if (state.inspectionFails) throw Error('Controlled inspector failure');
     }
-    return {
-      value: {
-        isError: false,
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(activity()),
-          },
-        ],
-      },
-    };
+    const said = (value: unknown, isError = false) => ({
+      value: { isError, content: [{ type: 'text' as const, text: JSON.stringify(value) }] },
+    });
+    if (state.readsRefused) return said('This read is the Tenjin plugin’s own', true);
+    // A job that ended carries its own status and time, from the job's record.
+    if (!state.liveView)
+      return said(
+        state.ended ? { status: 'ended', ended: state.ended } : { status: 'unavailable' },
+      );
+    const offer = typeof e.args.offer_id === 'string' ? e.args.offer_id : state.offer;
+    return said({ ...activity(offer), ...(state.ended ? { ended: state.ended } : {}) });
   });
   on('tool.call', { tool: ACCEPT }, async (_$, e) => {
     if (e.capture) {
       state.captures.push(
         structuredClone(e.capture) as { input: Record<string, unknown>; tool: string },
       );
-      // The CLI's answer to a held call sent again unchanged: it runs native.
+      // The CLI's answer to a held call sent again unchanged: it runs native, and the
+      // CLI names the one open offer that repeat settled.
       if (state.keepNative) {
-        const native = JSON.stringify({ action: 'native' });
+        const native = JSON.stringify({ action: 'native', settled: state.offer });
         return { result: native, text: native };
       }
       const offered = JSON.stringify({
@@ -238,7 +255,7 @@ function setup(_$: Engine, on: On) {
     }
     state.accepted++;
     try {
-      return await state.work();
+      return await state.work(e);
     } finally {
       state.finishFollow();
     }
@@ -1145,7 +1162,7 @@ test('the worker starts before its viewer does, and the viewer still binds to it
   expect(f.state.nativeSteps).toBe(0);
 });
 
-test('an accept call is one live DeepSeek row that ends in a native Done line, and the spinner names its step', async ($, on) => {
+test("an accept call is one live DeepSeek row that ends in a native Done line, and the parent's spinner stays the host's own", async ($, on) => {
   const f = setup($, on);
   const spinners: { message: string | null }[] = [];
   on('ui.render', { component: 'Spinner' }, ($, e) => {
@@ -1185,7 +1202,7 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
   await f.clock.settle();
   const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
   for (const surface of SURFACES) {
-    // The row and the spinner say so from the moment of accept, before any tick.
+    // The row says so from the moment of accept, before any tick.
     const row = await $.ui.mount({
       plugin: 'tenjin',
       surface,
@@ -1199,7 +1216,8 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
     await (
       await $.ui.mount({ plugin: 'tenjin', surface, component: 'Spinner', props: spinner })
     ).unmount();
-    expect(spinners.at(-1)?.message).toBe('DeepSeek · starting');
+    // The parent's spinner is the host's, as while a native subagent runs: its own words.
+    expect(spinners.at(-1)).toEqual(spinner);
   }
   await f.clock.advance(12_000);
   const waiting = await $.ui.mount({
@@ -1231,7 +1249,7 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
       component: 'Spinner',
       props: spinner,
     });
-    expect(spinners.at(-1)?.message).toBe('DeepSeek · Read(src/example.ts)');
+    expect(spinners.at(-1)).toEqual(spinner);
     await turn.unmount();
   }
   expect(f.state.inspections).toBe(0);
@@ -1342,14 +1360,15 @@ test('an accept sent again while its worker runs leaves the live row and its clo
   };
   const live = (seconds: number) =>
     `⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · ${seconds}s · $0.0043 so far  ⎿  Read(src/example.ts)`;
-  // The repeat's own row: this call started nothing. The worker's row and the spinner go on.
+  // The repeat's own row: this call started nothing. The worker's row goes on, and the
+  // parent's spinner is the host's throughout.
   const repeat = '⏺DeepSeek(Read selected source)  ⎿  Not started';
   expect(await shown(first)).toBe(live(13));
   expect(await shown(second)).toBe(repeat);
-  expect(await spinning()).toBe('DeepSeek · Read(src/example.ts)');
+  expect(await spinning()).toBe('engine step');
   await f.clock.advance(1000);
   expect(await shown(first)).toBe(live(14));
-  expect(await spinning()).toBe('DeepSeek · Read(src/example.ts)');
+  expect(await spinning()).toBe('engine step');
   release();
   expect((await running).text).toBe(handback);
   await f.clock.settle();
@@ -1553,8 +1572,8 @@ test("the viewer's transcript grows with the worker's rows and keeps the whole r
     '⏺ Read(src/router/model-mcp.ts)',
     '✻ DeepSeek · Read(src/router/model-mcp.ts)…',
   ]);
-  // The parent's own spinner names the step and carries no rows.
-  expect(await transcript('main')).toEqual(['✻ DeepSeek · Read(src/router/model-mcp.ts)…']);
+  // The parent's own spinner is the host's: no step, no rows.
+  expect(await transcript('main')).toEqual(['✻ Sauteing…']);
   // The CLI's window moved on: the first row left it and stays in the transcript.
   f.state.rows = [said, { ...push, state: 'running', outputPreview: undefined }];
   f.state.sequence = 5;
@@ -1862,3 +1881,303 @@ for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as con
       await f.clock.settle();
     },
   );
+
+/** What the host answers the parent after two minutes, in place of the worker's envelope. */
+const MOVED =
+  'MCP tool "plugin:tenjin:router/subagent" is still running after 120s. It was moved to the background as task k2vf9xspk and keeps running; you\'ll receive a notification with the result when it completes.';
+/** The job's own end, as its record keeps it: offer cbe81427 of the alpha.52 run. */
+const JOB_END = {
+  status: 'completed',
+  elapsedMs: 882_695,
+  toolUses: 89,
+  tokens: 215_822,
+  spend: { reservedAtomic: '226437', actualAtomic: '226437', uncertain: [] },
+};
+async function acceptRow($: Engine, toolUseId: string, offerId: string, output?: string) {
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow(toolUseId, ACCEPT, { offer_id: offerId }, output),
+  });
+  const lines = (await shownLines(ui)).join('');
+  const [dot] = await ui.findAll({ type: 'Text', text: '⏺' });
+  await ui.unmount();
+  return [lines, dot?.props.color] as const;
+}
+/** Accepts the offer; the host moves the call to the background at two minutes. */
+async function acceptMoved($: Engine, f: ReturnType<typeof setup>) {
+  let move: () => void = () => undefined;
+  const moving = new Promise<void>((resolve) => {
+    move = resolve;
+  });
+  f.state.work = async () => {
+    await moving;
+    return { result: MOVED, text: MOVED };
+  };
+  await remember($);
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.settle();
+  await f.clock.advance(120_000);
+  move();
+  expect((await running).text).toBe(MOVED);
+}
+
+test('a worker moved to the background ends when its job does, with the job’s own status and time', async ($, on) => {
+  const f = setup($, on);
+  const shown: string[] = [];
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    shown.push(e.props.text);
+    return $.ui.resolve(e).Text({ children: [e.props.text] });
+  });
+  await acceptMoved($, f);
+  f.state.toolUses = 89;
+  f.state.tokens = 215_822;
+  f.state.actualAtomic = '226437';
+  await f.clock.advance(600_000);
+  expect((await acceptRow($, 'parent_accept', OFFER, MOVED))[0]).toBe(
+    '⏺DeepSeek(Read selected source) · 89 tool uses · 215.8k tokens · 12m 0s · $0.226437 so far  ⎿  Read(src/example.ts)',
+  );
+  // The job completes 14m 42s after its worker started: its display file goes, and the
+  // CLI reads how it ended from the job's record.
+  await f.clock.advance(164_000);
+  f.state.liveFile = false;
+  f.state.phase = 'completed';
+  f.state.ended = JOB_END;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  const done = [
+    '⏺DeepSeek(Read selected source)  ⎿  Done (89 tool uses · 215.8k tokens · 14m 42s · $0.226437)',
+    'success',
+  ];
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual(done);
+  // Nothing later rewrites it: no limit closes it as a stop.
+  await f.clock.advance(31 * 60_000);
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual(done);
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: {
+      text: 'MCP task k2vf9xspk (plugin:tenjin:router/subagent) completed.',
+      origin: { kind: 'task-notification' },
+      isExpanded: true,
+      task: { id: 'k2vf9xspk', status: 'completed' },
+    },
+  });
+  await ui.unmount();
+  expect(shown.at(-1)).toBe(
+    'DeepSeek "Read selected source" finished · Done (89 tool uses · 215.8k tokens · 14m 42s · $0.226437)',
+  );
+});
+
+// Forty-five minutes of one-second ticks: longer than the kit's default time for a test.
+test(
+  'a row that cannot learn how its job ended says so at the job’s limit, never as a stop or with a time past its end',
+  { timeoutMs: 120_000 },
+  async ($, on) => {
+    const f = setup($, on);
+    await acceptMoved($, f);
+    f.state.toolUses = 89;
+    f.state.tokens = 215_822;
+    f.state.actualAtomic = '226437';
+    await f.clock.advance(763_000);
+    // The job ends, and every read the row makes is refused.
+    f.state.liveFile = false;
+    f.state.readsRefused = true;
+    await f.clock.advance(45 * 60_000 - 883_000 + 2000);
+    await f.clock.settle();
+    const [line, color] = await acceptRow($, 'parent_accept', OFFER, MOVED);
+    expect(line).toBe(
+      '⏺DeepSeek(Read selected source)  ⎿  Outcome not shown here (89 tool uses · 215.8k tokens · $0.226437 so far)',
+    );
+    expect(color).toBeUndefined();
+  },
+);
+
+test('a row drawn after a resume, with no record and no live view, follows the running job and ends with it', async ($, on) => {
+  const f = setup($, on);
+  // A resumed session: this module never saw the accept, and the CLI process holds no view.
+  f.state.liveView = false;
+  const background = ['⏺DeepSeek(subagent) · running in the background', undefined];
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual(background);
+  await f.clock.settle();
+  // The worker still runs, so its display file is there: the row goes on.
+  await f.clock.advance(300_000);
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual(background);
+  f.state.liveFile = false;
+  f.state.ended = JOB_END;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual([
+    '⏺DeepSeek(subagent)  ⎿  Done (89 tool uses · 215.8k tokens · 14m 42s · $0.226437)',
+    'success',
+  ]);
+});
+
+test('a row drawn after a resume of a job that already ended settles at once from its record', async ($, on) => {
+  const f = setup($, on);
+  f.state.liveView = false;
+  f.state.liveFile = false;
+  f.state.ended = { status: 'cancelled', elapsedMs: 61_000, toolUses: 3, tokens: 900 };
+  await acceptRow($, 'parent_accept', OFFER, MOVED);
+  await f.clock.settle();
+  expect(await acceptRow($, 'parent_accept', OFFER, MOVED)).toEqual([
+    '⏺DeepSeek(subagent)  ⎿  Interrupted (3 tool uses · 900 tokens · 1m 1s)',
+    'error',
+  ]);
+});
+
+const OFFER2 = 'c4a1f0de-7b2e-4c11-9a3d-5e6f7a8b9c0d';
+const INPUT2 = {
+  prompt: 'Check the cancel path in src/router/model-mcp.ts. Final line: DONE.',
+  description: 'Check the cancel path',
+  subagent_type: 'general-purpose',
+};
+async function heldRow(
+  $: Engine,
+  toolUseId: string,
+  input: Record<string, unknown>,
+  output: unknown,
+) {
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...toolRow(toolUseId, 'Agent', input), isRunning: false, output },
+  });
+  const lines = (await shownLines(ui)).join('');
+  await ui.unmount();
+  return lines;
+}
+
+test('two offers and two workers at once each keep their own row, viewer entry and end line', async ($, on) => {
+  const f = setup($, on);
+  const spinners: unknown[] = [];
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    spinners.push(e.props);
+    return $.ui.resolve(e).Text({ children: ['engine spinner'] });
+  });
+  f.state.offer = OFFER;
+  const first = (await remember($, INPUT)).result;
+  f.state.offer = OFFER2;
+  const second = (await remember($, INPUT2)).result;
+  f.state.offer = OFFER;
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe(
+    '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
+  );
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe(
+    '⏺Agent(Check the cancel path) · Tenjin offered DeepSeek',
+  );
+  f.state.per[OFFER2] = { toolUses: 7, tokens: 9000, actualAtomic: '1200' };
+  const release: Record<string, () => void> = {};
+  const blocked = Object.fromEntries(
+    [OFFER, OFFER2].map((id) => [id, new Promise<void>((resolve) => (release[id] = resolve))]),
+  );
+  const handback = (toolUses: number, elapsedMs: number) =>
+    JSON.stringify({
+      status: 'completed',
+      elapsedMs,
+      toolUses,
+      tokens: 41_234,
+      spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+      result: 'worker report',
+    });
+  f.state.work = async (e) => {
+    await blocked[String(e.offer_id)];
+    const text = e.offer_id === OFFER ? handback(12, 9000) : handback(7, 6000);
+    return { result: text, text };
+  };
+  const a = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'accept_a' });
+  await f.clock.settle();
+  await f.clock.advance(5000);
+  const b = $.tool.call({ tool: ACCEPT, offer_id: OFFER2, tool_use_id: 'accept_b' });
+  await f.clock.settle();
+  await f.clock.advance(3000);
+  // Two settled offers draw nothing of their own; two workers draw two live rows.
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe('');
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe('');
+  const liveA = (s: number) =>
+    `⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · ${s}s · $0.0043 so far  ⎿  Read(src/example.ts)`;
+  const liveB = (s: number) =>
+    `⏺DeepSeek(Check the cancel path) · 7 tool uses · 9k tokens · ${s}s · $0.0012 so far  ⎿  Read(src/example.ts)`;
+  expect((await acceptRow($, 'accept_a', OFFER))[0]).toBe(liveA(8));
+  expect((await acceptRow($, 'accept_b', OFFER2))[0]).toBe(liveB(3));
+  // Each has its own entry in the agent list.
+  expect(f.state.agents.map((agent) => [agent.type, agent.description])).toEqual([
+    [TYPE, 'DeepSeek #1 · Read selected source'],
+    [TYPE, 'DeepSeek #2 · Check the cancel path'],
+  ]);
+  // The parent's spinner is the host's, whichever workers run.
+  const props = { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' as const };
+  await (
+    await $.ui.mount({ plugin: 'tenjin', surface: 'terminal', component: 'Spinner', props })
+  ).unmount();
+  expect(spinners.at(-1)).toEqual(props);
+  // The first ends: its own end line; the second is still live, its clock its own.
+  release[OFFER]!();
+  const endedA = (await a).text;
+  await f.clock.settle();
+  expect(await acceptRow($, 'accept_a', OFFER, endedA)).toEqual([
+    '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 9s · $0.039)',
+    'success',
+  ]);
+  await f.clock.advance(1000);
+  expect((await acceptRow($, 'accept_b', OFFER2))[0]).toBe(liveB(4));
+  release[OFFER2]!();
+  const endedB = (await b).text;
+  await f.clock.settle();
+  expect(await acceptRow($, 'accept_b', OFFER2, endedB)).toEqual([
+    '⏺DeepSeek(Check the cancel path)  ⎿  Done (7 tool uses · 41.2k tokens · 6s · $0.039)',
+    'success',
+  ]);
+});
+
+test('a repeat that keeps one of two identical offers native clears that offer’s row alone', async ($, on) => {
+  const f = setup($, on);
+  f.state.offer = OFFER;
+  const first = (await remember($)).result;
+  f.state.offer = OFFER2;
+  const second = (await remember($)).result;
+  const open = '⏺Agent(Read selected source) · Tenjin offered DeepSeek';
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe(open);
+  expect(await heldRow($, 'held_b', INPUT, second)).toBe(open);
+  // The CLI keeps the repeat native and names the offer it settled: the older one.
+  f.state.keepNative = true;
+  f.state.offer = OFFER;
+  await remember($);
+  expect(f.state.nativeCalls).toHaveLength(1);
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe('');
+  expect(await heldRow($, 'held_b', INPUT, second)).toBe(open);
+});
+
+test('an offer for a custom agent type draws its row and its viewer entry as a built-in one does', async ($, on) => {
+  const f = setup($, on);
+  f.state.nativeProfile = 'loop-worker-high';
+  const custom = { ...INPUT, subagent_type: 'loop-worker-high' };
+  const held = (await remember($, custom)).result;
+  expect(await heldRow($, 'held_agent', custom, held)).toBe(
+    '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
+  );
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback', text: 'handback' };
+  };
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.settle();
+  await f.clock.advance(1000);
+  expect((await acceptRow($, 'parent_accept', OFFER))[0]).toBe(
+    '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
+  );
+  expect(f.state.agents.map((agent) => [agent.type, agent.description])).toEqual([
+    [TYPE, 'DeepSeek #1 · Read selected source'],
+  ]);
+  expect(f.state.snapshot?.records.map((r) => r.profile)).toEqual(['loop-worker-high']);
+  release();
+  await running;
+  await f.clock.settle();
+});

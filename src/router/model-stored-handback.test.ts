@@ -40,7 +40,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
-vi.mock('./agent-tools', () => ({ findDefinition: vi.fn(async () => null) }));
+vi.mock('./agent-tools', async (original) => ({
+  ...(await original<typeof import('./agent-tools')>()),
+  findDefinition: vi.fn(async () => null),
+}));
 vi.mock('./model-settings', async (original) => ({
   ...(await original<typeof import('./model-settings')>()),
   modelSettings: vi.fn(),
@@ -210,6 +213,50 @@ it.each(['completed', 'stopped'] as const)(
           expect(text).not.toContain(password);
         }
         expect(JSON.parse(again)).toEqual(JSON.parse(first));
+        // HOW IT ENDED, for its row: the job's own status, time and counts. Here beside the
+        // live view; in a process that holds none (a restart, a resumed session) from the
+        // job's record alone, never with the assignment or the result; for no other session.
+        const handed = JSON.parse(first);
+        const ended = {
+          status: handed.status,
+          elapsedMs: handed.elapsedMs,
+          toolUses: handed.toolUses,
+          tokens: handed.tokens,
+          ...(ending === 'completed' ? { spend } : {}),
+        };
+        const read = async (sessionId: string) => {
+          const later = new McpServer({ name: 'test', version: '1' });
+          const tool = registerModelTool(later, {
+            dataDir,
+            harness: 'claude',
+            session: () => ({ ...session, sessionId }),
+            transport: async () => transport,
+          });
+          const reader = new Client({ name: 'test', version: '1' });
+          const [c, d] = InMemoryTransport.createLinkedPair();
+          await later.connect(c);
+          await reader.connect(d);
+          try {
+            const reply = await reader.callTool({
+              name: 'subagent_activity',
+              arguments: { offer_id: job.id },
+            });
+            return (reply.content as Array<{ text: string }>)[0]!.text;
+          } finally {
+            await tool.shutdown();
+            await reader.close();
+            await later.close();
+          }
+        };
+        const live = await client.callTool({
+          name: 'subagent_activity',
+          arguments: { offer_id: job.id },
+        });
+        expect(JSON.parse((live.content as Array<{ text: string }>)[0]!.text).ended).toEqual(ended);
+        const restarted = await read('root');
+        expect(JSON.parse(restarted)).toEqual({ status: 'ended', ended });
+        expect(restarted).not.toMatch(/connect|env:|database/i);
+        expect(JSON.parse(await read('another-session'))).toEqual({ status: 'unavailable' });
         await model.shutdown();
         const files = await filesUnder(dataDir);
         const stored = await Promise.all(files.map((file) => readFile(file, 'utf8')));

@@ -25,7 +25,8 @@ const bindingSchema = z
           value.startsWith('tenjin-worker-') &&
           z.uuid().safeParse(value.slice('tenjin-worker-'.length)).success,
       ),
-    nativeProfile: z.enum(['general-purpose', 'Explore']),
+    // The agent type the worker runs as, a custom one too; a plugin's (`a:b`) is never offered.
+    nativeProfile: z.string().regex(/^[A-Za-z0-9_.-]{1,200}$/),
     continuationId: z.uuid(),
     sdkSessionId: z.uuid(),
     generation: id,
@@ -102,6 +103,37 @@ export function activityAnswer(
       ...(snapshot.spend ? { spend: snapshot.spend } : {}),
       ...(options.result && snapshot.result !== undefined ? { result: snapshot.result } : {}),
     },
+  };
+}
+
+/**
+ * How an ended job ended, as its row shows it: from the job's state and the
+ * handback kept for it (the completed envelope or the stopped one). Its status,
+ * own time, counts and spend only, never the assignment or the result. Undefined
+ * while the job has not ended.
+ */
+export function endedDisplay(state: string, kept: string | null | undefined) {
+  if (state !== 'completed' && state !== 'cancelled' && state !== 'unknown') return undefined;
+  let handback: Record<string, unknown> = {};
+  try {
+    handback = object(JSON.parse(kept ?? '{}')) ?? {};
+  } catch {
+    // A record with no readable handback still says how it ended.
+  }
+  const count = (value: unknown) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const [elapsedMs, toolUses, tokens] = [
+    handback.elapsedMs,
+    handback.toolUses,
+    handback.tokens,
+  ].map(count);
+  const spend = spendSchema.safeParse(handback.spend);
+  return {
+    status: state === 'unknown' && handback.status === 'not_started' ? 'not_started' : state,
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(toolUses !== undefined ? { toolUses } : {}),
+    ...(tokens !== undefined ? { tokens } : {}),
+    ...(spend.success ? { spend: spend.data } : {}),
   };
 }
 

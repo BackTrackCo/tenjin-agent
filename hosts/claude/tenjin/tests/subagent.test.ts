@@ -526,3 +526,50 @@ test('a held Agent call draws as the offer it is, never as a finished subagent w
     await nativeRow.unmount();
   }
 });
+
+test('a held call names the model request that made it, so two calls of one response are told from a repeat', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: Record<string, unknown>[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture as Record<string, unknown>);
+    return { result: offered, text: offered };
+  });
+  native(on);
+  on('turn.step', async function* (_$, e): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+    yield { kind: 'stop', stopReason: 'tool_use', usage: null };
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'tool_use',
+      usage: null,
+    };
+  });
+  const step = async (turnId: string, index: number, agentId?: string) => {
+    const stream = $.turn.step({
+      turnId,
+      index,
+      model: 'inherit',
+      messageCount: 0,
+      ...(agentId ? { agentId } : {}),
+    });
+    for (let item = await stream.next(); !item.done; item = await stream.next());
+  };
+  // Before any request of its loop is seen, a call names none.
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'early', ...ASSIGNMENT });
+  await step('main-turn', 0);
+  await step('main-turn', 1);
+  await step('child-turn', 0, 'child-1');
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'first', ...ASSIGNMENT });
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'second', ...ASSIGNMENT });
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'child', agentId: 'child-1', ...ASSIGNMENT });
+  expect(asked.map((capture) => capture.step)).toEqual([
+    undefined,
+    'main-turn:1',
+    'main-turn:1',
+    'child-turn:0',
+  ]);
+  expect('step' in asked[0]!).toBe(false);
+});

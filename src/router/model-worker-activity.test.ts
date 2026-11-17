@@ -484,3 +484,12 @@ it('removes a value learned after its row was made from the rows and the partial
   f.activity.finish('unknown');
   expect(partialHandback(f.activity.snapshot())?.lastText).toBe('It holds [env:DEEP].');
 });
+
+it("binds a worker that runs as a custom agent, never one named like a plugin's or with a space", () => {
+  const f = fixture();
+  const bind = (nativeProfile: string) =>
+    new ModelWorkerActivity({ dataDir: f.dataDir, binding: { ...f.binding, nativeProfile } });
+  expect(bind('loop-worker-high').snapshot().binding.nativeProfile).toBe('loop-worker-high');
+  expect(() => bind('tenjin:deepseek-viewer')).toThrow();
+  expect(() => bind('loop worker')).toThrow();
+});

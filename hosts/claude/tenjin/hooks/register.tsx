@@ -3,6 +3,8 @@ import { asRecord, parseJson, readJson, tenjinDataDir, textOf } from './hook-dat
 
 import type { TenjinHeld, TenjinRow } from '../types';
 import {
+  keptNative,
+  modelStep,
   registerModelViewer,
   rememberModelOffer,
   translateViewerContinuation,
@@ -131,13 +133,22 @@ export const register: Register = (on) => {
       if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
         return owned ? unavailable() : next(e);
       // A held call is never rewritten: the parent keeps it native by sending it
-      // again unchanged, and that repeat runs here as it was reviewed.
+      // again unchanged, and that repeat runs here as it was reviewed. The model
+      // request that made it tells that repeat from a second call of one response.
+      const step = modelStep(e.agentId);
       const response = await $.tool.call({
         tool: 'mcp__plugin_tenjin_router__subagent',
-        capture: { session_id: await $.session.id(), tool_use_id, input, tool: e.tool },
+        capture: {
+          session_id: await $.session.id(),
+          tool_use_id,
+          input,
+          tool: e.tool,
+          ...(step !== undefined ? { step } : {}),
+        },
       });
       const text = textOf(response.result) ?? response.text;
       const offer = asRecord(parseJson(text));
+      if (offer?.action === 'native') await keptNative($, offer.settled);
       if (
         offer?.action === 'refused' &&
         offer.started === false &&

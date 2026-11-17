@@ -19,7 +19,12 @@ import {
 } from './model-conversations';
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 import { realpath, rm } from 'node:fs/promises';
-import { ModelWorkerActivity, activityAnswer, partialHandback } from './model-worker-activity';
+import {
+  ModelWorkerActivity,
+  activityAnswer,
+  endedDisplay,
+  partialHandback,
+} from './model-worker-activity';
 import { startWorkerProgress, workerProgressPath } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
@@ -238,6 +243,23 @@ export function registerModelTool(
             existing.binding.configDir !== configDir)
         )
           return answer({ status: 'unavailable' });
+        // HOW AN ENDED JOB ENDED, from its own record, for the session that owns it: its
+        // row ends with the job's real status and time even where no live view of it is
+        // held (a restarted process, a resumed session). No assignment and no result.
+        const ended = async () => {
+          const job = await jobs.owned(args.offer_id, session.sessionId);
+          if (!job?.runner || job.root !== root) return undefined;
+          const conversation =
+            job.state === 'completed' ? await conversationOf(job).catch(() => null) : null;
+          const kept = conversation
+            ? await conversations.handback(conversation.handle, jobOwner(job), job.id)
+            : job.result;
+          return endedDisplay(job.state, kept);
+        };
+        if (!existing) {
+          const end = await ended().catch(() => undefined);
+          if (end) return answer({ status: 'ended', ended: end });
+        }
         if (args.follow && !existing) {
           // By its own id: the offer may have been accepted in a later turn than it was made in.
           const pending = await jobs.owned(args.offer_id, session.sessionId);
@@ -269,7 +291,12 @@ export function registerModelTool(
           activity.binding.configDir !== configDir
         )
           return answer({ status: 'unavailable' });
-        return answer(activityAnswer(activity, { rows: !args.follow, result: !args.follow }));
+        const shown = activityAnswer(activity, { rows: !args.follow, result: !args.follow });
+        // The live view does not hold the job's own time.
+        const end = ['completed', 'cancelled', 'unknown'].includes(activity.state)
+          ? await ended().catch(() => undefined)
+          : undefined;
+        return answer(end ? { ...shown, ended: end } : shown);
       },
     );
   server.registerTool(
@@ -592,9 +619,8 @@ export function registerModelTool(
             try {
               const owned = activeConversation;
               const { parentSessionId, root, configDir, sdkSessionId } = conversation;
-              const nativeProfile = executionJob.native.subagent_type ?? 'general-purpose';
-              if (nativeProfile !== 'general-purpose' && nativeProfile !== 'Explore')
-                throw new Error('Unsupported native worker profile for activity');
+              // A custom agent type too; the binding refuses any other shape.
+              const nativeProfile = String(executionJob.native.subagent_type ?? 'general-purpose');
               activity = views.begin(
                 job.id,
                 () =>

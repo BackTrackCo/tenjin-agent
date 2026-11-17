@@ -40,7 +40,8 @@ export type TenjinModelActivity = {
   offerId: string;
   workerHandle: string;
   generation: string;
-  nativeProfile: 'general-purpose' | 'Explore';
+  /** The agent type the worker runs as: `general-purpose`, `Explore` or a custom agent's name. */
+  nativeProfile: string;
   sequence: number;
   state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
   /** False when the worker's Claude Code never started; absent from an older CLI. */
@@ -97,7 +98,8 @@ export type TenjinModelWorker = {
   title: string;
   /** When the accept call started, on the plugin's clock. */
   startedAt: number;
-  elapsedMs: number;
+  /** Absent only for a row settled after a resume from a job that kept no time. */
+  elapsedMs?: number;
   state: TenjinModelActivity['state'];
   toolUses?: number;
   tokens?: number;
@@ -108,9 +110,10 @@ export type TenjinModelWorker = {
   /**
    * How the worker ended, once it has: from the accept call's answer or, for a
    * call the host moved to the background, from the CLI. The row's end line
-   * reads this, never the absence of an answer.
+   * reads this, never the absence of an answer. `unseen`: past the job's wall
+   * time and nothing here could say how it ended.
    */
-  ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started';
+  ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started' | 'unseen';
   /** The final spend still has an unsettled part. */
   unresolved?: boolean;
 };
@@ -121,7 +124,8 @@ export type TenjinModelViewerRecord = {
   /** The held Agent call's description, cleaned, for the live row. */
   title?: string;
   description: string;
-  profile: 'general-purpose' | 'Explore';
+  /** As `TenjinModelActivity.nativeProfile`. */
+  profile: string;
   active: boolean;
   nativeId?: string;
   parentId?: string;
