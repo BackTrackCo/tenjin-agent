@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk/core';
@@ -10,6 +11,7 @@ import {
   walletPath,
 } from '../lib/paths';
 import { claudeWorkerConfigDir } from './claude-worker-session';
+import { findClaudeBinary, type ClaudeBinary } from './claude-cli';
 import type { WindowsWorkerProcess } from './claude-worker-process';
 import { loadWindowsWorkerConfig } from './windows-worker-config';
 
@@ -21,6 +23,21 @@ export type WindowsWorkerLaunch = WindowsWorkerProcess & {
 
 export function sameWindowsPath(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+/** Check the selected binary before the controller executes its version command. */
+export function findWindowsWorkerClaude(
+  env: NodeJS.ProcessEnv,
+  configuredPath: string,
+): ClaudeBinary | null {
+  const selected = findClaudeBinary(env);
+  try {
+    return selected && sameWindowsPath(realpathSync(selected.path), configuredPath)
+      ? { ...selected, path: configuredPath }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The explicit shared profile must be the one producing this session's policy and history. */

@@ -71,6 +71,12 @@ await writeFile(fixture, content);
 
 const children = [];
 const launches = [];
+const versionProbes = [];
+const execFile = childProcess.execFile;
+childProcess.execFile = function (file, ...args) {
+  if (args[0]?.[0] === '--version') versionProbes.push(file);
+  return Reflect.apply(execFile, this, [file, ...args]);
+};
 const spawn = childProcess.spawn;
 childProcess.spawn = function (file, args, options) {
   const child = Reflect.apply(spawn, this, [file, args, options]);
@@ -215,6 +221,31 @@ try {
     target: 'node22',
   });
   const { qualifiedModelWorker, registerModelTool } = await import(pathToFileURL(bundle).href);
+  const originalPath = process.env.Path;
+  const fixtureExe = join(workspace, 'claude.exe');
+  await writeFile(fixtureExe, 'Inert qualification data.');
+  try {
+    process.env.Path = [workspace, originalPath].join(delimiter);
+    assert.equal(
+      await qualifiedModelWorker(
+        workspace,
+        'general-purpose',
+        undefined,
+        dataDir,
+        signal,
+        'default',
+      ),
+      null,
+    );
+    assert.equal(
+      versionProbes.length,
+      0,
+      'Qualification executed a version probe from worker-writable PATH',
+    );
+  } finally {
+    process.env.Path = originalPath;
+    await rm(fixtureExe);
+  }
   assert(
     await qualifiedModelWorker(workspace, 'general-purpose', undefined, dataDir, signal, 'default'),
   );

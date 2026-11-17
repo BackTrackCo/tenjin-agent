@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
 import {
   findDefinition,
   isCustomAgentType,
@@ -67,8 +67,8 @@ import {
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
 import {
+  findWindowsWorkerClaude,
   nativeWindowsShellPolicy,
-  sameWindowsPath,
   windowsWorkerLaunch,
   type WindowsWorkerLaunch,
 } from './windows-worker-launch';
@@ -132,6 +132,14 @@ type QualifiedWorker = {
   windows?: WindowsWorkerLaunch;
 };
 
+function readWorkerClaudeCode(cwd: string, windows?: WindowsWorkerLaunch) {
+  return readClaudeCodeCached(
+    process.env,
+    windows ? dirname(windows.claudePath) : cwd,
+    windows ? (env) => findWindowsWorkerClaude(env, windows.claudePath) : undefined,
+  );
+}
+
 /** Qualify host policy, not model capability; unsupported paths stay native. */
 export async function qualifiedModelWorker(
   cwd: string,
@@ -147,13 +155,8 @@ export async function qualifiedModelWorker(
   const windows = await windowsWorkerLaunch(dataDir, cwd);
   if (process.platform === 'win32' && !windows) return null;
   // Read at every offer and again at its accept: once per binary file, not per call.
-  const state = await readClaudeCodeCached(process.env, cwd);
+  const state = await readWorkerClaudeCode(cwd, windows ?? undefined);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
-  if (
-    windows &&
-    !sameWindowsPath(await realpath(state.binary.path).catch(() => ''), windows.claudePath)
-  )
-    return null;
   // A built-in a file redefines, a plugin's agent and the host's other built-ins run
   // natively. A custom type's own definition is read where it is offered and where it runs.
   if (
@@ -1212,7 +1215,7 @@ async function runQualifiedWorker(
         )
           throw new Error("The warm Claude worker's env file restrictions changed");
         const current = await assertCurrentWorkspace();
-        const selected = await readClaudeCodeCached(process.env, job.root);
+        const selected = await readWorkerClaudeCode(job.root, binary.windows);
         const custom = WORKER_BUILTIN_AGENTS.has(agentType)
           ? null
           : await workerAgent(agentType, { root: job.root, homeDir: homedir() });
