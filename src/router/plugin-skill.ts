@@ -46,6 +46,11 @@ cannot pay the endpoint. A 2xx on the probe is delivered free. Read the quote
 before the first call to an endpoint, and again when the body or the headers
 change: some endpoints price by request shape.
 
+\`signIn: true\` with no \`accepts\` means the endpoint, such as a paid run's
+status URL, asks the wallet that paid it to sign in. \`tenjin pay <url> --json\`
+(a GET, with no \`--max-price\` or \`--yes\`) signs in and pays nothing. It
+refuses with exit 3 when this wallet has not paid that host.
+
 ## Pay
 
 \`\`\`bash
@@ -69,10 +74,15 @@ tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H '
 - Every paid call pays. There is no cache and no dedupe: a loop pays on every
   turn. Batch work needs the user's consent for the whole batch and its total.
 - A paid 2xx returns \`amountPaid\`, \`payTo\`, \`settlementTxHash\` when the
-  seller reported one, and the body. A 4xx or 5xx AFTER payment is exit 4
-  (\`PAYMENT_FAILED\`): the signed authorization already left, so do not retry
-  blindly. Read the provider's error in \`details.body\`, fix the request, and
-  quote again.
+  seller reported one, and the body. A file (an image, a sound, a PDF) is saved
+  instead, and \`savedTo\` is its path; \`saveError\` says why when Downloads could
+  not take it. If no folder could, \`bodyBase64\` holds the bytes.
+- A 4xx or 5xx AFTER payment is exit 4 (\`PAYMENT_FAILED\`): the signed
+  authorization already left, so do not retry blindly. Read \`details.body\` and
+  \`details.paymentError\` (the seller's reason), fix the request, and quote
+  again. When \`details.settlement\` is \`"settled"\`, say it was charged. When
+  only \`details.reportedTxHash\` is set, say the seller reports a charge the
+  chain does not show yet. In both cases, do not ask for funds.
 
 ## Refusals are answers
 

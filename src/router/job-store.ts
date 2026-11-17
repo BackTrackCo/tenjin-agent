@@ -36,6 +36,8 @@ const Authorization = z.strictObject({
   from: z.string().max(64),
   nonce: z.string().max(80),
   validBefore: Digits,
+  network: z.string().max(64).optional(),
+  asset: z.string().max(200).optional(),
 });
 
 const TakeSchema = z.strictObject({
@@ -71,6 +73,10 @@ const TakeSchema = z.strictObject({
   submittedAt: Iso,
   expiresAt: Iso,
   amountAtomic: Digits,
+  /** The wallet that signed the submit's payment, whatever its scheme: the
+   *  only wallet a seller's sign-in on a poll is answered with. A take from
+   *  before has none; its authorization's `from` stands in. */
+  payer: z.string().max(64).optional(),
   /** The submit's authorization, which its ledger row is found by. */
   authorization: Authorization.optional(),
   /** The submit's settlement, when the seller named it: paid for certain. */
@@ -78,6 +84,9 @@ const TakeSchema = z.strictObject({
     .string()
     .regex(/^0x[0-9a-fA-F]{64}$/)
     .optional(),
+  /** The chain showed the submit's authorization used when its paid leg was
+   *  cut off: paid for certain, with no tx named. */
+  settled: z.boolean().optional(),
   /** The submit's HTTP status. */
   httpStatus: z.number().int().optional(),
   state: z.enum(['running', 'done', 'failed', 'expired']),

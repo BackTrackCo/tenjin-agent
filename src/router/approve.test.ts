@@ -15,6 +15,7 @@ import {
   storeChoices,
   storeSpecs,
 } from './specs';
+import { readPaidRecords } from './paid';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
@@ -312,8 +313,9 @@ describe("approve, called through the host's own prompt", () => {
   });
 
   /** The seller's facilitator, refusing each signed payment as short of
-   *  funds until `funded()` says the wallet was topped up. */
-  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0) {
+   *  funds until `funded()` says the wallet was topped up. `claim` is a
+   *  payment-response header sent with each refusal. */
+  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0, claim?: string) {
     let funded = false;
     let refused = 0;
     let delivered = 0;
@@ -328,7 +330,10 @@ describe("approve, called through the host's own prompt", () => {
           JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
           {
             status: 402,
-            headers: { 'content-type': 'application/json' },
+            headers: {
+              'content-type': 'application/json',
+              ...(claim !== undefined ? { 'PAYMENT-RESPONSE': claim } : {}),
+            },
           },
         );
       }
@@ -356,6 +361,67 @@ describe("approve, called through the host's own prompt", () => {
     short.fund();
     expect((await runApproveTool(args, d)).envelope.status).toBe('fulfilled');
     expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  /** A CHARGED PAYMENT KEEPS ITS QUOTE USED. A seller can settle and still
+   *  answer 402 insufficient_funds: read as short of funds, the charged slot
+   *  reopened the quote, and the same quote could pay the seller again. */
+  it('keeps an approved quote used when a payment refused as short of funds was charged', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const base = deps(short.fetchImpl);
+    // The chain shows the authorization used.
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` }),
+      )) as typeof fetch;
+    const d = { ...base, payDeps: { ...base.payDeps, chainFetch }, approves: true };
+    const charged = await runApproveTool(args, d);
+    expect(charged.envelope).toMatchObject({ status: 'failed', settlement: 'settled' });
+    expect(String(charged.envelope.reason)).toMatch(/^The payment was charged/);
+    expect(String(charged.envelope.reason)).not.toContain('tenjin fund');
+    expect(charged.envelope).not.toHaveProperty('quote');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  /** A CLAIMED CHARGE KEEPS ITS QUOTE USED TOO. The seller's receipt is not
+   *  proof, so the payment stays unknown, but a quote it reopened could pay
+   *  the seller a second time for a call it says it already took. */
+  it('keeps an approved quote used when the seller claims a charge the chain does not show', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const TX = `0x${'ab'.repeat(32)}`;
+    const claim = Buffer.from(JSON.stringify({ success: true, transaction: TX })).toString(
+      'base64',
+    );
+    const short = shortUntilFunded(normal, 0, claim);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const base = deps(short.fetchImpl);
+    // The chain shows the authorization unused.
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.padStart(64, '0')}` }),
+      )) as typeof fetch;
+    const d = { ...base, payDeps: { ...base.payDeps, chainFetch }, approves: true };
+    const claimed = await runApproveTool(args, d);
+    expect(claimed.envelope).toMatchObject({ status: 'failed', settlement: 'unknown' });
+    expect(String(claimed.envelope.reason)).toContain(`The seller reports a charge (tx ${TX})`);
+    expect(String(claimed.envelope.reason)).not.toContain('tenjin fund');
+    expect(claimed.envelope).not.toHaveProperty('quote');
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { settlement: 'unknown', reportedTxHash: TX },
+    ]);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    short.fund();
     expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
     expect(short.refused()).toBe(1);
   });

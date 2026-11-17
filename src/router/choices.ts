@@ -307,6 +307,11 @@ export type SetEntry =
  * `fulfilled` when every one is; `running` while any is, with the job that
  * resumes it; `partial` when some delivered; `failed` when none did. The
  * cost is what ran here, summed.
+ *
+ * A RUNNING TAKE KEPT FOR THE WALLET THAT PAID IT (`sign_in_wallet`) cannot
+ * move while this machine holds another, so polling again does nothing for
+ * it: it is named with that wallet, and the poll line covers only the takes
+ * that can. When none can, the set is the same error a single such take is.
  */
 export function takesResult(
   entries: SetEntry[],
@@ -331,41 +336,50 @@ export function takesResult(
         ? 'partial'
         : 'failed';
   const cost = costLines(total);
+  const who = (step: StepResult) =>
+    step.label !== undefined
+      ? `${String(step.label)} (${String(step.key)})`
+      : `take ${String(step.take)}`;
   const lines = results.map((step) => {
     const files = Array.isArray(step.savedFiles) ? step.savedFiles : [];
-    const who =
-      step.label !== undefined
-        ? `${String(step.label)} (${String(step.key)})`
-        : `take ${String(step.take)}`;
-    return `- ${who}: ${String(step.status)}${files.length ? `, saved to ${files.join(', ')}` : ''}`;
+    return `- ${who(step)}: ${String(step.status)}${files.length ? `, saved to ${files.join(', ')}` : ''}`;
   });
   // Each entry still running names its job: one for a count's takes, one per
   // option for a choice set's.
-  const jobs = [
-    ...new Set(
-      results.flatMap((step) =>
-        step.status === 'running' && typeof step.job === 'string' ? [step.job] : [],
-      ),
-    ),
+  const running = results.filter((step) => step.status === 'running');
+  const jobsOf = (steps: StepResult[]) => [
+    ...new Set(steps.flatMap((step) => (typeof step.job === 'string' ? [step.job] : []))),
   ];
+  const resumeOf = (steps: StepResult[]) =>
+    jobsOf(steps)
+      .map((job) => `request({job: ${JSON.stringify(job)}})`)
+      .join(' and ');
+  const jobs = jobsOf(running);
+  const blocked = running.filter((step) => step.reasonCode === 'sign_in_wallet');
+  const moving = running.filter((step) => step.reasonCode !== 'sign_in_wallet');
   const resume =
-    jobs.length > 0
-      ? `Call ${jobs.map((job) => `request({job: ${JSON.stringify(job)}})`).join(' and ')} in a minute or two for what is still running; nothing more is paid.`
+    jobsOf(moving).length > 0
+      ? `Call ${resumeOf(moving)} in a minute or two for what is still running; nothing more is paid.`
       : undefined;
+  const walletLines = [...new Set(blocked.map((step) => String(step.paidBy)))].map((paidBy) => {
+    const paid = blocked.filter((step) => String(step.paidBy) === paidBy);
+    const one = paid.length === 1;
+    return `Tell the user ${paid.map(who).join(' and ')} ${one ? 'was' : 'were'} paid by the wallet ${paidBy}, and this machine's wallet cannot collect ${one ? 'it' : 'them'}. Once this machine uses that wallet again, call ${resumeOf(paid)}; nothing more is paid. Do not call request again for a new result: it would pay again.`;
+  });
+  const next = [...(resume !== undefined ? [resume] : []), ...walletLines];
+  // No running take can move until the wallet changes back.
+  const walletBlocked = blocked.length > 0 && resume === undefined;
   return {
-    isError: status === 'failed',
-    summary: [
-      `${opts.head}, ${status} · ${cost.join(' · ')}`,
-      ...lines,
-      ...(resume !== undefined ? [resume] : []),
-    ].join('\n'),
+    isError: status === 'failed' || walletBlocked,
+    summary: [`${opts.head}, ${status} · ${cost.join(' · ')}`, ...lines, ...next].join('\n'),
     envelope: {
       status,
       ...(opts.envelope ?? {}),
       ...(jobs.length === 1 ? { job: jobs[0] } : {}),
+      ...(walletBlocked ? { reasonCode: 'sign_in_wallet' } : {}),
       results,
       cost,
-      nextStep: resume ?? opts.nextStep,
+      nextStep: next.length > 0 ? next.join(' ') : opts.nextStep,
       providerContentUntrusted: true,
     },
   };
