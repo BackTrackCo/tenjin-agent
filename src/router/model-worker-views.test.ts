@@ -64,6 +64,46 @@ it('waits when the native mirror precedes begin and resolves only when the contr
   expect(vi.getTimerCount()).toBe(0);
 });
 
+// The DeepSeek viewer could only learn a worker's end: a follow did not wake when the
+// worker's activity moved, so its transcript could not grow as the worker ran.
+it('wakes a reader waiting past a sequence when the activity moves, while one without it waits for the end', async () => {
+  const f = await fixture();
+  const activity = f.views.begin('job-live', f.activity)!;
+  activity.running();
+  const seen = activity.snapshot().sequence;
+  let ended = false;
+  const toTheEnd = f.views.follow('job-live', new AbortController().signal).then((snapshot) => {
+    ended = true;
+    return snapshot;
+  });
+  const next = f.views.follow('job-live', new AbortController().signal, seen);
+  const alsoNext = f.views.follow('job-live', new AbortController().signal, seen);
+  activity.observe({
+    type: 'assistant',
+    uuid: 'turn-one',
+    session_id: activity.snapshot().binding.sdkSessionId,
+    message: {
+      id: 'message-1',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      content: [{ type: 'tool_use', id: 'read-1', name: 'Read', input: { file_path: '/a' } }],
+    },
+  });
+  for (const woke of await Promise.all([next, alsoNext])) {
+    expect(woke!.sequence).toBeGreaterThan(seen);
+    expect(woke!.rows).toEqual([expect.objectContaining({ name: 'Read' })]);
+  }
+  // Already past it: answered at once, with no wait.
+  await expect(f.views.follow('job-live', new AbortController().signal, seen)).resolves.toEqual(
+    expect.objectContaining({ state: 'running' }),
+  );
+  await Promise.resolve();
+  expect(ended).toBe(false);
+  activity.finish('completed');
+  f.views.finished('job-live');
+  await expect(toTheEnd).resolves.toMatchObject({ state: 'completed' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it('expires only the before-start UI wait, allowing the controller to begin later unchanged', async () => {
   const f = await fixture();
   const create = vi.fn(f.activity);
@@ -96,13 +136,20 @@ it('aborting a native mirror does not cancel or finish its active DeepSeek obser
   expect(f.views.get('running')).toBe(activity);
 });
 
-it('releases an aborted pre-start waiter and never lets a second waiter replace the first', async () => {
+it('releases only the pre-start waiter that gave up, and bounds how many may wait on one worker', async () => {
   const f = await fixture();
   const firstClient = new AbortController();
   const secondClient = new AbortController();
   const follow = f.views.follow('pending', firstClient.signal);
-  await expect(f.views.follow('pending', secondClient.signal)).resolves.toBeNull();
+  // A second reader waits beside the first, never in its place.
+  const second = f.views.follow('pending', secondClient.signal);
+  const more = [new AbortController(), new AbortController()];
+  const others = more.map((client) => f.views.follow('pending', client.signal));
+  await expect(f.views.follow('pending', new AbortController().signal)).resolves.toBeNull();
   secondClient.abort();
+  await expect(second).resolves.toBeNull();
+  for (const client of more) client.abort();
+  await expect(Promise.all(others)).resolves.toEqual([null, null]);
   expect(vi.getTimerCount()).toBe(1);
   firstClient.abort();
   await expect(follow).resolves.toBeNull();

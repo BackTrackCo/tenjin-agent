@@ -78,13 +78,17 @@ export type ModelWorkerActivitySnapshot = {
 /** What `subagent_activity` answers and the progress file holds: display data only. */
 export function activityAnswer(
   snapshot: ModelWorkerActivitySnapshot,
-  options: { rows: boolean; maxRows?: number; result?: boolean },
+  options: { rows: boolean; maxRows?: number; result?: boolean; after?: number },
 ) {
+  const after = options.after;
   const rows = !options.rows
     ? undefined
-    : options.maxRows === undefined
-      ? snapshot.rows
-      : snapshot.rows.slice(-options.maxRows);
+    : after !== undefined
+      ? // Only what changed since the reader's last sequence: a new row, or one whose state moved.
+        snapshot.rows.filter((row) => row.sequence > after)
+      : options.maxRows === undefined
+        ? snapshot.rows
+        : snapshot.rows.slice(-options.maxRows);
   return {
     status: 'activity' as const,
     activity: {
@@ -99,7 +103,13 @@ export function activityAnswer(
       toolUses: snapshot.toolUses,
       tokens: snapshot.tokens,
       ...(rows
-        ? { droppedRows: snapshot.droppedRows + snapshot.rows.length - rows.length, rows }
+        ? {
+            droppedRows:
+              after !== undefined
+                ? snapshot.droppedRows
+                : snapshot.droppedRows + snapshot.rows.length - rows.length,
+            rows,
+          }
         : {}),
       ...(snapshot.spend ? { spend: snapshot.spend } : {}),
       ...(options.result && snapshot.result !== undefined ? { result: snapshot.result } : {}),
@@ -279,6 +289,9 @@ function validBinding(binding: ModelWorkerActivityBinding): ModelWorkerActivityB
 export class ModelWorkerActivity {
   private value: ModelWorkerActivitySnapshot;
   private seen = new Set<string>();
+  private listeners = new Set<() => void>();
+  private holding = false;
+  private held = false;
   private readonly key: string;
   private readonly activationToken = Symbol();
 
@@ -314,6 +327,26 @@ export class ModelWorkerActivity {
 
   snapshot(): ModelWorkerActivitySnapshot {
     return structuredClone(this.value);
+  }
+
+  /** Calls `listener` after the activity changes. Display only; returns its removal. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private changed(): void {
+    if (this.holding) {
+      this.held = true;
+      return;
+    }
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // A display reader never changes the worker.
+      }
+    }
   }
 
   running(generation = this.value.binding.generation): void {
@@ -376,6 +409,20 @@ export class ModelWorkerActivity {
 
   /** The SDK owns complete history; this retains only bounded, redacted display data. */
   observe(message: unknown, generation = this.value.binding.generation): void {
+    // One message is one change: a reader wakes once, with every row it made.
+    this.holding = true;
+    try {
+      this.observeOne(message, generation);
+    } finally {
+      this.holding = false;
+      if (this.held) {
+        this.held = false;
+        this.changed();
+      }
+    }
+  }
+
+  private observeOne(message: unknown, generation: string): void {
     try {
       if (!this.current(generation) || this.terminal()) return;
       const event = object(message);
@@ -396,6 +443,7 @@ export class ModelWorkerActivity {
         if (tokens !== undefined && tokens !== this.value.tokens) {
           this.value.tokens = tokens;
           this.value.sequence++;
+          this.changed();
         }
         for (const raw of msg.content.slice(0, 64)) {
           const block = object(raw);
@@ -538,6 +586,7 @@ export class ModelWorkerActivity {
     } catch {
       // Display data only; the next forwarded request is redacted regardless.
     }
+    this.changed();
   }
 
   private add(row: Omit<ModelWorkerActivityRow, 'sequence'>): void {
@@ -558,6 +607,9 @@ export class ModelWorkerActivity {
       }
     } catch {
       // Never change the execution result because a display snapshot is unavailable.
+    } finally {
+      // Every change of the sequence ends here, so a reader waiting on a change wakes.
+      this.changed();
     }
   }
 }

@@ -229,6 +229,9 @@ export function registerModelTool(
         inputSchema: {
           offer_id: z.string().uuid(),
           follow: z.boolean().optional(),
+          // With follow: answer once the activity moves past this sequence, with the rows
+          // that changed since, so a viewer shows the run as it goes.
+          after: z.number().int().nonnegative().optional(),
         },
       },
       async (args, extra) => {
@@ -277,6 +280,7 @@ export function registerModelTool(
             activity = await views.follow(
               args.offer_id,
               AbortSignal.any([extra.signal, bound.signal]),
+              args.after,
             );
           } finally {
             clearTimeout(timer);
@@ -294,7 +298,12 @@ export function registerModelTool(
           activity.binding.configDir !== configDir
         )
           return answer({ status: 'unavailable' });
-        const shown = activityAnswer(activity, { rows: !args.follow, result: !args.follow });
+        const delta = args.follow === true && args.after !== undefined;
+        const shown = activityAnswer(activity, {
+          rows: !args.follow || delta,
+          result: !args.follow,
+          ...(delta ? { after: args.after } : {}),
+        });
         // The live view does not hold the job's own time.
         const end = ['completed', 'cancelled', 'unknown'].includes(activity.state)
           ? await ended().catch(() => undefined)

@@ -569,7 +569,7 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     const reply = await client.callTool({ name: 'subagent', arguments: args });
     return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
   };
-  const activity = async (args: { offer_id: string; follow?: boolean }) => {
+  const activity = async (args: { offer_id: string; follow?: boolean; after?: number }) => {
     const reply = await client.callTool({ name: 'subagent_activity', arguments: args });
     return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
   };
@@ -642,6 +642,7 @@ it('advertises display activity as read-only without changing the original subag
     const activity = tools.find((tool) => tool.name === 'subagent_activity');
     expect(activity?.annotations?.readOnlyHint).toBe(true);
     expect(Object.keys(activity?.inputSchema.properties ?? {}).sort()).toEqual([
+      'after',
       'follow',
       'offer_id',
     ]);
@@ -760,6 +761,14 @@ it('inspects only owned activity without starting work, changing selection or ad
     );
     expect(JSON.stringify(viewed)).toContain('observed.ts');
     expect(JSON.stringify(viewed)).not.toContain('sdkSessionId');
+    // A reader that shows the run as it goes: answered at once past an older sequence,
+    // with the rows that changed since, while the follow to the end still waits.
+    const delta = await f.activity({ offer_id: f.job.id, follow: true, after: 0 });
+    expect(delta).toMatchObject({ status: 'activity', activity: { state: 'running' } });
+    expect(delta.activity.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'Read' })]),
+    );
+    expect(delta.activity).not.toHaveProperty('result');
     f.session.sessionId = 'foreign';
     expect(await f.activity({ offer_id: f.job.id })).toEqual({ status: 'unavailable' });
     expect(await f.activity({ offer_id: f.job.id, follow: true })).toEqual({
