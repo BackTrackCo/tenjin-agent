@@ -26,6 +26,7 @@ vi.mock('../lib/usdc-balance', async (importOriginal) =>
 
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund, type FundOptions } from './fund';
+import { recallLink } from './fund-watch';
 import { runBalance } from './balance';
 import { finishTerminalFunding, fundStep } from '../router/install-funding';
 
@@ -819,7 +820,10 @@ describe('runFund: the link, its context and its status', () => {
     });
     await fund(makeCtx(), {
       provider,
-      fetchImpl: fundServer([pageLink(Date.now() + 500_000)]).fetchImpl,
+      fetchImpl: fundServer(
+        [pageLink(Date.now() + 500_000)],
+        [[200, { state: 'paying', updatedAt: 'x' }]],
+      ).fetchImpl,
       wait: false,
       open: false,
       code: 'NCSTATE26',
@@ -837,6 +841,32 @@ describe('runFund: the link, its context and its status', () => {
     });
     expect(again.mints).toHaveLength(0);
     expect(res.data).toMatchObject({ paymentInFlight: true, checkoutUrl: checkout });
+  });
+
+  it("a redeem link starts from today's balance once an earlier checkout has landed", async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: fundServer([pageLink(Date.now() + 600_000)]).fetchImpl,
+      wait: false,
+      open: false,
+    });
+    // That checkout's $5 arrived; nothing is landing now.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    const ctx = makeCtx();
+    await fund(ctx, {
+      provider,
+      fetchImpl: fundServer(
+        [pageLink(Date.now() + 500_000)],
+        [[200, { state: 'paid', updatedAt: 'x' }]],
+      ).fetchImpl,
+      wait: false,
+      open: false,
+      code: 'NCSTATE26',
+    });
+    const remembered = await recallLink(ctx.dataDir, address, Date.now());
+    expect(remembered?.startBalanceAtomic).toBe('5000000');
   });
 
   it('waits on a payment already on its way instead of opening a second checkout', async () => {

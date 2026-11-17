@@ -207,10 +207,11 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // always mints: the link on its way does not carry the code, and the page it
   // opens is not a payment.
   const prior = await recallLink(ctx.dataDir, address, now());
-  const onItsWay =
-    prior !== null && now() - prior.issuedAt < DUPLICATE_WINDOW_MS && opts.code === undefined
+  const landing =
+    prior !== null && now() - prior.issuedAt < DUPLICATE_WINDOW_MS
       ? await paymentOnItsWay(prior, startBalance, opts.fetchImpl)
       : undefined;
+  const onItsWay = opts.code === undefined ? landing : undefined;
 
   const source: FundSource = opts.source ?? (underAgentHarness(env) ? 'agent' : 'terminal');
   // Unlocked only to mint: waiting on a payment already on its way needs no
@@ -241,7 +242,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     // record, as `--usdc` does, so the next `tenjin fund` waits on that payment
     // instead of opening a second checkout. Only the starting balance is kept.
     if (opts.code !== undefined) {
-      if (startBalance !== undefined) {
+      if (startBalance !== undefined && landing !== undefined) {
         await rememberStartBalance(
           ctx.dataDir,
           address,
@@ -249,6 +250,16 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
           issuedAt,
           expiresAt - issuedAt,
         );
+      } else if (startBalance !== undefined) {
+        // Nothing landing: the redeem's own starting balance, so money that already
+        // arrived is never counted as the code's.
+        await rememberLink(ctx.dataDir, {
+          version: 1,
+          address: address.toLowerCase(),
+          issuedAt,
+          expiresAt,
+          startBalanceAtomic: startBalance.toString(),
+        });
       }
       return { url, ...(token !== undefined ? { token } : {}), expiresAt, hosted };
     }
