@@ -84,6 +84,7 @@ export const NO_OFFER_CODES = [
   'no_session',
   'host_unqualified',
   'no_consent',
+  'consent_outdated',
   'permission_mode',
   'worker_unqualified',
   'input_filter',

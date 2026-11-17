@@ -58,6 +58,7 @@ async function continuationFixture(multiple = false) {
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: multiple ? [repo, sibling] : [repo],
           githubRepositories: ['Acme/repo'],
@@ -467,6 +468,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
             : {
                 version: 2,
                 instructions: 'applicable',
+                reads: 'claude-home',
                 recipients: ['Tenjin', 'DeepSeek'],
                 repositories: [repo],
                 githubRepositories: ['Acme/repo'],
@@ -944,6 +946,11 @@ it('records one code for each reason a held call gets no offer, and never its te
   config.router.subagentConsent.routerOrigin = 'https://elsewhere.test';
   await writeFile(join(dir, 'config.json'), JSON.stringify(config));
   expect(await reason(other)).toMatchObject({ code: 'no_consent' });
+  // A consent from before a worker could read the global Claude Code folder says so.
+  config.router.subagentConsent.routerOrigin = 'http://localhost:3939';
+  delete config.router.subagentConsent.reads;
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  expect(await reason(other)).toMatchObject({ code: 'consent_outdated' });
   expect(await readFile(join(dir, 'model-jobs', 'no-offers.json'), 'utf8')).not.toContain(
     'PRIVATE-ASSIGNMENT',
   );

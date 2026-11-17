@@ -120,6 +120,7 @@ it.each(
               : {
                   version: 2,
                   instructions: 'applicable',
+                  reads: 'claude-home',
                   recipients: ['Tenjin', 'DeepSeek'],
                   repositories: [repo],
                   maxJobAtomic: '1000000',
@@ -253,6 +254,7 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',
@@ -360,6 +362,7 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',
@@ -458,6 +461,7 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',

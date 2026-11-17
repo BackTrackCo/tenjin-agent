@@ -46,6 +46,7 @@ async function fixture(
       subagentConsent: {
         version: 2,
         instructions: 'applicable',
+        reads: 'claude-home',
         recipients: ['Tenjin', 'DeepSeek'],
         repositories: [repo],
         maxJobAtomic: options.cap ?? '1000000',

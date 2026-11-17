@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, type NoOffer } from './model-job';
-import { modelSettings, type ModelSettings } from './model-settings';
+import { modelConsentOutdated, modelSettings, type ModelSettings } from './model-settings';
 import { currentModelGithubRepositories, modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
@@ -339,7 +339,8 @@ export class ModelHandoff {
     const stay = (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) =>
       this.stay(session, nativeTool, code, more);
     const { dataDir, transport } = this.options;
-    if (!settings) return stay('no_consent');
+    if (!settings)
+      return stay((await modelConsentOutdated(dataDir)) ? 'consent_outdated' : 'no_consent');
     if (!claudeWorkerPermissionMode(session.claudePermissionMode))
       return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();

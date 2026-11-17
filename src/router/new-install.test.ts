@@ -41,6 +41,7 @@ it('retains a pending new-install claim without consent until accepted setup com
       version: 3,
       scope: 'native-workspace',
       instructions: 'applicable',
+      reads: 'claude-home',
       recipients: ['Tenjin', 'DeepSeek'],
       routerOrigin: 'https://tenjin.sh',
       maxJobAtomic: '1000000',

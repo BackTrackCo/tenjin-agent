@@ -159,6 +159,7 @@ function expectDefault(config: Awaited<ReturnType<typeof loadRawConfig>>) {
       version: 3,
       scope: 'native-workspace',
       instructions: 'applicable',
+      reads: 'claude-home',
       recipients: ['Tenjin', 'DeepSeek'],
       routerOrigin: 'https://tenjin.sh',
       maxJobAtomic: '1000000',

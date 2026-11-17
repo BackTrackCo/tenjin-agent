@@ -82,6 +82,7 @@ beforeEach(async () => {
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [root, join(home, '.codex', 'AGENTS.md')],
           maxJobAtomic: '1000000',

@@ -6,7 +6,7 @@ import { parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
-import { modelConsentSchema } from '../router/model-settings';
+import { modelConsentSchema, outdatedModelConsent } from '../router/model-settings';
 import { modelGithubRepositories } from '../router/model-repositories';
 import { MODEL_MINIMUM_JOB_ATOMIC } from '../router/model-limits';
 import { ModelJobStore, type NoOffer } from '../router/model-job';
@@ -17,6 +17,8 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   no_session: 'this Tenjin process had not seen an event of the session yet',
   host_unqualified: 'the host cannot show a worker permission prompt',
   no_consent: 'no DeepSeek consent covers this directory at this router',
+  consent_outdated:
+    'your DeepSeek consent predates what a worker can read now; read the current terms and renew it with tenjin config subagents on --repository <path> --max-job <USD>',
   permission_mode: 'the session was in plan mode, or its mode was not seen',
   worker_unqualified:
     'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
@@ -42,15 +44,17 @@ function whyLine(entry: NoOffer): string {
 }
 
 function retainedRepositories(value: unknown, origin: string): string[] {
-  const prior = modelConsentSchema.safeParse(value);
+  // A consent from before the current disclosure still names the directories to keep.
+  const parsed = modelConsentSchema.safeParse(value);
+  const prior = parsed.success ? parsed.data : outdatedModelConsent(value);
   if (
-    !prior.success ||
-    prior.data.version !== 2 ||
-    prior.data.routerOrigin !== origin ||
-    BigInt(prior.data.maxJobAtomic) <= 0n
+    !prior ||
+    prior.version !== 2 ||
+    prior.routerOrigin !== origin ||
+    BigInt(prior.maxJobAtomic) <= 0n
   )
     return [];
-  return prior.data.repositories.flatMap((path) => {
+  return prior.repositories.flatMap((path) => {
     if (!isAbsolute(path)) return [];
     try {
       return [realpathSync(path)];
@@ -120,6 +124,7 @@ export async function runConfigSubagents(
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories,
           githubRepositories,

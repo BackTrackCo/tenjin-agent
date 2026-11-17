@@ -47,6 +47,7 @@ it('records explicit accepted-worker instruction consent while preserving wallet
       subagentConsent: {
         version: 2,
         instructions: 'applicable',
+        reads: 'claude-home',
         repositories: [repo],
         maxJobAtomic: '1000000',
       },
@@ -181,6 +182,7 @@ it('an explicit repository command narrows native-workspace disclosure to the na
           version: 3,
           scope: 'native-workspace',
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           routerOrigin: 'https://tenjin.sh',
           maxJobAtomic: '1000000',
@@ -214,4 +216,24 @@ it('lists why recent subagent calls got no offer, newest first, without changing
   expect(result.humanLines?.[1]).toMatch(/Task {2}over_size_limit \(17203 of 16384 bytes\)/);
   expect(result.humanLines?.[2]).toContain('Agent  input_filter:name');
   await expect(stat(join(dir, 'config.json'))).rejects.toThrow();
+});
+
+it('renews a consent from before the current disclosure, keeping the directories it named', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const first = join(dir, 'first'),
+    second = join(dir, 'second');
+  await mkdir(first);
+  await mkdir(second);
+  await runConfigSubagents('on', { repository: first, maxJob: '1' }, testCtx(dir));
+  const path = join(dir, 'config.json');
+  const earlier = JSON.parse(await readFile(path, 'utf8'));
+  expect(earlier.router.subagentConsent.reads).toBe('claude-home');
+  delete earlier.router.subagentConsent.reads;
+  await writeFile(path, JSON.stringify(earlier));
+  expect(await modelSettings(dir, first)).toBeNull();
+  const renewed = await runConfigSubagents('on', { repository: second, maxJob: '1' }, testCtx(dir));
+  // The person reads what a worker can read now, and both directories stand.
+  expect(JSON.stringify(renewed.data)).toContain('every session transcript');
+  expect(await modelSettings(dir, first)).not.toBeNull();
+  expect(await modelSettings(dir, second)).not.toBeNull();
 });

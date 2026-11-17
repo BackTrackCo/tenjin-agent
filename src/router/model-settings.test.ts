@@ -2,7 +2,12 @@ import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { modelSettings, nativeWorkspaceModelConsent } from './model-settings';
+import {
+  modelConsentOutdated,
+  modelSettings,
+  nativeWorkspaceModelConsent,
+  outdatedModelConsent,
+} from './model-settings';
 import * as repositories from './model-repositories';
 let dir: string;
 afterEach(async () => {
@@ -45,6 +50,29 @@ it.each([
     subagentConsent: { ...consent, ...change },
   });
   expect(await modelSettings(data, repo)).toBeNull();
+});
+
+it('stops qualifying a consent given before a worker could read the global Claude Code folder, until it is renewed', async () => {
+  // Agreed to under the earlier disclosure: the named or current workspace, nothing of ~/.claude.
+  const earlier: Record<string, unknown> = {
+    ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+  };
+  delete earlier.reads;
+  const { data, repo } = await fixture({ subagents: true, subagentConsent: earlier });
+  expect(await modelSettings(data, repo)).toBeNull();
+  expect(await modelConsentOutdated(data)).toBe(true);
+  expect(outdatedModelConsent(earlier)).toMatchObject({ version: 3 });
+  // Renewed, it qualifies again and is no longer out of date.
+  await writeFile(
+    join(data, 'config.json'),
+    JSON.stringify({
+      router: { subagents: true, subagentConsent: { ...earlier, reads: 'claude-home' } },
+    }),
+  );
+  expect(await modelSettings(data, repo)).toMatchObject({ version: 3 });
+  expect(await modelConsentOutdated(data)).toBe(false);
+  // A record that is wrong in another way is not an earlier consent.
+  expect(outdatedModelConsent({ ...earlier, recipients: ['Tenjin'] })).toBeNull();
 });
 
 it('a repository cannot create native-workspace disclosure, or override a global/project stop', async () => {
@@ -111,6 +139,7 @@ it('keeps the actual cwd beneath an explicitly selected workspace and lets a pro
         subagentConsent: {
           version: 2,
           instructions: 'applicable',
+          reads: 'claude-home',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',
