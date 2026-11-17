@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -207,6 +207,30 @@ it('denies an env file over the hard limit at start, and counts one that appears
   expect([...env.uncovered]).toEqual([]);
   expect(env.redact('later-value-0x06 kept-value-0x05')).toBe('[env:LATER] [env:KEPT]');
 });
+
+// Root lists any folder, so there is nothing to refuse.
+it.skipIf(process.getuid?.() === 0)(
+  'names a folder it may enter but not list, so its env files are denied and the rest stay readable',
+  async () => {
+    const root = await workspace({
+      '.env': 'OPEN=open-value-0x07',
+      'locked/.env.local': 'HIDDEN=hidden-value-0x08',
+      'locked/deep/.env': 'DEEPER=deeper-value-0x09',
+    });
+    const locked = join(root, 'locked');
+    await chmod(locked, 0o111);
+    try {
+      const env = await WorkerEnvSecrets.start([root], { watch: false });
+      // A command can still open `locked/.env.local` by name, and its value was never learned.
+      expect(env.redact('hidden-value-0x08 open-value-0x07')).toBe('hidden-value-0x08 [env:OPEN]');
+      expect(env.unlisted).toEqual([locked]);
+      // One folder is denied, not every env file of the job.
+      expect(env.scanned).toBe(true);
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  },
+);
 
 it('lists the forms of a value it replaces, never a plain one', () => {
   expect(envPieces({ key: 'PORT', value: '3000', written: '3000' })).toEqual([]);

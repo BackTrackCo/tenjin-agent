@@ -505,6 +505,14 @@ async function runQualifiedWorker(
                 const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
               }),
+              // Nor can one in a folder the scan could not list, whatever its name.
+              ...envFiles.unlisted.flatMap((path) => {
+                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                return ['Read', 'Edit', 'Write'].flatMap((tool) => [
+                  `${tool}(${absolute}/.env*)`,
+                  `${tool}(${absolute}/**/.env*)`,
+                ]);
+              }),
               // Native settings still add these; the worker may not use them.
               ...dropped.flatMap((path) => {
                 const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
@@ -541,6 +549,8 @@ async function runQualifiedWorker(
                 ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
               ]),
               ...envFiles.withheld,
+              // Commands cannot read inside a folder the scan could not list.
+              ...envFiles.unlisted,
               ...dropped,
             ],
             denyWrite: [...privatePaths.paths, ...dropped],

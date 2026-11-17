@@ -98,6 +98,32 @@ it('still gives git a readable global config with no token, and no credential he
   expect(() => fill(prepared!, 'github.com')).toThrow();
 });
 
+it("clears the session's own GitHub tokens from a worker that was named a token, also one that cannot be read", async () => {
+  const broad = `ghp_${'b'.repeat(36)}`;
+  const session = { GH_TOKEN: broad, GITHUB_TOKEN: broad, GITHUB_ENTERPRISE_TOKEN: broad };
+  // The worker's environment is its parent's with this laid over it.
+  const worker = (env: Record<string, string | undefined>) => ({ ...session, ...env });
+  prepared = await prepareWorkerGithub(
+    { ...session, TENJIN_WORKER_GITHUB_TOKEN_FILE: join(tmpdir(), 'tenjin-no-such-token') },
+    { run: runner({ token: broad }) },
+  );
+  expect(prepared.authenticated).toBe(false);
+  expect(Object.values(worker(prepared.env))).not.toContain(broad);
+  // Its commands could still print it from the parent's memory of it: it stays replaced.
+  expect(prepared.secrets).toContain(broad);
+  await prepared.close();
+  prepared = await prepareWorkerGithub(
+    { ...session, TENJIN_WORKER_GITHUB_TOKEN: NAMED },
+    { run: runner({ token: broad }) },
+  );
+  expect(worker(prepared.env)).toMatchObject({ GH_TOKEN: NAMED, GITHUB_TOKEN: '' });
+  expect(Object.values(worker(prepared.env))).not.toContain(broad);
+  await prepared.close();
+  // No token named: the worker keeps what a native subagent has, the session's own.
+  prepared = await prepareWorkerGithub(session, { run: runner({ token: broad }) });
+  expect(worker(prepared.env)).toMatchObject({ GH_TOKEN: broad, GITHUB_TOKEN: broad });
+});
+
 it('redacts the job token and any inherited GitHub token everywhere they appear', async () => {
   const inherited = `ghp_${'k'.repeat(36)}`;
   const configured = `ghs_${'s'.repeat(36)}`;

@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -813,6 +813,46 @@ it("reads its working directories' env files natively, and only their placeholde
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Root lists any folder, so there is nothing to refuse.
+it.skipIf(process.getuid?.() === 0)(
+  'denies the worker what is inside a folder its env scan could not list',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
+    const locked = join(root, 'locked');
+    try {
+      await mkdir(locked);
+      await writeFile(join(root, '.env'), 'OPEN=open-value-0x07');
+      await writeFile(join(locked, '.env.local'), 'HIDDEN=hidden-value-0x08');
+      await chmod(locked, 0o111);
+      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+      const workspace = {
+        version: 1,
+        root,
+        workingDirectories: [root],
+        workingDirectorySpellings: [root],
+        readExceptions: [],
+        writeExceptions: [],
+      };
+      sdkResult({ subtype: 'success', result: 'done' });
+      await runModelWorker(
+        { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
+        options(),
+      );
+      const sent = vi.mocked(query).mock.calls[0]![0].options;
+      const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
+      // The file tools are refused its env files, and commands the whole folder: a
+      // command could open `locked/.env.local` by name, and its value was never learned.
+      expect(deny).toEqual(expect.arrayContaining([`Read(//${locked.replace(/^\/+/, '')}/.env*)`]));
+      expect(sent?.sandbox?.filesystem?.denyRead).toContain(locked);
+      // The readable env file next to it stays the worker's to read.
+      expect(deny.filter((rule) => rule.includes(`${root.replace(/^\/+/, '')}/.env*`))).toEqual([]);
+    } finally {
+      await chmod(locked, 0o755).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 it('forwards and shows nothing more once an env file appears that is too large to read in full', async () => {
   const root = await mkdtemp(join(tmpdir(), 'worker-env-'));

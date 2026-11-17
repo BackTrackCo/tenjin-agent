@@ -24,6 +24,8 @@ const PLAIN_BELOW = 16;
  * so memory grows with the file. A larger env file cannot be covered at all.
  */
 export const MAX_ENV_FILE_BYTES = 16 * 1024 * 1024;
+/** Folders the scan could not list are denied one by one up to this many; past it every env file is. */
+const MAX_UNLISTED = 64;
 /** A file this user may not read is closed to the worker's commands as well. */
 const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
 const SKIP = new Set(['node_modules', '.git']);
@@ -234,6 +236,12 @@ export class WorkerEnvSecrets {
   /** Env files found at start that could not be read in full: denied to the worker. */
   readonly withheld: string[] = [];
   /**
+   * Folders the start scan could not list. One that may be entered but not
+   * listed can hold an env file a command opens by name, with values never
+   * learned here: the worker is denied what is inside.
+   */
+  readonly unlisted: string[] = [];
+  /**
    * Env files that appeared or changed after start and cannot be read in full.
    * The worker's denies are fixed at start, so while one is here nothing more
    * may be forwarded or shown.
@@ -389,8 +397,13 @@ export class WorkerEnvSecrets {
                 if (found.length > maxFiles) complete = false;
               },
               (error: NodeJS.ErrnoException) => {
-                // A root that cannot be listed may hold env files the worker can reach.
-                if (tops.includes(directory) && error.code !== 'ENOENT') complete = false;
+                if (error.code === 'ENOENT') return;
+                // A folder that cannot be listed may hold env files the worker can reach.
+                // A root, or more such folders than can each be denied, fails the scan.
+                if (tops.includes(directory) || this.unlisted.length >= MAX_UNLISTED)
+                  complete = false;
+                // One that turned out to be a file has nothing inside to read.
+                else if (error.code !== 'ENOTDIR') this.unlisted.push(directory);
               },
             )
             .finally(() => {
