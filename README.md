@@ -72,7 +72,7 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. In a terminal, choose **Add $5** to open checkout or **Not now** to skip it. Follow the activation step; paid tools need funds before they can run.
+Setup asks about spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
@@ -100,19 +100,19 @@ Use Tenjin to make a 10-second welcome voiceover for my app.
 
 ## What your agent can do
 
-| Your agent needs                       | Provider examples               | Provider price |
-| -------------------------------------- | ------------------------------- | -------------- |
-| Library docs                           | Context7                        | free           |
-| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢   |
-| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢       |
-| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 5¢     |
-| X and Reddit                           | glim                            | 0.1¢ to 1¢     |
-| Images                                 | GPT Image, Nano Banana, Recraft | 3.5¢ to 14.4¢  |
-| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
-| Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢   |
-| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
-| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
-| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
+| Your agent needs                  | Provider examples               | Provider price |
+| --------------------------------- | ------------------------------- | -------------- |
+| Library docs                      | Context7                        | free           |
+| Web search and page reads         | Exa, Firecrawl                  | 0.1¢ to 1.5¢   |
+| Math and live crypto prices       | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢       |
+| People, companies and emails      | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 5¢     |
+| X and Reddit                      | glim                            | 0.1¢ to 1¢     |
+| Images                            | GPT Image, Nano Banana, Recraft | 3.5¢ to 14.4¢  |
+| Voiceovers, sound effects, music  | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
+| Video clips                       | MiniMax Hailuo                  | 15.5¢ to 84¢   |
+| Papers and SEC filings            | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
+| Instagram, TikTok and Google Maps | Scrape Creators, Google Maps    | 2¢             |
+| PDFs, screenshots and hosting     | Cloudflare and others           | 0.2¢ to 50¢    |
 
 Example provider prices vary by tool and inputs and exclude Tenjin's routing fee. The quote for your call applies; [the full catalog has every tool and its current price →](https://tenjin.sh/tools)
 
@@ -125,18 +125,27 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When the routing channel needs funds, Tenjin reads your USDC balance once and uses the SDK's deposit target, usually $0.05, within your per-call limit and a $0.25 ceiling. It leaves $0.01 liquid for provider payments. Below a $0.10 liquid balance, or if the normal target will not fit, it targets $0.01 or the next voucher's larger shortfall, then shrinks to the balance above the reserve. It skips the top-up only if that amount cannot cover the next voucher. The deposit counts toward automatic spending once; fees drawn from it do not count again, and unused funds remain yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing fees vary by answer. Tool charges are separate. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 
-| Command                 | What it does                                  |
-| ----------------------- | --------------------------------------------- |
-| `tenjin wallet fund 5`  | Open checkout to add $5                       |
-| `tenjin wallet balance` | Check available funds                         |
-| `tenjin status`         | Show spending and limits                      |
-| `tenjin doctor`         | Check setup, activation and payment readiness |
-| `tenjin update`         | Update Tenjin                                 |
-| `tenjin uninstall`      | Remove the integration; keep your wallet      |
+| Command                   | What it does                                      |
+| ------------------------- | ------------------------------------------------- |
+| `tenjin fund 5`           | Add $5 in your browser, and watch it land         |
+| `tenjin balance`          | Your balance and limits                           |
+| `tenjin status`           | On or paused, balance, accounts and settings      |
+| `tenjin usage`            | What lookups cost, by day                         |
+| `tenjin config`           | Your rules: block, prefer or limit tools          |
+| `tenjin config names exa` | Every name a rule can use, such as Exa            |
+| `tenjin connect apify`    | Use your own Apify, fal, Firecrawl or Exa account |
+| `tenjin disconnect apify` | Forget a connected account here                   |
+| `tenjin doctor`           | Check setup and payment readiness                 |
+| `tenjin update`           | Update Tenjin                                     |
+| `tenjin uninstall`        | Remove Tenjin from your agent; your balance stays |
+
+`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
+
+Calls on your own account bill its plan, not your Tenjin balance. [Your own accounts →](./docs/agent-permissions.md#your-own-accounts)
 
 ## Privacy and help
 

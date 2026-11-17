@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { main } from './cli';
+import { buildProgram, main } from './cli';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { captureIo } from './context-test-utils';
 
@@ -42,6 +42,71 @@ afterAll(async () => {
 // real I/O (network, filesystem, stdin), so every case here is driven to a
 // deterministic, offline dispatcher-level outcome instead of a command result.
 describe('main', () => {
+  /**
+   * `tenjin config --help` IS HOW AN AGENT FINDS THE SETTINGS OPERATIONS: the
+   * MCP instructions send it to `tenjin config <command> --help` for the
+   * flags and `tenjin config names <word>` for the names. The group's help is
+   * written by hand, so a command registered under it and missing from it is
+   * one an agent never finds; each operation's own help carries examples, and
+   * those that take a name point at where the names are.
+   */
+  it('lists every config command in `tenjin config --help`, each with its own help', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    const config = buildProgram(captureIo().io, () => {}).commands.find(
+      (command) => command.name() === 'config',
+    );
+    const operations = config?.commands.map((command) => command.name()) ?? [];
+    expect(operations).toEqual(
+      expect.arrayContaining(['names', 'block', 'unblock', 'prefer', 'only', 'reset', 'speed']),
+    );
+    for (const operation of operations) {
+      // A row of its own: "  block / unblock", "  tenjin config names [word]".
+      expect(help, operation).toMatch(
+        new RegExp(`^  (?:tenjin config )?(?:[^/\\n]+ / )?${operation}\\b`, 'm'),
+      );
+      const leaf = captureIo();
+      expect(await main(['config', operation, '--help'], leaf.io)).toBe(0);
+      expect(leaf.stdout(), operation).toContain(`$ tenjin config ${operation}`);
+    }
+    for (const operation of ['prefer', 'only', 'block', 'unblock', 'reset', 'replacement']) {
+      const leaf = captureIo();
+      await main(['config', operation, '--help'], leaf.io);
+      expect(leaf.stdout(), operation).toContain('Find names: tenjin config names <word>');
+    }
+  });
+
+  // commander reads `config blok` as an operand of `config`, which would
+  // fail as "too many arguments" with nothing to go on.
+  it('answers a mistyped config command with the one it could mean', async () => {
+    const cap = captureIo();
+    expect(await main(['config', 'blok'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error).toMatchObject({
+      code: 'USAGE',
+      fix: 'Did you mean: block? See tenjin config --help.',
+    });
+  });
+
+  // `config --all` is the listing's own flag, and commander hands a parent its
+  // flag wherever it is placed: `config reset --all` must still reach reset.
+  it('still resets every rule with `config reset --all`', async () => {
+    const work = join(sandbox, 'work');
+    await mkdir(join(work, '.git'), { recursive: true });
+    const prev = process.cwd();
+    process.chdir(work);
+    try {
+      const reset = captureIo();
+      expect(await main(['config', 'reset', '--all', '--json'], reset.io)).toBe(0);
+      expect(JSON.parse(reset.stdout())).toMatchObject({
+        ok: true,
+        data: { operation: 'reset', changed: false },
+      });
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
   it('unknown command exits 2 with exactly one JSON error object', async () => {
     const cap = captureIo();
     const code = await main(['bogus'], cap.io);
@@ -268,6 +333,32 @@ describe('global flags are position-independent', () => {
       expect(parsed.error.code).toBe('USAGE');
       expect(parsed.command).toBe(argv[1] === 'address' ? 'wallet.show' : 'wallet.fund');
     }
+  });
+
+  it('`fund` and `balance` are top-level commands with their own flags', async () => {
+    for (const [argv, command] of [
+      [['fund', '5', '--for', 'X post read', '--price', '0.006', '--timeout', 'abc'], 'fund'],
+      [['fund', '--usdc', '--no-wait', '--timeout', 'abc'], 'fund'],
+      [['balance', '--wait', '--timeout', 'abc'], 'balance'],
+      [['wallet', 'balance', '--wait', '--timeout', 'abc'], 'wallet.balance'],
+    ] as const) {
+      const cap = captureIo();
+      expect(await main([...argv], cap.io)).toBe(2);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.command).toBe(command);
+    }
+  });
+
+  // The root takes --timeout wherever it is placed, so the wait's duration has
+  // to pass the global parse: `15m` once failed it as NaN.
+  it('`balance --wait --timeout 15m` passes the global parse and reaches the command', async () => {
+    const cap = captureIo();
+    await main(['balance', '--wait', '--timeout', '15m'], cap.io);
+    const parsed = JSON.parse(cap.stdout());
+    // The sandbox has no wallet: the body ran, past the flags.
+    expect(parsed.command).toBe('balance');
+    expect(parsed.error.code).not.toBe('USAGE');
   });
 
   it('`wallet repair` resolves to wallet.repair, and --insecure-storage parses on repair and create', async () => {

@@ -15,6 +15,7 @@ import {
   storeChoices,
   storeSpecs,
 } from './specs';
+import { readPaidRecords } from './paid';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
@@ -312,8 +313,9 @@ describe("approve, called through the host's own prompt", () => {
   });
 
   /** The seller's facilitator, refusing each signed payment as short of
-   *  funds until `funded()` says the wallet was topped up. */
-  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0) {
+   *  funds until `funded()` says the wallet was topped up. `claim` is a
+   *  payment-response header sent with each refusal. */
+  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0, claim?: string) {
     let funded = false;
     let refused = 0;
     let delivered = 0;
@@ -328,7 +330,10 @@ describe("approve, called through the host's own prompt", () => {
           JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
           {
             status: 402,
-            headers: { 'content-type': 'application/json' },
+            headers: {
+              'content-type': 'application/json',
+              ...(claim !== undefined ? { 'PAYMENT-RESPONSE': claim } : {}),
+            },
           },
         );
       }
@@ -348,7 +353,9 @@ describe("approve, called through the host's own prompt", () => {
     const d = { ...deps(short.fetchImpl), approves: true };
     const refused = await runApproveTool(args, d);
     expect(refused.envelope).toMatchObject({ status: 'failed', quote: { id: quote.id } });
-    expect(String(refused.envelope.nextStep)).toContain('tenjin wallet fund');
+    expect(String(refused.envelope.nextStep)).toContain(
+      'Ask the person once to add funds; on yes, run `tenjin fund 5',
+    );
     expect(String(refused.envelope.nextStep)).toContain(`approve({quote: "${quote.id}"`);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
     short.fund();
@@ -356,6 +363,116 @@ describe("approve, called through the host's own prompt", () => {
     expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
     expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
     expect(short.refused()).toBe(1);
+  });
+
+  /** A CHARGED PAYMENT KEEPS ITS QUOTE USED. A seller can settle and still
+   *  answer 402 insufficient_funds: read as short of funds, the charged slot
+   *  reopened the quote, and the same quote could pay the seller again. */
+  it('keeps an approved quote used when a payment refused as short of funds was charged', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const base = deps(short.fetchImpl);
+    // The chain shows the authorization used.
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` }),
+      )) as typeof fetch;
+    const d = { ...base, payDeps: { ...base.payDeps, chainFetch }, approves: true };
+    const charged = await runApproveTool(args, d);
+    expect(charged.envelope).toMatchObject({ status: 'failed', settlement: 'settled' });
+    expect(String(charged.envelope.reason)).toMatch(/^The payment was charged/);
+    expect(String(charged.envelope.reason)).not.toContain('tenjin fund');
+    expect(charged.envelope).not.toHaveProperty('quote');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  /** A CLAIMED CHARGE KEEPS ITS QUOTE USED TOO. The seller's receipt is not
+   *  proof, so the payment stays unknown, but a quote it reopened could pay
+   *  the seller a second time for a call it says it already took. */
+  it('keeps an approved quote used when the seller claims a charge the chain does not show', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const TX = `0x${'ab'.repeat(32)}`;
+    const claim = Buffer.from(JSON.stringify({ success: true, transaction: TX })).toString(
+      'base64',
+    );
+    const short = shortUntilFunded(normal, 0, claim);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const base = deps(short.fetchImpl);
+    // The chain shows the authorization unused.
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.padStart(64, '0')}` }),
+      )) as typeof fetch;
+    const d = { ...base, payDeps: { ...base.payDeps, chainFetch }, approves: true };
+    const claimed = await runApproveTool(args, d);
+    expect(claimed.envelope).toMatchObject({ status: 'failed', settlement: 'unknown' });
+    expect(String(claimed.envelope.reason)).toContain(`The seller reports a charge (tx ${TX})`);
+    expect(String(claimed.envelope.reason)).not.toContain('tenjin fund');
+    expect(claimed.envelope).not.toHaveProperty('quote');
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { settlement: 'unknown', reportedTxHash: TX },
+    ]);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  /** WHAT THE MONEY IS FOR: a short quote names its call and price, and the
+   *  fund command carries both to the checkout page. */
+  it('names the call, its price and the fund command when a quote is short of funds', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    await storeSpecs(dir, [{ ...SPEC, label: 'Hailuo video' }]);
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const refused = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    const ask =
+      'This Hailuo video costs $0.155, more than your Tenjin balance. Ask the person once to add funds; on yes, run `tenjin fund 5 --for "Hailuo video" --price 0.155`.';
+    expect(refused.envelope.nextStep).toBe(
+      `${ask} The quote stays open for its ten minutes: once the funds arrive, call approve({quote: "${quote.id}", total: "$0.155", what: "${quote.what}"}) again.`,
+    );
+    expect(String(refused.envelope.reason)).toContain(ask);
+    expect(String(refused.envelope.reason)).not.toContain('wallet fund');
+  });
+
+  /** A COUNT IS ASKED ABOUT ONE TAKE AT A TIME: the fund page shows a price
+   *  per call, so the ask names one take at its own price, never the total. */
+  it('names one take at its own price when a short count quote reopens', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    await storeSpecs(dir, [
+      {
+        ...SPEC,
+        provider: 'ElevenLabs',
+        label: 'ElevenLabs voiceover',
+        priceAtomic: '50000',
+        maxAmountAtomic: '50000',
+      },
+    ]);
+    const normal = seller('50000');
+    const quote = await quoted({ id: ID, input: INPUT, count: 3 }, normal.fetchImpl);
+    expect(quote.total).toBe('$0.15');
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const refused = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    const ask =
+      'This ElevenLabs voiceover costs $0.05, more than your Tenjin balance. Ask the person once to add funds; on yes, run `tenjin fund 5 --for "ElevenLabs voiceover" --price 0.05`.';
+    expect(refused.envelope.nextStep).toBe(
+      `${ask} The quote stays open for its ten minutes: once the funds arrive, call approve({quote: "${quote.id}", total: "$0.15", what: "${quote.what}"}) again.`,
+    );
+    const takes = refused.envelope.results as { reason: string }[];
+    expect(takes).toHaveLength(3);
+    for (const take of takes) expect(take.reason).toContain(ask);
+    expect(JSON.stringify(refused.envelope)).not.toContain('--price 0.15');
   });
 
   it('reruns every take of a reopened count once the wallet is funded', async () => {

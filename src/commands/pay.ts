@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -5,6 +6,7 @@ import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaa
 import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
+import { notePaymentSent } from '../lib/flush-stdio';
 import { paymentShortOfFunds } from '../lib/payment-failure';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
@@ -14,7 +16,13 @@ import { sanitizeForTerminal } from '../lib/output';
 import { mask } from '../lib/redact';
 import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
-import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
+import {
+  SIWX_HEADER,
+  answerSignInChallenge,
+  buildSiwxHeader,
+  signInOnlyChallenge,
+} from '../lib/siwx';
+import { downloadsDir } from '../lib/paths';
 import { gateSpend } from '../lib/spend-gate';
 import { markShortOfFunds, spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
@@ -31,10 +39,19 @@ import {
   isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
+  signsEip3009,
 } from '../lib/x402-pay';
-import type { x402Client } from '@x402/core/client';
+import type { x402Client, x402HTTPClient } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
-import { appendPaidRecord, recordedSent } from '../router/paid';
+import {
+  appendPaidRecord,
+  chargedOnChain,
+  walletPaidHost,
+  recordedSent,
+  writeNewFile,
+  type Settlement,
+  type SignedAuthorization,
+} from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -62,6 +79,18 @@ const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
+
+/** A paid leg the seller refused as short of funds (`paymentShortOfFunds`). */
+const LOW_FUNDS_MESSAGE = 'The wallet does not hold enough USDC for this payment.';
+/** What a low-funds refusal says after its ask for funds: the `request` tool
+ *  keeps it behind its own ask, which names the call ({@link isLowFundsRefusal}). */
+export const LOW_FUNDS_TAIL =
+  'The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.';
+
+/** A `runPay` failure that is the seller refusing the payment as short of funds. */
+export function isLowFundsRefusal(err: CliError): boolean {
+  return err.code === 'PAYMENT_FAILED' && err.message === LOW_FUNDS_MESSAGE;
+}
 
 /**
  * What a caller was told this endpoint costs, BEFORE the live 402 is seen. It
@@ -186,6 +215,9 @@ export interface PayDeps {
   confirm?: (prompt: string) => Promise<boolean>;
   /** Resolver seam for the destination preflight; production leaves it unset. */
   destination?: DestinationOptions;
+  /** The transport a failed paid call's chain read goes through; unset, the
+   *  call's own `fetchImpl`, else the global one. */
+  chainFetch?: typeof fetch;
 }
 
 type Lane = 'tenjin' | 'bazaar';
@@ -283,9 +315,10 @@ async function executePay(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...body,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    // A router lookup can buy a file (a sound, an image): its bytes are kept
-    // whole for the tool to save, never decoded as text.
-    ...(router ? { binaryBody: true as const } : {}),
+    // A call can buy a file (a sound, an image): its bytes are kept whole,
+    // never decoded as text. The router's tool saves them itself; a direct
+    // pay writes them to a file and hands back its path (`keepBody`).
+    binaryBody: true as const,
     ...(args.maxBytes !== undefined ? { maxBinaryBytes: args.maxBytes } : {}),
     method,
   };
@@ -298,12 +331,20 @@ async function executePay(
       fix: `Nothing was sent and nothing was paid. ${legFix(probe)}`,
     });
   }
+  // A BINARY BODY ON A DIRECT PAY IS A FILE: written under the downloads
+  // directory, and its path is what comes back. The router's provider leg
+  // keeps the bytes for its own tool to save. A quote writes nothing: a free
+  // file it met is described, and a run without `--quote` saves it.
+  const keep = async (res: HttpResponse): Promise<SavedBody | undefined> =>
+    router ? undefined : args.quote === true ? describeBody(res) : keepBody(ctx.dataDir, url, res);
   if (probe.status >= 200 && probe.status < 300) {
     const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
     args.onPaidLeg?.({ status: probe.status, header: probe.header });
+    const saved = await keep(probe);
     return deliver(url, lane, probe, {
       paid: false,
       ...(caveat !== undefined ? { caveat } : {}),
+      ...(saved !== undefined ? { saved } : {}),
       printBody: args.printBody === true,
     });
   }
@@ -350,6 +391,82 @@ async function executePay(
   // runs, so no wallet is opened and nothing is signed.
   if (args.quote === true) {
     return deliverQuote(url, lane, probe, paymentRequired, requirement, args.printBody === true);
+  }
+  // A SELLER THAT ASKS ONLY FOR A SIGN-IN: a 402 offering no payment, with
+  // its own sign-in-with-x challenge, as Monid answers a poll of a run it was
+  // paid for. It is signed only for a GET, as a poll is, when the challenge
+  // matches the responding origin and the ledger shows this wallet paid
+  // that host, and nothing is paid on this path. A write behind a sign-in could spend the wallet's credit with the
+  // seller off-protocol, so it is refused unsigned. The router's provider leg
+  // never takes it: its job polls answer the same challenge in
+  // `router/jobs.ts`, through {@link signInForPoll}.
+  const signIn = router ? undefined : signInOnlyChallenge(paymentRequired);
+  if (signIn !== undefined) {
+    if (method !== 'GET') {
+      throw new CliError(
+        'REFUSED',
+        `${new URL(url).host} asks the wallet that paid it to sign in, and nothing was signed: a sign-in answers only a GET, and this is a ${method}.`,
+        {
+          fix: 'Nothing was signed or paid. Fetch the result with a plain GET (no -X, no body).',
+          details: { status: 402, reason: 'sign_in_method', signIn: true },
+        },
+      );
+    }
+    const provider = resolveWalletProvider(
+      ctx,
+      deps.provider !== undefined ? { provider: deps.provider } : {},
+    );
+    const answer = await answerSignInChallenge(paymentRequired, signIn, url, {
+      address: async () => (await describeOpenable(provider)).address,
+      paidHost: (host, address) => walletPaidHost(ctx.dataDir, host, address),
+      signer: () => openWallet(provider),
+    });
+    if ('refused' in answer) {
+      throw new CliError(
+        'REFUSED',
+        `${new URL(url).host} asks the wallet that paid it to sign in, and nothing was signed: ${answer.reason}.`,
+        {
+          fix:
+            answer.refused === 'unpaid'
+              ? 'Nothing was signed or paid. This seller returns the result only to the wallet that paid for it; sign in from that wallet.'
+              : answer.refused === 'payer_unknown'
+                ? 'Nothing was signed or paid. The payment was recorded before this CLI kept the wallet that paid, so it cannot show this wallet paid; `tenjin payments` lists it.'
+                : 'Nothing was signed or paid.',
+          details: { status: 402, reason: `sign_in_${answer.refused}`, signIn: true },
+        },
+      );
+    }
+    const signed = await httpRequest(url, {
+      ...fetchOpts,
+      headers: { ...headers, ...answer.headers },
+    });
+    if (!signed.ok) {
+      throw fetchFailureToCliError(signed, {
+        fix: `Nothing was paid: the request carried a sign-in, not a payment. ${legFix(signed)}`,
+      });
+    }
+    if (signed.status >= 200 && signed.status < 300) {
+      const caveat = assertUsableResult(args.resultSchema, signed.text, signed.status, 'signed-in');
+      const saved = await keep(signed);
+      return deliver(url, lane, signed, {
+        paid: false,
+        signedIn: true,
+        ...(caveat !== undefined ? { caveat } : {}),
+        ...(saved !== undefined ? { saved } : {}),
+        printBody: args.printBody === true,
+      });
+    }
+    const said = providerMessage(signed.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      signed.status === 402
+        ? `${new URL(url).host} did not accept this wallet's sign-in.`
+        : `${url} answered ${signed.status} to this wallet's sign-in${said === null ? '.' : `: ${said}`}`,
+      {
+        fix: 'Nothing was paid: the request carried a sign-in, not a payment. This seller returns the result only to the wallet that paid for it.',
+        details: { status: signed.status, body: signed.json, ...providerError(signed.text) },
+      },
+    );
   }
   if (requirement === undefined) {
     throw noMatchingEntry(paymentRequired, args.terms);
@@ -415,10 +532,12 @@ async function executePay(
         'entitled',
       );
       args.onPaidLeg?.({ status: recheck.status, header: recheck.header });
+      const saved = await keep(recheck);
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
         ...(caveat !== undefined ? { caveat } : {}),
+        ...(saved !== undefined ? { saved } : {}),
         printBody: args.printBody === true,
       });
     }
@@ -566,11 +685,20 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
-  // A DIRECT PAY THAT MAY NOT HAVE SETTLED goes in the paid ledger as a
-  // `request` call does (a router leg is recorded by `request` itself), so the
-  // same reconcile pass gives its amount back to the daily budget once the
+  // From here, output this process loses follows a payment (lib/flush-stdio).
+  notePaymentSent();
+  // EVERY DIRECT PAY THAT SIGNED goes in the paid ledger, as a `request`
+  // call does (a router leg is recorded by `request` itself): a delivered one
+  // with the file it saved, so a seller's later sign-in challenge can be
+  // answered for a host this wallet paid; one that may not have settled so
+  // the same reconcile pass gives its amount back to the daily budget once the
   // chain is past its `validBefore` and shows the authorization unused.
-  const recordUnsettled = async (): Promise<void> => {
+  const recordDirect = async (entry: {
+    settlement: Settlement;
+    txHash?: string;
+    reportedTxHash?: string;
+    savedFiles?: string[];
+  }): Promise<void> => {
     if (router) return;
     await appendPaidRecord(ctx.dataDir, {
       version: 1,
@@ -580,10 +708,55 @@ async function executePay(
       url,
       sent: recordedSent(args.data ?? args.dataRaw ?? ''),
       amountAtomic: payment.amountAtomic.toString(),
-      settlement: 'unknown',
-      savedFiles: [],
+      ...(entry.txHash !== undefined ? { txHash: entry.txHash } : {}),
+      ...(entry.reportedTxHash !== undefined ? { reportedTxHash: entry.reportedTxHash } : {}),
+      settlement: entry.settlement,
+      savedFiles: entry.savedFiles ?? [],
+      payer: payment.payer,
       ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
     });
+  };
+  // A PAID CALL THAT FAILED MAY STILL HAVE BEEN CHARGED: a seller can settle
+  // and then answer an error (AiSpace's voiceover queue did). Only the chain
+  // proves it: read once, as reconcile reads it, on the payment's own network
+  // and token. An unused authorization, or one this machine cannot read,
+  // stays unknown: it can still be settled until its `validBefore`.
+  //
+  // A SELLER THAT SAYS IT SETTLED (`success: true` naming a tx) is reported,
+  // not believed: its tx rides as `reportedTxHash`, and the row stays unknown
+  // for reconcile, which gives an unused authorization back to the daily
+  // budget. Its claim still keeps a quote used, so it is never paid twice.
+  const failedSettlement = async (
+    header: ((name: string) => string | undefined) | undefined,
+  ): Promise<{
+    settlement: 'settled' | 'unknown';
+    reportedTxHash?: string;
+    /** The chain shows it charged. */
+    charged?: string;
+    /** Only the seller says it charged. */
+    reported?: string;
+  }> => {
+    const reportedTxHash = header !== undefined ? settledTx({ header }) : undefined;
+    const tx = reportedTxHash !== undefined ? { reportedTxHash } : {};
+    const settlement = await chargedOnChain(payment.authorization, settings.rpcUrl, {
+      ...((deps.chainFetch ?? deps.fetchImpl) !== undefined
+        ? { fetchImpl: deps.chainFetch ?? deps.fetchImpl }
+        : {}),
+    });
+    if (settlement === 'settled') {
+      return {
+        settlement,
+        ...tx,
+        charged: 'The chain shows the authorization was used, so it was charged.',
+      };
+    }
+    return reportedTxHash !== undefined
+      ? {
+          settlement,
+          ...tx,
+          reported: `The seller reports a charge (tx ${reportedTxHash}), but the chain does not show it yet. Check \`tenjin payments\` before paying again.`,
+        }
+      : { settlement };
   };
   if (paid.ok || paid.header !== undefined) {
     args.onPaidLeg?.({
@@ -599,21 +772,28 @@ async function executePay(
   if (!paid.ok) {
     // A LONG JOB THAT NAMED WHERE ITS RESULT WILL BE: the seller is still
     // working, so the agent is pointed there rather than told it failed.
-    // Settlement is just as unknown as on any other timeout.
+    // Settlement is just as unknown as on any other timeout, unless the chain
+    // already shows it.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
-    await recordUnsettled();
+    const { settlement, reportedTxHash, charged, reported } = await failedSettlement(paid.header);
+    await recordDirect({ settlement, ...(reportedTxHash !== undefined ? { reportedTxHash } : {}) });
+    const known = charged ?? reported;
     if (statusUrl !== null) {
       throw new CliError(
         'NETWORK_ERROR',
         `The seller is still working on this: no result within ${Math.round(paidTimeoutMs / 1000)} s, and it named a status URL to check: ${statusUrl}`,
         {
           fix:
-            'The authorization was transmitted and settlement is unknown until the job ends; it is recorded as transmitted exposure. ' +
+            (known !== undefined
+              ? `${known} `
+              : 'The authorization was transmitted and settlement is unknown until the job ends; it is recorded as transmitted exposure. ') +
             'Do not pay again: check the status URL for the result.',
           details: {
             statusUrl,
             amountAtomic: payment.amountAtomic.toString(),
-            settlement: 'unknown',
+            settlement,
+            ...(reportedTxHash !== undefined ? { reportedTxHash } : {}),
+            payer: payment.payer,
             ...(payment.authorization !== undefined
               ? { authorization: payment.authorization }
               : {}),
@@ -623,11 +803,15 @@ async function executePay(
     }
     throw fetchFailureToCliError(paid, {
       fix:
-        'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
+        (known !== undefined
+          ? `The authorization was transmitted. ${known} `
+          : 'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ') +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
       details: {
         amountAtomic: payment.amountAtomic.toString(),
-        settlement: 'unknown',
+        settlement,
+        ...(reportedTxHash !== undefined ? { reportedTxHash } : {}),
+        payer: payment.payer,
         ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     });
@@ -645,51 +829,91 @@ async function executePay(
       if (check.unvalidated === true) caveat = unvalidatedCaveat(check);
       else if (!check.valid) caveat = failedRuleCaveat(check);
     }
+    const saved = await keep(paid);
+    const txHash = settlementTx(paid);
+    await recordDirect({
+      settlement: txHash !== undefined ? 'settled' : 'unknown',
+      ...(txHash !== undefined ? { txHash } : {}),
+      savedFiles: saved?.savedTo !== undefined ? [saved.savedTo] : [],
+    });
     return deliver(url, lane, paid, {
       paid: true,
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
+      payer: payment.payer,
       ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       ...(registry !== undefined ? { registry } : {}),
       ...(caveat !== undefined ? { caveat } : {}),
+      ...(saved !== undefined ? { saved } : {}),
       printBody: args.printBody === true,
     });
   }
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
   // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
+  //
+  // SETTLEMENT IS RESOLVED FIRST. A seller can settle and still answer 402
+  // `insufficient_funds`: read as short of funds, that charged slot reopened
+  // an approved quote, and the same quote could pay the seller again on the
+  // next yes. A charged payment keeps its quote used, its message says it was
+  // charged, and the seller's reason rides in the details. One the seller
+  // only says it took keeps its quote used too, and says so.
+  const { settlement, reportedTxHash, charged, reported } = await failedSettlement(paid.header);
+  await recordDirect({ settlement, ...(reportedTxHash !== undefined ? { reportedTxHash } : {}) });
+  const known = charged ?? reported;
   // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
-  // from the payment-response header: its body can be an empty `{}`. The
-  // authorization stays valid until it expires, so settlement is still unknown.
+  // from the payment-response header: its body can be an empty `{}`. A 402's
+  // own reason rides in its PAYMENT-REQUIRED header's `error`. The
+  // authorization stays valid until it expires, so settlement is unknown
+  // unless the chain shows it taken.
   const refusal = settlementRefusal(paid);
-  const lowFunds = paymentShortOfFunds(paid);
+  const sellerShort = paymentShortOfFunds(paid);
+  const paymentError = paymentRequiredError(payer.http, paid);
+  const lowFunds = sellerShort && known === undefined;
   if (lowFunds) markShortOfFunds(slot);
-  await recordUnsettled();
+  const said = sellerShort
+    ? known !== undefined
+      ? 'The seller said the wallet does not hold enough USDC for this payment.'
+      : LOW_FUNDS_MESSAGE
+    : refusal !== undefined
+      ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
+      : paid.status === 402
+        ? `Payment was not accepted by the endpoint${paymentError !== undefined ? `: ${paymentError.replace(/\.+$/, '')}` : ''}.`
+        : known !== undefined
+          ? `The endpoint answered ${paid.status} on the paid request.`
+          : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`;
   throw new CliError(
     'PAYMENT_FAILED',
-    lowFunds
-      ? 'The wallet does not hold enough USDC for this payment.'
-      : refusal !== undefined
-        ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
-        : paid.status === 402
-          ? 'Payment was not accepted by the endpoint.'
-          : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    charged !== undefined
+      ? `The payment was charged, and the endpoint answered ${paid.status} with no result. ${charged}`
+      : reported !== undefined
+        ? `The endpoint answered ${paid.status} with no result. ${reported}`
+        : said,
     {
-      fix: lowFunds
-        ? 'Ask the person to add funds with `tenjin wallet fund`. The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.'
-        : refusal !== undefined
-          ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
-          : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix:
+        charged !== undefined
+          ? "The payment was charged and is recorded as settled. Do not simply retry: each attempt pays again. Read the seller's reason in the details, fix the request, and quote again."
+          : reported !== undefined
+            ? "The payment is recorded as transmitted exposure until the chain shows it taken. Do not simply retry: each attempt signs a fresh authorization. Read the seller's reason in the details, fix the request, and quote again."
+            : lowFunds
+              ? `Ask the person once to add funds; on yes, run \`tenjin fund\`. ${LOW_FUNDS_TAIL}`
+              : refusal !== undefined
+                ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
+                : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
-      // rather than a zero. Settlement is unknown by construction here.
+      // rather than a zero.
       details: {
         status: paid.status,
         body: paid.json,
         ...providerError(paid.text),
+        ...(known !== undefined ? { sellerReason: said } : {}),
+        ...(paymentError !== undefined ? { paymentError } : {}),
         ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
         amountAtomic: payment.amountAtomic.toString(),
-        settlement: 'unknown',
+        settlement,
+        ...(reportedTxHash !== undefined ? { reportedTxHash } : {}),
+        payer: payment.payer,
         ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     },
@@ -1030,7 +1254,7 @@ function assertUsableResult(
   schema: unknown,
   body: string,
   status: number,
-  how: 'free' | 'entitled',
+  how: 'free' | 'entitled' | 'signed-in',
 ): string | undefined {
   if (schema === undefined) return undefined;
   const check = validateResultBody(schema, body);
@@ -1145,7 +1369,16 @@ function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | un
   // No terms, or terms that pinned no chain and no token: the 402 simply
   // advertises nothing this wallet can pay, which the shared refusal already
   // names in the SDK's own vocabulary.
-  if (terms === undefined || (terms.network === undefined && terms.asset === undefined)) {
+  // An entry on the terms' chain is the deal, in a transfer method this CLI
+  // does not sign (Permit2, or another): the shared refusal names the method.
+  const unsupportedMethod = challenge.accepts.some(
+    (a) => !signsEip3009(a) && (terms?.network === undefined || a.network === terms.network),
+  );
+  if (
+    terms === undefined ||
+    (terms.network === undefined && terms.asset === undefined) ||
+    unsupportedMethod
+  ) {
     return noPayableRequirement(challenge.accepts);
   }
   const advertised = challenge.accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
@@ -1265,18 +1498,24 @@ type DeliverOpts = {
   /** Set when the body is delivered UNVERIFIED: the success rule could not run. */
   caveat?: string;
   warnings?: RegistryWarning[];
+  /** A direct pay's binary body, written to a file ({@link keepBody}). */
+  saved?: SavedBody;
 } & (
   | {
       paid: false;
       /** Free because the wallet was already entitled (SIWX), not free-of-price. */
       entitled?: boolean;
+      /** Free because the seller asked only for a sign-in, and got one. */
+      signedIn?: boolean;
       printBody: boolean;
     }
   | {
       paid: true;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
-      authorization?: { from: string; nonce: string; validBefore: string };
+      /** The wallet that signed it (`BuiltPayment.payer`). */
+      payer: string;
+      authorization?: SignedAuthorization;
       registry?: string;
       printBody: boolean;
     }
@@ -1314,6 +1553,9 @@ function deliverQuote(
     maxTimeoutSeconds: a.maxTimeoutSeconds,
     ...(a.extra !== undefined ? { extra: a.extra } : {}),
   }));
+  // A 402 that asks only for a sign-in: `tenjin pay` answers it, paying
+  // nothing, when this wallet paid that host.
+  const signIn = signInOnlyChallenge(challenge) !== undefined;
   const data = {
     url,
     lane,
@@ -1322,6 +1564,7 @@ function deliverQuote(
     quote: true,
     resource: challenge.resource,
     accepts,
+    ...(signIn ? { signIn: true } : {}),
     ...(challenge.extensions !== undefined ? { extensions: challenge.extensions } : {}),
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
@@ -1331,9 +1574,11 @@ function deliverQuote(
   const headline =
     payable?.usd !== undefined
       ? `quote: ${payable.usd} USD to ${host} on ${sanitizeForTerminal(payable.network)} (nothing paid)`
-      : accepts.length === 0
-        ? `quote: ${host} answered 402 with no payment option (nothing paid)`
-        : `quote: ${host} lists no option this wallet can pay, only USDC on Base is supported (nothing paid)`;
+      : signIn
+        ? `quote: ${host} asks the wallet that paid it to sign in, and lists no payment option (nothing paid)`
+        : accepts.length === 0
+          ? `quote: ${host} answered 402 with no payment option (nothing paid)`
+          : `quote: ${host} lists no option this wallet can pay, only USDC on Base is supported (nothing paid)`;
   const body = sanitizeForTerminal(res.text);
   const preview =
     printBody || body.length <= BODY_PREVIEW_CHARS
@@ -1368,12 +1613,15 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
           asset: opts.requirement.asset,
+          payer: opts.payer,
           ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
       : opts.entitled === true
         ? { entitled: true }
-        : {}),
+        : opts.signedIn === true
+          ? { signedIn: true }
+          : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
     // Beside the body, never instead of it: the caller gets the product AND the
     // fact that its shape was never checked. The flag is what a machine reads:
@@ -1381,19 +1629,24 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     // is how an unchecked body passed for a checked one one layer up.
     ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always,
-    // and the bytes themselves when it was a file.
+    // and, when it was a file, where a direct pay saved it, or the bytes
+    // themselves for the router's tool to save.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
-    ...(res.bytes !== undefined
-      ? { bodyBytes: res.bytes, contentType: res.header('content-type') ?? '' }
-      : {}),
+    ...(opts.saved !== undefined
+      ? opts.saved
+      : res.bytes !== undefined
+        ? { bodyBytes: res.bytes, contentType: res.header('content-type') ?? '' }
+        : {}),
   };
   const headline = opts.paid
     ? `paid ${toMoney(opts.amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
       (settlementTxHash !== undefined ? ` (tx ${settlementTxHash})` : '')
     : opts.entitled === true
       ? `free (entitled, no charge)`
-      : `free (${res.status}, no charge)`;
+      : opts.signedIn === true
+        ? `free (signed in, no charge)`
+        : `free (${res.status}, no charge)`;
   const body = sanitizeForTerminal(res.text);
   const preview =
     opts.printBody || body.length <= BODY_PREVIEW_CHARS
@@ -1407,9 +1660,91 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
         (w) => `${sanitizeForTerminal(warningMessage(w))} (acknowledged)`,
       ),
       ...(opts.caveat !== undefined ? [sanitizeForTerminal(opts.caveat)] : []),
+      ...(opts.saved !== undefined ? [savedLine(opts.saved)] : []),
+      // The paid bytes no folder took: the only copy, so printed whole.
+      ...(opts.saved?.bodyBase64 !== undefined ? [opts.saved.bodyBase64] : []),
       ...(preview.length > 0 ? [preview] : []),
     ],
   };
+}
+
+/** A binary body a direct pay wrote to a file, tried to, or (on a quote)
+ *  left unwritten. `bodyBase64` holds the bytes when no folder took them. */
+interface SavedBody {
+  savedTo?: string;
+  saveError?: string;
+  notSaved?: string;
+  bodyBase64?: string;
+  contentType: string;
+  bytes: number;
+}
+
+/** A quote's binary body, described and never written. */
+function describeBody(res: Pick<HttpResponse, 'bytes' | 'header'>): SavedBody | undefined {
+  if (res.bytes === undefined) return undefined;
+  return {
+    notSaved: '--quote writes no file; run it without --quote to save it',
+    contentType: res.header('content-type') ?? '',
+    bytes: res.bytes.byteLength,
+  };
+}
+
+/**
+ * WRITE A DIRECT PAY'S BINARY BODY TO A FILE, under the downloads directory,
+ * named for the host with the extension its type implies, and say where. A
+ * text body is undefined: it is delivered as text. NEVER THROWS, AND NEVER
+ * DROPS THE BYTES: on the paid leg the money has already moved, and a retry
+ * pays again. A downloads folder that cannot take the file (full, or not
+ * writable) falls back to the OS temp folder, with the first error said. When
+ * that fails too, the bytes come back in the result as base64.
+ */
+async function keepBody(
+  dataDir: string,
+  url: string,
+  res: Pick<HttpResponse, 'bytes' | 'header'>,
+): Promise<SavedBody | undefined> {
+  if (res.bytes === undefined) return undefined;
+  const contentType = res.header('content-type') ?? '';
+  const described = { contentType, bytes: res.bytes.byteLength };
+  const stem = `pay-${new URL(url).hostname.slice(0, 60)}-${Date.now()}`;
+  const first = await writeBody(downloadsDir(dataDir), stem, contentType, res.bytes);
+  if ('path' in first) return { savedTo: first.path, ...described };
+  const second = await writeBody(tmpdir(), stem, contentType, res.bytes);
+  if ('path' in second) return { savedTo: second.path, saveError: first.error, ...described };
+  return {
+    saveError: `${first.error}; the temp folder failed too: ${second.error}`,
+    bodyBase64: Buffer.from(res.bytes).toString('base64'),
+    ...described,
+  };
+}
+
+/** One try at a new file in `directory` ({@link writeNewFile}), as a path
+ *  or the reason it was not saved. */
+async function writeBody(
+  directory: string,
+  stem: string,
+  contentType: string,
+  bytes: Uint8Array,
+): Promise<{ path: string } | { error: string }> {
+  try {
+    return { path: await writeNewFile(directory, stem, contentType, bytes) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function savedLine(saved: SavedBody): string {
+  const what = `${saved.bytes}-byte ${sanitizeForTerminal(saved.contentType) || 'binary'} body`;
+  const why = sanitizeForTerminal(saved.saveError ?? 'unknown error');
+  if (saved.savedTo !== undefined) {
+    return saved.saveError !== undefined
+      ? `the downloads folder could not take the ${what} (${why}), so it was saved to ${saved.savedTo}`
+      : `saved the ${what} to ${saved.savedTo}`;
+  }
+  if (saved.notSaved !== undefined) return `the ${what} was not saved: ${saved.notSaved}`;
+  return saved.bodyBase64 !== undefined
+    ? `the ${what} could not be saved (${why}); its bytes follow as base64`
+    : `the ${what} could not be saved: ${why}`;
 }
 
 /**
@@ -1420,6 +1755,14 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
 export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
   const tx = paymentResponse(res)?.transaction;
   return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
+}
+
+/**
+ * The seller's own word that it DID settle, on a failure: its payment-response
+ * header with `success: true` and the settlement transaction it names.
+ */
+function settledTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  return paymentResponse(res)?.success === true ? settlementTx(res) : undefined;
 }
 
 /**
@@ -1466,16 +1809,174 @@ async function openWallet(provider: WalletProvider): Promise<TenjinSigner> {
     await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
     return await provider.getSigner();
   } catch (err) {
-    if (!(err instanceof CliError)) throw err;
-    throw new CliError(err.code, err.message, {
-      exitCode: err.exitCode,
-      ...(err.fix !== undefined ? { fix: err.fix } : {}),
-      details: {
-        ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
-        walletUnavailable: true,
+    throw walletError(err);
+  }
+}
+
+/** The wallet's description, read without opening it; a refusal is marked
+ *  the wallet's as {@link openWallet} marks it. */
+async function describeOpenable(
+  provider: WalletProvider,
+): Promise<Awaited<ReturnType<typeof describeWallet>>> {
+  try {
+    return await describeWallet(provider);
+  } catch (err) {
+    throw walletError(err);
+  }
+}
+
+function walletError(err: unknown): unknown {
+  if (!(err instanceof CliError)) return err;
+  return new CliError(err.code, err.message, {
+    exitCode: err.exitCode,
+    ...(err.fix !== undefined ? { fix: err.fix } : {}),
+    details: {
+      ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
+      walletUnavailable: true,
+    },
+    cause: err,
+  });
+}
+
+/** Cap on a seller's PAYMENT-REQUIRED header before it is decoded for its reason. */
+const MAX_CHALLENGE_CHARS = 16_384;
+
+/**
+ * WHY A SELLER REFUSED A PAYMENT, in its words: the `error` of the challenge
+ * the SDK reads from the 402 (its PAYMENT-REQUIRED header, x402 v2, else an
+ * x402 v1 body), as one bounded, redacted plain line. A header past the cap
+ * is not decoded. Seller text, never instructions.
+ */
+function paymentRequiredError(
+  http: Pick<x402HTTPClient, 'getPaymentRequiredResponse'>,
+  res: Pick<HttpResponse, 'header' | 'json'>,
+): string | undefined {
+  let said: unknown;
+  try {
+    said = http.getPaymentRequiredResponse((name) => {
+      const value = res.header(name);
+      return value !== undefined && value.length <= MAX_CHALLENGE_CHARS ? value : undefined;
+    }, res.json).error;
+  } catch {
+    said = undefined;
+  }
+  if (typeof said !== 'string') return undefined;
+  const line = sellerLine(said);
+  return line.length > 0 ? line : undefined;
+}
+
+/**
+ * A SELLER'S SIGN-IN CHALLENGE, read from a 402's PAYMENT-REQUIRED header:
+ * the challenge and its `sign-in-with-x` extension when the 402 offers no
+ * payment and asks only for a sign-in, else undefined (a price, a header too
+ * long or one that does not decode). Reading it signs nothing and opens no
+ * wallet, so a router poll uses it to tell a sign-in it refuses from a seller
+ * asking to be paid again.
+ */
+export function signInOnlyHeader(
+  paymentRequiredHeader: string,
+):
+  | { challenge: PaymentRequired; extension: NonNullable<ReturnType<typeof signInOnlyChallenge>> }
+  | undefined {
+  if (paymentRequiredHeader.length > MAX_CHALLENGE_CHARS) return undefined;
+  let challenge: PaymentRequired;
+  try {
+    challenge = decodePaymentRequiredHeader(paymentRequiredHeader);
+  } catch {
+    return undefined;
+  }
+  const extension = signInOnlyChallenge(challenge);
+  return extension !== undefined ? { challenge, extension } : undefined;
+}
+
+/** What a poll's sign-in comes to (`PollSignIn` in `router/jobs.ts`). */
+export type PollSignInAnswer =
+  | { headers: Record<string, string> }
+  | { refused: string }
+  | { error: string }
+  | { otherWallet: { paidBy: string; current: string } }
+  | undefined;
+
+/**
+ * THE ROUTER'S JOB POLLS, SIGNED IN AS A DIRECT PAY IS (tenjin#977): a poll
+ * the seller answered 402 with a sign-in challenge and no way to pay gets the
+ * headers that answer it, when the challenge matches the responding origin,
+ * signed by the wallet that paid. The take is that proof, and the only one:
+ * `paidBy` names the wallet that signed its submit (its recorded payer, else,
+ * on a take from before payers were kept, its authorization's `from`) and
+ * the submit's URL, and the wallet signs only when it is that address and
+ * the poll is on that host. A take that names no payer signs nothing; the
+ * ledger is not asked, since any payment there to the host is not this
+ * take's. A wallet switched since the submit signs nothing either, and is
+ * `otherWallet`, naming the wallet that paid: the take is still the seller's
+ * to finish, for that wallet. Undefined for any other 402, which the poll
+ * treats as a seller asking to be paid again.
+ * A wallet that could not be opened is an `error`, which the poll counts and
+ * survives, never a refusal that ends a paid take. Never pays: the challenge
+ * offers no payment, and none is built. Only a GET poll is handed here: a
+ * POST poll's challenge is refused unsigned in `router/jobs.ts`, as a direct
+ * pay's write is (`sign_in_method`).
+ */
+export async function signInForPoll(
+  paymentRequiredHeader: string,
+  url: string,
+  ctx: CommandContext,
+  deps: {
+    provider?: WalletProvider;
+    paidBy: { from?: string; url: string };
+  },
+): Promise<PollSignInAnswer> {
+  const read = signInOnlyHeader(paymentRequiredHeader);
+  if (read === undefined) return undefined;
+  const { challenge, extension } = read;
+  const { paidBy } = deps;
+  try {
+    const provider = resolveWalletProvider(
+      ctx,
+      deps.provider !== undefined ? { provider: deps.provider } : {},
+    );
+    // The wallet this machine holds now, as described and as opened.
+    let current: string | undefined;
+    const answer = await answerSignInChallenge(challenge, extension, url, {
+      address: async () => (current = (await describeOpenable(provider)).address),
+      paidHost: async (host, address) =>
+        paidBy.from === undefined
+          ? 'payer_unknown'
+          : hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
+            ? 'paid'
+            : 'unpaid',
+      signer: async () => {
+        const signer = await openWallet(provider);
+        current = signer.address;
+        return signer;
       },
-      cause: err,
     });
+    if (!('refused' in answer)) return answer;
+    // A WALLET SWITCHED SINCE THE SUBMIT is this machine's state, not the
+    // seller's answer: nothing is signed with it, and the take waits for the
+    // wallet that paid.
+    if (
+      answer.refused === 'unpaid' &&
+      paidBy.from !== undefined &&
+      current !== undefined &&
+      hostOf(paidBy.url) === hostOf(url) &&
+      current.toLowerCase() !== paidBy.from.toLowerCase()
+    ) {
+      return { otherWallet: { paidBy: paidBy.from, current } };
+    }
+    return { refused: answer.reason };
+  } catch (err) {
+    return {
+      error: `the wallet could not be opened (${sellerLine(err instanceof Error ? err.message : String(err)) || 'no reason given'})`,
+    };
+  }
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
   }
 }
 

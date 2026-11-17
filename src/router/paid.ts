@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolvePublicDestination, type DestinationOptions } from '../lib/destination';
 import { hasCode } from '../lib/errno';
+import { ADDRESS_RE } from '../lib/ids';
 import { withFileLock } from '../lib/lock';
 import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
@@ -15,13 +17,15 @@ import { releaseUnchargedExposure } from '../lib/wallet/spend';
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
  * call in `~/.tenjin/paid/ledger.jsonl`: who was paid, for what, how much, the
- * settlement it carried and the files it saved. A direct `tenjin pay` the
- * seller did not deliver on is a line too. It is the user's own record
+ * settlement it carried and the files it saved. Every direct `tenjin pay`
+ * that signed is a line too, delivered or not. It is the user's own record
  * and the receipt `tenjin payments reconcile` resolves an unknown settlement
  * against. Nothing here can fail a lookup: every write swallows its own error.
  */
 
-export type Settlement = 'settled' | 'unknown' | 'not_charged';
+/** `account`: run on the user's own connected account, which their plan
+ *  pays; nothing left the balance, so there is nothing to settle. */
+export type Settlement = 'settled' | 'unknown' | 'not_charged' | 'account';
 
 /** The EIP-3009 authorization that was signed, enough to ask the token later
  *  whether it was used. */
@@ -30,6 +34,10 @@ export interface SignedAuthorization {
   nonce: string;
   /** Unix seconds; after it the authorization can no longer be used. */
   validBefore: string;
+  /** The CAIP-2 network and the token of the requirement it was signed for.
+   *  A record from before has neither, and was USDC on Base. */
+  network?: string;
+  asset?: string;
 }
 
 export interface PaidRecord {
@@ -39,17 +47,41 @@ export interface PaidRecord {
   provider: string;
   /** The service's display name, when its decision or spec carried one. */
   label?: string;
+  /** Who the call ran through: `tenjin` for Tenjin's own tools, or the id of
+   *  the connected account that ran it (plan 37). Rows from before have none
+   *  and read as `tenjin`. */
+  source?: string;
+  /** `swap`: the call answered a native search or fetch in place, which
+   *  nobody was asked about separately. */
+  via?: 'swap';
   url: string;
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;
   amountAtomic: string;
+  /** The settlement transaction; only a settled row has one. */
   txHash?: string;
+  /** The tx a seller's payment response named on a call that failed: its
+   *  word that it took the payment, not proof. The row's settlement is what
+   *  the chain shows, so reconcile still resolves it. */
+  reportedTxHash?: string;
   settlement: Settlement;
   savedFiles: string[];
+  /** The wallet that signed the payment, whatever its scheme. A record from
+   *  before has none; its `authorization.from` stands in ({@link payerOf}). */
+  payer?: string;
   authorization?: SignedAuthorization;
   /** When reconcile last asked the chain about it, so a slow or rate-limited
    *  RPC is not asked about the same record on every lookup. */
   lastCheckedAt?: string;
+  /** The offer id of a job on the user's own account: its one row, kept from
+   *  when its billing call may have billed and finished in place. */
+  job?: string;
+  /** `unknown`: a call on the user's own account that may have billed it,
+   *  with no result to show it did: still running, failed after the
+   *  account's job started, or answered with the account's own error. Usage
+   *  and payments say it may have charged, and never count it as billed.
+   *  Absent: the account ran it. */
+  charge?: 'unknown';
 }
 
 export const MAX_SENT_CHARS = 4_096;
@@ -129,6 +161,50 @@ export async function updatePaidRecord(
   }
 }
 
+/**
+ * A JOB ON THE USER'S OWN ACCOUNT, ONE ROW (plan 37). It is written once its
+ * billing call may have billed (still running, failed, or answered with the
+ * account's own error), its charge `unknown`, so usage and payments show it
+ * as may have charged; a later write for the same job that delivered (the
+ * resumed job) finishes that row in place, with the files it saved and its
+ * charge no longer unknown, under the lock reconcile rewrites with. Never
+ * throws.
+ */
+export async function recordAccountRow(
+  dataDir: string,
+  record: PaidRecord & { job: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      const kept = current
+        .map(({ record: row }) => row)
+        .find((row): row is PaidRecord => row?.job === record.job);
+      if (kept === undefined) {
+        await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        return;
+      }
+      // Still unknown, or already finished with nothing to add: unchanged.
+      if (record.charge !== undefined) return;
+      if (kept.charge === undefined && record.savedFiles.length === 0) return;
+      const lines = current.map(({ line, record: row }) => {
+        if (row?.job !== record.job) return line;
+        const finished: PaidRecord = {
+          ...row,
+          ...(record.savedFiles.length > 0 ? { savedFiles: record.savedFiles } : {}),
+        };
+        delete finished.charge;
+        return JSON.stringify(finished);
+      });
+      await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
 /** `authorizationState(address,bytes32)`: the first four bytes of its keccak-256. */
 const AUTHORIZATION_STATE_SELECTOR = '0xe94a0102';
 const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -139,21 +215,39 @@ export const MAX_RECONCILE_CHECKS = 3;
 export const RECHECK_MS = 10 * 60_000;
 const RECONCILE_TIMEOUT_MS = 1_500;
 
+/** The network the configured `rpcUrl` reads: Base, as every balance read
+ *  and the shipped default assume. No other network has an RPC here. */
+const RPC_NETWORK = 'eip155:8453';
+
+/** Whether this machine can read the token this authorization was signed on. */
+export function chainReadable(authorization: SignedAuthorization): boolean {
+  return (authorization.network ?? RPC_NETWORK) === RPC_NETWORK;
+}
+
 /**
- * Whether USDC on Base has used this authorization: true once a facilitator
- * settled it, false while it has not. Null when the RPC could not say.
+ * Whether the token this authorization was signed on has used it: true once a
+ * facilitator settled it, false while it has not. It is read on the
+ * payment's own network and asset; one with no RPC here (Base Sepolia) and an
+ * RPC that could not say are both null, so its settlement stays unknown.
+ *
+ * `authorizationState` is also true for an authorization cancelled with
+ * EIP-3009's `cancelAuthorization`. Used still means transferred here: a
+ * cancellation needs the payer's own signature, only the key holder can make
+ * one, and this CLI never signs one.
  */
 export async function authorizationUsed(
   authorization: SignedAuthorization,
   rpcUrl: string,
   opts: { fetchImpl?: typeof fetch; timeoutMs?: number; blockTag?: string } = {},
 ): Promise<boolean | null> {
+  const asset = authorization.asset ?? USDC_ADDRESS;
+  if (!chainReadable(authorization) || !ADDRESS_RE.test(asset)) return null;
   const result = await rpcCall(
     rpcUrl,
     'eth_call',
     [
       {
-        to: USDC_ADDRESS,
+        to: asset,
         data: `${AUTHORIZATION_STATE_SELECTOR}${authorization.from.slice(2).toLowerCase().padStart(64, '0')}${authorization.nonce.slice(2).toLowerCase()}`,
       },
       opts.blockTag ?? 'latest',
@@ -253,6 +347,7 @@ export async function reconcilePayments(
   const due = open.filter(
     ({ record }) =>
       record.authorization !== undefined &&
+      chainReadable(record.authorization) &&
       Number(record.authorization.validBefore) * 1_000 < now &&
       (record.lastCheckedAt === undefined || now - Date.parse(record.lastCheckedAt) >= recheckMs),
   );
@@ -320,6 +415,68 @@ export async function reconcilePayments(
   };
 }
 
+/**
+ * WHAT THE CHAIN SAYS OF A PAID CALL THAT FAILED, read the moment it failed:
+ * `settled` once the payment's own token shows the authorization used, so a
+ * seller that took the money and returned an error shows as charged. Anything
+ * else stays `unknown`: an unused authorization can still be settled until
+ * its `validBefore`, so only {@link reconcilePayments}, past that, may call it
+ * not charged.
+ */
+export async function chargedOnChain(
+  authorization: SignedAuthorization | undefined,
+  rpcUrl: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<'settled' | 'unknown'> {
+  if (authorization === undefined) return 'unknown';
+  return (await authorizationUsed(authorization, rpcUrl, opts)) === true ? 'settled' : 'unknown';
+}
+
+/** Who signed a payment: its recorded payer, else, on a record from before
+ *  payers were kept, its EIP-3009 authorization's `from`. */
+export function payerOf(paid: {
+  payer?: string;
+  authorization?: { from: string };
+}): string | undefined {
+  return paid.payer ?? paid.authorization?.from;
+}
+
+/** `paid` when this address paid the host; `payer_unknown` when the only
+ *  record of a payment to it does not say which wallet paid. */
+export type PaidHost = 'paid' | 'unpaid' | 'payer_unknown';
+
+/**
+ * WHETHER THIS WALLET PAID THIS HOST, by the paid ledger: a row for the same
+ * host (with its port) that this address signed ({@link payerOf}), that the
+ * chain has not shown went unused. There is no time limit. It is what lets a
+ * seller's sign-in challenge be signed without asking: that seller already
+ * holds this address. A row that names no payer never counts.
+ */
+export async function walletPaidHost(
+  dataDir: string,
+  host: string,
+  address: string,
+): Promise<PaidHost> {
+  const from = address.toLowerCase();
+  let payerUnknown = false;
+  for (const record of await readPaidRecords(dataDir)) {
+    if (record.settlement === 'not_charged' || record.settlement === 'account') continue;
+    if (hostOf(record.url) !== host) continue;
+    const payer = payerOf(record);
+    if (payer === undefined) payerUnknown = true;
+    else if (payer.toLowerCase() === from) return 'paid';
+  }
+  return payerUnknown ? 'payer_unknown' : 'unpaid';
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Every paid record in the ledger, oldest first; a line that is not one is skipped. */
 export async function readPaidRecords(dataDir: string): Promise<PaidRecord[]> {
   const raw = await readFile(paidLedgerPath(dataDir), 'utf8').catch(() => '');
@@ -357,6 +514,39 @@ const MEDIA_EXTENSIONS = new Set([
   'webm',
   'mov',
 ]);
+/** Extensions for the media types a paid call plausibly returns; any other
+ *  type, `text/html` from a seller included, is saved as `.bin`. */
+const EXTENSIONS: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'video/quicktime': 'mov',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/octet-stream': 'bin',
+};
+
+export function extensionFor(contentType: string): string {
+  const type = contentType.split(';')[0]!.trim().toLowerCase();
+  return EXTENSIONS[type] ?? 'bin';
+}
+
 export const MAX_MEDIA_FILES = 5;
 export const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 export const MEDIA_TIMEOUT_MS = 60_000;
@@ -422,30 +612,48 @@ export interface MediaDeps {
  * that hands back the one validated address closes that: the socket goes to
  * it, and TLS still verifies the certificate against the URL's own host name.
  */
-export const pinnedGet: MediaTransport = (target, signal) =>
-  new Promise((resolve, reject) => {
-    const req = httpsRequest(
+export const pinnedGet: MediaTransport = async (target, signal) => {
+  const res = await pinnedHttp(target, { method: 'GET' }, signal);
+  const length = Number(res.headers['content-length']);
+  const location = res.headers.location;
+  return {
+    status: res.statusCode ?? 0,
+    ...(typeof location === 'string' ? { location } : {}),
+    ...(Number.isFinite(length) ? { contentLength: length } : {}),
+    body: res,
+    discard: () => res.destroy(),
+  };
+};
+
+/**
+ * ONE REQUEST ON THE PINNED SOCKET, the one every request to a host this CLI
+ * checked goes out on: a media download (above), a job's poll (`jobs.ts`)
+ * and every connected-account request to a host the router or a server named
+ * (`accounts/fetch.ts`). HTTPS, but for the plain `http` the account check
+ * takes to a loopback address alone. No redirect is followed; the caller sees
+ * the 3xx and checks the next hop.
+ */
+export function pinnedHttp(
+  target: PinnedTarget,
+  request: { method: string; headers?: Record<string, string>; body?: string | Uint8Array },
+  signal: AbortSignal,
+): Promise<IncomingMessage> {
+  const send = target.url.protocol === 'http:' ? httpRequest : httpsRequest;
+  return new Promise((resolve, reject) => {
+    const req = send(
       target.url,
       {
-        method: 'GET',
+        method: request.method,
+        ...(request.headers !== undefined ? { headers: request.headers } : {}),
         signal,
         lookup: pinnedLookup(target),
       },
-      (res) => {
-        const length = Number(res.headers['content-length']);
-        const location = res.headers.location;
-        resolve({
-          status: res.statusCode ?? 0,
-          ...(typeof location === 'string' ? { location } : {}),
-          ...(Number.isFinite(length) ? { contentLength: length } : {}),
-          body: res,
-          discard: () => res.destroy(),
-        });
-      },
+      resolve,
     );
     req.on('error', reject);
-    req.end();
+    req.end(request.body);
   });
+}
 
 /** A `lookup` that answers every name with the one validated address. */
 export function pinnedLookup(target: Pick<PinnedTarget, 'address' | 'family'>): LookupFunction {
@@ -590,6 +798,33 @@ async function saveOne(
   } finally {
     if (budget !== undefined && !kept) budget.leftBytes += charged;
   }
+}
+
+/**
+ * ONE TRY AT A NEW FILE HOLDING `bytes`: created exclusively under
+ * `directory`, named for `stem` with the extension `contentType` implies,
+ * written whole and closed, and its path returned. A file that could not be
+ * written whole is removed, and the error is thrown. A direct pay and the
+ * router's provider leg both save a paid body with it, so both fail alike.
+ */
+export async function writeNewFile(
+  directory: string,
+  stem: string,
+  contentType: string,
+  bytes: Uint8Array,
+): Promise<string> {
+  const file = await createUniqueFile(directory, stem, extensionFor(contentType));
+  try {
+    try {
+      await file.handle.writeFile(bytes);
+    } finally {
+      await file.handle.close();
+    }
+  } catch (err) {
+    await rm(file.path, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  return file.path;
 }
 
 /**

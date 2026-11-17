@@ -48,6 +48,9 @@ const NOTE_PREFIX = 'note-';
 /** One agent's search query that was noted, one file per window, so the same
  *  one is not noted twice. */
 const QUERY_PREFIX = 'query-';
+/** A native call's routing decision, kept for the pre-call hook when the swap
+ *  hands it back (`decided.ts`). Its size is the router's, so it ages by mtime. */
+export const DECIDED_PREFIX = 'decided-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -137,13 +140,18 @@ interface SavedOffer extends Stamp {
   offerId?: string;
   label?: string;
   priceAtomic?: string;
+  /** The offer ran in the native call's place (the swap), not held. */
+  swap?: true;
 }
 
-/** What the offer record names: the offer's id, display name and price. */
+/** What the offer record names: the offer's id, display name and price, and
+ *  whether it ran in the native call's place. */
 export interface OfferedTerms {
   offerId?: string;
   label?: string;
-  priceAtomic: string;
+  /** Absent for an offer on the user's own account, which their plan pays. */
+  priceAtomic?: string;
+  swap?: true;
 }
 
 export interface ProgressStep {
@@ -268,8 +276,30 @@ export async function markOffered(
       ? { offerId: offer.offerId }
       : {}),
     ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
-    ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
+    ...(offer.priceAtomic !== undefined && /^\d{1,78}$/.test(offer.priceAtomic)
+      ? { priceAtomic: offer.priceAtomic }
+      : {}),
+    ...(offer.swap === true ? { swap: true as const } : {}),
   };
+  await write(
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
+    saved,
+  );
+}
+
+/**
+ * THE SWAP HANDED A CLAIMED CALL BACK, so the native call runs after all: its
+ * offer record keeps only its stamp. The after-call arm still sees the call
+ * as offered once, and the mod, finding no offer id in it, draws the native
+ * call and its result as the engine does, never as a lookup that ran.
+ */
+export async function markHandedBack(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedOffer = { version: 1, at: now };
   await write(
     join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
     saved,
@@ -617,7 +647,7 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
  * (`augment-*.docs`) reads as damaged, and goes.
  */
 function agesByMtime(name: string): boolean {
-  return name.startsWith('.');
+  return name.startsWith('.') || name.startsWith(DECIDED_PREFIX);
 }
 
 async function mtimeOf(path: string): Promise<Stamp | null> {

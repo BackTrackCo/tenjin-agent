@@ -5,6 +5,17 @@ import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { DEFAULT_RPC_URL } from './usdc-balance';
+import {
+  BUILT_IN_SOURCE,
+  REPLACEMENT_MODES,
+  ReplacementProvidersSchema,
+  SETTINGS_LIMITS,
+  SavedPolicySchema,
+  TargetIdSchema,
+  type ReplacementMode,
+  type SavedPolicy,
+  type Target,
+} from '../router/settings-wire';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -37,6 +48,123 @@ export type RouterLayer = z.infer<typeof RouterLayerSchema>;
  */
 const RouterGlobalSchema = RouterLayerSchema.extend({ improve: z.boolean().optional() });
 const RouterConfigSchema = RouterGlobalSchema.required();
+
+/**
+ * ONE SAVED ACCOUNT DESCRIPTOR (`router.sources`, plan 37): a safe id, and
+ * whatever else `tenjin connect` wrote beside it (its name, its server, how
+ * it signs in), read leniently by `accounts/saved.ts`. Never a credential: a
+ * descriptor alone connects nothing, and whether an account is connected is
+ * this machine's own state, its vault (`accounts/presence.ts`). User scope,
+ * like the rules.
+ */
+export const SourceDescriptorSchema = z.looseObject({ id: TargetIdSchema });
+export type SourceDescriptor = z.infer<typeof SourceDescriptorSchema>;
+
+const SourcesSchema = z
+  .array(SourceDescriptorSchema)
+  .max(SETTINGS_LIMITS.sources)
+  .superRefine((sources, ctx) => {
+    const seen = new Set<string>();
+    sources.forEach(({ id }, at) => {
+      if (id === BUILT_IN_SOURCE)
+        ctx.addIssue({ code: 'custom', path: [at, 'id'], message: `${id} is built in` });
+      if (seen.has(id))
+        ctx.addIssue({ code: 'custom', path: [at, 'id'], message: 'an account is saved twice' });
+      seen.add(id);
+    });
+  });
+
+/**
+ * The global file's personal router keys, read one by one and never through
+ * {@link RawConfigSchema}: a hand edit this build cannot read fails only what
+ * reads rules (fail closed), while `tenjin config`, pause and reset keep
+ * working on the rest of the file.
+ */
+export interface PersonalRouter {
+  policy:
+    | { status: 'none' }
+    | { status: 'ok'; saved: SavedPolicy }
+    | { status: 'invalid'; problem: string };
+  /** An unreadable mode or scope reads as off: never on by accident. */
+  nativeReplacement: { mode: ReplacementMode; providers?: Target[]; problem?: string };
+  /** The saved account descriptors. A list this build cannot read is
+   *  `invalid`: no account is named to the router from it (fail closed). */
+  sources: { status: 'ok'; saved: SourceDescriptor[] } | { status: 'invalid'; problem: string };
+}
+
+function firstProblem(key: string, error: z.ZodError): string {
+  const [issue] = error.issues;
+  const path = [key, ...(issue?.path ?? []).map(String)].join('.');
+  return `${path}: ${issue?.message ?? 'invalid'}`;
+}
+
+const ReplacementModeSchema = z.enum(REPLACEMENT_MODES).optional();
+
+export function readPersonalRouter(router: unknown): PersonalRouter {
+  const block =
+    router !== null && typeof router === 'object' ? (router as Record<string, unknown>) : {};
+  const policy = block.policy === undefined ? undefined : SavedPolicySchema.safeParse(block.policy);
+  const mode = ReplacementModeSchema.safeParse(block.nativeReplacement);
+  const providers = ReplacementProvidersSchema.optional().safeParse(
+    block.nativeReplacementProviders,
+  );
+  const sources = SourcesSchema.optional().safeParse(block.sources);
+  const problem = !mode.success
+    ? firstProblem('router.nativeReplacement', mode.error)
+    : !providers.success
+      ? firstProblem('router.nativeReplacementProviders', providers.error)
+      : undefined;
+  return {
+    policy:
+      policy === undefined
+        ? { status: 'none' }
+        : policy.success
+          ? { status: 'ok', saved: policy.data }
+          : { status: 'invalid', problem: firstProblem('router.policy', policy.error) },
+    nativeReplacement:
+      problem !== undefined
+        ? { mode: 'off', problem }
+        : {
+            mode: mode.data ?? 'off',
+            ...(providers.data !== undefined ? { providers: providers.data } : {}),
+          },
+    sources: sources.success
+      ? { status: 'ok', saved: sources.data ?? [] }
+      : { status: 'invalid', problem: firstProblem('router.sources', sources.error) },
+  };
+}
+
+/** The saved account descriptors in a router block, or a refusal when the
+ *  saved list can't be read: nothing is changed on a list this build can't
+ *  read. */
+export function savedDescriptors(router: unknown): SourceDescriptor[] {
+  const sources = readPersonalRouter(router).sources;
+  if (sources.status === 'invalid') {
+    throw new CliError(
+      'CONFIG_INVALID',
+      `Your saved accounts can't be read (${sources.problem}), so nothing was changed.`,
+      { fix: 'Fix or remove router.sources in your Tenjin config, then run the command again.' },
+    );
+  }
+  return sources.saved;
+}
+
+/**
+ * `existing` with its saved account descriptors replaced by what `edit` makes
+ * of them, the key dropped once none is left. Read through
+ * {@link readPersonalRouter}, so a list this build can't read is refused, as
+ * {@link savedDescriptors} refuses it, and never edited as if it were empty.
+ */
+export function editSources(
+  existing: PartialConfig,
+  edit: (saved: SourceDescriptor[]) => Record<string, unknown>[],
+): PartialConfig {
+  const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
+  const sources = edit(savedDescriptors(router));
+  if (sources.length > 0) router.sources = sources;
+  else delete router.sources;
+  return { ...existing, router };
+}
 
 /**
  * The `router` block of one project file's parsed JSON, and nothing else: an
@@ -174,7 +302,17 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     install: InstallConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
-    router: RouterGlobalSchema.passthrough().optional(),
+    // The personal keys ride as data here and are read by
+    // `readPersonalRouter`, so one this build cannot read never makes the
+    // whole file unreadable.
+    router: RouterGlobalSchema.extend({
+      policy: z.unknown().optional(),
+      nativeReplacement: z.unknown().optional(),
+      nativeReplacementProviders: z.unknown().optional(),
+      sources: z.unknown().optional(),
+    })
+      .passthrough()
+      .optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -269,9 +407,41 @@ export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
 export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
-/** The dotted keys `config get/set` accept for the router block. */
+/** The dotted keys `config get/set` accept for the router block. The rules
+ *  and automatic use are not among them: they change only through their own
+ *  operations (`tenjin config prefer|only|block|unblock|reset|speed|
+ *  replacement`), which validate what they couple. */
 export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
+
+/** The personal router keys that only their own operations write. */
+export const PERSONAL_ROUTER_KEYS = [
+  'router.policy',
+  'router.nativeReplacement',
+  'router.nativeReplacementProviders',
+  'router.sources',
+] as const;
+
+/**
+ * WHERE A SETTING BELONGS, declared once rather than labelled on each saved
+ * value. Everything is local today: `user` is the person's intent, which a
+ * later sync could carry between machines (none exists; readback says "not
+ * synced"); `machine` is this machine's own; `project` is a repository's
+ * `.tenjin/config.json` or `config.local.json`, which only tightens.
+ */
+export type SettingScope = 'user' | 'machine' | 'project';
+
+export const SETTING_SCOPES = {
+  'router.policy': 'user',
+  'router.sources': 'user',
+  'router.nativeReplacement': 'machine',
+  'router.nativeReplacementProviders': 'machine',
+  'router.enabled': 'machine',
+  'router.context': 'machine',
+  maxAutoSpend: 'machine',
+  sessionBudget: 'machine',
+  allowlistCreators: 'machine',
+} as const satisfies Record<string, SettingScope>;
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
 export const RETIRED_PAYMENT_GUIDANCE =

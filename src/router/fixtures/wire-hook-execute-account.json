@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+    "capabilityId": "apify.google-maps-places",
+    "category": "local business search",
+    "provider": "Apify",
+    "label": "Apify Google Maps",
+    "capabilityDescription": "Google Maps places for a search, each with its name, address, phone, website and rating",
+    "providerPriceAtomic": "0",
+    "usage": "the place search",
+    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"<what to search for>\",\"limit\":\"<how many places, e.g. 20>\"}}) alone and wait for its result.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+        "capabilityId": "apify.google-maps-places",
+        "provider": "Apify",
+        "label": "Apify Google Maps",
+        "holds": {},
+        "output": "json",
+        "description": "Google Maps places for a search, each with its name, address, phone, website and rating",
+        "source": "apify",
+        "mcp": {
+          "tool": "call-actor",
+          "args": {
+            "actor": "compass/crawler-google-places",
+            "input": {
+              "searchStringsArray": ["{query}"],
+              "locationQuery": "{location}",
+              "maxCrawledPlacesPerSearch": "{limit}",
+              "language": "en"
+            },
+            "callOptions": {
+              "maxTotalChargeUsd": 0.5
+            }
+          },
+          "result": "structured",
+          "next": {
+            "poll": {
+              "tool": "get-actor-run",
+              "args": {
+                "runId": "{result.runId}"
+              },
+              "result": "structured",
+              "running": {
+                "path": "status",
+                "values": ["READY", "RUNNING"]
+              },
+              "failed": {
+                "path": "status",
+                "values": ["FAILED", "TIMING-OUT", "TIMED-OUT", "ABORTING", "ABORTED"]
+              },
+              "everyS": 5,
+              "maxWaitS": 300
+            },
+            "tool": "get-dataset-items",
+            "args": {
+              "datasetId": "{result.storages.datasets.default.id}",
+              "limit": "{limit}",
+              "fields": "title,address,phone,website,totalScore",
+              "clean": true
+            },
+            "result": "structured"
+          }
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "What to search for, such as coffee shops."
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "Where to search: a city, region or address."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "How many places, at most 50."
+            }
+          },
+          "required": ["query", "limit"],
+          "additionalProperties": false
+        },
+        "pinned": {},
+        "example": {
+          "query": "coffee shops",
+          "location": "Austin, TX",
+          "limit": 20
+        },
+        "returns": "the places found, each with its name, address, phone, website and rating",
+        "resultSchema": {
+          "type": "object",
+          "required": ["items"]
+        },
+        "requires": ["mcp"]
+      }
+    ],
+    "delivery": "offer"
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  },
+  "honored": ["schemaVersion", "packet", "sessionId", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:44b9ea82595254e4decdff8c1dad72d5fd393082ce7e8749ef2932f8111c5565"
+}

@@ -1,0 +1,16 @@
+{
+  "client_id": "https://tenjin.sh/oauth/client-metadata.json",
+  "client_name": "Tenjin",
+  "client_uri": "https://tenjin.sh",
+  "logo_uri": "https://tenjin.sh/icon.png",
+  "policy_uri": "https://tenjin.sh/privacy",
+  "tos_uri": "https://tenjin.sh/terms",
+  "redirect_uris": [
+    "http://127.0.0.1:28541/callback",
+    "http://127.0.0.1:28542/callback",
+    "http://127.0.0.1:28543/callback"
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
