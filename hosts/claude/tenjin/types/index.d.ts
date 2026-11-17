@@ -63,6 +63,17 @@ export type TenjinModelActivity = {
     message?: string;
     /** A file read's line count, as Claude Code reported it to the worker. */
     lines?: number;
+    /** A web call's URL or query, with the job's replacements already applied by the CLI. */
+    target?: string;
+    /** A web call's own figures from Claude Code's record: never its content. */
+    figures?: {
+      bytes?: number;
+      code?: number;
+      codeText?: string;
+      durationMs?: number;
+      searchCount?: number;
+      durationSeconds?: number;
+    };
   }[];
   /** Tool calls the worker made, as a native subagent row counts them. */
   toolUses?: number;

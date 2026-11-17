@@ -396,7 +396,10 @@ test('the owned viewer binds before spawn returns while the parent work runs exa
   expect(f.state.calls).toBe(1);
   // Only the tools its steps' calls are answered as, and a model no step reaches.
   expect(f.state.registrations).toContainEqual(
-    expect.objectContaining({ tools: ['Read', 'Bash', 'Edit', 'Write'], model: 'haiku' }),
+    expect.objectContaining({
+      tools: ['Read', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'],
+      model: 'haiku',
+    }),
   );
   for (const registration of f.state.registrations) {
     // Explicit MCP servers append model-visible tools independently of tools: [].
@@ -413,7 +416,8 @@ test('the owned viewer binds before spawn returns while the parent work runs exa
   await f.clock.settle();
   const finished = await step($, 'native-viewer-1', 1);
   expect(finished.toolUses).toEqual([]);
-  expect(finished.answer).toContain('observation finished');
+  // After its last step the viewer draws nothing more.
+  expect(finished.answer).toBe('');
   expect(f.state.nativeSteps).toBe(0);
 });
 
@@ -2593,4 +2597,114 @@ test("a DeepSeek worker's own accept passes through with no row or viewer", asyn
   expect((await acceptRow($, 'worker_accept', OFFER, 'actual worker result'))[0]).toBe(
     'engine row',
   );
+});
+
+// Live on alpha.64 (offer 6b457847): the viewer showed a `ToolSearch` line, WebSearch and
+// WebFetch as text lines (one with Markdown bold), and `DeepSeek activity observation
+// finished` three times after the answer, once for each hand-back reminder the host sent.
+// The worker's real calls: ToolSearch and two Bash greps in one reply, then WebSearch,
+// WebFetch, a Bash grep, and the answer.
+test('the live sequence draws each call as Claude Code does, in the worker’s order, and nothing after the answer', async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  const row = (id: string, message: string, rest: Record<string, unknown>) => ({
+    id: 'tool:' + id,
+    sequence: 1,
+    kind: 'tool',
+    state: 'completed',
+    message,
+    ...rest,
+  });
+  const grep = 'grep -rn "pnpm" /repo/.github/workflows/ | head -60; ls /repo/.github/workflows/';
+  f.state.rows = [
+    row('search', 'm1', { name: 'ToolSearch', inputSummary: '{"query":"[text: 23 chars]"}' }),
+    row('grep', 'm1', { name: 'Bash', command: grep, outputPreview: 'ci.yml:35: pnpm' }),
+    row('pkg', 'm1', { name: 'Bash', command: 'grep -n packageManager package.json' }),
+    row('web', 'm2', {
+      name: 'WebSearch',
+      target: 'pnpm newest stable release',
+      figures: { durationSeconds: 4.4 },
+      outputPreview: 'Web search results for query: "pnpm newest stable release"',
+    }),
+    row('fetch', 'm3', {
+      name: 'WebFetch',
+      target: 'https://pnpm.io/blog/tags/release',
+      inputSummary: '{"url":"[text: 33 chars]","prompt":"[text: 40 chars]"}',
+      figures: { bytes: 48_213, code: 200, codeText: 'OK', durationMs: 5100 },
+      outputPreview: 'The latest release is **"pnpm 12.21.0"**.',
+    }),
+    row('setup', 'm4', { name: 'Bash', command: 'grep -rn -A4 "pnpm/action-setup" .github' }),
+  ];
+  await remember($);
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.settle();
+  await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+  const steps: TurnStepChunk[][] = [];
+  const next = async () => {
+    const chunks: TurnStepChunk[] = [];
+    const stream = $.turn.step({
+      agentId: 'native-viewer-1',
+      index: steps.length,
+      turnId: 'viewer-turn',
+      model: 'inherit',
+      messageCount: 0,
+    });
+    for (let item = await stream.next(); !item.done; item = await stream.next())
+      chunks.push(item.value);
+    steps.push(chunks);
+    return chunks;
+  };
+  const shown = (chunks: TurnStepChunk[]) =>
+    chunks.flatMap((c) => (c.kind === 'tool' ? [c.name] : c.kind === 'text' ? [c.text] : []));
+  const answers: unknown[] = [];
+  const answer = async (chunks: TurnStepChunk[]) => {
+    for (const c of chunks)
+      if (c.kind === 'input') {
+        const tool = chunks.find((t) => t.kind === 'tool' && t.index === c.index);
+        if (tool?.kind !== 'tool') continue;
+        const call = { tool: tool.name, ...JSON.parse(c.json), tool_use_id: tool.id };
+        answers.push((await $.tool.call({ ...call, agentId: 'native-viewer-1' } as never)).result);
+      }
+  };
+  // The first reply: its two Bash calls as Claude Code's own rows, and no tool search row.
+  expect(shown(await next())).toEqual(['Bash', 'Bash']);
+  await answer(steps[0]!);
+  expect(shown(await next())).toEqual(['WebSearch']);
+  await answer(steps[1]!);
+  expect(shown(await next())).toEqual(['WebFetch']);
+  await answer(steps[2]!);
+  expect(answers.slice(2)).toEqual([
+    { query: 'pnpm newest stable release', results: [], durationSeconds: 4.4 },
+    {
+      url: 'https://pnpm.io/blog/tags/release',
+      bytes: 48_213,
+      code: 200,
+      codeText: 'OK',
+      result: '',
+      durationMs: 5100,
+    },
+  ]);
+  expect(shown(await next())).toEqual(['Bash']);
+  f.state.rows = [];
+  f.state.sequence = 9;
+  f.state.phase = 'completed';
+  f.state.result = 'pnpm 12.21.0 is the newest release.';
+  release();
+  await running;
+  expect(shown(await next())).toEqual([
+    'pnpm 12.21.0 is the newest release.\n\nDone (1 tool use · 41.2k tokens · 0s · $0.0043)',
+  ]);
+  // The host asks again (its hand-back reminder, three times live): nothing is drawn.
+  for (let ask = 0; ask < 3; ask++) expect(shown(await next())).toEqual([]);
+  expect(JSON.stringify(steps)).not.toContain('ToolSearch');
+  expect(JSON.stringify(steps)).not.toContain('**');
+  expect(JSON.stringify(steps)).not.toContain('observation');
+  expect(f.state.nativeSteps).toBe(0);
 });

@@ -52,7 +52,7 @@ const VIEWER_PROMPT = 'Observe only the already owned DeepSeek worker activity.'
  * below; `tool.check` refuses any other call in a viewer's loop). A call of another
  * tool is written as a line of the step's text.
  */
-const VIEWER_TOOLS = ['Read', 'Bash', 'Edit', 'Write'] as const;
+const VIEWER_TOOLS = ['Read', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'] as const;
 /** The ids a viewer step gives its calls, so no other call is answered as one. */
 const CALL_ID = 'toolu_dsv';
 /** A run's rows not yet written into its viewer's transcript, at most. */
@@ -437,6 +437,8 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
         ...(Number.isSafeInteger(r.lines) && Number(r.lines) >= 0
           ? { lines: Number(r.lines) }
           : {}),
+        ...(typeof r.target === 'string' ? { target: clean(r.target, 1024) } : {}),
+        ...figuresOf(record(r.figures)),
         ...(typeof r.name === 'string' ? { name: clean(r.name, 120) } : {}),
         ...(typeof r.text === 'string' ? { text: clean(r.text) } : {}),
         ...(typeof r.inputSummary === 'string' ? { inputSummary: clean(r.inputSummary) } : {}),
@@ -597,7 +599,23 @@ function callOf(row: Row): Json | undefined {
     };
   if (row.name === 'Write' && text('file_path') && text('content'))
     return { file_path: given.file_path, content: given.content };
+  // A web call is drawn as one only with its own figures, which its native line reads.
+  const known = row.state !== 'completed' || row.figures !== undefined;
+  if (row.name === 'WebFetch' && row.target && known)
+    return { url: row.target, prompt: text('prompt') ? given.prompt : '' };
+  if (row.name === 'WebSearch' && row.target && known) return { query: row.target };
   return undefined;
+}
+/** A web call's figures from the CLI, numbers and a status word only. */
+function figuresOf(given: Json | undefined): { figures?: NonNullable<Row['figures']> } {
+  if (!given) return {};
+  const figures: NonNullable<Row['figures']> = {};
+  for (const key of ['bytes', 'code', 'durationMs', 'searchCount', 'durationSeconds'] as const) {
+    const value = given[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) figures[key] = value;
+  }
+  if (typeof given.codeText === 'string') figures.codeText = clean(given.codeText, 64);
+  return Object.keys(figures).length ? { figures } : {};
 }
 /**
  * A call's answer, from the worker's row: what Claude Code draws under the call. Never
@@ -626,6 +644,27 @@ function answerOf(tool: string, row: Row, input: Json): { result: unknown } | { 
       .join('\n');
     return { result: { stdout, stderr: '', interrupted: false } };
   }
+  const figures = row.figures ?? {};
+  if (tool === 'WebFetch')
+    return {
+      result: {
+        url: String(input.url ?? ''),
+        bytes: figures.bytes ?? 0,
+        code: figures.code ?? 200,
+        codeText: figures.codeText ?? '',
+        result: '',
+        durationMs: figures.durationMs ?? 0,
+      },
+    };
+  if (tool === 'WebSearch')
+    return {
+      result: {
+        query: String(input.query ?? ''),
+        results: [],
+        durationSeconds: figures.durationSeconds ?? 0,
+        ...(figures.searchCount !== undefined ? { searchCount: figures.searchCount } : {}),
+      },
+    };
   const patch = { filePath, structuredPatch: [], originalFile: null };
   return tool === 'Edit'
     ? { result: { ...patch, oldString: '', newString: '', userModified: false, replaceAll: false } }
@@ -645,7 +684,10 @@ function callLine(row: Row, cwd: string): string {
           ? row.lines !== undefined
             ? 'Read ' + row.lines + (row.lines === 1 ? ' line' : ' lines')
             : ''
-          : clean(plain(row.outputPreview ?? '', 400).split('\n')[0] ?? '', 160);
+          : clean(plain(row.outputPreview ?? '', 400).split('\n')[0] ?? '', 160).replace(
+              /\*\*|__/g,
+              '',
+            );
   return '```\n' + (head + (under ? '\n  ⎿  ' + under : '')).replaceAll('```', "'''") + '\n```';
 }
 /** Rows as a step's blocks: the worker's text and calls in order, each call with its id. */
@@ -666,7 +708,8 @@ function blocksOf(rows: Row[], cwd: string, view: View) {
       viewerCalls.set(id, { row, input });
       if (viewerCalls.size > 256) viewerCalls.delete(viewerCalls.keys().next().value!);
       blocks.push({ id, name: row.name, input });
-    } else if (row.kind === 'tool') say(callLine(row, cwd));
+      // Claude Code draws no row for a tool search, a native subagent's too.
+    } else if (row.kind === 'tool' && row.name !== 'ToolSearch') say(callLine(row, cwd));
     else if (row.text) say(row.text);
   }
   if (view.shown.size > 4096) view.shown.delete(view.shown.values().next().value!);
@@ -1644,11 +1687,10 @@ export function registerModelViewer(on: On): void {
         views.set(e.agentId, view);
         if (views.size > 16) views.delete(views.keys().next().value!);
       }
-      if (view.done)
-        return yield* finish(
-          e,
-          'DeepSeek activity observation finished. The worker result is returned separately to the parent.',
-        );
+      // AFTER ITS LAST STEP the viewer says nothing more: the host may ask it again (its
+      // hand-back reminder asked three times live), and a native subagent's view ends
+      // with its answer. An empty step draws nothing.
+      if (view.done) return yield* finish(e, '');
       return yield* viewerStep($, e, e.agentId, owned.item, view);
     } catch {
       if (marked) return yield* finish(e, 'DeepSeek activity unavailable.');

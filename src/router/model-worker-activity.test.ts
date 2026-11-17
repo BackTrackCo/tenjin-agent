@@ -520,3 +520,37 @@ it('marks the reply each row belongs to, and a read’s line count from its own 
   // The viewer's result lines come from this preview, which never holds a token.
   expect(read?.outputPreview).not.toContain(token);
 });
+
+// The viewer draws a web call as Claude Code does: `WebFetch(url)` and `Received 12KB (200 OK)`.
+it('keeps a web call’s URL or query for the local display and its record’s figures, never its content', () => {
+  const f = fixture();
+  f.activity.running();
+  f.activity.observe(
+    f.tool('fetch-one', 'WebFetch', { url: 'https://pnpm.io/blog', prompt: 'newest release' }),
+  );
+  f.activity.observe(f.tool('search-one', 'WebSearch', { query: 'pnpm release' }));
+  f.activity.observe({
+    ...f.result('fetch-one', 'The latest release is **12.21.0**. PRIVATE_PAGE'),
+    tool_use_result: {
+      bytes: 12_345,
+      code: 200,
+      codeText: 'OK',
+      result: 'PRIVATE_PAGE',
+      durationMs: 812,
+      url: 'https://pnpm.io/blog',
+    },
+  });
+  f.activity.observe({
+    ...f.result('search-one', 'Web search results'),
+    tool_use_result: { query: 'pnpm release', results: ['PRIVATE_HIT'], durationSeconds: 2.5 },
+  });
+  const [fetch, search] = f.activity.snapshot().rows;
+  expect(fetch).toMatchObject({
+    target: 'https://pnpm.io/blog',
+    figures: { bytes: 12_345, code: 200, codeText: 'OK', durationMs: 812 },
+  });
+  expect(search).toMatchObject({ target: 'pnpm release', figures: { durationSeconds: 2.5 } });
+  expect(JSON.stringify([fetch?.figures, search?.figures])).not.toContain('PRIVATE_');
+  f.activity.finish('unknown');
+  expect(JSON.stringify(partialHandback(f.activity.snapshot()))).not.toContain('pnpm.io');
+});

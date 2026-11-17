@@ -50,6 +50,18 @@ export type ModelWorkerActivityRow = {
   message?: string;
   /** A file read's line count, as Claude Code reports it: the viewer's `Read N lines`. */
   lines?: number;
+  /** A web call's URL or query, masked and bounded: for the local display, never a handback. */
+  target?: string;
+  /** A web call's own figures from Claude Code's record, for the viewer's native line. */
+  figures?: ModelWorkerActivityFigures;
+};
+export type ModelWorkerActivityFigures = {
+  bytes?: number;
+  code?: number;
+  codeText?: string;
+  durationMs?: number;
+  searchCount?: number;
+  durationSeconds?: number;
 };
 const spendSchema = z
   .object({
@@ -268,6 +280,43 @@ function shellCommand(value: unknown): { command?: string } {
   return typeof command === 'string' && command ? { command: preview(command) } : {};
 }
 
+/** What a native row names a web call by: a fetch's URL, a search's query. */
+function webTarget(name: string, value: unknown): { target?: string } {
+  const input = object(value);
+  const field = name === 'WebFetch' ? input?.url : name === 'WebSearch' ? input?.query : undefined;
+  return typeof field === 'string' && field ? { target: preview(field) } : {};
+}
+
+/** A tool's own figures, never its content: `Read N lines`, `Received 12KB (200 OK)`, `Did 1 search in 3s`. */
+function figuresOf(name: string | undefined, record: Record<string, unknown> | null) {
+  const count = (v: unknown) =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+  const amount = (v: unknown) =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+  if (!record) return {};
+  if (name === 'Read') {
+    const lines = count(object(record.file)?.numLines);
+    return lines === undefined ? {} : { lines };
+  }
+  const figures: ModelWorkerActivityFigures =
+    name === 'WebFetch'
+      ? {
+          bytes: count(record.bytes),
+          code: count(record.code),
+          codeText:
+            typeof record.codeText === 'string' ? preview(record.codeText).slice(0, 64) : undefined,
+          durationMs: amount(record.durationMs),
+        }
+      : name === 'WebSearch'
+        ? {
+            searchCount: count(record.searchCount),
+            durationSeconds: amount(record.durationSeconds),
+          }
+        : {};
+  const known = Object.fromEntries(Object.entries(figures).filter(([, v]) => v !== undefined));
+  return Object.keys(known).length ? { figures: known as ModelWorkerActivityFigures } : {};
+}
+
 function toolPreview(value: unknown): string | undefined {
   if (typeof value === 'string') return preview(value);
   if (!Array.isArray(value)) return undefined;
@@ -469,6 +518,7 @@ export class ModelWorkerActivity {
               name: preview(block.name).slice(0, 120),
               inputSummary: inputSummary(block.input),
               ...shellCommand(block.input),
+              ...webTarget(block.name, block.input),
               message,
             });
           } else if (block.type === 'text' && typeof block.text === 'string') {
@@ -482,7 +532,7 @@ export class ModelWorkerActivity {
         const msg = object(event.message);
         if (!msg || !Array.isArray(msg.content)) return;
         // Claude Code sends one tool result a message, with its own record beside it.
-        const lines = object(object(event.tool_use_result)?.file)?.numLines;
+        const record = msg.content.length === 1 ? object(event.tool_use_result) : null;
         for (const raw of msg.content.slice(0, 64)) {
           const block = object(raw);
           if (
@@ -500,14 +550,7 @@ export class ModelWorkerActivity {
             block.is_error === true
               ? 'Tool reported an error; inspect its native history for details.'
               : toolPreview(block.content);
-          if (
-            row.name === 'Read' &&
-            msg.content.length === 1 &&
-            typeof lines === 'number' &&
-            Number.isSafeInteger(lines) &&
-            lines >= 0
-          )
-            row.lines = lines;
+          if (block.is_error !== true) Object.assign(row, figuresOf(row.name, record));
           row.sequence = ++this.value.sequence;
           this.boundSnapshot();
         }
@@ -588,7 +631,13 @@ export class ModelWorkerActivity {
     try {
       for (const row of this.value.rows) {
         let changed = false;
-        for (const field of ['text', 'inputSummary', 'command', 'outputPreview'] as const) {
+        for (const field of [
+          'text',
+          'inputSummary',
+          'command',
+          'target',
+          'outputPreview',
+        ] as const) {
           const before = row[field];
           if (before === undefined) continue;
           const after = redact(before);
