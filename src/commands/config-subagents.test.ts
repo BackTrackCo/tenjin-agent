@@ -166,6 +166,10 @@ it('refuses a job ceiling below the useful reservation floor before saving conse
   await expect(
     runConfigSubagents('on', { repository: dir, maxJob: '0.04' }, testCtx(dir)),
   ).rejects.toMatchObject({ code: 'USAGE' });
+  // Above the old 32K floor ($0.044611), under one call at the 65,536 cap and the fee.
+  await expect(
+    runConfigSubagents('on', { repository: dir, maxJob: '0.08' }, testCtx(dir)),
+  ).rejects.toThrow('at least $0.086866');
   await expect(readFile(join(dir, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 

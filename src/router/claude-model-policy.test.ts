@@ -92,6 +92,8 @@ it('keeps provider, aliases and the native auto classifier inside the disposable
     CLAUDE_CODE_AUTO_MODE_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+    // The most the bridge and the router take; Claude Code asks 32,000 unless told.
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '65536',
     CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
   });
   expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();

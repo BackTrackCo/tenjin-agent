@@ -9,7 +9,7 @@ import { WorkerDiagnosticsRecord } from './model-worker-diagnostics';
 it('keeps how a worker ran, names and counts only, beside the job and readable by its user alone', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'tenjin-diagnostics-'));
   try {
-    const record = new WorkerDiagnosticsRecord('/no/such/repo', 786_432);
+    const record = new WorkerDiagnosticsRecord('/no/such/repo', 786_432, 65_536);
     record.init({
       model: 'deepseek-flash[1m]',
       tools: ['Bash', 'Read'],
@@ -51,6 +51,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
       tools: ['Bash', 'Read'],
       mcpServers: [{ name: 'serena', status: 'connected' }],
       settings: {
+        outputCap: 65_536,
         maxOutputTokens: 32_000,
         compactWindow: 786_432,
         thinking: ['adaptive'],

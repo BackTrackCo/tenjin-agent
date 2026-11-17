@@ -37,7 +37,11 @@ import {
 } from './codex-native-worker';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
-import { MODEL_MESSAGES_MAX_TOOLS, MODEL_NATIVE_TEXT_BYTES } from './model-limits';
+import {
+  MODEL_MESSAGES_MAX_TOOLS,
+  MODEL_NATIVE_TEXT_BYTES,
+  MODEL_OUTPUT_TOKENS,
+} from './model-limits';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import {
@@ -591,7 +595,11 @@ async function runQualifiedWorker(
   // Auto and bypass workers never wait on a person; the sandbox and the secrets boundary still apply.
   const nobodyAsked = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
   const repeats = new WorkerRepeatReminder();
-  const diagnostics = new WorkerDiagnosticsRecord(job.root, CLAUDE_DEEPSEEK_COMPACT_WINDOW);
+  const diagnostics = new WorkerDiagnosticsRecord(
+    job.root,
+    CLAUDE_DEEPSEEK_COMPACT_WINDOW,
+    MODEL_OUTPUT_TOKENS,
+  );
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
     diagnostics.repeat(tool, reminder);

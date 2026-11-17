@@ -23,7 +23,8 @@ export type WorkerDiagnostics = {
   tools: string[];
   mcpServers: { name: string; status: string }[];
   settings: {
-    /** The largest output cap a request asked for: the effective one. */
+    /** The output cap the worker was given, and the largest one a request asked for. */
+    outputCap: number;
     maxOutputTokens?: number;
     compactWindow: number;
     thinking: string[];
@@ -50,13 +51,13 @@ const blocks = (message: unknown): Record<string, unknown>[] => {
 export class WorkerDiagnosticsRecord {
   private value: WorkerDiagnostics;
 
-  constructor(root: string, compactWindow: number) {
+  constructor(root: string, compactWindow: number, outputCap: number) {
     this.value = {
       version: 1,
       root,
       tools: [],
       mcpServers: [],
-      settings: { compactWindow, thinking: [], maxTurns: null },
+      settings: { outputCap, compactWindow, thinking: [], maxTurns: null },
       reasoning: { turns: 0, withThinking: 0, textTurns: 0, textWithThinking: 0 },
       repeats: [],
     };

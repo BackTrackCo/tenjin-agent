@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { isRecord } from '../lib/guards';
-import { MODEL_MESSAGES_MAX_TOOLS } from './model-limits';
+import { MODEL_MESSAGES_MAX_TOOLS, MODEL_OUTPUT_TOKENS } from './model-limits';
 /** The proxy's blocks, and the two of Tenjin's own answer to a worker's web search. */
 const block = z.object({
   type: z.enum(['text', 'thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result']),
@@ -193,7 +193,7 @@ export function workerMessages(raw: Record<string, unknown>) {
     max_tokens:
       raw.max_tokens === undefined
         ? 16384
-        : z.number().int().min(1).max(65536).parse(raw.max_tokens),
+        : z.number().int().min(1).max(MODEL_OUTPUT_TOKENS).parse(raw.max_tokens),
     thinking: { type: mode === 'adaptive' ? 'enabled' : mode },
     ...(stopSequences ? { stop_sequences: stopSequences } : {}),
     messages,
