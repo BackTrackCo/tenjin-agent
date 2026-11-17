@@ -1267,6 +1267,87 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
   }
 });
 
+test('an accept sent again while its worker runs leaves the live row and its clock alone, and its own row says it started nothing', async ($, on) => {
+  const f = setup($, on);
+  const spinners: { message: string | null }[] = [];
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    spinners.push(e.props);
+    return $.ui.resolve(e).Text({ children: ['engine spinner'] });
+  });
+  const spinning = async () => {
+    const props = {
+      word: 'Sauteing',
+      message: 'engine step',
+      suffix: '…',
+      mode: 'tool-use' as const,
+    };
+    await (
+      await $.ui.mount({ plugin: 'tenjin', surface: 'terminal', component: 'Spinner', props })
+    ).unmount();
+    return spinners.at(-1)?.message;
+  };
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const handback = JSON.stringify({
+    status: 'completed',
+    label: 'DeepSeek V4.1 Flash 1017',
+    elapsedMs: 133_000,
+    toolUses: 12,
+    tokens: 41_234,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'worker report',
+  });
+  const refused = JSON.stringify({ action: 'native', reason: 'its worker is still running' });
+  let accepts = 0;
+  f.state.work = async () => {
+    if (++accepts > 1) return { result: refused, text: refused };
+    await blocked;
+    return { result: handback, text: handback };
+  };
+  await remember($);
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.settle();
+  await f.clock.advance(13_000);
+  const again = await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_again' });
+  expect(again.text).toBe(refused);
+  const first = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  const second = {
+    ...toolRow('parent_again', ACCEPT, { offer_id: OFFER }),
+    isRunning: false,
+    output: refused,
+  };
+  const shown = async (props: typeof first) => {
+    const row = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props,
+    });
+    const lines = (await shownLines(row)).join('');
+    await row.unmount();
+    return lines;
+  };
+  const live = (seconds: number) =>
+    `⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · ${seconds}s · $0.0043 so far  ⎿  Read(src/example.ts)`;
+  // The repeat's own row: this call started nothing. The worker's row and the spinner go on.
+  const repeat = '⏺DeepSeek(Read selected source)  ⎿  Not started';
+  expect(await shown(first)).toBe(live(13));
+  expect(await shown(second)).toBe(repeat);
+  expect(await spinning()).toBe('DeepSeek · Read(src/example.ts)');
+  await f.clock.advance(1000);
+  expect(await shown(first)).toBe(live(14));
+  expect(await spinning()).toBe('DeepSeek · Read(src/example.ts)');
+  release();
+  expect((await running).text).toBe(handback);
+  await f.clock.settle();
+  const done =
+    '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 2m 13s · $0.039)';
+  expect(await shown({ ...first, isRunning: false, output: handback })).toBe(done);
+  expect(await shown(second)).toBe(repeat);
+});
+
 test('a worker that stops, is interrupted or never starts says so, never Done', async ($, on) => {
   setup($, on);
   const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });

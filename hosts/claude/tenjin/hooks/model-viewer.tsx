@@ -960,6 +960,13 @@ export function registerModelViewer(on: On): void {
   }).catch(() => ({ deny: 'DeepSeek activity viewer is unavailable.' }));
 
   on('tool.call', { tool: ACCEPT }, async ($, e, next) => {
+    // ONLY A HELD CALL ASKS FOR AN OFFER. `capture` is this mod's own transport,
+    // sent for an Agent, Task or SendMessage call it holds. Sent by the model it
+    // would buy a routing decision for a call nobody made.
+    if (e.capture !== undefined && next.origin.plugin !== 'tenjin')
+      return {
+        deny: 'Tenjin makes an offer only for an Agent, Task or SendMessage call it holds. Call that tool; never send capture yourself.',
+      };
     // Capture/cancel calls and deterministic viewer calls are never execution accepts.
     if (
       e.agentId !== undefined ||
@@ -971,6 +978,9 @@ export function registerModelViewer(on: On): void {
     )
       return next(e);
     const offerId = e.offer_id;
+    // An accept sent again while its worker runs starts nothing: the row that is
+    // already live keeps its clock and counts, and ends when that worker does.
+    if (liveWorkers.has(offerId)) return next(e);
     let timer: { cancel(): void } | undefined;
     let binding: ViewerBinding | undefined;
     let spawned: Promise<void> | undefined;

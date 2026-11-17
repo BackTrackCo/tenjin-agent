@@ -83,6 +83,31 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
   expect(result.context?.join(' ')).toContain('final veto');
 });
 
+test('a capture the model sends itself is refused before it reaches the CLI, so only a held call asks for an offer', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture ?? e.offer_id);
+    return { result: offered, text: offered };
+  });
+  native(on);
+  const forged = await $.tool.call({
+    tool: SUBAGENT,
+    tool_use_id: 'model_capture',
+    capture: { session_id: SESSION, tool_use_id: 'no_such_call', input: ASSIGNMENT, tool: 'Agent' },
+  });
+  expect(asked).toEqual([]);
+  expect(JSON.stringify(forged)).toContain('never send capture yourself');
+  // The other forms are the model's own to send, and a held call still reaches the CLI.
+  await $.tool.call({ tool: SUBAGENT, tool_use_id: 'model_cancel', cancel: OFFER });
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_offer', ...ASSIGNMENT });
+  expect(asked).toEqual([
+    undefined,
+    { session_id: SESSION, tool_use_id: 'agent_offer', input: ASSIGNMENT, tool: 'Agent' },
+  ]);
+});
+
 test('an action offer in MCP content holds Task as well', async ($, on) => {
   const { files } = machine(on);
   enabled(files);
