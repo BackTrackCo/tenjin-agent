@@ -1475,6 +1475,63 @@ it.each(['additional directory', 'read exception', 'write exception'] as const)(
   },
 );
 
+// Greptile thread on fe665e10: a retry resent the built request after its wait without the
+// checks a first send passes, so a consent narrowed or revoked meanwhile did not stop it.
+it('checks consent and the workspace again before a retry, and stops when it was revoked meanwhile', async () => {
+  vi.mocked(modelSettings).mockResolvedValue({ root: '/repo', repositories: ['/repo'] } as never);
+  const messages = vi.fn(async () => {
+    // The person revokes consent while the failed call waits to be tried again.
+    vi.mocked(modelSettings).mockResolvedValue(null as never);
+    throw new ModelCallFailed('provider failed', {
+      cause: 'provider',
+      status: 500,
+      uncharged: true,
+    });
+  });
+  sdkResult({ subtype: 'success', result: 'not a valid completion' }, undefined, async () => {
+    const call = vi.mocked(query).mock.calls[0]![0];
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    await new Promise<void>((complete) =>
+      handle(
+        {
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from(
+              JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
+            );
+          },
+        },
+        {
+          headersSent: false,
+          destroyed: false,
+          writeHead() {
+            return this;
+          },
+          end(_body: string, done?: () => void) {
+            done?.();
+            complete();
+            return this;
+          },
+        },
+      ),
+    );
+  });
+  await expect(
+    runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+      retryWait: async () => undefined,
+    }),
+  ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
+  // Sent once; the retry found the consent gone and sent nothing.
+  expect(messages).toHaveBeenCalledTimes(1);
+});
+
 // Live case: a paid call that the router answered with no result ended the job as
 // `unknown` with no cause, and the bridge kept nothing of why.
 it.each([

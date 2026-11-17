@@ -185,6 +185,8 @@ export async function runModelWorker(
     claudeSession?: ClaudeWorkerSession;
     /** Tests only: a start-up window. A job has none; its start is bounded by the wall time and by cancel. */
     startupMs?: number;
+    /** Tests only: the wait before a model call is tried again. */
+    retryWait?: (ms: number, signal: AbortSignal) => Promise<void>;
     /** When the accept reached `tenjin mcp`, and the start phases marked before the run. */
     accepted?: { at: number; marks: Record<string, number> };
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
@@ -492,25 +494,34 @@ async function runQualifiedWorker(
           if (size > 8 * 1024 * 1024) throw new UnsupportedRequest('the request is too large');
           chunks.push(chunk);
         }
-        // An env file a command just wrote, or a settings file the person just changed, is
-        // read before this request leaves.
-        await refreshEnv();
-        // One that cannot be read in full cannot be replaced, and the worker's denies
-        // are fixed at start: nothing more leaves this job.
-        if (envFiles.uncovered.size)
-          throw new ModelWorkerStopped({ kind: 'execution_failure', reason: 'env_file_unscanned' });
-        // Env values may need JSON escapes, so they are replaced in the parsed strings.
-        const text = withholdDroppedDirectories(
-          redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
-          workspace.droppedDirectories,
-        );
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          throw new UnsupportedRequest('the request is not JSON');
-        }
-        const raw = redactWorkerMessage(parsed, redactEnv) as Record<string, unknown>;
+        const body = Buffer.concat(chunks).toString('utf8');
+        // What leaves for the model: built for the request, and built again before each retry
+        // with the checks every request passes (the workspace and mode checks are above).
+        const outgoing = async () => {
+          // An env file a command just wrote, or a settings file the person just changed, is
+          // read before this request leaves.
+          await refreshEnv();
+          // One that cannot be read in full cannot be replaced, and the worker's denies
+          // are fixed at start: nothing more leaves this job.
+          if (envFiles.uncovered.size)
+            throw new ModelWorkerStopped({
+              kind: 'execution_failure',
+              reason: 'env_file_unscanned',
+            });
+          // Env values may need JSON escapes, so they are replaced in the parsed strings.
+          const text = withholdDroppedDirectories(
+            redactWorkerSecrets(body, secrets),
+            workspace.droppedDirectories,
+          );
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            throw new UnsupportedRequest('the request is not JSON');
+          }
+          return redactWorkerMessage(parsed, redactEnv) as Record<string, unknown>;
+        };
+        const raw = await outgoing();
         const send = (message: unknown) => {
           if (raw.stream === true)
             res
@@ -543,10 +554,23 @@ async function runQualifiedWorker(
         // (the router's status, a timeout, the ceiling), not as an error nobody can read.
         // A call the router confirms cost nothing is tried again for a transient failure,
         // as the DeepSeek harness does (`withModelRetry`); any other failure ends the job.
+        // A RETRY IS A NEW SEND: it waits, so it passes again every check this request did
+        // (consent and the workspace, the mode, a cancel, env files and their values).
+        let attempts = 0;
         const message = await withModelRetry(
-          () => options.transport.messages(job, messages, controller.signal),
+          async () => {
+            if (attempts++ > 0) {
+              await assertCurrentWorkspace();
+              assertCurrentMode();
+              if (controller.signal.aborted)
+                throw new Error('Model consent revoked or job cancelled');
+              messages = workerMessages(await outgoing());
+            }
+            return options.transport.messages(job, messages, controller.signal);
+          },
           controller.signal,
           (attempt, failure) => diagnostics.retry(attempt, failure.detail),
+          options.retryWait,
         ).catch((error: unknown) => {
           throw controller.signal.aborted ? error : modelCallStop(error);
         });
