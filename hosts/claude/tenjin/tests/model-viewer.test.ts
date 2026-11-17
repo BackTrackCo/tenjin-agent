@@ -1051,7 +1051,7 @@ test(
 // The host's own bound finds a step past its planned end: whatever the agent then reads,
 // that abort is not a person's stop.
 test(
-  'a viewer turn aborted at or past its step’s planned end never cancels, even read as stopped',
+  'a viewer stopped while a read runs past its step’s planned end still cancels its worker',
   { timeoutMs: 60_000 },
   async ($, on) => {
     const f = setup($, on);
@@ -1071,12 +1071,13 @@ test(
     await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
     const first = step($, 'native-viewer-1', 0);
     await f.clock.settle();
-    // One read held open past the planned end.
+    // One read held open past the planned end: a stop there once went unheard, and the
+    // worker ran on after the person had stopped it.
     await f.clock.advance(5 * 60_000);
     f.state.agents[0]!.status = 'killed';
     await complete($, 'native-viewer-1');
     await f.clock.advance(1500);
-    expect(f.state.cancellations).toEqual([]);
+    expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
     for (const open of gate.splice(0)) open();
     await first;
     f.state.phase = 'completed';

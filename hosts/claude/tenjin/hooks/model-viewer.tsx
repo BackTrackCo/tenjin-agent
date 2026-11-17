@@ -73,8 +73,6 @@ const STEP_MS = 5 * 60_000;
 const MAX_STEPS = 9;
 /** Viewer agents whose step ended at its bound, for their stop to be held once. */
 const handedOver = new Set<string>();
-/** Each running viewer step's planned end: an abort from then on is the host's, not a person's. */
-const stepEnds = new Map<string, number>();
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -1428,7 +1426,6 @@ export function registerModelViewer(on: On): void {
       if (header) yield { kind: 'text', index: 0, text: header };
       let tail = 'Activity unavailable. The worker result is returned separately to the parent.';
       const stepStart = await $.clock.now();
-      stepEnds.set(e.agentId, stepStart + STEP_MS);
       try {
         // Followed in short reads, never one held open for the run: a call past two
         // minutes becomes a background task of the parent session, with its own lines
@@ -1466,7 +1463,6 @@ export function registerModelViewer(on: On): void {
       } catch {
         /* An observer error never cancels, retries or replaces the actual worker. */
       }
-      // The planned end stays until the turn's end reads it: an abort ends a step's reads first.
       if (tail) yield { kind: 'text', index: 0, text: tail };
       yield { kind: 'stop', stopReason: 'end_turn', usage: null };
       return {
@@ -1494,19 +1490,14 @@ export function registerModelViewer(on: On): void {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
     }
-    const planned = e.agentId ? stepEnds.get(e.agentId) : undefined;
-    if (e.agentId) {
-      handedOver.delete(e.agentId);
-      stepEnds.delete(e.agentId);
-    }
+    if (e.agentId) handedOver.delete(e.agentId);
     try {
       // ONLY A STOP OF THE AGENT CANCELS ITS WORKER: a person's from the agent list, or the
       // parent's TaskStop, as for a native subagent. An abort is also the host ending the
       // viewer's turn for its own reasons (its stall watchdog, at ten minutes), which says
-      // nothing about the worker; only a stopped agent reads `killed`, and an abort once a
-      // step is past its planned end is the host's bound, whatever the agent reads.
-      const late = planned !== undefined && (await $.clock.now()) >= planned;
-      if (e.agentId && e.reason === 'aborted' && !sessionEnding && !late) {
+      // nothing about the worker; only a stopped agent reads `killed`. How long the step
+      // has run tells nothing: a person can stop the agent at any moment of it.
+      if (e.agentId && e.reason === 'aborted' && !sessionEnding) {
         const agentId = e.agentId;
         // Cancellation uses the prior binding even when cwd access was revoked. This
         // grants no work/scope authority; the backend still checks its owned pending offer.
