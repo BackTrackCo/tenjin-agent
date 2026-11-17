@@ -14,7 +14,6 @@ import {
 } from './hook-data';
 import type {
   TenjinModelActivity,
-  TenjinModelTranscript,
   TenjinModelViewerRecord,
   TenjinModelViewerState,
   TenjinModelWorker,
@@ -28,7 +27,6 @@ const ACTIVITY = 'mcp__plugin_tenjin_router__subagent_activity';
 const SERVER = 'plugin:tenjin:router';
 const STATE = { plugin: 'tenjin', key: 'modelViewers' } as const;
 const WORKERS = { plugin: 'tenjin', key: 'modelWorkers' } as const;
-const TRANSCRIPTS = { plugin: 'tenjin', key: 'modelTranscripts' } as const;
 const ASSIGNMENTS = { plugin: 'tenjin', key: 'modelAssignments' } as const;
 const OFFERS = { plugin: 'tenjin', key: 'modelOffers' } as const;
 /** How long the CLI keeps an offer open (`model-job.ts`). */
@@ -44,13 +42,21 @@ export function modelStep(agentId: string | undefined): string | undefined {
   return short(step) ? step : undefined;
 }
 /**
- * What the viewer agent is told. Its record's description follows, so the
+ * What the viewer agent is told. Its offer id and description follow, so the
  * transcript's first message can be drawn as the worker's real assignment.
  */
 const VIEWER_PROMPT = 'Observe only the already owned DeepSeek worker activity.';
-/** A run's rows in memory, until its viewer has written them into its transcript. */
-const TRANSCRIPT_ROWS = 2000;
-const TRANSCRIPT_CHARS = 512 * 1024;
+/**
+ * THE WORKER'S CALLS AS CLAUDE CODE DRAWS ITS OWN: a viewer step asks for these tools,
+ * and this module answers each from the worker's row, so none runs (`tool.call`
+ * below; `tool.check` refuses any other call in a viewer's loop). A call of another
+ * tool is written as a line of the step's text.
+ */
+const VIEWER_TOOLS = ['Read', 'Bash', 'Edit', 'Write'] as const;
+/** The ids a viewer step gives its calls, so no other call is answered as one. */
+const CALL_ID = 'toolu_dsv';
+/** A run's rows not yet written into its viewer's transcript, at most. */
+const PENDING_ROWS = 2000;
 /** What the engine draws of a message, at most. */
 const ASSIGNMENT_CHARS = 100_000;
 const RESULT_CHARS = 256 * 1024;
@@ -61,19 +67,38 @@ const POLL_MS = 1000;
 /** How long retirement waits for a viewer still starting, so it binds first. */
 const SPAWN_WAIT_MS = 10_000;
 /**
- * How long one viewer step follows the worker, so it ends by itself (by one 25 s
- * read more at most) well before Claude Code ends it: the host aborts a background
- * agent that shows no progress for ten minutes (its stall watchdog, 2.1.326). The
- * viewer's stop is then held while the worker runs, and the next step follows on.
+ * How long one viewer step waits for the worker's next reply, so it ends by itself (by
+ * one 25 s read more at most) well before Claude Code ends it: the host aborts a
+ * background agent that shows no progress for ten minutes (its stall watchdog,
+ * 2.1.326). The viewer's stop is then held while the worker runs, and the next step
+ * follows on.
  */
 const STEP_MS = 5 * 60_000;
-/**
- * Steps one viewer turn may take: 45 minutes, past the job's 40-minute wall time.
- * Claude Code ends a turn whose stop was held more than 8 times in a row.
- */
-const MAX_STEPS = 9;
+/** Claude Code ends a turn whose stop was held more than 8 times in a row. */
+const MAX_HOLDS = 8;
+/** Each step is one worker reply: up to the worker's 500 turns, and the holds between. */
+const VIEWER_TURNS = 600;
 /** Viewer agents whose step ended at its bound, for their stop to be held once. */
 const handedOver = new Set<string>();
+type Row = TenjinModelActivity['rows'][number];
+/**
+ * What a viewer agent has followed of its worker: the activity sequence read, the
+ * rows not yet written into its transcript, and how the job ended once it has. In
+ * memory only; a reload starts it over.
+ */
+type View = {
+  offerId: string;
+  sequence: number;
+  rows: Row[];
+  shown: Set<string>;
+  dropped: number;
+  holds: number;
+  ended?: Json;
+  done?: boolean;
+};
+const views = new Map<string, View>();
+/** The calls viewer steps made, by the id each step gave them, until each is answered. */
+const viewerCalls = new Map<string, { row: Row; input: Json }>();
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -86,12 +111,6 @@ let sessionEnding = false;
 const liveWorkers = new Set<string>();
 /** Rows taken up again in this module's life, each once. */
 const adopted = new Set<string>();
-/**
- * Each running worker's rows, by offer id. A viewer's turn is one long hook
- * call, and its state reads all stand at the moment it began, so the rows the
- * timer adds are shared here; the state copy is what the live drawing reads.
- */
-const runs = new Map<string, TenjinModelTranscript>();
 /**
  * What the host answers an accept call it moved to the background: a tool call
  * still running after two minutes becomes a task of the session, and the
@@ -301,10 +320,12 @@ async function registerType($: Dollar): Promise<void> {
     description: 'Read-only activity for an already owned Tenjin DeepSeek worker',
     prompt:
       'Display the already owned DeepSeek worker activity. Never execute its assignment or request model inference.',
-    tools: [],
-    // Every step is the plugin's own made-up response; a held stop continues the turn
-    // only up to this bound. Worker limits are independent.
-    maxTurns: MAX_STEPS + 1,
+    // Every step is the plugin's own made-up response and every call it makes is answered
+    // here, so no model request is made and no tool runs. The model is a placeholder that
+    // only a failure of every guard below could reach. Worker limits are independent.
+    tools: [...VIEWER_TOOLS],
+    model: 'haiku',
+    maxTurns: VIEWER_TURNS,
     omitClaudeMd: true,
   });
 }
@@ -340,14 +361,12 @@ export async function rememberModelOffer(
       const ordinal = Math.max(state.serial, priorSerial) + 1;
       if (!Number.isSafeInteger(ordinal)) return;
       state.serial = ordinal;
-      state.records.push({
-        offerId,
-        ordinal,
-        profile,
-        title,
-        description: 'DeepSeek #' + ordinal + ' · ' + title,
-        active: false,
-      });
+      // THE AGENT LIST NAMES THE VIEWER AS THE TASK, as a native subagent's entry is its
+      // call's description: ` (2)` on a second of the same, since the viewer binds by it.
+      const taken = new Set(state.records.map((r) => r.description));
+      let description = title;
+      for (let n = 2; taken.has(description); n++) description = title + ' (' + n + ')';
+      state.records.push({ offerId, ordinal, profile, title, description, active: false });
     });
     if (current) {
       await $.store.set(SERIAL, Math.max(await serial($), current.serial));
@@ -412,13 +431,20 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
       rows.push({
         id: r.id,
         sequence: Number(r.sequence),
-        kind: r.kind as TenjinModelActivity['rows'][number]['kind'],
+        kind: r.kind as Row['kind'],
         state: String(r.state),
+        ...(short(r.message, 64) ? { message: r.message } : {}),
+        ...(Number.isSafeInteger(r.lines) && Number(r.lines) >= 0
+          ? { lines: Number(r.lines) }
+          : {}),
         ...(typeof r.name === 'string' ? { name: clean(r.name, 120) } : {}),
         ...(typeof r.text === 'string' ? { text: clean(r.text) } : {}),
         ...(typeof r.inputSummary === 'string' ? { inputSummary: clean(r.inputSummary) } : {}),
         ...(typeof r.command === 'string' ? { command: clean(r.command, 1024) } : {}),
-        ...(typeof r.outputPreview === 'string' ? { outputPreview: clean(r.outputPreview) } : {}),
+        // Its lines kept: a command's result line is its output's first lines.
+        ...(typeof r.outputPreview === 'string'
+          ? { outputPreview: plain(r.outputPreview, 1024) }
+          : {}),
         ...(typeof r.elapsedSeconds === 'number' &&
         Number.isFinite(r.elapsedSeconds) &&
         r.elapsedSeconds >= 0
@@ -510,87 +536,141 @@ async function refresh($: Dollar, offerId: string, isCurrent = () => true): Prom
   return true;
 }
 
-function rowChars(row: TenjinModelActivity['rows'][number]): number {
-  return (
-    64 +
-    (row.text?.length ?? 0) +
-    (row.inputSummary?.length ?? 0) +
-    (row.command?.length ?? 0) +
-    (row.outputPreview?.length ?? 0)
-  );
-}
 /**
- * Adds what the CLI reports now to the run's rows. The CLI shows a window of
- * its latest rows; a row is kept here by its id as it changes, so the viewer's
- * transcript holds the whole run, inside the bound above.
+ * Adds what the CLI reports to the rows the viewer has yet to write. A row is kept
+ * by its id as it changes; one already written is never written again.
  */
-async function addRows(
-  $: Dollar,
-  offerId: string,
-  activity: TenjinModelActivity,
-): Promise<TenjinModelTranscript> {
-  const held = runs.get(offerId);
-  if (held && held.sequence >= activity.sequence) return held;
-  const rows = [...(held?.rows ?? [])];
-  const at = new Map(rows.map((row, index) => [row.id, index]));
+function merge(view: View, activity: TenjinModelActivity): void {
+  view.sequence = Math.max(view.sequence, activity.sequence);
   for (const row of activity.rows) {
-    const index = at.get(row.id);
-    if (index !== undefined) rows[index] = row;
-    else {
-      at.set(row.id, rows.length);
-      rows.push(row);
-    }
+    // A status says only what runs now, which the row in the parent's view says.
+    if (row.kind === 'status' || view.shown.has(row.id)) continue;
+    const at = view.rows.findIndex((held) => held.id === row.id);
+    if (at >= 0) view.rows[at] = row;
+    else view.rows.push(row);
   }
-  let dropped = held?.dropped ?? 0;
-  let chars = rows.reduce((sum, row) => sum + rowChars(row), 0);
-  while (rows.length > TRANSCRIPT_ROWS || chars > TRANSCRIPT_CHARS) {
-    chars -= rowChars(rows.shift()!);
-    dropped++;
+  while (view.rows.length > PENDING_ROWS) {
+    view.rows.shift();
+    view.dropped++;
   }
-  const next: TenjinModelTranscript = { sequence: activity.sequence, dropped, rows };
-  runs.set(offerId, next);
-  await $.state.set({ ...TRANSCRIPTS, id: offerId }, next);
-  return next;
 }
-type TranscriptLine = { kind: 'call' | 'under' | 'text' | 'note'; text: string };
 /**
- * A run as a native subagent's transcript reads: each tool call as
- * `Read(src/a.ts)` or `Bash(pnpm lint)`, a refused or failed call's reason
- * under it, and the worker's own text between calls.
+ * THE NEXT STEP OF THE VIEWER'S TRANSCRIPT: the worker's next reply whose calls have
+ * all ended, its text and calls together, as a native subagent's reply is one step.
+ * A reply of text alone goes with the next one, or with the end, since a step with
+ * no call would end the viewer's turn.
  */
-function transcriptLines(rows: TenjinModelActivity['rows'], cwd: string): TranscriptLine[] {
-  const lines: TranscriptLine[] = [];
-  for (const row of rows) {
-    if (row.kind === 'tool') {
-      const target = row.command ? clean(row.command, 240) : targetOf(row.inputSummary, cwd);
-      lines.push({ kind: 'call', text: (row.name ?? 'Tool') + (target ? '(' + target + ')' : '') });
-      if (row.state === 'error' && row.outputPreview)
-        lines.push({ kind: 'under', text: clean(row.outputPreview, 400) });
-      else if (row.state === 'cancelled') lines.push({ kind: 'under', text: 'Interrupted' });
-    } else if (row.kind === 'text') {
-      if (row.text) lines.push({ kind: 'text', text: row.text });
-    } else if (row.text) lines.push({ kind: 'note', text: row.text });
+function nextReply(view: View): Row[] | undefined {
+  const rows = view.rows;
+  const key = (row: Row) => row.message ?? row.id;
+  for (let from = 0; from < rows.length;) {
+    let to = from;
+    while (to < rows.length && key(rows[to]!) === key(rows[from]!)) to++;
+    const calls = rows.slice(from, to).filter((row) => row.kind === 'tool');
+    const ended = to < rows.length || !!view.ended || !calls.some((r) => r.state === 'running');
+    if (!ended) return undefined;
+    from = to;
+    if (calls.some((row) => callOf(row))) return rows.splice(0, from);
   }
-  return lines;
+  return undefined;
 }
-const LINE_MARK = { call: '⏺ ', under: '  ⎿  ', note: '· ', text: '' } as const;
-/** The run as the text the viewer's transcript keeps: rows verbatim, the worker's text as it wrote it. */
-function writtenLines(lines: TranscriptLine[], dropped: number): string {
-  let out = dropped ? dropped + ' earlier events omitted\n' : '';
-  let fenced = false;
-  const fence = (open: boolean) => {
-    if (open !== fenced) out += '```\n';
-    fenced = open;
-  };
-  for (const line of lines) {
-    fence(line.kind !== 'text');
-    out +=
-      line.kind === 'text'
-        ? '\n' + line.text + '\n\n'
-        : LINE_MARK[line.kind] + line.text.replaceAll('```', "'''") + '\n';
+/** A worker's call as one of the viewer's own tools takes it, or undefined for a line of text. */
+function callOf(row: Row): Json | undefined {
+  const given = json(row.inputSummary) ?? {};
+  const text = (key: string) => typeof given[key] === 'string';
+  if (row.name === 'Bash' && row.command) return { command: row.command };
+  // A read is drawn as one only with its line count: `Read 0 lines` would be a wrong figure.
+  if (
+    row.name === 'Read' &&
+    text('file_path') &&
+    (row.lines !== undefined || row.state !== 'completed')
+  )
+    return {
+      file_path: given.file_path,
+      ...(typeof given.offset === 'number' ? { offset: given.offset } : {}),
+    };
+  if (row.name === 'Edit' && text('file_path') && text('old_string') && text('new_string'))
+    return {
+      file_path: given.file_path,
+      old_string: given.old_string,
+      new_string: given.new_string,
+    };
+  if (row.name === 'Write' && text('file_path') && text('content'))
+    return { file_path: given.file_path, content: given.content };
+  return undefined;
+}
+/**
+ * A call's answer, from the worker's row: what Claude Code draws under the call. Never
+ * a file's content: a read's line count, a command's first three lines of output (the
+ * CLI's already replaced preview), an edit's path. A failed call reads its reason.
+ */
+function answerOf(tool: string, row: Row, input: Json): { result: unknown } | { deny: string } {
+  if (row.state === 'error') return { deny: clean(row.outputPreview ?? 'Error', 400) };
+  if (row.state !== 'completed') return { deny: 'Interrupted' };
+  const filePath = String(input.file_path ?? '');
+  if (tool === 'Read') {
+    const lines = row.lines ?? 0;
+    const startLine = typeof input.offset === 'number' ? input.offset : 1;
+    return {
+      result: {
+        type: 'text',
+        file: { filePath, content: '', numLines: lines, startLine, totalLines: lines },
+      },
+    };
   }
-  fence(false);
-  return out;
+  if (tool === 'Bash') {
+    const stdout = plain(row.outputPreview ?? '', 2000)
+      .split('\n')
+      .slice(0, 3)
+      .map((line) => clean(line, 400))
+      .join('\n');
+    return { result: { stdout, stderr: '', interrupted: false } };
+  }
+  const patch = { filePath, structuredPatch: [], originalFile: null };
+  return tool === 'Edit'
+    ? { result: { ...patch, oldString: '', newString: '', userModified: false, replaceAll: false } }
+    : { result: { ...patch, type: 'update', content: '' } };
+}
+/** A call of a tool the viewer does not take, as a line of its text: `WebFetch(…)` and what came of it. */
+function callLine(row: Row, cwd: string): string {
+  const target = row.command ? clean(row.command, 240) : targetOf(row.inputSummary, cwd);
+  const head = '⏺ ' + (row.name ?? 'Tool') + (target ? '(' + target + ')' : '');
+  // A read says how much it read, never what: a file's content is never written here.
+  const under =
+    row.state === 'error'
+      ? clean(row.outputPreview ?? 'Error', 400)
+      : row.state !== 'completed'
+        ? 'Interrupted'
+        : row.name === 'Read'
+          ? row.lines !== undefined
+            ? 'Read ' + row.lines + (row.lines === 1 ? ' line' : ' lines')
+            : ''
+          : clean(plain(row.outputPreview ?? '', 400).split('\n')[0] ?? '', 160);
+  return '```\n' + (head + (under ? '\n  ⎿  ' + under : '')).replaceAll('```', "'''") + '\n```';
+}
+/** Rows as a step's blocks: the worker's text and calls in order, each call with its id. */
+function blocksOf(rows: Row[], cwd: string, view: View) {
+  const blocks: ({ text: string } | { id: string; name: string; input: Json })[] = [];
+  const say = (text: string) => {
+    const last = blocks.at(-1);
+    if (last && 'text' in last) last.text += '\n\n' + text;
+    else blocks.push({ text });
+  };
+  if (view.dropped) say(view.dropped + ' earlier events omitted');
+  view.dropped = 0;
+  for (const row of rows) {
+    view.shown.add(row.id);
+    const input = row.kind === 'tool' ? callOf(row) : undefined;
+    if (input && row.name) {
+      const id = CALL_ID + row.id.replace(/[^A-Za-z0-9]/g, '').slice(-24);
+      viewerCalls.set(id, { row, input });
+      if (viewerCalls.size > 256) viewerCalls.delete(viewerCalls.keys().next().value!);
+      blocks.push({ id, name: row.name, input });
+    } else if (row.kind === 'tool') say(callLine(row, cwd));
+    else if (row.text) say(row.text);
+  }
+  if (view.shown.size > 4096) view.shown.delete(view.shown.values().next().value!);
+  return blocks;
 }
 
 /** The one input a native row shows for a step: a path, under the session's folder when it is. */
@@ -674,7 +754,6 @@ async function pollWorker(
   };
   if (live && JSON.stringify(live) !== JSON.stringify(held)) await $.state.set(ref, live);
   if (!activity) return 'missing';
-  await addRows($, offerId, activity);
   await showActivity($, activity);
   return activity;
 }
@@ -738,7 +817,6 @@ async function endedNow(
     ended = endedFrom(record(body(response)?.ended));
     const last = activityOf(response, offerId);
     if (last) {
-      await addRows($, offerId, last);
       await showActivity($, last);
       if (!ended && ENDED.includes(last.state)) ended = endedFromActivity(last);
     }
@@ -1049,7 +1127,7 @@ async function* finish(
   e: TurnStepInput,
   answer: string,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  yield { kind: 'text', index: 0, text: answer };
+  if (answer) yield { kind: 'text', index: 0, text: answer };
   yield { kind: 'stop', stopReason: 'end_turn', usage: null };
   return {
     turnId: e.turnId,
@@ -1059,6 +1137,102 @@ async function* finish(
     stopReason: 'end_turn',
     usage: null,
   };
+}
+/**
+ * ONE STEP OF A VIEWER'S TRANSCRIPT: the worker's next reply, made up here, its calls
+ * answered by the `tool.call` hook. It waits for that reply with follow reads that
+ * wake when the activity moves (`after`); past its bound it ends empty and its stop
+ * is held, so the next step follows on. Once the worker ended and its replies are
+ * written, the last step writes its answer and end line.
+ */
+async function* viewerStep(
+  $: Dollar,
+  e: TurnStepInput,
+  agentId: string,
+  item: TenjinModelViewerRecord,
+  view: View,
+): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  const cwd = (await $.state.get(STATE)).value?.cwd ?? '';
+  const stepStart = await $.clock.now();
+  try {
+    let quick = 0;
+    // Bound by the step's time alone: a long command wakes the read each second it runs.
+    for (;;) {
+      const reply = nextReply(view);
+      if (reply) {
+        view.holds = 0;
+        const blocks = blocksOf(reply, cwd, view);
+        for (const [index, block] of blocks.entries()) {
+          if ('text' in block) yield { kind: 'text', index, text: block.text };
+          else {
+            yield { kind: 'tool', index, id: block.id, name: block.name };
+            yield { kind: 'input', index, json: JSON.stringify(block.input) };
+          }
+        }
+        yield { kind: 'stop', stopReason: 'tool_use', usage: null };
+        return {
+          turnId: e.turnId,
+          index: e.index,
+          answer: blocks.flatMap((b) => ('text' in b ? [b.text] : [])).join('\n\n'),
+          toolUses: blocks.flatMap((b) => ('id' in b ? [{ name: b.name, input: b.input }] : [])),
+          stopReason: 'tool_use',
+          usage: null,
+        };
+      }
+      if (view.ended) {
+        view.done = true;
+        return yield* finish(e, await endOf($, item, view, cwd));
+      }
+      const before = await $.clock.now();
+      if (before - stepStart >= STEP_MS) {
+        // Ended here, before the host's ten-minute bound, with the stop held once.
+        if (view.holds++ >= MAX_HOLDS) break;
+        handedOver.add(agentId);
+        return yield* finish(e, '');
+      }
+      const response = await $.mcp.call(SERVER, 'subagent_activity', {
+        offer_id: view.offerId,
+        follow: true,
+        after: view.sequence,
+      });
+      if (response.isError) break;
+      const value = body(response);
+      const data = activityOf(response, view.offerId);
+      const seen = view.sequence;
+      if (data) merge(view, data);
+      if (value?.status === 'ended' || (data && ENDED.includes(data.state))) {
+        view.ended = { ...data, ...record(value?.ended) };
+        try {
+          // The run is over, so this read returns at once: its last rows and its answer.
+          const last = await $.mcp.call(SERVER, 'subagent_activity', { offer_id: view.offerId });
+          const final = activityOf(last, view.offerId);
+          if (final) merge(view, final);
+          const result = record(body(last)?.activity)?.result;
+          view.ended = {
+            ...view.ended,
+            ...record(body(last)?.ended),
+            ...(typeof result === 'string' && result.trim()
+              ? { answer: plain(result, RESULT_CHARS) }
+              : {}),
+          };
+        } catch {
+          /* The rows read while it ran, and how it ended, still stand. */
+        }
+        continue;
+      } else if (!data && value?.status !== 'waiting') break;
+      // A read that did not wait and saw nothing new must not spin: a few short pauses.
+      if (view.sequence === seen && (await $.clock.now()) - before < 1000) {
+        if (++quick > 5) break;
+        await $.clock.sleep(1000);
+      }
+    }
+  } catch {
+    /* An observer error never cancels, retries or replaces the actual worker. */
+  }
+  return yield* finish(
+    e,
+    'Activity unavailable. The worker result is returned separately to the parent.',
+  );
 }
 function dollars(atomic: string): string {
   const padded = atomic.padStart(7, '0');
@@ -1192,6 +1366,32 @@ export function registerModelViewer(on: On): void {
     };
   });
 
+  // A VIEWER STEP'S CALL IS ANSWERED HERE, from the worker's row, and runs nothing: an
+  // answer at `tool.call` serves the tool and skips its permission check. Any other call
+  // in a viewer's loop, or one this hook fails to answer, is refused at `tool.check`.
+  on('tool.call', { tool: [...VIEWER_TOOLS] }, (_$, e, next) => {
+    const call = e.agentId !== undefined ? viewerCalls.get(e.tool_use_id ?? '') : undefined;
+    if (!call) return next(e);
+    viewerCalls.delete(e.tool_use_id!);
+    return answerOf(e.tool, call.row, call.input) as never;
+  }).catch((_$, e, next) =>
+    next.called || !viewerCalls.has(e.tool_use_id ?? '')
+      ? next(e)
+      : { deny: 'DeepSeek activity unavailable.' },
+  );
+  const refused = {
+    decision: 'deny',
+    reason: 'The DeepSeek activity viewer runs no tool.',
+  } as const;
+  on('tool.check', async ($, e, next) => {
+    if (e.agentId === undefined) return next(e);
+    const viewer =
+      liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => false));
+    return viewer ? refused : next(e);
+  }).catch((_$, e, next) =>
+    e.agentId !== undefined && liveViewerGuards.has(e.agentId) ? refused : next(e),
+  );
+
   on('tool.call', { tool: ACCEPT }, async ($, e, next) => {
     // ONLY A HELD CALL ASKS FOR AN OFFER. `capture` is this mod's own transport,
     // sent for an Agent, Task or SendMessage call it holds. Sent by the model it
@@ -1250,8 +1450,6 @@ export function registerModelViewer(on: On): void {
       closed = true;
       try {
         timer?.cancel();
-        // Its viewer writes the rows into its transcript at once; with no viewer they are let go.
-        $.clock.after(60_000, () => void runs.delete(offerId));
       } catch {
         /* Timer failures do not rewrite the handback. */
       }
@@ -1353,7 +1551,7 @@ export function registerModelViewer(on: On): void {
               const viewer = await $.agent.spawn({
                 subagentType: TYPE,
                 description: item.description,
-                prompt: VIEWER_PROMPT + ' ' + item.description,
+                prompt: VIEWER_PROMPT + ' ' + offerId + ' ' + item.description,
                 cwd: current.cwd,
               });
               if (viewer.agentId) {
@@ -1420,65 +1618,26 @@ export function registerModelViewer(on: On): void {
           e,
           'DeepSeek activity unavailable. Continue through the owned worker handle.',
         );
-      // A later step follows on only after a step that ended at its bound.
-      if (e.index !== 0 && !handedOver.delete(e.agentId))
+      handedOver.delete(e.agentId);
+      let view = views.get(e.agentId);
+      if (view?.offerId !== owned.item.offerId) {
+        view = {
+          offerId: owned.item.offerId,
+          sequence: 0,
+          rows: [],
+          shown: new Set(),
+          dropped: 0,
+          holds: 0,
+        };
+        views.set(e.agentId, view);
+        if (views.size > 16) views.delete(views.keys().next().value!);
+      }
+      if (view.done)
         return yield* finish(
           e,
           'DeepSeek activity observation finished. The worker result is returned separately to the parent.',
         );
-      // The transcript opens with the worker's own name: while only this line stands, the
-      // rows draw live under it; the whole run is written after it when the worker ends.
-      const header = e.index === 0 ? owned.item.description + '\n' : '';
-      if (header) yield { kind: 'text', index: 0, text: header };
-      let tail = 'Activity unavailable. The worker result is returned separately to the parent.';
-      const stepStart = await $.clock.now();
-      try {
-        // Followed in short reads, never one held open for the run: a call past two
-        // minutes becomes a background task of the parent session, with its own lines
-        // there and its answer sent to the parent model.
-        let quick = 0;
-        for (let read = 0; read < 240; read++) {
-          const before = await $.clock.now();
-          if (before - stepStart >= STEP_MS) {
-            // Ended here, before the host's ten-minute bound; the last step may not hand over.
-            if (e.index + 1 < MAX_STEPS) {
-              handedOver.add(e.agentId);
-              tail = '';
-            }
-            break;
-          }
-          const response = await $.mcp.call(SERVER, 'subagent_activity', {
-            offer_id: owned.item.offerId,
-            follow: true,
-          });
-          const value = body(response);
-          const stands = record(value?.activity);
-          if (response.isError) break;
-          if (value?.status === 'activity' && stands?.offerId === owned.item.offerId) {
-            if (ENDED.includes(String(stands.state))) {
-              tail = await writtenRun($, owned.item, stands);
-              break;
-            }
-          } else if (value?.status !== 'waiting') break;
-          // A read that did not wait must not spin: a few short pauses, then no more.
-          if ((await $.clock.now()) - before < 1000) {
-            if (++quick > 5) break;
-            await $.clock.sleep(1000);
-          }
-        }
-      } catch {
-        /* An observer error never cancels, retries or replaces the actual worker. */
-      }
-      if (tail) yield { kind: 'text', index: 0, text: tail };
-      yield { kind: 'stop', stopReason: 'end_turn', usage: null };
-      return {
-        turnId: e.turnId,
-        index: e.index,
-        answer: header + tail,
-        toolUses: [],
-        stopReason: 'end_turn',
-        usage: null,
-      };
+      return yield* viewerStep($, e, e.agentId, owned.item, view);
     } catch {
       if (marked) return yield* finish(e, 'DeepSeek activity unavailable.');
       return yield* next(e);
@@ -1496,7 +1655,10 @@ export function registerModelViewer(on: On): void {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
     }
-    if (e.agentId) handedOver.delete(e.agentId);
+    if (e.agentId) {
+      handedOver.delete(e.agentId);
+      views.delete(e.agentId);
+    }
     try {
       // ONLY A STOP OF THE AGENT CANCELS ITS WORKER: a person's from the agent list, or the
       // parent's TaskStop, as for a native subagent. An abort is also the host ending the
@@ -1790,9 +1952,12 @@ export function registerModelViewer(on: On): void {
       );
     }
     if (!told.startsWith(VIEWER_PROMPT + ' ')) return next(e);
-    const description = told.slice(VIEWER_PROMPT.length + 1);
-    const item = (await $.state.get(STATE)).value?.records.find(
-      (r) => r.description === description,
+    // `<offer id> <description>`; a viewer of an earlier build was told its description alone.
+    const [, offerId, description = ''] = /^(\S{36}) ([\s\S]*)$/.exec(
+      told.slice(VIEWER_PROMPT.length + 1),
+    ) ?? [undefined, undefined, told.slice(VIEWER_PROMPT.length + 1)];
+    const item = (await $.state.get(STATE)).value?.records.find((r) =>
+      offerId ? r.offerId === offerId : r.description === description,
     );
     const assignment = item
       ? (await $.state.get({ ...ASSIGNMENTS, id: item.offerId })).value
@@ -1802,90 +1967,46 @@ export function registerModelViewer(on: On): void {
       assignment || 'DeepSeek worker for: ' + description.replace(/^DeepSeek #\d+ · /, '');
     return next({ ...e, props: { ...e.props, text } });
   });
-  // THE VIEWER'S SPINNER, the one in the DeepSeek agent's own view (its `requestId`
-  // is that agent's id), names the worker's step and carries THE TRANSCRIPT WHILE
-  // THE WORKER RUNS: a turn's reply is drawn as a message only once it is whole, so
-  // until then the spinner is the one thing the host draws in the transcript area,
-  // and the worker's rows are drawn above it there, as a native subagent's rows
-  // stand above its spinner. Every other spinner is the host's own: while a native
-  // subagent runs, its parent's spinner keeps its own words, time and tokens, and
-  // the subagent's step shows under its row, as the worker's does under its row.
-  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    // No worker of this session runs: the spinner is the engine's, at no cost.
-    if (!liveWorkers.size) return next(e);
-    const state = (await $.state.get(STATE)).value;
-    const viewed = state?.records.find((r) => r.active && r.nativeId === e.requestId);
-    if (!viewed || !state) return next(e);
-    const offerId = viewed.offerId;
-    const live = (await $.state.get({ ...WORKERS, id: offerId })).value;
-    const step = live?.current ?? (live?.state === 'running' ? 'working' : 'starting');
-    const spinner = next({
-      ...e,
-      props: { ...e.props, message: clean('DeepSeek · ' + step, 120) },
-    });
-    const held = (await $.state.get({ ...TRANSCRIPTS, id: offerId })).value;
-    const lines = transcriptLines(held?.rows ?? [], state.cwd);
-    // The latest rows that fit above the spinner; the whole run is written when it ends.
-    const room = Math.max(4, Math.min(200, (e.viewport?.rows ?? 48) - 8));
-    const hidden = Math.max(0, lines.length - room) + (held?.dropped ?? 0);
-    const { Box, Text } = $.ui.resolve(e);
-    return (
-      <Box flexDirection="column">
-        {[
-          ...(hidden
-            ? [
-                <Text key="hidden" dimColor>
-                  {'… ' + hidden + ' earlier ' + (hidden === 1 ? 'line' : 'lines')}
-                </Text>,
-              ]
-            : []),
-          ...lines.slice(-room).map((line, index) => (
-            <Text
-              key={String(index)}
-              dimColor={line.kind === 'under' || line.kind === 'note'}
-              wrap={line.kind === 'text' ? 'wrap' : 'truncate-end'}
-            >
-              {LINE_MARK[line.kind] + (line.kind === 'text' ? clean(line.text, 1200) : line.text)}
-            </Text>
-          )),
-          <Box key="spinner">{await spinner}</Box>,
-        ]}
-      </Box>
-    );
+  // THE VIEWER'S ROW IN THE AGENT LIST reads as the worker's: `DeepSeek` where a native
+  // row names its agent type, then the host's own words for the task (its progress
+  // summary, else the description) and the worker's counts. The `tenjin:` type itself
+  // is the host's to name; the row's body is the one part a plugin draws.
+  on('ui.render', { component: 'AgentRow' }, async ($, e, next) => {
+    if (e.props.type !== TYPE) return next(e);
+    const item = (await $.state.get(STATE)).value?.records.find((r) => r.nativeId === e.props.id);
+    const live = item ? (await $.state.get({ ...WORKERS, id: item.offerId })).value : undefined;
+    const counts = [
+      live?.toolUses ? toolUses(live.toolUses) : undefined,
+      live?.tokens ? tokens(live.tokens) : undefined,
+      live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
+    ].filter((part): part is string => part !== undefined);
+    const task = clean(e.props.label.split('\n')[0] ?? '', 200) || clean(e.props.description, 200);
+    return next({ ...e, props: { ...e.props, body: ['DeepSeek ' + task, ...counts].join(' · ') } });
   });
 }
 
 /**
- * The whole run as the viewer's transcript keeps it after the worker ended:
- * every row added up while it ran and the CLI's last window, the answer the
- * parent received, and the counts line. The rows held in memory are then released.
+ * The viewer's last step after the worker ended: what is left of its rows, its answer
+ * as the parent received it (in place of its last reply's shortened text), and the end
+ * line with the job's own word, counts and time.
  */
-async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json): Promise<string> {
-  let held = runs.get(item.offerId);
-  let answer: string | undefined;
-  let own: unknown;
-  let endedBy: unknown = ended.endedBy;
-  try {
-    // The run is over, so this read returns at once: its last rows and its answer.
-    const last = await $.mcp.call(SERVER, 'subagent_activity', { offer_id: item.offerId });
-    const data = activityOf(last, item.offerId);
-    if (data) held = await addRows($, item.offerId, data);
-    const result = record(body(last)?.activity)?.result;
-    if (typeof result === 'string' && result.trim()) answer = plain(result, RESULT_CHARS);
-    own = record(body(last)?.ended)?.elapsedMs;
-    endedBy = record(body(last)?.ended)?.endedBy ?? endedBy;
-  } catch {
-    /* The rows read while it ran still stand. */
-  }
-  const [live, state, now] = await Promise.all([
+async function endOf(
+  $: Dollar,
+  item: TenjinModelViewerRecord,
+  view: View,
+  cwd: string,
+): Promise<string> {
+  const ended = view.ended ?? {};
+  const answer = typeof ended.answer === 'string' ? ended.answer : undefined;
+  const rows = view.rows.splice(0).filter((row) => !answer || row.kind !== 'text');
+  const said = blocksOf(rows, cwd, view).flatMap((block) => ('text' in block ? [block.text] : []));
+  const [live, now] = await Promise.all([
     $.state.get({ ...WORKERS, id: item.offerId }),
-    $.state.get(STATE),
     $.clock.now(),
   ]);
-  // The job's own time when the CLI gives it. This turn's state reads stand at the
-  // moment it began, so otherwise only the start time is used.
-  const elapsedMs = Number.isSafeInteger(own)
-    ? own
+  // The job's own time when the CLI gives it; otherwise the time since the accept.
+  const elapsedMs = Number.isSafeInteger(ended.elapsedMs)
+    ? ended.elapsedMs
     : live.value
       ? Math.max(0, now - live.value.startedAt)
       : undefined;
@@ -1893,27 +2014,15 @@ async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json)
     { ...ended, ...(elapsedMs !== undefined ? { elapsedMs } : {}) },
     live.value,
   ).join(' · ');
+  const state = ended.state ?? (ended.status === 'stopped' ? 'unknown' : ended.status);
+  const started = ended.started ?? ended.status !== 'not_started';
   const end =
-    ended.state === 'completed'
+    state === 'completed'
       ? 'Done (' + counts + ')'
-      : ended.started === false
-        ? endingOf(ended)
-        : stopWord(ended.state, endedBy) + ' (' + counts + ')\n' + endingOf(ended);
-  const text =
-    writtenLines(transcriptLines(held?.rows ?? [], state.value?.cwd ?? ''), held?.dropped ?? 0) +
-    (answer ? '\n' + answer + '\n' : '') +
-    '\n' +
-    end;
-  runs.delete(item.offerId);
-  try {
-    await $.state.set(
-      { ...TRANSCRIPTS, id: item.offerId },
-      { sequence: held?.sequence ?? 0, dropped: 0, rows: [] },
-    );
-  } catch {
-    /* Display only. */
-  }
-  return text;
+      : started === false
+        ? endingOf({ state, started })
+        : stopWord(state, ended.endedBy) + ' (' + counts + ')\n' + endingOf({ state, started });
+  return [...said, ...(answer ? [answer] : []), end].join('\n\n');
 }
 /** How the viewer's transcript ends: what happened to the worker, never a run that did not happen. */
 function endingOf(activity: Json): string {

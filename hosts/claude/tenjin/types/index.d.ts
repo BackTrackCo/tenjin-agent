@@ -59,6 +59,10 @@ export type TenjinModelActivity = {
     command?: string;
     outputPreview?: string;
     elapsedSeconds?: number;
+    /** Which worker reply the row belongs to: the viewer writes each reply as one step. */
+    message?: string;
+    /** A file read's line count, as Claude Code reported it to the worker. */
+    lines?: number;
   }[];
   /** Tool calls the worker made, as a native subagent row counts them. */
   toolUses?: number;
@@ -66,18 +70,6 @@ export type TenjinModelActivity = {
   tokens?: number;
   /** While running, what has settled so far; once ended, the final accounting. */
   spend?: { reservedAtomic: string; actualAtomic: string; uncertain: string[] };
-};
-
-/**
- * A running worker's rows, added up from the CLI's activity for its viewer's
- * transcript. Kept only until the viewer has written them into that transcript.
- */
-export type TenjinModelTranscript = {
-  /** The activity sequence the rows stand at. */
-  sequence: number;
-  /** Oldest rows left out to stay inside the bound. */
-  dropped: number;
-  rows: TenjinModelActivity['rows'];
 };
 
 /**
@@ -164,8 +156,6 @@ declare module 'claude-code' {
       modelViewers: TenjinModelViewerState;
       /** By offer id: an accept call's live row while its worker runs. */
       modelWorkers: StateFamily<TenjinModelWorker>;
-      /** By offer id: a running worker's rows for its viewer's transcript. */
-      modelTranscripts: StateFamily<TenjinModelTranscript>;
       /** By offer id: the held call's own prompt, shown as its viewer's first message. */
       modelAssignments: StateFamily<string>;
       /** By offer id: when the offer was made and how it was settled, for its row. */
