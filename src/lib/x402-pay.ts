@@ -182,8 +182,8 @@ export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
  * EIP-3009 ONLY, until this CLI supports Permit2. The SDK signs a Permit2
  * transfer for an entry whose `extra.assetTransferMethod` asks for one, and
  * that cannot settle without a Permit2 allowance this CLI never sets (the
- * facilitator answers `invalid_exact_evm_permit2_payload_allowance_required`),
- * so dropping such an entry loses nothing. An entry that names no method is
+ * facilitator answers `invalid_exact_evm_permit2_payload_allowance_required`).
+ * An entry that names no method is
  * EIP-3009, as the SDK reads it; any other method is dropped too.
  */
 export const eip3009Only: PaymentPolicy = (_version, requirements) =>

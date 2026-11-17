@@ -866,7 +866,7 @@ async function executePay(
   // from the payment-response header: its body can be an empty `{}`. A 402's
   // own reason rides in its PAYMENT-REQUIRED header's `error`. The
   // authorization stays valid until it expires, so settlement is unknown
-  // unless the seller or the chain shows it taken.
+  // unless the chain shows it taken.
   const refusal = settlementRefusal(paid);
   const sellerShort = paymentShortOfFunds(paid);
   const paymentError = paymentRequiredError(payer.http, paid);
