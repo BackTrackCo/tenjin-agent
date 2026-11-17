@@ -95,3 +95,70 @@ it('preserves the native worker output allowance instead of silently halving it'
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 0 })).toThrow();
 });
+it('serves tool search as the Messages API does, so a ToolSearch result never stops the job', () => {
+  // The shape Claude Code 2.1.326 sends with tool search on, after one ToolSearch call:
+  // the proxy and DeepSeek take neither `defer_loading` nor a `tool_reference` block.
+  const schema = { type: 'object', properties: { offer_id: { type: 'string' } } };
+  const result = workerMessages({
+    model: 'deepseek-flash',
+    tools: [
+      { name: 'Read', description: 'Read a file', input_schema: { type: 'object' } },
+      {
+        name: 'DeferredToolPlaceholder',
+        description: 'Reserved placeholder; never call this tool.',
+        input_schema: { type: 'object', properties: {} },
+        defer_loading: true,
+      },
+      {
+        name: 'mcp__plugin_tenjin_router__subagent_activity',
+        description: 'Activity',
+        input_schema: schema,
+        defer_loading: true,
+      },
+      { name: 'WebFetch', input_schema: { type: 'object' }, defer_loading: true },
+    ],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Check the activity.' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'ToolSearch', input: { query: 'select:x' } }],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't1',
+            content: [
+              { type: 'tool_reference', tool_name: 'mcp__plugin_tenjin_router__subagent_activity' },
+            ],
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+    ],
+  });
+  // The named tool is callable; a deferred tool nothing named is not sent.
+  expect(result.tools).toEqual([
+    { name: 'Read', description: 'Read a file', input_schema: { type: 'object' } },
+    {
+      name: 'mcp__plugin_tenjin_router__subagent_activity',
+      description: 'Activity',
+      input_schema: schema,
+    },
+  ]);
+  // The result reads as the definition, in the form ToolSearch's own description promises.
+  expect((result.messages as { content: unknown }[])[2]!.content).toEqual([
+    {
+      type: 'tool_result',
+      tool_use_id: 't1',
+      content: [
+        {
+          type: 'text',
+          text: `<functions>\n<function>${JSON.stringify({ description: 'Activity', name: 'mcp__plugin_tenjin_router__subagent_activity', parameters: schema })}</function>\n</functions>`,
+        },
+      ],
+    },
+  ]);
+  expect(JSON.stringify(result)).not.toMatch(/tool_reference|defer_loading/);
+});

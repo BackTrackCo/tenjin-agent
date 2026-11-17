@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isRecord } from '../lib/guards';
 /** The proxy's blocks, and the two of Tenjin's own answer to a worker's web search. */
 const block = z.object({
   type: z.enum(['text', 'thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result']),
@@ -98,6 +99,8 @@ export function completedMessageSse(raw: unknown): string {
   return events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
 }
 
+type Reference = { type: 'tool_reference'; tool_name?: unknown };
+
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
 export function workerMessages(raw: Record<string, unknown>) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
@@ -112,6 +115,43 @@ export function workerMessages(raw: Record<string, unknown>) {
     raw.stop_sequences === undefined
       ? undefined
       : z.array(z.string().min(1).max(256)).max(16).parse(raw.stop_sequences);
+  const declared =
+    raw.tools === undefined
+      ? undefined
+      : z
+          .array(
+            z
+              .object({
+                name: z.string(),
+                description: z.string().optional(),
+                input_schema: z.record(z.string(), z.unknown()),
+                type: z.literal('custom').optional(),
+                defer_loading: z.boolean().optional(),
+              })
+              .passthrough(),
+          )
+          .parse(raw.tools);
+  // Tool search, as the Messages API serves it: a deferred tool is left out until a
+  // ToolSearch result names it in a `tool_reference`, then it can be called, and the
+  // result reads as the tool's definition in Claude Code's own text form of it. Neither
+  // the proxy nor DeepSeek takes deferred tools or `tool_reference` blocks.
+  const loaded = new Set<string>();
+  const isReference = (b: unknown) => isRecord(b) && b.type === 'tool_reference';
+  const loadTools = (blocks: unknown[]): unknown[] => {
+    const names = blocks.filter(isReference).map((b) => String((b as Reference).tool_name));
+    if (!names.length) return blocks;
+    const functions = names.map((name) => {
+      loaded.add(name);
+      const tool = declared?.find((t) => t.name === name);
+      return tool
+        ? `\n<function>${JSON.stringify({ description: tool.description, name, parameters: tool.input_schema })}</function>`
+        : '';
+    });
+    return [
+      ...blocks.filter((b) => !isReference(b)),
+      { type: 'text', text: `<functions>${functions.join('')}\n</functions>` },
+    ];
+  };
   const clearBlocks = (value: unknown): unknown => {
     if (!Array.isArray(value)) return value;
     return value.map((b) => {
@@ -123,32 +163,21 @@ export function workerMessages(raw: Record<string, unknown>) {
         return b;
       const kept = { ...b };
       delete kept.cache_control;
-      return kept.type === 'tool_result' ? { ...kept, content: clearBlocks(kept.content) } : kept;
+      if (kept.type !== 'tool_result') return kept;
+      const content = clearBlocks(kept.content);
+      return { ...kept, content: Array.isArray(content) ? loadTools(content) : content };
     });
   };
   const messages = Array.isArray(raw.messages)
     ? raw.messages.map((m) => ({ ...m, content: clearBlocks(m.content) }))
     : raw.messages;
-  const tools =
-    raw.tools === undefined
-      ? undefined
-      : z
-          .array(
-            z
-              .object({
-                name: z.string(),
-                description: z.string().optional(),
-                input_schema: z.record(z.string(), z.unknown()),
-                type: z.literal('custom').optional(),
-              })
-              .passthrough(),
-          )
-          .parse(raw.tools)
-          .map((t) => ({
-            name: t.name,
-            ...(t.description ? { description: t.description } : {}),
-            input_schema: t.input_schema,
-          }));
+  const tools = declared
+    ?.filter((t) => t.defer_loading !== true || loaded.has(t.name))
+    .map((t) => ({
+      name: t.name,
+      ...(t.description ? { description: t.description } : {}),
+      input_schema: t.input_schema,
+    }));
   return {
     model: 'deepseek-flash',
     max_tokens:

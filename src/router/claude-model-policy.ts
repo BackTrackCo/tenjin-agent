@@ -140,7 +140,8 @@ export function claudeDeepSeekWorkerSettingsEnv(
     TENJIN_MODEL_WORKER: '1',
     ANTHROPIC_MAX_RETRIES: '0',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    ENABLE_TOOL_SEARCH: 'false',
+    // No ENABLE_TOOL_SEARCH: tool search stays as the person's session has it, and the
+    // bridge serves its deferred tools (`workerMessages`).
   };
 }
 
