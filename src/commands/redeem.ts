@@ -273,6 +273,8 @@ async function githubSignIn(
   const { opts, live, say } = c;
   const again = `Run \`tenjin redeem ${code}\` again.`;
   say("  This code is one per person, so GitHub confirms it's you.");
+  say('  Tenjin sees only your public profile.');
+  say();
   const device = await requestDeviceCode(clientId, c.flow);
   if (!device.ok) {
     if (device.reason === 'network') {
@@ -298,12 +300,19 @@ async function githubSignIn(
   }
   const { userCode, verificationUri } = device.code;
   const copied = await (opts.copyText ?? copyToClipboard)(userCode).catch(() => false);
-  say(`  Your code  ${style('bold', userCode, c.err)}${copied ? '  (copied)' : ''}`);
   const browser = browserAvailable(c.env, opts.platform ?? process.platform);
   const opened = browser ? await (opts.openUrl ?? openInBrowser)(verificationUri) : false;
-  if (!opened) {
-    const page = new URL(verificationUri);
-    say(`  Open ${page.host}${page.pathname} and enter the code.`);
+  const page = new URL(verificationUri);
+  const where = `${page.host}${page.pathname}`;
+  // The labels line up with `tenjin fund`'s: a 10-column label, then the value.
+  say(
+    `  Code      ${style('bold', userCode, c.err)}${copied ? `  ${style('dim', 'copied', c.err)}` : ''}`,
+  );
+  if (opened) {
+    say('  GitHub    opened in your browser: paste the code, then Authorize');
+    say(`            ${style('dim', where, c.err)}`);
+  } else {
+    say(`  GitHub    open ${where} and enter the code`);
   }
   say();
 
@@ -316,7 +325,10 @@ async function githubSignIn(
     stop();
     live.stop();
   }
-  if (result.ok) return result.token;
+  if (result.ok) {
+    live.ok('GitHub confirmed');
+    return result.token;
+  }
   if (result.reason === 'expired') {
     throw new CliError('REFUSED', 'The GitHub code expired. Nothing was redeemed.', {
       fix: `Run \`tenjin redeem ${code}\` again for a fresh one.`,

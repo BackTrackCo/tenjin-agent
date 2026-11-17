@@ -276,7 +276,10 @@ describe('runRedeem at a terminal: a code that needs GitHub', () => {
 
     const out = stderr.join('');
     expect(out).toContain('Redeem NCSTATE26');
-    expect(out).toContain('Your code  ABCD-1234  (copied)');
+    expect(out).toContain('Tenjin sees only your public profile.');
+    expect(out).toContain('Code      ABCD-1234  copied');
+    expect(out).toContain('GitHub    opened in your browser: paste the code, then Authorize');
+    expect(out).toContain('✓ GitHub confirmed');
     expect(out).toContain('✓ $2.00 added');
     // The token is sent once and never shown.
     expect(out).not.toContain(TOKEN);
@@ -303,8 +306,8 @@ describe('runRedeem at a terminal: a code that needs GitHub', () => {
     });
     expect(openUrl).not.toHaveBeenCalled();
     const out = stderr.join('');
-    expect(out).toContain('Your code  ABCD-1234\n');
-    expect(out).toContain('Open github.com/login/device and enter the code.');
+    expect(out).toContain('Code      ABCD-1234\n');
+    expect(out).toContain('GitHub    open github.com/login/device and enter the code');
   });
 
   it('a cancelled sign-in redeems nothing: no second POST is made', async () => {
