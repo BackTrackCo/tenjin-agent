@@ -89,13 +89,14 @@ export function accessOf(definition: string, tool: string = requestToolName()): 
 }
 
 /**
- * Does one `tools:` or `disallowedTools:` entry cover the request tool? The
- * tool itself, its bare server (`mcp__plugin_tenjin_router`), or any
- * `*`-suffixed pattern the tool's name starts with: `*`, `mcp__*`,
+ * Does one `tools:` or `disallowedTools:` entry cover an MCP tool, such as the
+ * request tool? The tool itself, its bare server (`mcp__plugin_tenjin_router`),
+ * or any `*`-suffixed pattern the tool's name starts with: `*`, `mcp__*`,
  * `mcp__plugin_tenjin_router__*` and every prefix between.
  */
 function namesRequestTool(entry: string, tool: string): boolean {
-  if (entry === tool || entry === tool.replace(/__request$/, '')) return true;
+  const server = tool.lastIndexOf('__');
+  if (entry === tool || (server > 0 && entry === tool.slice(0, server))) return true;
   return entry.endsWith('*') && tool.startsWith(entry.slice(0, -1));
 }
 
@@ -248,6 +249,28 @@ function readFrontmatter(
 
 /** The agent types Claude Code ships that a worker runs as, with no definition file. */
 export const WORKER_BUILTIN_AGENTS: ReadonlySet<string> = new Set(['general-purpose', 'Explore']);
+
+/**
+ * MAY THIS AGENT RUN IN A PERMISSION MODE OF ITS OWN? Its native children inherit
+ * that mode, and a worker accepted in the session's mode would not. True when its
+ * definition sets `permissionMode`, and when no definition can be read for it:
+ * only `general-purpose` and `Explore` with no file of their own take the
+ * session's mode for certain.
+ */
+export async function setsOwnMode(agentType: string, lookup: AgentLookup): Promise<boolean> {
+  if (!TYPE_RE.test(agentType)) return true;
+  try {
+    const text = await findDefinition(agentType, lookup);
+    if (text === null) return !WORKER_BUILTIN_AGENTS.has(agentType);
+    const frontmatter = frontmatterOf(text);
+    return (
+      frontmatter === null ||
+      frontmatter.some((line) => /^\s*['"]?permissionMode['"]?\s*:/.test(line))
+    );
+  } catch {
+    return true;
+  }
+}
 
 export type WorkerAgent = {
   description: string;

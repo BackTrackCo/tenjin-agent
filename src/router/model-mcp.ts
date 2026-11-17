@@ -7,6 +7,7 @@ import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from '.
 import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
+import type { WorkerRequest } from './model-worker-web';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
 import { WORKER_ENDS, WORKER_WALL_MS, workerEnd, workerStop } from './model-worker-control';
@@ -70,6 +71,8 @@ export function registerModelTool(
     harness: 'claude' | 'codex';
     session: () => ModelSession | undefined;
     transport: () => Promise<ModelTransport>;
+    /** `tenjin mcp`'s request executor, which pays for a Claude worker's web searches. */
+    web?: WorkerRequest;
   },
 ) {
   const lifecycle = new ModelLifecycle();
@@ -332,6 +335,17 @@ export function registerModelTool(
             input: z.record(z.string(), z.unknown()),
             // The parent's model request that made the held call, as the host numbers it.
             step: z.string().max(200).optional(),
+            // The native subagent whose loop made the call, as the host lists it; absent
+            // for the main loop. It receives the offer and accepts it or keeps it native.
+            agent: z
+              .object({
+                id: z.string().min(1).max(200),
+                type: z.string().max(200).optional(),
+                // The types of the agents above it, nearest first.
+                parents: z.array(z.string().max(200)).max(32).optional(),
+                cwd: z.string().max(4096).optional(),
+              })
+              .optional(),
           })
           .optional(),
         delegation_id: z.string().uuid().optional(),
@@ -357,6 +371,7 @@ export function registerModelTool(
             tool: held.tool ?? 'Agent',
             code,
             ...more,
+            ...(held.agent ? { from: 'subagent' as const } : {}),
           });
       };
       const ownedSessionId = session?.sessionId;
@@ -444,6 +459,12 @@ export function registerModelTool(
                   signal,
                   args.capture.tool,
                   args.capture.step,
+                  args.capture.agent && {
+                    agentId: args.capture.agent.id,
+                    agentType: args.capture.agent.type,
+                    parents: args.capture.agent.parents,
+                    cwd: args.capture.agent.cwd,
+                  },
                 ),
               );
             } catch {
@@ -564,6 +585,7 @@ export function registerModelTool(
                 tool: pending.nativeTool ?? 'Agent',
                 code: 'expired',
                 offerId: pending.id,
+                ...(pending.caller ? { from: 'subagent' as const } : {}),
               });
             return unavailable(
               ownedContinuation
@@ -710,6 +732,7 @@ export function registerModelTool(
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
                 ...(options.harness === 'claude'
                   ? {
+                      ...(options.web ? { web: options.web } : {}),
                       claudePermissionMode: acceptedClaudeMode ?? undefined,
                       currentClaudePermissionMode: jobClaudeMode,
                       claudeSession: {

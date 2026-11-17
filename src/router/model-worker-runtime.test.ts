@@ -2116,3 +2116,192 @@ it("gives a parent's text no permission: the same mode, rules, sandbox and ask w
   expect(permission).toHaveBeenCalledTimes(2);
   expect(claimed.answer).toMatchObject({ behavior: 'deny' });
 });
+
+/** One request through the running job's bridge, and what the bridge answered. */
+function oneBridgeRequest(
+  body: string,
+): Promise<{ status?: number; headers?: Record<string, string>; body?: string }> {
+  const call = vi.mocked(query).mock.calls.at(-1)![0];
+  const handle = native.createServer.mock.calls.at(-1)![0] as (
+    request: unknown,
+    response: unknown,
+  ) => void;
+  const answered: { status?: number; headers?: Record<string, string>; body?: string } = {};
+  return new Promise((complete) =>
+    handle(
+      {
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(body);
+        },
+      },
+      {
+        headersSent: false,
+        destroyed: false,
+        writeHead(status: number, headers?: Record<string, string>) {
+          answered.status = status;
+          if (headers) answered.headers = headers;
+          return this;
+        },
+        end(text: string, done?: () => void) {
+          answered.body = text;
+          done?.();
+          complete(answered);
+          return this;
+        },
+      },
+    ),
+  );
+}
+
+/** The nested request Claude Code 2.1.326's WebSearch sends its model (probed). */
+const NESTED_SEARCH = {
+  model: 'deepseek-flash',
+  max_tokens: 32000,
+  stream: true,
+  tool_choice: { type: 'auto' },
+  tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }],
+  messages: [
+    {
+      role: 'user',
+      content: [{ type: 'text', text: 'Perform a web search for the query: x402 receipts' }],
+    },
+  ],
+};
+
+// Live case: one WebSearch in a worker reached the bridge as a server tool it refused,
+// and that refusal ended the whole job `unknown`.
+it("answers a worker's WebSearch at the bridge in WebSearch's own stream, sends nothing to the model, and the job goes on", async () => {
+  const messages = vi.fn();
+  let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    answered = await oneBridgeRequest(JSON.stringify(NESTED_SEARCH));
+  });
+  await expect(
+    runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+  ).resolves.toBe('done');
+  expect(messages).not.toHaveBeenCalled();
+  expect(answered.status).toBe(200);
+  expect(answered.headers).toEqual({ 'content-type': 'text/event-stream' });
+  // No executor in this test: the search's own native error, never the job's end.
+  expect(answered.body).toContain('"type":"server_tool_use"');
+  expect(answered.body).toContain('"error_code":"unavailable"');
+  expect(answered.body).toContain('Web search is not available to this worker right now');
+});
+
+it.each([
+  ['another model', JSON.stringify({ model: 'claude-opus-4', messages: [], max_tokens: 10 })],
+  [
+    'a server tool beside its own tools',
+    JSON.stringify({
+      ...NESTED_SEARCH,
+      tools: [...NESTED_SEARCH.tools, { name: 'Read', input_schema: { type: 'object' } }],
+    }),
+  ],
+  ['a body that is not JSON', '{"model":'],
+])(
+  'answers a request with %s as that request alone, a 400 with nothing sent or paid, and the job goes on',
+  async (_label, body) => {
+    // The failure: any request the bridge could not send ended the whole job.
+    const messages = vi.fn();
+    let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+    sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+      answered = await oneBridgeRequest(body);
+    });
+    await expect(
+      runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+    ).resolves.toBe('done');
+    expect(messages).not.toHaveBeenCalled();
+    expect(answered.status).toBe(400);
+    expect(JSON.parse(answered.body!)).toMatchObject({
+      type: 'error',
+      error: { type: 'invalid_request_error' },
+    });
+  },
+);
+
+it("hands a worker's failed WebFetch the page through Exa, as hook context, while the job runs", async () => {
+  // The failure: a public page the worker's own fetch could not reach stayed unread.
+  const dataDir = await mkdtemp(join(tmpdir(), 'worker-fetch-'));
+  const { storeSpecs } = await import('./specs');
+  const web = vi.fn(async (args: Record<string, unknown>) => {
+    if (args.tool !== undefined) {
+      const id = `spec-${String(args.tool)}`;
+      await storeSpecs(dataDir, [
+        {
+          id,
+          capabilityId: String(args.tool),
+          provider: 'Exa',
+          description: 'page read',
+          priceAtomic: '1000',
+          priceVaries: false,
+          maxAmountAtomic: '1000',
+          payTo: '0x6d6E695b09861467c7d462f5AAF31cF3540B9192',
+          network: 'eip155:8453',
+          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          request: {
+            method: 'POST',
+            url: 'https://api.exa.ai/contents',
+            fields: {},
+            location: 'body',
+          },
+          input: { type: 'object' },
+          pinned: {},
+        },
+      ]);
+      return { isError: false, summary: '', envelope: { status: 'spec', id } };
+    }
+    return {
+      isError: false,
+      summary: '',
+      envelope: {
+        status: 'fulfilled',
+        result: JSON.stringify({ results: [{ title: 'x402', text: 'Read through Exa.' }] }),
+      },
+    };
+  });
+  const toolCall = vi.fn(
+    async (
+      _job: unknown,
+      _tool: string,
+      _ceiling: bigint,
+      run: () => Promise<{ value: unknown }>,
+    ) => (await run()).value,
+  );
+  let context: unknown;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    const failure = vi.mocked(query).mock.calls.at(-1)![0].options?.hooks?.PostToolUseFailure?.[0]
+      ?.hooks[0];
+    context = await failure!(
+      {
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'WebFetch',
+        // A literal public address: the fallback checks a name's addresses with DNS.
+        tool_input: { url: 'https://93.184.216.34/', prompt: 'Summarize' },
+        tool_use_id: 'fetch-1',
+        error: 'connect ECONNREFUSED 93.184.216.34:443',
+      } as never,
+      undefined,
+      { signal: new AbortController().signal },
+    );
+  });
+  try {
+    await runModelWorker(job, {
+      ...options(),
+      dataDir,
+      transport: { toolCall } as unknown as ModelTransport,
+      web: web as never,
+    });
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+  expect(toolCall).toHaveBeenCalledWith(job, 'exa-contents', 1000n, expect.any(Function));
+  expect(context).toMatchObject({
+    hookSpecificOutput: {
+      hookEventName: 'PostToolUseFailure',
+      additionalContext: expect.stringContaining('Read through Exa.'),
+    },
+  });
+});

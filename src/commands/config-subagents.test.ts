@@ -218,6 +218,27 @@ it('lists why recent subagent calls got no offer, newest first, without changing
   await expect(stat(join(dir, 'config.json'))).rejects.toThrow();
 });
 
+it('says which recent calls without an offer a native subagent made, and why it could not take one', async () => {
+  // Catches: a subagent's call listed as the main loop's, so a person reading the list
+  // could not tell which agent's calls stay native, nor that its tools are the reason.
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const store = new ModelJobStore(dir);
+  await store.noOffer({ sessionId: 's', tool: 'Agent', code: 'input_filter', detail: 'name' });
+  await store.noOffer({
+    sessionId: 's',
+    tool: 'Agent',
+    code: 'caller_unqualified',
+    detail: 'tools',
+    from: 'subagent',
+  });
+  const result = await runConfigSubagents('why', {}, testCtx(dir));
+  expect(result.data).toMatchObject({
+    noOffers: [{ code: 'caller_unqualified', from: 'subagent' }, { code: 'input_filter' }],
+  });
+  expect(result.humanLines?.[1]).toContain('Agent from a subagent  caller_unqualified:tools');
+  expect(result.humanLines?.[2]).toContain('Z  Agent  input_filter:name');
+});
+
 it('renews a consent from before the current disclosure, keeping the directories it named', async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
   const first = join(dir, 'first'),

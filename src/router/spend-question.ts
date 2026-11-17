@@ -59,7 +59,7 @@ export const ROUTING_FEE_TERMS =
 
 /** Part of the existing setup question, never a separate opt-in question. */
 export const DEEPSEEK_INSTALL_TERMS =
-  'New installs enable eligible DeepSeek helpers in native workspaces with parent veto, up to $1 per job. Tenjin/TypeSafe receive assignments and bounded parent context; after parent acceptance, Tenjin/DeepSeek receive assignments, applicable instructions and tool results. A helper can read your ~/.claude folder as a native subagent can, session transcripts included. Inference adds 5%; model routing is 15% of expected inference, capped at $0.003 per job. Stop with `tenjin config subagents off`.';
+  'New installs enable eligible DeepSeek helpers in native workspaces with parent veto, up to $1 per job. Tenjin/TypeSafe receive assignments and bounded parent context; after parent acceptance, Tenjin/DeepSeek receive assignments, applicable instructions and tool results. A helper can read your ~/.claude folder as a native subagent can, session transcripts included. Inference adds 5%; model routing is 15% of expected inference, capped at $0.003 per job. A helper’s web searches are Exa searches at $0.004 each, within your limits and its job cap. Stop with `tenjin config subagents off`.';
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either choice approves this.';

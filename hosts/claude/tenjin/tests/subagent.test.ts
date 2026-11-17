@@ -1,6 +1,6 @@
 import type { On, TurnStepChunk, TurnStepResult } from 'claude-code';
-import { expect, test } from 'claude-code/testing';
-import { DATA, OFFER, SESSION, SURFACES, machine, shownLines } from './fixtures';
+import { expect, mock, test } from 'claude-code/testing';
+import { DATA, NOW, OFFER, SESSION, SURFACES, machine, shownLines } from './fixtures';
 
 const SUBAGENT = 'mcp__plugin_tenjin_router__subagent';
 const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
@@ -598,4 +598,122 @@ test('a held call names the model request that made it, so two calls of one resp
     'child-turn:0',
   ]);
   expect('step' in asked[0]!).toBe(false);
+});
+
+/** The session's agents as the host lists them (`$.agent.list()`), fields the mod reads. */
+function listed(on: On, agents: Record<string, unknown>[]) {
+  on('agent.list', () => ({ value: agents as never }));
+}
+const agent = (id: string, type: string, more: Record<string, unknown> = {}) => ({
+  id,
+  description: 'Review the module',
+  type,
+  status: 'running',
+  kind: 'local_agent',
+  cwd: '/repo',
+  ...more,
+});
+
+test("a native subagent's call is held for that subagent: the subagent goes beside the call, never in its input, and its accept reaches the CLI", async ($, on) => {
+  // Catches: the host's `agentId` sent inside the call's input, which the CLI keeps native
+  // as `input_filter:agentId`, so no subagent was ever offered DeepSeek.
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture ?? { offer_id: e.offer_id });
+    return { result: offered, text: offered };
+  });
+  listed(on, [agent('child-1', 'general-purpose')]);
+  const ran = native(on);
+  const held = await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'child_call',
+    agentId: 'child-1',
+    ...ASSIGNMENT,
+  });
+  expect(held.result).toMatchObject({ agentId: `tenjin-offer-${OFFER}`, canContinueAgent: false });
+  expect(held.context?.join(' ')).toContain('local Tenjin hook held');
+  await $.tool.call({
+    tool: SUBAGENT,
+    tool_use_id: 'child_accept',
+    agentId: 'child-1',
+    offer_id: OFFER,
+  });
+  expect(asked).toEqual([
+    {
+      session_id: SESSION,
+      tool_use_id: 'child_call',
+      input: ASSIGNMENT,
+      tool: 'Agent',
+      agent: { id: 'child-1', type: 'general-purpose', parents: [], cwd: '/repo' },
+    },
+    { offer_id: OFFER },
+  ]);
+  expect(ran).toEqual([]);
+});
+
+test('a call two native agents deep names every agent above its own, so the CLI can tell whose mode it runs in', async ($, on) => {
+  // Catches: a nested agent's call sent with the host's `agentId` in its input and nothing
+  // of the agents above it, whose own permission mode its native child would inherit.
+  const { files } = machine(on);
+  enabled(files);
+  const asked: Record<string, unknown>[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture as Record<string, unknown>);
+    return { result: '{"action":"native"}' };
+  });
+  listed(on, [
+    agent('lead-1', 'lead'),
+    agent('nested-1', 'general-purpose', { parentId: 'lead-1', cwd: '/repo/.claude/worktrees/w' }),
+    agent('orphan-1', 'general-purpose', { parentId: 'gone-1' }),
+  ]);
+  const ran = native(on);
+  for (const id of ['nested-1', 'orphan-1', 'unlisted-1'])
+    await $.tool.call({ tool: 'Agent', tool_use_id: id, agentId: id, ...ASSIGNMENT });
+  expect(asked.map((capture) => capture.agent)).toEqual([
+    {
+      id: 'nested-1',
+      type: 'general-purpose',
+      parents: ['lead'],
+      cwd: '/repo/.claude/worktrees/w',
+    },
+    // An agent above it that the host no longer lists is named as unknown.
+    { id: 'orphan-1', type: 'general-purpose', parents: [''], cwd: '/repo' },
+    // One the host does not list goes by its id alone, and the CLI keeps it native.
+    { id: 'unlisted-1' },
+  ]);
+  expect(asked.every((capture) => capture.input && !('agentId' in (capture.input as object)))).toBe(
+    true,
+  );
+  expect(ran).toEqual(['nested-1', 'orphan-1', 'unlisted-1']);
+});
+
+test("a DeepSeek worker's own subagents get no offer: the same subagent call that is held in the parent runs natively in a worker", async ($, on) => {
+  // Catches: a worker's subagent call sent for an offer once subagent calls are offered;
+  // and, in the parent's process, the subagent's call sent with `agentId` in its input.
+  const env: Record<string, string> = { HOME: '/home/test' };
+  on('env.get', (_$, e) => ({ value: env[e.name] }));
+  mock.clock(on, { now: NOW });
+  on('session.id', () => ({ value: SESSION }));
+  const files = new Map([[`${DATA}/config.json`, JSON.stringify({ router: { subagents: true } })]]);
+  on('fs.read', (_$, e) => {
+    const text = files.get(e.path);
+    return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
+  });
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push((e.capture as Record<string, unknown>).agent);
+    return { result: offered, text: offered };
+  });
+  listed(on, [agent('child-1', 'general-purpose')]);
+  const ran = native(on);
+  const call = (id: string) =>
+    $.tool.call({ tool: 'Agent', tool_use_id: id, agentId: 'child-1', ...ASSIGNMENT });
+  await call('in_parent');
+  env.TENJIN_MODEL_WORKER = '1';
+  const inWorker = await call('in_worker');
+  expect(inWorker.result).toBe('native child result');
+  expect(asked).toEqual([{ id: 'child-1', type: 'general-purpose', parents: [], cwd: '/repo' }]);
+  expect(ran).toEqual(['in_worker']);
 });

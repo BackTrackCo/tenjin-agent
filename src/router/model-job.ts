@@ -18,6 +18,8 @@ const jobSchema = z.object({
   nativeTool: z.enum(['Agent', 'Task']).optional(),
   /** The parent's model request that made the call, as the host numbers it. */
   step: z.string().optional(),
+  /** The agent id of the native subagent that made the call and receives its offer; absent for the main loop. */
+  caller: z.string().optional(),
   decision: z.record(z.string(), z.unknown()),
   capAtomic: z.string().regex(/^\d+$/),
   state: z.enum([
@@ -88,6 +90,7 @@ export const NO_OFFER_CODES = [
   'permission_mode',
   'worker_unqualified',
   'input_filter',
+  'caller_unqualified',
   'scope_not_covered',
   'parent_context_unavailable',
   'over_size_limit',
@@ -113,6 +116,8 @@ const noOfferSchema = z.object({
   bytes: z.number().optional(),
   limit: z.number().optional(),
   offerId: z.uuid().optional(),
+  /** Set when a native subagent made the call, not the main loop. */
+  from: z.literal('subagent').optional(),
 });
 export type NoOffer = z.infer<typeof noOfferSchema>;
 const NO_OFFERS_KEPT = 200;
@@ -386,8 +391,10 @@ export class ModelJobStore {
    * unchanged. Matched by content, never by call ID, so the host's permission
    * review sees the call that runs. Once per offer: a match ends the offer, so
    * it cannot be accepted after, and a later repeat is a new call. It matches
-   * in the same session and workspace root until the offer expires, or for the
-   * same time after its accepted worker stopped. No turn boundary is read.
+   * in the same session, workspace root and agent loop (`caller`, the native
+   * subagent that made the offered call, or none for the main loop) until the
+   * offer expires, or for the same time after its accepted worker stopped. No
+   * turn boundary is read.
    *
    * Several open offers can hold the same content. One repeat settles one of
    * them, the oldest first. A call made by the same model request (`step`) as
@@ -402,6 +409,7 @@ export class ModelJobStore {
     tool: 'Agent' | 'Task',
     native: Record<string, unknown>,
     step?: string,
+    caller?: string,
   ): Promise<string | null> {
     return this.locked(async () => {
       for (const id of await this.repeatIds(this.repeatPath(session, root, tool, native))) {
@@ -413,6 +421,8 @@ export class ModelJobStore {
           job.nativeTool !== tool ||
           !REPEATABLE.includes(job.state) ||
           job.expiresAt <= Date.now() ||
+          // An offer is kept native by the loop it was made to, not by another's same call.
+          job.caller !== caller ||
           (step !== undefined && job.step === step) ||
           canonicalHash(repeatKey(job.native)) !== canonicalHash(repeatKey(native))
         )

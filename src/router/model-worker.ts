@@ -1,4 +1,12 @@
 import { completedMessageSse, workerMessages } from './model-messages';
+import {
+  answerWorkerWebSearch,
+  workerFetchFallback,
+  workerWebSearch,
+  type WorkerFetchEvent,
+  type WorkerRequest,
+  type WorkerWebDeps,
+} from './model-worker-web';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -160,6 +168,9 @@ export async function runModelWorker(
     claudeSession?: ClaudeWorkerSession;
     /** Tests only: a start-up window. A job has none; its start is bounded by the wall time and by cancel. */
     startupMs?: number;
+    /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
+     *  each search answers that it is not available. */
+    web?: WorkerRequest;
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
@@ -381,6 +392,17 @@ async function runQualifiedWorker(
           worker?.close();
         }, options.startupMs);
   initTimer?.unref();
+  // The worker's web searches, and a page its WebFetch could not fetch, paid as Tenjin
+  // tool calls from the person's wallet and counted in this job's budget.
+  const web: WorkerWebDeps = {
+    job,
+    transport: options.transport,
+    dataDir: options.dataDir,
+    ...(options.web ? { request: options.web } : {}),
+    signal: controller.signal,
+  };
+  const fetchFallback = async (event: WorkerFetchEvent) =>
+    controller.signal.aborted ? null : workerFetchFallback(event, { ...web, redact: redactAll });
   const bridge = createServer((req, res) => {
     const handle = async () => {
       try {
@@ -402,7 +424,7 @@ async function runQualifiedWorker(
         let size = 0;
         for await (const chunk of req) {
           size += chunk.length;
-          if (size > 8 * 1024 * 1024) throw new Error('Worker request too large');
+          if (size > 8 * 1024 * 1024) throw new UnsupportedRequest('the request is too large');
           chunks.push(chunk);
         }
         // An env file a command just wrote, or a settings file the person just changed, is
@@ -413,16 +435,37 @@ async function runQualifiedWorker(
         if (envFiles.uncovered.size)
           throw new ModelWorkerStopped({ kind: 'execution_failure', reason: 'env_file_unscanned' });
         // Env values may need JSON escapes, so they are replaced in the parsed strings.
-        const raw = redactWorkerMessage(
-          JSON.parse(
-            withholdDroppedDirectories(
-              redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
-              workspace.droppedDirectories,
-            ),
-          ),
-          redactEnv,
-        ) as Record<string, unknown>;
-        const messages = workerMessages(raw);
+        const text = withholdDroppedDirectories(
+          redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
+          workspace.droppedDirectories,
+        );
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new UnsupportedRequest('the request is not JSON');
+        }
+        const raw = redactWorkerMessage(parsed, redactEnv) as Record<string, unknown>;
+        const send = (message: unknown) => {
+          if (raw.stream === true)
+            res
+              .writeHead(200, { 'content-type': 'text/event-stream' })
+              .end(completedMessageSse(message));
+          else
+            res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(message));
+        };
+        // A worker's WebSearch: answered here, never sent on to the model.
+        const search = workerWebSearch(raw);
+        if (search) {
+          send(await answerWorkerWebSearch(search, web));
+          return;
+        }
+        let messages: ReturnType<typeof workerMessages>;
+        try {
+          messages = workerMessages(raw);
+        } catch {
+          throw new UnsupportedRequest('the request has a field or tool the bridge does not send');
+        }
         assertCurrentMode();
         // A model call that returned no result ends the job with its cause in fixed codes
         // (the router's status, a timeout, the ceiling), not as an error nobody can read.
@@ -431,13 +474,24 @@ async function runQualifiedWorker(
           .catch((error: unknown) => {
             throw controller.signal.aborted ? error : modelCallStop(error);
           });
-        if (raw.stream === true)
-          res
-            .writeHead(200, { 'content-type': 'text/event-stream' })
-            .end(completedMessageSse(message));
-        else
-          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(message));
+        send(message);
       } catch (error) {
+        // ONE REQUEST THE BRIDGE CANNOT SEND fails alone, as a provider's 400 does: nothing
+        // was sent on or paid, and the native tool that asked for it reports the error.
+        if (error instanceof UnsupportedRequest) {
+          if (!res.headersSent) res.writeHead(400, { 'content-type': 'application/json' });
+          if (!res.destroyed)
+            res.end(
+              JSON.stringify({
+                type: 'error',
+                error: {
+                  type: 'invalid_request_error',
+                  message: `Tenjin's worker bridge did not send this request: ${error.message}. Nothing was charged.`,
+                },
+              }),
+            );
+          return;
+        }
         proxyFailure ??= { error };
         const stop = () => {
           // Transport has already drained any signed accounting before it
@@ -738,12 +792,20 @@ async function runQualifiedWorker(
               hooks: [
                 async (input) => {
                   if (input.hook_event_name !== 'PostToolUse') return {};
-                  const reminder = repeats.observe(input.tool_name, input.tool_input);
-                  return reminder
+                  const context = [
+                    repeats.observe(input.tool_name, input.tool_input),
+                    input.tool_name === 'WebFetch'
+                      ? await fetchFallback({
+                          input: input.tool_input,
+                          response: input.tool_response,
+                        })
+                      : null,
+                  ].filter((text) => typeof text === 'string');
+                  return context.length
                     ? {
                         hookSpecificOutput: {
                           hookEventName: 'PostToolUse',
-                          additionalContext: reminder,
+                          additionalContext: context.join('\n\n'),
                         },
                       }
                     : {};
@@ -756,12 +818,17 @@ async function runQualifiedWorker(
               hooks: [
                 async (input) => {
                   if (input.hook_event_name !== 'PostToolUseFailure') return {};
-                  const reminder = repeats.observe(input.tool_name, input.tool_input);
-                  return reminder
+                  const context = [
+                    repeats.observe(input.tool_name, input.tool_input),
+                    input.tool_name === 'WebFetch' && input.is_interrupt !== true
+                      ? await fetchFallback({ input: input.tool_input, error: input.error })
+                      : null,
+                  ].filter((text) => typeof text === 'string');
+                  return context.length
                     ? {
                         hookSpecificOutput: {
                           hookEventName: 'PostToolUseFailure',
-                          additionalContext: reminder,
+                          additionalContext: context.join('\n\n'),
                         },
                       }
                     : {};
@@ -946,3 +1013,7 @@ async function runQualifiedWorker(
 
 /** Native settings and MCP config of repositories nested in a worker root. */
 const NESTED_PRIVATE = ['.claude/settings.json', '.claude/settings.local.json', '.mcp.json'];
+
+/** A worker request the bridge refuses before anything is sent on or paid; the message
+ *  is fixed text, never the request's content. */
+class UnsupportedRequest extends Error {}

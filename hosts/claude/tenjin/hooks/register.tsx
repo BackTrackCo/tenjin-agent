@@ -120,6 +120,10 @@ export const register: Register = (on) => {
       return next(e);
     const { tool_use_id, ...raw } = e;
     delete (raw as Json).tool;
+    // A NATIVE SUBAGENT'S CALL IS JUDGED AS THE MAIN LOOP'S, at any depth. The host
+    // adds the id of the loop that made a call to its event; that is no field of the
+    // call, so it leaves the input and goes as `agent`, the loop that gets the offer.
+    delete (raw as Json).agentId;
     const translated = await translateViewerContinuation($, e.tool, raw);
     const input = translated.input;
     const owned = translated.owned || ownedContinuationAddress(input, e.tool);
@@ -144,6 +148,7 @@ export const register: Register = (on) => {
       // again unchanged, and that repeat runs here as it was reviewed. The model
       // request that made it tells that repeat from a second call of one response.
       const step = modelStep(e.agentId);
+      const agent = e.agentId === undefined ? undefined : await callerOf($, e.agentId);
       const response = await $.tool.call({
         tool: 'mcp__plugin_tenjin_router__subagent',
         capture: {
@@ -152,6 +157,7 @@ export const register: Register = (on) => {
           input,
           tool: e.tool,
           ...(step !== undefined ? { step } : {}),
+          ...(agent !== undefined ? { agent } : {}),
         },
       });
       const text = textOf(response.result) ?? response.text;
@@ -938,6 +944,31 @@ function ownedContinuationAddress(input: Json, tool: string): boolean {
   return addresses
     .flatMap((value) => (Array.isArray(value) ? value : [value]))
     .some((value) => typeof value === 'string' && /^tenjin-(worker|offer)-/i.test(value.trim()));
+}
+
+/**
+ * THE NATIVE SUBAGENT THAT MADE A CALL, as the host lists it: its id, the type it runs
+ * as, the types of the agents above it (nearest first, '' for one no longer listed)
+ * and the folder it works in. The CLI judges from these whether it can accept an offer
+ * and whether a worker would run as its native child would. One the host does not list
+ * goes by its id alone, and the CLI keeps its call native.
+ */
+async function callerOf($: Dollar, agentId: string): Promise<Json> {
+  try {
+    const agents = await $.agent.list();
+    const own = agents.find((agent) => agent.id === agentId);
+    if (!own) return { id: agentId };
+    const parents: string[] = [];
+    let above = own.parentId;
+    while (above !== undefined) {
+      const parent = parents.length < 16 ? agents.find((agent) => agent.id === above) : undefined;
+      parents.push(parent?.type ?? '');
+      above = parent?.parentId;
+    }
+    return { id: agentId, type: own.type, parents, cwd: own.cwd };
+  } catch {
+    return { id: agentId };
+  }
 }
 
 function heldModelResult(tool: string, input: Json, offerText: string, agentId: string) {
