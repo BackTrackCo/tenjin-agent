@@ -75,7 +75,7 @@ const spawn = childProcess.spawn;
 childProcess.spawn = function (file, args, options) {
   const child = Reflect.apply(spawn, this, [file, args, options]);
   if (args?.[0] === '--worker-sid') {
-    const session = args.includes('--session-id');
+    const session = args.some((arg) => arg === '--session-id' || arg.startsWith('--session-id='));
     const evidence = { closed: false, ready: false };
     launches.push(evidence);
     if (session) children.push(evidence);
