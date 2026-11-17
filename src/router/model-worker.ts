@@ -69,7 +69,7 @@ import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
-  workerStartupMs,
+  workerStop,
   WORKER_EMERGENCY_TURNS,
 } from './model-worker-control';
 
@@ -134,7 +134,7 @@ export async function runModelWorker(
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
-    /** Tests only: the start-up window, which otherwise matches native Claude Code's. */
+    /** Tests only: a start-up window. A job has none; its start is bounded by the wall time and by cancel. */
     startupMs?: number;
     activity?: {
       observe: (message: unknown) => void;
@@ -308,17 +308,21 @@ async function runQualifiedWorker(
   }
   const denyInitialization = () => initialized(false);
   controller.signal.addEventListener('abort', denyInitialization, { once: true });
-  // The native allowance (MCP_TIMEOUT, 30 s by default), not a fixed 10 s: a loaded
-  // machine starts Claude Code slowly, and a missed start leaves the routing fee paid.
-  const initTimer = setTimeout(
-    () => {
-      initialized(false);
-      controller.abort(new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }));
-      worker?.close();
-    },
-    options.startupMs ?? workerStartupMs(process.env),
-  );
-  initTimer.unref();
+  // No start-up window, as for a native subagent: a loaded machine starts Claude Code
+  // slowly, and a missed start leaves the routing fee paid. The job's wall time and a
+  // cancel bound the start.
+  let started = false;
+  const initTimer =
+    options.startupMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          initialized(false);
+          controller.abort(
+            new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }),
+          );
+          worker?.close();
+        }, options.startupMs);
+  initTimer?.unref();
   const bridge = createServer((req, res) => {
     const handle = async () => {
       try {
@@ -737,6 +741,7 @@ async function runQualifiedWorker(
         controller.signal.throwIfAborted();
         assertCurrentMode();
         initialized(matches);
+        started = true;
         clearTimeout(initTimer);
         activityReady = true;
         try {
@@ -805,9 +810,11 @@ async function runQualifiedWorker(
     envFiles.close();
   }
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
-  // A child that never started reports that, whatever the SDK threw on the way out.
-  const stopped = controller.signal.reason;
-  if (stopped instanceof ModelWorkerStopped && stopped.stop.kind === 'not_started') throw stopped;
+  // A child that never started reports that, whatever the SDK threw on the way out,
+  // also when the job's wall time is what ended the wait.
+  const stop = workerStop(controller.signal.reason);
+  if (stop?.kind === 'not_started' || (!started && stop?.reason === 'wall_time'))
+    throw new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' });
   if (executionFailure) throw executionFailure.error;
   return redactAll(result!);
 }

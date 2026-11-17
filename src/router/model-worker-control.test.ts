@@ -4,18 +4,8 @@ import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
-  workerStartupMs,
   workerStop,
 } from './model-worker-control';
-
-it("gives the worker's Claude Code the start-up time native Claude Code gives an MCP server", () => {
-  expect(workerStartupMs({})).toBe(30_000);
-  expect(workerStartupMs({ MCP_TIMEOUT: '90000' })).toBe(90_000);
-  for (const invalid of ['0', '-5', 'soon', '1.5'])
-    expect(workerStartupMs({ MCP_TIMEOUT: invalid })).toBe(30_000);
-  // Never past the job's own wall time: the window is part of it.
-  expect(workerStartupMs({ MCP_TIMEOUT: String(10 ** 9) })).toBe(40 * 60 * 1000);
-});
 
 afterEach(() => vi.useRealTimers());
 
@@ -85,6 +75,19 @@ it('waits for the owned runner to drain after the forty-minute wall guard', asyn
   drained();
   expect(workerStop(await outcome)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it('reports a worker the wall guard found still starting as not started, never as a wall stop', async () => {
+  vi.useFakeTimers();
+  const run = withWorkerDeadline(new AbortController().signal, async (signal) => {
+    await new Promise<void>((resolve) =>
+      signal.addEventListener('abort', () => resolve(), { once: true }),
+    );
+    throw new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' });
+  });
+  const outcome = run.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(40 * 60 * 1000);
+  expect(workerStop(await outcome)).toEqual({ kind: 'not_started', reason: 'startup_timeout' });
 });
 
 it('preserves caller interruption, drains it and clears its wall timer', async () => {

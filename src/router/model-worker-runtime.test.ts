@@ -813,7 +813,72 @@ it("reads its working directories' env files natively, and only their placeholde
   }
 });
 
-it('ends a worker whose Claude Code never starts in its window as not started', async () => {
+/** A Claude Code child that is still starting: resolves once the worker has spawned it. */
+function startingQuery(account: Promise<unknown>) {
+  void authenticationQuery(account);
+  const spawn = vi.mocked(query).getMockImplementation()!;
+  return new Promise<void>((spawned) => {
+    vi.mocked(query).mockImplementation((call) => {
+      const child = spawn(call);
+      spawned();
+      return child;
+    });
+  });
+}
+
+it('waits for a slow Claude Code start as a native subagent does, and still cancels it', async () => {
+  vi.useFakeTimers();
+  try {
+    let allow!: (account: unknown) => void;
+    const spawned = startingQuery(
+      new Promise((resolve) => {
+        allow = resolve;
+      }),
+    );
+    let settled = false;
+    const run = runModelWorker(job, options()).finally(() => {
+      settled = true;
+    });
+    await spawned;
+    // Far past the old 30 s window and any MCP_TIMEOUT: only the wall time bounds a start.
+    await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+    expect(settled).toBe(false);
+    allow({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' });
+    await expect(run).resolves.toBe('done');
+
+    const controller = new AbortController();
+    const again = startingQuery(new Promise<never>(() => {}));
+    const stopped = runModelWorker(job, { ...options(), signal: controller.signal }).catch(
+      (error: unknown) => error,
+    );
+    await again;
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    controller.abort(new Error('Esc during start'));
+    // A cancel is the person's stop, never a start that timed out.
+    const error = await stopped;
+    expect(error).toBeInstanceOf(Error);
+    expect(workerStop(error)).toBeUndefined();
+    expect(native.close).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('reports a worker still starting at the wall time as not started', async () => {
+  vi.useFakeTimers();
+  try {
+    const spawned = startingQuery(new Promise<never>(() => {}));
+    const run = runModelWorker(job, options()).catch((error: unknown) => error);
+    await spawned;
+    await vi.advanceTimersByTimeAsync(40 * 60 * 1000);
+    expect(workerStop(await run)).toEqual({ kind: 'not_started', reason: 'startup_timeout' });
+    expect(native.close).toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('ends a worker whose Claude Code never starts in a test window as not started', async () => {
   vi.mocked(query).mockImplementation(
     () =>
       ({
@@ -833,8 +898,8 @@ it('ends a worker whose Claude Code never starts in its window as not started', 
   expect(native.close).toHaveBeenCalled();
 });
 
-it('finishes GitHub setup before the native initialization window starts', async () => {
-  // gh auth token can wait on the keychain; it must not eat the start-up window.
+it('finishes GitHub setup before a start-up window starts', async () => {
+  // gh auth token can wait on the keychain; it must not eat a start-up window.
   vi.useFakeTimers();
   try {
     let release!: () => void;
@@ -852,8 +917,8 @@ it('finishes GitHub setup before the native initialization window starts', async
         }),
     );
     sdkResult({ subtype: 'success', result: 'done' });
-    const run = runModelWorker(job, options());
-    // Longer than the whole 30 s window: setup time is not taken from it.
+    const run = runModelWorker(job, { ...options(), startupMs: 30_000 });
+    // Longer than the whole window: setup time is not taken from it.
     await vi.advanceTimersByTimeAsync(31_000);
     release();
     await expect(run).resolves.toBe('done');

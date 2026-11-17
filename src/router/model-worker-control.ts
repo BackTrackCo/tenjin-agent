@@ -4,22 +4,6 @@ import { canonicalHash } from '../lib/request-schema';
 export const WORKER_WALL_MS = 40 * 60 * 1000;
 export const WORKER_EMERGENCY_TURNS = 500;
 
-/** Claude Code's own allowance before it gives up on an MCP server: `MCP_TIMEOUT`, default 30 s. */
-export const WORKER_STARTUP_MS = 30_000;
-
-/**
- * How long the worker's Claude Code may take to start, matching what native
- * Claude Code allows: the person's `MCP_TIMEOUT` when set, else its 30 s
- * default. Native sessions connect MCP servers without waiting for them, and
- * so does the worker; this bounds the child's own start, inside the job's wall time.
- */
-export function workerStartupMs(env: NodeJS.ProcessEnv): number {
-  const configured = Number(env.MCP_TIMEOUT);
-  return Number.isSafeInteger(configured) && configured > 0
-    ? Math.min(configured, WORKER_WALL_MS)
-    : WORKER_STARTUP_MS;
-}
-
 export type WorkerStop = {
   kind: 'harness_limit' | 'provider_limit' | 'execution_failure' | 'not_started';
   reason:
@@ -99,6 +83,8 @@ export async function withWorkerDeadline<T>(
     controller.signal.throwIfAborted();
     return result;
   } catch (error) {
+    // A worker the wall bound found still starting ran nothing: it reports that.
+    if (workerStop(error)?.kind === 'not_started') throw error;
     if (controller.signal.reason instanceof ModelWorkerStopped) throw controller.signal.reason;
     throw error;
   } finally {
