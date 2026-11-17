@@ -1119,6 +1119,46 @@ it('cancels a running Claude worker by its offer after a later parent prompt cha
   }
 });
 
+it('answers a follow that outlasts its wait with where the worker stands, so no read is held open for the run', async () => {
+  const f = await ownedClaudeFixture();
+  let started!: () => void;
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  worker.run.mockImplementation(async () => {
+    started();
+    await blocked;
+    return 'completed fixture';
+  });
+  try {
+    const accepted = f.call({ offer_id: f.job.id });
+    await began;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const following = f.activity({ offer_id: f.job.id, follow: true });
+    // Two timers: the client's own request limit, then the follow's wait once it is reached.
+    while (vi.getTimerCount() < 2) await new Promise((next) => setImmediate(next));
+    vi.advanceTimersByTime(25_000);
+    // Not ended: the viewer reads again, and each read stays far under the host's two minutes.
+    expect(await following).toMatchObject({
+      status: 'activity',
+      activity: { offerId: f.job.id, state: 'starting' },
+    });
+    vi.useRealTimers();
+    const last = f.activity({ offer_id: f.job.id, follow: true });
+    release();
+    expect(await last).toMatchObject({ status: 'activity', activity: { state: 'completed' } });
+    expect((await accepted).status).toBe('completed');
+  } finally {
+    vi.useRealTimers();
+    release();
+    await f.close();
+  }
+});
+
 it('reports native tool-use and token counts and keeps the live file only while the worker runs', async () => {
   const f = await ownedClaudeFixture();
   const path = workerProgressPath(dir, 'root', f.job.id);

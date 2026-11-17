@@ -26,6 +26,13 @@ type ActiveConversation = {
   continuationId: string;
 };
 
+/**
+ * How long one `follow` read waits before it answers where the worker stands.
+ * A host moves a tool call that runs past two minutes to a background task of
+ * the parent session, so a viewer follows in short reads, never one long one.
+ */
+const FOLLOW_MS = 25_000;
+
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
   await workerShutdown.get(server)?.();
@@ -126,9 +133,25 @@ export function registerModelTool(
           if (pending?.id !== args.offer_id || pending.root !== root)
             return answer({ status: 'unavailable' });
         }
-        const activity = args.follow
-          ? await views.follow(args.offer_id, extra.signal)
-          : views.get(args.offer_id)?.snapshot();
+        let activity = args.follow ? null : views.get(args.offer_id)?.snapshot();
+        if (args.follow) {
+          const bound = new AbortController();
+          const timer = setTimeout(() => bound.abort(), FOLLOW_MS);
+          timer.unref();
+          try {
+            activity = await views.follow(
+              args.offer_id,
+              AbortSignal.any([extra.signal, bound.signal]),
+            );
+          } finally {
+            clearTimeout(timer);
+          }
+          // Still going: the caller reads again. Only an ended worker ends the following.
+          if (!activity && bound.signal.aborted && !extra.signal.aborted) {
+            activity = views.get(args.offer_id)?.snapshot();
+            if (!activity) return answer({ status: 'waiting' });
+          }
+        }
         if (
           !activity ||
           activity.binding.parentSessionId !== session.sessionId ||

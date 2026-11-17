@@ -186,6 +186,15 @@ function setup(_$: Engine, on: On) {
           },
         };
       await state.followWait;
+      // The follow returned, so the worker ended: the CLI never answers it `running`.
+      const ended = activity();
+      if (ended.activity.state === 'running') ended.activity.state = 'completed';
+      return {
+        value: {
+          isError: false,
+          content: [{ type: 'text' as const, text: JSON.stringify(ended) }],
+        },
+      };
     } else {
       state.inspections++;
       await state.inspectionBlocked;
@@ -491,16 +500,15 @@ test('the live file renders actual activity and settled spend with no MCP read w
       component: 'AbovePrompt',
       props: band(),
     });
+    // One status line: what the worker does is its transcript's to show, never this band's,
+    // and no tool input is printed as raw JSON anywhere.
+    expect(await shownLines(ui)).toEqual([
+      'DeepSeek V4.1 Flash 1017 · running · 1 tool use · 41.2k tokens · $0.0043 so far',
+    ]);
     const shown = (await shownLines(ui)).join(' ');
-    expect(shown).toContain('Read');
-    expect(shown).toContain('/repo/src/example.ts');
-    expect(shown).toContain('export const answer = 42;');
     // While it runs, only what has settled, never the reservation.
-    expect(shown).toContain('Spent $0.0043 so far');
     expect(shown).not.toContain('$0.008');
     expect(shown).toContain('1 tool use · 41.2k tokens');
-    expect(shown).toContain('24');
-    expect(shown).toContain('8 earlier');
     expect(shown).not.toContain('PRIVATE_RAW_THINKING');
     expect(shown).not.toContain('PRIVATE_AUTH');
     await ui.unmount();
@@ -536,7 +544,8 @@ test('only the selected owned native viewer receives the bounded activity panel'
       component: 'AbovePrompt',
       props: band(),
     });
-    expect((await shownLines(owned)).join(' ')).toContain('export const answer = 42;');
+    expect((await shownLines(owned)).join(' ')).toContain('DeepSeek V4.1 Flash 1017 · running');
+    expect((await shownLines(owned)).join(' ')).not.toContain('export const answer');
     await owned.unmount();
     for (const props of [
       band(''),
@@ -919,7 +928,6 @@ for (const terminal of ['completed', 'cancelled'] as const) {
       const shown = (await shownLines(ui)).join(' ');
       expect(shown).toContain('activity unavailable');
       expect(shown).not.toContain('1017 · running');
-      expect(shown).toContain('Read');
       await ui.unmount();
     },
   );
@@ -1026,7 +1034,6 @@ test('failed final inspection labels the cached activity unavailable instead of 
   const shown = (await shownLines(ui)).join(' ');
   expect(shown).toContain('activity unavailable');
   expect(shown).not.toContain('1017 · running');
-  expect(shown).toContain('Read');
   await ui.unmount();
 });
 
@@ -1385,8 +1392,8 @@ for (const [phase, started, rows, ending] of [
 
 test("the viewer's transcript grows with the worker's rows and keeps the whole run, its denial and its answer", async ($, on) => {
   const f = setup($, on);
-  on('ui.render', { component: 'AssistantMessage' }, ($, e) =>
-    $.ui.resolve(e).Text({ children: ['stored: ' + e.props.text] }),
+  on('ui.render', { component: 'Spinner' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['✻ ' + (e.props.message ?? e.props.word) + e.props.suffix] }),
   );
   let release: () => void = () => undefined;
   const blocked = new Promise<void>((resolve) => {
@@ -1435,12 +1442,15 @@ test("the viewer's transcript grows with the worker's rows and keeps the whole r
   f.state.rows = [read];
   await remember($);
   const { running, firstStep } = await startWithViewer($, f);
-  const transcript = async () => {
+  // What the host draws in the viewer's transcript area while its turn runs: the spinner
+  // of that agent, with no reply yet to draw. The rows stand above it there.
+  const transcript = async (agent = 'native-viewer-1') => {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
       surface: 'terminal',
-      component: 'AssistantMessage',
-      props: { text: HEADER, isFirstOfReply: true },
+      component: 'Spinner',
+      requestId: agent,
+      props: { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' },
     });
     const lines = await shownLines(ui);
     await ui.unmount();
@@ -1448,20 +1458,20 @@ test("the viewer's transcript grows with the worker's rows and keeps the whole r
   };
   await f.clock.advance(1000);
   expect(await transcript()).toEqual([
-    'DeepSeek #1 · Read selected source',
     '⏺ Read(src/router/model-mcp.ts)',
-    'Working…',
+    '✻ DeepSeek · Read(src/router/model-mcp.ts)…',
   ]);
+  // The parent's own spinner names the step and carries no rows.
+  expect(await transcript('main')).toEqual(['✻ DeepSeek · Read(src/router/model-mcp.ts)…']);
   // The CLI's window moved on: the first row left it and stays in the transcript.
   f.state.rows = [said, { ...push, state: 'running', outputPreview: undefined }];
   f.state.sequence = 5;
   await f.clock.advance(1000);
   expect(await transcript()).toEqual([
-    'DeepSeek #1 · Read selected source',
     '⏺ Read(src/router/model-mcp.ts)',
     'The cancel path reads one turn. Checking lint.',
     '⏺ Bash(git push origin main)',
-    'Working…',
+    '✻ DeepSeek · Bash(git push origin main)…',
   ]);
   f.state.rows = [push, lint];
   f.state.sequence = 9;
@@ -1494,8 +1504,8 @@ test("the viewer's transcript grows with the worker's rows and keeps the whole r
   // A successful call's output is never copied into the transcript.
   expect(stored).not.toContain('PRIVATE_');
   await f.clock.settle();
-  // Written: the rows held while it ran are released, and the engine draws the stored reply.
-  expect(await transcript()).toEqual(['stored: ' + HEADER]);
+  // Written: the rows held while it ran are released, and the stored reply is the record.
+  expect(await transcript()).toEqual(['✻ Sauteing…']);
 });
 
 test("the viewer's first message draws the worker's real assignment, and a short line once it is no longer held", async ($, on) => {
@@ -1524,4 +1534,92 @@ test("the viewer's first message draws the worker's real assignment, and a short
   );
   // Any other message is the engine's own.
   expect(await message('Read src/example.ts.')).toBe('Read src/example.ts.');
+});
+
+test('an accept call the host moved to the background stays one live DeepSeek row and ends with the worker, never as Not started', async ($, on) => {
+  const f = setup($, on);
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
+  const shown: string[] = [];
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    shown.push(e.props.text);
+    return $.ui.resolve(e).Text({ children: [e.props.text] });
+  });
+  // What the host answers the parent after two minutes, in place of the worker's envelope.
+  const notice =
+    'MCP tool "plugin:tenjin:router/subagent" is still running after 120s. It was moved to the background as task k854rfv5w and keeps running; you\'ll receive a notification with the result when it completes.';
+  f.state.work = () => ({ result: notice, text: notice });
+  await remember($);
+  const moved = await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  expect(moved.text).toBe(notice);
+  // Its viewer goes on following the worker, in short reads of its own.
+  f.state.followWait = new Promise<void>((resolve) => {
+    f.state.finishFollow = resolve;
+  });
+  await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+  const viewing = step($, 'native-viewer-1');
+  await f.clock.advance(1000);
+  const row = async (output?: string) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props: { ...toolRow('parent_accept', ACCEPT, { offer_id: OFFER }, output) },
+    });
+    const lines = (await shownLines(ui)).join('');
+    const [dot] = await ui.findAll({ type: 'Text', text: '⏺' });
+    await ui.unmount();
+    return [lines, dot?.props.color] as const;
+  };
+  // The call has "a result" now, and the worker is still running: so is its row.
+  expect(await row(notice)).toEqual([
+    '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
+    undefined,
+  ]);
+  // The notice itself, which names the server and the tool, is not drawn under it.
+  const result = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'parent_accept', tool: ACCEPT, output: notice, isErrored: false },
+  });
+  expect(await shownLines(result)).toEqual([]);
+  await result.unmount();
+  await f.clock.advance(120_000);
+  expect((await row(notice))[0]).toContain('· 2m 1s ·');
+  // The worker ends: its display file goes, and the CLI says how it ended.
+  f.state.liveFile = false;
+  f.state.phase = 'completed';
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  expect(await row(notice)).toEqual([
+    '⏺DeepSeek(Read selected source)  ⎿  Done (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
+    'success',
+  ]);
+  // And its viewer, never retired at the two-minute mark, keeps the whole run.
+  f.state.finishFollow();
+  expect((await viewing).answer).toBe(
+    HEADER +
+      '```\n⏺ Read(src/example.ts)\n```\n\nDone (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
+  );
+  await f.clock.settle();
+  // The task's own notification reads as the worker finishing, by the task id or the call's.
+  for (const task of [{ id: 'k854rfv5w' }, { toolUseId: 'parent_accept' }]) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'UserMessage',
+      props: {
+        text: 'MCP task k854rfv5w (plugin:tenjin:router/subagent) completed.',
+        origin: { kind: 'task-notification' },
+        isExpanded: false,
+        task: { ...task, status: 'completed' },
+      },
+    });
+    await ui.unmount();
+    expect(shown.at(-1)).toBe(
+      'DeepSeek "Read selected source" finished · Done (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
+    );
+  }
 });

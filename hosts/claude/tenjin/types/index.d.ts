@@ -77,8 +77,6 @@ export type TenjinModelTranscript = {
   /** Oldest rows left out to stay inside the bound. */
   dropped: number;
   rows: TenjinModelActivity['rows'];
-  /** True once the viewer's transcript holds the run: the rows here are then released. */
-  written?: true;
 };
 
 /** One accept call's live row, kept by its offer id while the worker runs. Display only. */
@@ -96,6 +94,14 @@ export type TenjinModelWorker = {
   spentAtomic?: string;
   /** The worker's latest step, as a native row names it: `Read(src/a.ts)`. */
   current?: string;
+  /**
+   * How the worker ended, once it has: from the accept call's answer or, for a
+   * call the host moved to the background, from the CLI. The row's end line
+   * reads this, never the absence of an answer.
+   */
+  ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started';
+  /** The final spend still has an unsettled part. */
+  unresolved?: boolean;
 };
 
 export type TenjinModelViewerRecord = {
