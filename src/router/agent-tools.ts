@@ -76,17 +76,16 @@ export async function requestToolAccess(
  */
 export function accessOf(definition: string, tool: string = requestToolName()): RequestToolAccess {
   const frontmatter = frontmatterOf(definition);
-  if (frontmatter === null) return 'unknown';
-  const disallowed = listField(frontmatter, 'disallowedTools');
+  // Frontmatter this cannot read exactly says nothing: a tool limit missed here would
+  // redirect an agent to a tool it cannot call, and `unknown` gets no router call.
+  const read = frontmatter === null ? null : readFrontmatter(frontmatter, ANY_AGENT);
+  if (read === null || 'unmatched' in read) return 'unknown';
   if (
-    disallowed !== undefined &&
-    disallowed.some((entry) => namesRequestTool(entry, tool) || namesLegacyTool(entry))
-  ) {
+    read.disallowedTools?.some((entry) => namesRequestTool(entry, tool) || namesLegacyTool(entry))
+  )
     return 'excluded';
-  }
-  const tools = listField(frontmatter, 'tools');
-  if (tools === undefined) return 'allowed';
-  return tools.some((entry) => namesRequestTool(entry, tool)) ? 'allowed' : 'excluded';
+  if (read.tools === undefined) return 'allowed';
+  return read.tools.some((entry) => namesRequestTool(entry, tool)) ? 'allowed' : 'excluded';
 }
 
 /**
@@ -140,64 +139,111 @@ const WORKER_MATCHED_KEYS = new Set([
 /** A tool entry as agent files write one: a name, with an optional rule in parentheses. */
 const TOOL_ENTRY = /^[A-Za-z_][\w*.:-]*(\([^()]*\))?$/;
 
+type Frontmatter = { name?: string; tools?: string[]; disallowedTools?: string[] };
+/** What a reader's caller can take from a definition. */
+type FrontmatterRules = {
+  /** False for a key the caller cannot take: it is reported by its name. */
+  key: (key: string, value: string) => boolean;
+  /** Whether a tool entry is one the caller can use as written. */
+  entry: (entry: string) => boolean;
+  /** Whether a tool list with nothing in it has one reading for the caller. */
+  emptyList: boolean;
+};
 /**
- * What a custom agent's frontmatter says, for a worker that will run as it:
- * its tool lists, or the first thing a worker cannot match. A worker runs the
- * agent's prompt and tools on its own model, in the accepted session's
- * permission mode, in the foreground: a definition that pins a model, a mode,
- * isolation, background running, memory, or its own hooks, servers or skills
- * runs natively. `model: inherit` pins nothing.
+ * A WORKER RUNS AS THE AGENT, so it takes only what it can match: the agent's
+ * prompt and tools on its own model, in the accepted session's permission
+ * mode, in the foreground. A definition that pins a model, a mode, isolation,
+ * background running, memory, or its own hooks, servers or skills runs
+ * natively. `model: inherit` pins nothing.
+ */
+const WORKER_AGENT: FrontmatterRules = {
+  key: (key, value) =>
+    key === 'model' ? ['', 'inherit'].includes(value) : WORKER_MATCHED_KEYS.has(key),
+  entry: (entry) => TOOL_ENTRY.test(entry) && !entry.includes(','),
+  // All tools to some readers, none to others.
+  emptyList: false,
+};
+/** The router only asks whether an agent can call one tool: every key is its own business. */
+const ANY_AGENT: FrontmatterRules = {
+  key: () => true,
+  entry: (entry) => entry === '*' || TOOL_ENTRY.test(entry),
+  emptyList: true,
+};
+
+/** A one-line value without its trailing comment and quotes; null when it cannot be told. */
+function scalar(raw: string): string | null {
+  const value = raw.trim();
+  if (!/\s#/.test(` ${value}`)) return unquote(value);
+  // A `#` inside quotes is text, and telling which it is takes a YAML reader.
+  return /['"]/.test(value) ? null : value.replace(/(^|\s+)#.*$/, '');
+}
+
+/** A one-line list's entries: commas split it, but not inside a rule's parentheses. */
+function entriesOf(value: string): string[] {
+  return (value.match(/(?:[^,(]|\([^()]*\))+/g) ?? [])
+    .map((part) => unquote(part.trim()))
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * What an agent definition's frontmatter says: its name and tool lists, or the
+ * first thing the caller cannot take.
  *
  * READ STRICTLY, NOT AS YAML. This reads plain top-level `key: value` lines, a
- * one-line or `- item` tool list, and indented text under a plain key. Any
- * other syntax (a quoted key such as `'tools': [Read]`, a list over several
- * lines in brackets, a repeated key, a tool entry that is not a plain name) is
- * `frontmatter`: Claude Code would read it and this would not, and a tool list
- * missed here would give the worker every tool.
+ * one-line or `- item` tool list, a trailing comment, and indented text or
+ * items under a plain key. Any other syntax (a quoted key such as
+ * `'tools': [Read]`, a list over several lines in brackets, a block scalar for
+ * a tool list, a repeated key, a tool entry that is not a plain name) is
+ * `frontmatter`: Claude Code would read it and this would not. A tool list
+ * missed here would give a worker every tool, and send a subagent to a tool it
+ * cannot call.
  */
-function workerFrontmatter(
+function readFrontmatter(
   frontmatter: string[],
-): { tools?: string[]; disallowedTools?: string[] } | { unmatched: string } {
-  const lists: { tools?: string[]; disallowedTools?: string[] } = {};
+  rules: FrontmatterRules = WORKER_AGENT,
+): Frontmatter | { unmatched: string } {
+  const read: Frontmatter = {};
   const seen = new Set<string>();
-  /** The key the indented lines below belong to, and whether it is an open tool list. */
+  /** The key the lines below belong to, and whether it is an open tool list. */
   let under: { key: string; list: boolean } | undefined;
   for (const line of frontmatter) {
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
-    if (/^\s/.test(line)) {
+    // Indented lines, and list items at any indent, belong to the key above them.
+    if (/^(\s|-\s)/.test(line)) {
       if (!under) return { unmatched: 'frontmatter' };
       if (!under.list) continue;
-      const item = /^\s+-\s+(.+)$/.exec(line);
-      const entry = item === null ? '' : unquote(item[1]!.trim());
-      if (!TOOL_ENTRY.test(entry)) return { unmatched: 'frontmatter' };
-      lists[under.key as 'tools' | 'disallowedTools']!.push(entry);
+      const entry = scalar(/^\s*-\s+(.+)$/.exec(line)?.[1] ?? '');
+      if (!entry || !rules.entry(entry)) return { unmatched: 'frontmatter' };
+      read[under.key as 'tools' | 'disallowedTools']!.push(entry);
       continue;
     }
     const field = /^([A-Za-z][\w-]*)\s*:(.*)$/.exec(line);
     if (field === null) return { unmatched: 'frontmatter' };
     const [, key, raw] = field as unknown as [string, string, string];
-    const value = raw.trim();
     if (seen.has(key)) return { unmatched: 'frontmatter' };
     seen.add(key);
-    if (key === 'model' ? !['', 'inherit'].includes(unquote(value)) : !WORKER_MATCHED_KEYS.has(key))
-      return { unmatched: key };
     const list = key === 'tools' || key === 'disallowedTools';
+    const value = scalar(raw);
+    if (value === null) {
+      if (list || key === 'name' || !rules.key(key, raw.trim()))
+        return { unmatched: 'frontmatter' };
+      under = { key, list: false };
+      continue;
+    }
+    if (!rules.key(key, value)) return { unmatched: key };
     // Text may run on under a plain key, items under an open list, nothing under a one-line list.
     under = list && value !== '' ? undefined : { key, list };
+    if (key === 'name' && value) read.name = value;
     if (!list) continue;
     const bracketed = value.startsWith('[');
     if (bracketed && !value.endsWith(']')) return { unmatched: 'frontmatter' };
-    const entries = (bracketed ? value.slice(1, -1) : value)
-      .split(',')
-      .map((part) => unquote(part.trim()))
-      .filter((part) => part.length > 0);
-    if (entries.some((entry) => !TOOL_ENTRY.test(entry))) return { unmatched: 'frontmatter' };
-    lists[key] = entries;
+    const entries = entriesOf(bracketed ? value.slice(1, -1) : value);
+    if (entries.some((entry) => !rules.entry(entry))) return { unmatched: 'frontmatter' };
+    read[key] = entries;
   }
-  // A list with nothing in it has no one reading: all tools to some readers, none to others.
-  if ([lists.tools, lists.disallowedTools].some((list) => list?.length === 0))
+  if (!rules.emptyList && [read.tools, read.disallowedTools].some((list) => list?.length === 0))
     return { unmatched: 'frontmatter' };
-  return lists;
+  return read;
 }
 
 /** The agent types Claude Code ships that a worker runs as, with no definition file. */
@@ -247,7 +293,7 @@ export async function workerAgent(
     }
   const frontmatter = text === null ? null : frontmatterOf(text);
   if (text === null || frontmatter === null) return { unmatched: 'subagent_type' };
-  const read = workerFrontmatter(frontmatter);
+  const read = readFrontmatter(frontmatter);
   if ('unmatched' in read) return { unmatched: `definition:${read.unmatched}` };
   const lines = text.split(/\r?\n/);
   const open = lines.findIndex((line) => line.trim() === '---');
@@ -256,7 +302,15 @@ export async function workerAgent(
     .join('\n')
     .trim();
   if (!prompt) return { unmatched: 'definition:prompt' };
-  return { agent: { description: agentType, prompt, ...read } };
+  const { tools, disallowedTools } = read;
+  return {
+    agent: {
+      description: agentType,
+      prompt,
+      ...(tools ? { tools } : {}),
+      ...(disallowedTools ? { disallowedTools } : {}),
+    },
+  };
 }
 
 export async function findDefinition(
@@ -353,41 +407,11 @@ function frontmatterOf(text: string): string[] | null {
   return end === -1 ? null : lines.slice(open + 1, end);
 }
 
+/** The `name:` a definition gives its type, when its frontmatter can be read exactly. */
 function nameOf(text: string): string | null {
   const frontmatter = frontmatterOf(text);
-  if (frontmatter === null) return null;
-  const line = frontmatter.find((l) => /^name\s*:/.test(l));
-  const value = line === undefined ? '' : unquote(line.slice(line.indexOf(':') + 1).trim());
-  return value.length > 0 ? value : null;
-}
-
-/**
- * A top-level list field in the three spellings agent files use: `a, b, c`,
- * `[a, b]`, or a block of `- a` lines. `undefined` when the key is absent.
- */
-function listField(frontmatter: string[], key: string): string[] | undefined {
-  const index = frontmatter.findIndex((l) => new RegExp(`^${key}\\s*:`).test(l));
-  if (index === -1) return undefined;
-  const line = frontmatter[index]!;
-  const inline = line.slice(line.indexOf(':') + 1).trim();
-  if (inline.length > 0) {
-    const body = inline.startsWith('[') && inline.endsWith(']') ? inline.slice(1, -1) : inline;
-    return body
-      .split(',')
-      .map((part) => unquote(part.trim()))
-      .filter((part) => part.length > 0);
-  }
-  const items: string[] = [];
-  for (const next of frontmatter.slice(index + 1)) {
-    const item = /^\s+-\s*(.*)$/.exec(next);
-    if (item === null) {
-      if (next.trim().length === 0) continue;
-      break;
-    }
-    const value = unquote(item[1]!.trim());
-    if (value.length > 0) items.push(value);
-  }
-  return items;
+  const read = frontmatter === null ? null : readFrontmatter(frontmatter, ANY_AGENT);
+  return read === null || 'unmatched' in read ? null : (read.name ?? null);
 }
 
 function unquote(value: string): string {

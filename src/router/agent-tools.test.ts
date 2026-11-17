@@ -57,6 +57,24 @@ describe('what a definition says about the request tool', () => {
   it('cannot say anything without frontmatter', () => {
     expect(accessOf('just prose')).toBe('unknown');
   });
+
+  // Valid frontmatter the older reader got wrong. A limit it missed read as `allowed`, and
+  // the agent's search was then redirected to a tool it cannot call.
+  it.each([
+    ['a trailing comment on a list', 'tools: Read, mcp__x402__request # paid lookups\n', 'allowed'],
+    ['a trailing comment on an item', 'tools:\n  - mcp__x402__request # paid\n', 'allowed'],
+    ["a list at the key's own indent", 'tools:\n- Read\n- mcp__x402__request\n', 'allowed'],
+    ['a rule with a comma in it', 'tools: Agent(a, b), mcp__x402__request\n', 'allowed'],
+    ['a pinned model and its own servers', 'model: sonnet\nmcpServers:\n  - github\n', 'allowed'],
+    ['a quoted tools key', "'tools': [Read]\n", 'unknown'],
+    ['a quoted disallowedTools key', '"disallowedTools": [mcp__x402__request]\n', 'unknown'],
+    ['a list over several lines', 'tools: [Read,\n  mcp__x402__request]\n', 'unknown'],
+    ['a block scalar', 'tools: |\n  Read\n', 'unknown'],
+    ['a repeated key', 'tools: Read\ntools: mcp__x402__request\n', 'unknown'],
+    ['a comment beside a quoted value', 'tools: "Read" # only this\n', 'unknown'],
+  ] as const)('reads %s exactly, or says nothing', (_label, frontmatter, expected) => {
+    expect(accessOf(agent('a', frontmatter))).toBe(expected);
+  });
 });
 
 /**
@@ -107,6 +125,16 @@ describe('finding the definition an agent type names', () => {
     const cwd = join(project, 'src');
     expect(await requestToolAccess('reader', { cwd, homeDir: home })).toBe('excluded');
     expect(await requestToolAccess('reader', { homeDir: home })).toBe('allowed');
+  });
+
+  it('reads a name with a comment, and says nothing of a file whose name it cannot read', async () => {
+    const agents = join(project, '.claude', 'agents');
+    await define(agents, 'a.md', '---\nname: reader # reads\ntools: Read\n---\n\nReads.\n');
+    expect(await requestToolAccess('reader', { cwd: project, homeDir: home })).toBe('excluded');
+    // The type is `fetcher` to Claude Code: this is no definition of `b`, nor a listed agent.
+    await define(agents, 'b.md', "---\n'name': fetcher\ntools: Read\n---\n\nFetches.\n");
+    expect(await requestToolAccess('b', { cwd: project, homeDir: home })).toBe('unknown');
+    expect(await agentsWithoutRequestTool({ cwd: project, homeDir: home })).toEqual(['reader']);
   });
 
   it('finds a definition by its name: when the file is named otherwise', async () => {
