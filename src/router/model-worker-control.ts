@@ -39,12 +39,77 @@ export class ModelCallFailed extends Error {
       cause: 'failed' | 'timeout' | 'budget' | 'payment_refused' | 'provider';
       status?: number;
       payer?: string;
+      /** The router confirms nothing was charged: no payment was sent, or its record
+       *  says the failed call cost nothing and its reservation was released. */
+      uncharged?: true;
+      /** The router's `Retry-After`, in milliseconds, when it sent one. */
+      retryAfterMs?: number;
     },
     options?: ErrorOptions,
   ) {
     super(message, options);
     this.name = 'ModelCallFailed';
   }
+}
+
+/**
+ * A MODEL CALL TRIED AGAIN, as the DeepSeek harness tries one: up to 5 tries, 500 ms
+ * doubling to 10 s with 0.1 jitter, or the router's `Retry-After`. Only a call the router
+ * confirms cost nothing, and only for a rate limit, a server or provider error, a timeout
+ * or a call that never reached it. Never an uncertain or a charged call, never a request
+ * the bridge or the router refused as malformed.
+ */
+export const MODEL_RETRY = { tries: 5, baseMs: 500, maxMs: 10_000, jitter: 0.1, hintMs: 60_000 };
+export function retryableModelCall(error: unknown): error is ModelCallFailed {
+  if (!(error instanceof ModelCallFailed) || error.detail.uncharged !== true) return false;
+  const { cause, status } = error.detail;
+  if (cause === 'provider' || cause === 'timeout') return true;
+  return cause === 'failed' && (status === undefined || status === 429 || status >= 500);
+}
+export async function withModelRetry<T>(
+  call: () => Promise<T>,
+  signal: AbortSignal,
+  onRetry: (attempt: number, error: ModelCallFailed) => void,
+  wait: (ms: number, signal: AbortSignal) => Promise<void> = sleepFor,
+  random: () => number = Math.random,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (attempt >= MODEL_RETRY.tries || signal.aborted || !retryableModelCall(error)) throw error;
+      const hint = error.detail.retryAfterMs;
+      const backoff = Math.min(MODEL_RETRY.maxMs, MODEL_RETRY.baseMs * 2 ** (attempt - 1));
+      const ms =
+        hint !== undefined
+          ? Math.min(hint, MODEL_RETRY.hintMs)
+          : Math.round(backoff * (1 + MODEL_RETRY.jitter * (2 * random() - 1)));
+      onRetry(attempt, error);
+      await wait(ms, signal);
+    }
+  }
+}
+function sleepFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+/** A `Retry-After` header in milliseconds: seconds or an HTTP date; undefined otherwise. */
+export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
 /** Whether a failure, or one of its causes, is a timer's abort (`AbortSignal.timeout`). */

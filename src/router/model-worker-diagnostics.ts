@@ -34,6 +34,8 @@ export type WorkerDiagnostics = {
   /** The latest request's history: assistant turns, and how many carried their reasoning back. */
   reasoning: { turns: number; withThinking: number; textTurns: number; textWithThinking: number };
   repeats: { tool: string; count: number }[];
+  /** Model calls tried again after a failure the router confirmed cost nothing. */
+  retries: { attempt: number; cause: string; status?: number }[];
   stop?: { subtype: string; turns?: number; stopReason?: string };
 };
 
@@ -60,6 +62,7 @@ export class WorkerDiagnosticsRecord {
       settings: { outputCap, compactWindow, thinking: [], maxTurns: null },
       reasoning: { turns: 0, withThinking: 0, textTurns: 0, textWithThinking: 0 },
       repeats: [],
+      retries: [],
     };
   }
 
@@ -105,6 +108,16 @@ export class WorkerDiagnosticsRecord {
     const count = /repeated (\d+) times/.exec(reminder ?? '')?.[1];
     if (!count || this.value.repeats.length >= MAX_REPEATS) return;
     this.value.repeats.push({ tool: tool.slice(0, 200), count: Number(count) });
+  }
+
+  /** A model call tried again: which try failed, and why (fixed codes). */
+  retry(attempt: number, failure: { cause: string; status?: number }): void {
+    if (this.value.retries.length >= MAX_REPEATS) return;
+    this.value.retries.push({
+      attempt,
+      cause: failure.cause.slice(0, 40),
+      ...(failure.status !== undefined ? { status: failure.status } : {}),
+    });
   }
 
   /** The SDK's result message: its subtype, turn count and stop reason. */

@@ -106,6 +106,7 @@ import {
 import { envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
   modelCallStop,
+  withModelRetry,
   ModelWorkerStopped,
   withWorkerDeadline,
   WorkerRepeatReminder,
@@ -537,11 +538,15 @@ async function runQualifiedWorker(
         assertCurrentMode();
         // A model call that returned no result ends the job with its cause in fixed codes
         // (the router's status, a timeout, the ceiling), not as an error nobody can read.
-        const message = await options.transport
-          .messages(job, messages, controller.signal)
-          .catch((error: unknown) => {
-            throw controller.signal.aborted ? error : modelCallStop(error);
-          });
+        // A call the router confirms cost nothing is tried again for a transient failure,
+        // as the DeepSeek harness does (`withModelRetry`); any other failure ends the job.
+        const message = await withModelRetry(
+          () => options.transport.messages(job, messages, controller.signal),
+          controller.signal,
+          (attempt, failure) => diagnostics.retry(attempt, failure.detail),
+        ).catch((error: unknown) => {
+          throw controller.signal.aborted ? error : modelCallStop(error);
+        });
         send(message);
       } catch (error) {
         // ONE REQUEST THE BRIDGE CANNOT SEND fails alone, as a provider's 400 does: nothing

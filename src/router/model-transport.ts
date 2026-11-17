@@ -18,7 +18,7 @@ import {
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
-import { ModelCallFailed, timedOut } from './model-worker-control';
+import { ModelCallFailed, retryAfterMs, timedOut } from './model-worker-control';
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
@@ -375,17 +375,21 @@ export class ModelTransport {
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     }).catch((error: unknown) => {
       if (signal.aborted) throw error;
+      // Nothing is reserved or paid yet: the router confirms nothing was charged.
       throw new ModelCallFailed(
         'Model proxy did not answer',
-        { cause: timedOut(error) ? 'timeout' : 'failed' },
+        { cause: timedOut(error) ? 'timeout' : 'failed', uncharged: true },
         { cause: error },
       );
     });
     if (challenge.status !== 402) {
       await challenge.body?.cancel();
+      const wait = retryAfterMs(challenge.headers.get('retry-after'));
       throw new ModelCallFailed('Model proxy did not return a payment quote', {
         cause: 'failed',
         status: challenge.status,
+        uncharged: true,
+        ...(wait !== undefined ? { retryAfterMs: wait } : {}),
       });
     }
     const header = challenge.headers.get('payment-required');
@@ -542,7 +546,7 @@ export class ModelTransport {
           });
           throw new ModelCallFailed(
             'The model provider failed the call; nothing was charged for it',
-            { cause: 'provider', status: paidError.status },
+            { cause: 'provider', status: paidError.status, uncharged: true },
             { cause: failure },
           );
         }

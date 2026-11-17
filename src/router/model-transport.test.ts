@@ -826,10 +826,19 @@ it('says how a model call failed: the status of an answer that is not a result, 
   };
   const timedOut = await failure();
   expect(timedOut).toBeInstanceOf(ModelCallFailed);
-  expect(timedOut?.detail).toEqual({ cause: 'timeout' });
+  expect(timedOut?.detail).toEqual({ cause: 'timeout', uncharged: true });
   // A quote request answered with an error carries its status.
   f.deps.fetchImpl = async () => new Response('busy', { status: 503 });
-  expect((await failure())?.detail).toEqual({ cause: 'failed', status: 503 });
+  expect((await failure())?.detail).toEqual({ cause: 'failed', status: 503, uncharged: true });
+  // A rate limit's Retry-After is kept, for the retry to wait as asked.
+  f.deps.fetchImpl = async () =>
+    new Response('slow down', { status: 429, headers: { 'retry-after': '3' } });
+  expect((await failure())?.detail).toEqual({
+    cause: 'failed',
+    status: 429,
+    uncharged: true,
+    retryAfterMs: 3000,
+  });
   expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [] });
   // The paid request answered with an error: its reservation stays until its receipt is read.
   f.deps.fetchImpl = async (input, init) =>
@@ -871,7 +880,7 @@ it('releases at once a call the provider failed when the router record says it c
     .messages(f.job, { messages: [] }, new AbortController().signal)
     .catch((error: unknown) => error as ModelCallFailed);
   expect(failed).toBeInstanceOf(ModelCallFailed);
-  expect(failed?.detail).toEqual({ cause: 'provider', status: 500 });
+  expect(failed?.detail).toEqual({ cause: 'provider', status: 500, uncharged: true });
   // One free read of the router's record, nothing bought again, and the quote released.
   expect(f.signedGets()).toBe(1);
   expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });

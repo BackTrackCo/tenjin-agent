@@ -40,6 +40,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
     });
     record.repeat('Bash', 'the same tool and arguments have repeated 3 times consecutively.');
     record.repeat('Read', undefined);
+    record.retry(1, { cause: 'provider', status: 500 });
     record.stop({ subtype: 'success', num_turns: 2, stop_reason: 'end_turn' });
     await record.write(dataDir, 'job-1');
     const path = join(dataDir, 'model-jobs', 'job-1.diagnostics.json');
@@ -59,6 +60,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
       },
       reasoning: { turns: 2, withThinking: 2, textTurns: 1, textWithThinking: 1 },
       repeats: [{ tool: 'Bash', count: 3 }],
+      retries: [{ attempt: 1, cause: 'provider', status: 500 }],
       stop: { subtype: 'success', turns: 2, stopReason: 'end_turn' },
     });
     expect(written).not.toContain('PRIVATE_');

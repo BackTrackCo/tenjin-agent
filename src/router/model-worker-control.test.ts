@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ModelCallFailed,
   modelCallStop,
@@ -6,6 +6,7 @@ import {
   timedOut,
   withWorkerDeadline,
   WorkerRepeatReminder,
+  withModelRetry,
   WORKER_ENDS,
   workerEnd,
   workerResultError,
@@ -214,4 +215,79 @@ it("tells a timer's abort from another failure, also as a cause", () => {
   expect(timedOut(new Error('fetch failed', { cause: timeout }))).toBe(true);
   expect(timedOut(new DOMException('aborted', 'AbortError'))).toBe(false);
   expect(timedOut(new TypeError('fetch failed'))).toBe(false);
+});
+
+// The DeepSeek harness tries a transient failure again; in the payment path only a call the
+// router confirms cost nothing may be, never an uncertain or charged one.
+describe('a model call tried again', () => {
+  const failing = (failures: unknown[], answer = 'ok') => {
+    let calls = 0;
+    const call = async () => {
+      const failure = failures[calls++];
+      if (failure) throw failure;
+      return answer;
+    };
+    return { call, calls: () => calls };
+  };
+  const waits: number[] = [];
+  const wait = async (ms: number) => void waits.push(ms);
+  const signal = new AbortController().signal;
+
+  it('tries a call that cost nothing again, with doubling backoff, and counts each try', async () => {
+    waits.length = 0;
+    const tries: number[] = [];
+    const uncharged = (cause: 'provider' | 'timeout' | 'failed', status?: number) =>
+      new ModelCallFailed('x', { cause, ...(status ? { status } : {}), uncharged: true });
+    const f = failing([uncharged('provider', 500), uncharged('timeout'), uncharged('failed', 503)]);
+    await expect(
+      withModelRetry(
+        f.call,
+        signal,
+        (n) => tries.push(n),
+        wait,
+        () => 0.5,
+      ),
+    ).resolves.toBe('ok');
+    expect(f.calls()).toBe(4);
+    expect(tries).toEqual([1, 2, 3]);
+    expect(waits).toEqual([500, 1000, 2000]);
+  });
+
+  it('stops after five tries', async () => {
+    const failure = new ModelCallFailed('x', { cause: 'provider', uncharged: true });
+    const f = failing([failure, failure, failure, failure, failure, failure]);
+    await expect(withModelRetry(f.call, signal, () => undefined, wait)).rejects.toBe(failure);
+    expect(f.calls()).toBe(5);
+  });
+
+  it('never tries an uncertain or charged call again, nor a malformed request', async () => {
+    for (const failure of [
+      // Signed and sent, no receipt that clears it: uncertain.
+      new ModelCallFailed('uncertain', { cause: 'failed', payer: 'payment_failed', status: 500 }),
+      // Sent and answered; the router's record holds a charge.
+      new ModelCallFailed('charged', { cause: 'failed', status: 502 }),
+      // Refused as malformed: trying again cannot help.
+      new ModelCallFailed('bad', { cause: 'failed', status: 400, uncharged: true }),
+      new ModelCallFailed('ceiling', { cause: 'budget' }),
+      new Error('Unsupported request'),
+    ]) {
+      const f = failing([failure]);
+      await expect(withModelRetry(f.call, signal, () => undefined, wait)).rejects.toBe(failure);
+      expect(f.calls()).toBe(1);
+    }
+  });
+
+  it('waits as the router asks with Retry-After', async () => {
+    waits.length = 0;
+    const f = failing([
+      new ModelCallFailed('x', {
+        cause: 'failed',
+        status: 429,
+        uncharged: true,
+        retryAfterMs: 3000,
+      }),
+    ]);
+    await expect(withModelRetry(f.call, signal, () => undefined, wait)).resolves.toBe('ok');
+    expect(waits).toEqual([3000]);
+  });
 });
