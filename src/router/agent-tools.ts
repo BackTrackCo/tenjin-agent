@@ -407,11 +407,19 @@ function frontmatterOf(text: string): string[] | null {
   return end === -1 ? null : lines.slice(open + 1, end);
 }
 
-/** The `name:` a definition gives its type, when its frontmatter can be read exactly. */
+/**
+ * The `name:` a definition gives its type, read by itself: a file is found by
+ * its name whether or not the rest of its frontmatter can be read, so a project
+ * definition this cannot read still stands in its place, where it keeps the
+ * call native, and lookup never falls through to another file of that name.
+ */
 function nameOf(text: string): string | null {
-  const frontmatter = frontmatterOf(text);
-  const read = frontmatter === null ? null : readFrontmatter(frontmatter, ANY_AGENT);
-  return read === null || 'unmatched' in read ? null : (read.name ?? null);
+  const line = frontmatterOf(text)
+    ?.map((l) => /^(?:name|'name'|"name")\s*:(.*)$/.exec(l)?.[1])
+    .find((value) => value !== undefined);
+  if (line === undefined) return null;
+  const value = scalar(line) ?? unquote(line.replace(/\s+#.*$/, '').trim());
+  return value.length > 0 ? value : null;
 }
 
 function unquote(value: string): string {

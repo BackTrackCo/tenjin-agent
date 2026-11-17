@@ -247,6 +247,30 @@ describe('the custom agents a DeepSeek worker can run as', () => {
     expect(await workerAgent('above', lookup())).toEqual({ unmatched: 'subagent_type' });
   });
 
+  // Claude Code runs the project's definition of a name before the person's. One this
+  // cannot read must keep the call native, not hand the name on to another file.
+  it.each([
+    [
+      'a pinned model and a list over several lines',
+      'model: opus\ntools: [Read,\n  Bash]\n',
+      'name: worker',
+    ],
+    ['a quoted name key', 'tools: Read\n', "'name': worker"],
+  ])(
+    "stays with the project's definition of a name it cannot read: %s",
+    async (_label, rest, name) => {
+      await define(
+        join(project, '.claude', 'agents'),
+        'reviewer.md',
+        `---\n${name}\ndescription: reviews\n${rest}---\n\nReview on Opus.\n`,
+      );
+      await define(join(home, '.claude', 'agents'), 'worker.md', agent('worker', ''));
+      expect(await workerAgent('worker', lookup())).toMatchObject({
+        unmatched: expect.stringMatching(/^definition:/),
+      });
+    },
+  );
+
   it("never takes a plugin's agent, installed and matching or redefined in the project", async () => {
     const install = join(root, 'plugins', 'codex', '1.0.0');
     await define(
