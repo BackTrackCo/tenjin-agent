@@ -127,6 +127,8 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 
 A new chat does not reset the daily budget. Routing fees vary by answer. Tool charges are separate. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
+Tenjin works with an empty wallet: answers that need no paid tool are free within the router's daily limits. When a paid tool would have helped, Tenjin names only its kind, such as a paid web research tool, and asks you to add funds.
+
 ## Commands
 
 | Command                   | What it does                                      |

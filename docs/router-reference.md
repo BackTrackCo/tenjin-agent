@@ -129,6 +129,8 @@ A deposit meets your automatic limits (per-call limit, daily budget, creator all
 
 The facilitator checks the wallet's funds when it verifies the deposit. If it answers that the wallet holds less, that call gets no route, the wallet is reported as too low, and Tenjin does not retry.
 
+An empty wallet still routes: within the router's daily limits, an answer with no paid offer needs no payment. A router 402 that decided a paid offer names that offer's task in its body, and nothing else about it. When the wallet cannot pay that call (no wallet, a balance below what the deposit needs, or the facilitator's low-funds reply), the hook's message says, on that call and on every such call: “Tenjin would have used a paid web research tool for this. Ask your agent to add funds to Tenjin.” It names the task, never the tool, its price or its payee, and the native tool still runs. The hook sends `funding` in `accepts`, so the router also marks an answer whose paid offer it held back because the wallet could not pay the provider, even when the routing balance paid the fee; the hook shows the same line for it. A 402 that names no offer, such as one past a daily limit, keeps the once-per-session wallet notice, as does a router from before this body. A wallet that cannot sign for another reason, a spend limit and a quote above the routing limit keep their own once-per-session notice.
+
 ### Whole-call limits
 
 The CLI admits a plan for the whole call before signing: one automatic per-call total and the remaining daily headroom. Multiple takes and comparison options cannot each claim a fresh per-call allowance. A payment must use its admitted slot, once, at no more than its planned amount. Reservations and duplicate guards are shared across processes.
