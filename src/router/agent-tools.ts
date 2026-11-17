@@ -137,29 +137,67 @@ const WORKER_MATCHED_KEYS = new Set([
   'effort',
 ]);
 
+/** A tool entry as agent files write one: a name, with an optional rule in parentheses. */
+const TOOL_ENTRY = /^[A-Za-z_][\w*.:-]*(\([^()]*\))?$/;
+
 /**
- * The first frontmatter key of a custom agent's definition that a DeepSeek
- * worker cannot match, else null. A worker runs the agent's prompt and tools on
- * its own model, in the accepted session's permission mode, in the foreground:
- * a definition that pins a model, a mode, isolation, background running,
- * memory, or its own hooks, servers or skills runs natively. `model: inherit`
- * pins nothing.
+ * What a custom agent's frontmatter says, for a worker that will run as it:
+ * its tool lists, or the first thing a worker cannot match. A worker runs the
+ * agent's prompt and tools on its own model, in the accepted session's
+ * permission mode, in the foreground: a definition that pins a model, a mode,
+ * isolation, background running, memory, or its own hooks, servers or skills
+ * runs natively. `model: inherit` pins nothing.
+ *
+ * READ STRICTLY, NOT AS YAML. This reads plain top-level `key: value` lines, a
+ * one-line or `- item` tool list, and indented text under a plain key. Any
+ * other syntax (a quoted key such as `'tools': [Read]`, a list over several
+ * lines in brackets, a repeated key, a tool entry that is not a plain name) is
+ * `frontmatter`: Claude Code would read it and this would not, and a tool list
+ * missed here would give the worker every tool.
  */
-function unmatchedDefinitionKey(definition: string): string | null {
-  const frontmatter = frontmatterOf(definition);
-  if (frontmatter === null) return 'frontmatter';
+function workerFrontmatter(
+  frontmatter: string[],
+): { tools?: string[]; disallowedTools?: string[] } | { unmatched: string } {
+  const lists: { tools?: string[]; disallowedTools?: string[] } = {};
+  const seen = new Set<string>();
+  /** The key the indented lines below belong to, and whether it is an open tool list. */
+  let under: { key: string; list: boolean } | undefined;
   for (const line of frontmatter) {
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    if (/^\s/.test(line)) {
+      if (!under) return { unmatched: 'frontmatter' };
+      if (!under.list) continue;
+      const item = /^\s+-\s+(.+)$/.exec(line);
+      const entry = item === null ? '' : unquote(item[1]!.trim());
+      if (!TOOL_ENTRY.test(entry)) return { unmatched: 'frontmatter' };
+      lists[under.key as 'tools' | 'disallowedTools']!.push(entry);
+      continue;
+    }
     const field = /^([A-Za-z][\w-]*)\s*:(.*)$/.exec(line);
-    if (field === null) continue;
-    const [, key, value] = field as unknown as [string, string, string];
-    if (
-      key === 'model'
-        ? !['', 'inherit'].includes(unquote(value.trim()))
-        : !WORKER_MATCHED_KEYS.has(key)
-    )
-      return key;
+    if (field === null) return { unmatched: 'frontmatter' };
+    const [, key, raw] = field as unknown as [string, string, string];
+    const value = raw.trim();
+    if (seen.has(key)) return { unmatched: 'frontmatter' };
+    seen.add(key);
+    if (key === 'model' ? !['', 'inherit'].includes(unquote(value)) : !WORKER_MATCHED_KEYS.has(key))
+      return { unmatched: key };
+    const list = key === 'tools' || key === 'disallowedTools';
+    // Text may run on under a plain key, items under an open list, nothing under a one-line list.
+    under = list && value !== '' ? undefined : { key, list };
+    if (!list) continue;
+    const bracketed = value.startsWith('[');
+    if (bracketed && !value.endsWith(']')) return { unmatched: 'frontmatter' };
+    const entries = (bracketed ? value.slice(1, -1) : value)
+      .split(',')
+      .map((part) => unquote(part.trim()))
+      .filter((part) => part.length > 0);
+    if (entries.some((entry) => !TOOL_ENTRY.test(entry))) return { unmatched: 'frontmatter' };
+    lists[key] = entries;
   }
-  return null;
+  // A list with nothing in it has no one reading: all tools to some readers, none to others.
+  if ([lists.tools, lists.disallowedTools].some((list) => list?.length === 0))
+    return { unmatched: 'frontmatter' };
+  return lists;
 }
 
 /** The agent types Claude Code ships that a worker runs as, with no definition file. */
@@ -209,24 +247,16 @@ export async function workerAgent(
     }
   const frontmatter = text === null ? null : frontmatterOf(text);
   if (text === null || frontmatter === null) return { unmatched: 'subagent_type' };
-  const key = unmatchedDefinitionKey(text);
+  const read = workerFrontmatter(frontmatter);
+  if ('unmatched' in read) return { unmatched: `definition:${read.unmatched}` };
   const lines = text.split(/\r?\n/);
   const open = lines.findIndex((line) => line.trim() === '---');
   const prompt = lines
     .slice(lines.findIndex((line, i) => i > open && line.trim() === '---') + 1)
     .join('\n')
     .trim();
-  if (key !== null || !prompt) return { unmatched: `definition:${key ?? 'prompt'}` };
-  const tools = listField(frontmatter, 'tools');
-  const disallowedTools = listField(frontmatter, 'disallowedTools');
-  return {
-    agent: {
-      description: agentType,
-      prompt,
-      ...(tools ? { tools } : {}),
-      ...(disallowedTools ? { disallowedTools } : {}),
-    },
-  };
+  if (!prompt) return { unmatched: 'definition:prompt' };
+  return { agent: { description: agentType, prompt, ...read } };
 }
 
 export async function findDefinition(

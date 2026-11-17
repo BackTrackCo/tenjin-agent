@@ -1717,6 +1717,29 @@ it("gives each job a private temp folder that its commands and file tools use by
   await expect(lstat(directory)).rejects.toThrow();
 });
 
+it('replaces the values of an env file a command wrote into the job temp folder', async () => {
+  // The folder is a working directory, so its env files are read like any other: a value
+  // that exists only there once left for Tenjin and DeepSeek as written.
+  const directory = await mkdtemp(join(tmpdir(), 'worker-temp-'));
+  const scratchpad = join(directory, 'claude-501');
+  await mkdir(scratchpad);
+  vi.mocked(prepareClaudeWorkerTemp).mockResolvedValueOnce({
+    directory,
+    scratchpad,
+    shared: [],
+    close: () => rm(directory, { recursive: true, force: true }),
+  });
+  const fresh = 'fresh-credential-0x42-value';
+  const read = { type: 'tool_result', tool_use_id: 'cat', content: `FRESH_TOKEN=${fresh}` };
+  sdkResult(
+    { subtype: 'success', result: `the token is ${fresh}` },
+    undefined,
+    () => writeFile(join(scratchpad, '.env.local'), `FRESH_TOKEN=${fresh}\n`),
+    [{ type: 'user', uuid: 'cat', message: { role: 'user', content: [read] } }],
+  );
+  expect(await runModelWorker(job, options())).toBe('the token is [env:FRESH_TOKEN]');
+});
+
 it('refuses a credential probe in the worker hook whatever the mode, and leaves a push to the mode', async () => {
   const decisions: unknown[] = [];
   sdkResult({ subtype: 'success', result: 'probe fixture' }, undefined, async () => {

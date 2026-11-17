@@ -177,6 +177,40 @@ describe('the custom agents a DeepSeek worker can run as', () => {
     expect(await workerAgent('worker', lookup())).toEqual({ unmatched });
   });
 
+  it('reads a block list of tools, and text that runs on under a plain key', async () => {
+    await defined(
+      'color: >\n  blue\n  tools: every one, it says here\ntools:\n  - Read\n  - "Bash(git status:*)"\n',
+    );
+    expect(await workerAgent('worker', lookup())).toMatchObject({
+      agent: { tools: ['Read', 'Bash(git status:*)'] },
+    });
+  });
+
+  // Each is YAML that Claude Code reads and this reader does not: with the tool list
+  // missed, the worker would have run with every tool; with the model missed, on DeepSeek.
+  it.each([
+    ["'tools': [Read]\n"],
+    ['"disallowedTools": [Bash]\n'],
+    ["'model': opus\n"],
+    ['"permissionMode": bypassPermissions\n'],
+    ['tools: [Read,\n  Bash]\n'],
+    ['tools: Read\ntools: Bash\n'],
+    ['tools: Read\n  - Bash\n'],
+    ['tools: Agent(worker, researcher), Read\n'],
+    ['tools: &all [Read]\n'],
+    ['tools:\n'],
+    ['tools:\n  - {name: Read}\n'],
+    ['? tools\n: [Read]\n'],
+  ])(
+    'keeps a definition whose frontmatter it cannot read exactly native: %j',
+    async (frontmatter) => {
+      await defined(frontmatter);
+      expect(await workerAgent('worker', lookup())).toEqual({
+        unmatched: 'definition:frontmatter',
+      });
+    },
+  );
+
   it("reads the job root's own agents and the person's, never a folder above the root", async () => {
     await define(join(home, '.claude', 'agents'), 'mine.md', agent('mine', 'tools: Read\n'));
     expect(await workerAgent('mine', lookup())).toMatchObject({ agent: { tools: ['Read'] } });

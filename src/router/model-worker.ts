@@ -284,7 +284,15 @@ async function runQualifiedWorker(
   // Also before the timer: the worker reads its env files as a native subagent does, and
   // their values are replaced in everything that leaves this process. A scan that stops
   // short keeps every env file denied.
-  const envFiles = await WorkerEnvSecrets.start([...workspace.workingDirectories, ...worktrees]);
+  // The job's own temp folder, as a native session has its scratchpad. Without one the
+  // worker uses the shared temp root, as before. Made before the scan: it is a working
+  // directory too, so an env file a command writes there has its values replaced as well.
+  const temp = await prepareClaudeWorkerTemp().catch(() => undefined);
+  const envFiles = await WorkerEnvSecrets.start([
+    ...workspace.workingDirectories,
+    ...worktrees,
+    ...(temp ? [temp.directory, temp.scratchpad] : []),
+  ]);
   const envDenied = new Set(
     envDeniedRoots(
       protectedRoots,
@@ -305,9 +313,6 @@ async function runQualifiedWorker(
       // Display only.
     }
   };
-  // The job's own temp folder, as a native session has its scratchpad. Without one the
-  // worker uses the shared temp root, as before.
-  const temp = await prepareClaudeWorkerTemp().catch(() => undefined);
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
