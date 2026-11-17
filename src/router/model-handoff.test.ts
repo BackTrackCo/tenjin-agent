@@ -289,7 +289,7 @@ it('refuses sibling disclosure revoked during qualification before routing or of
   expect(f.route).not.toHaveBeenCalled();
 });
 
-it('offers an across-day continuation with full parent veto, same job ceiling and no Jev fee', async () => {
+it('holds an across-day continuation to run or cancel, with nothing to judge, the same job ceiling and no routing fee', async () => {
   const f = await continuationFixture();
   const now = Date.now();
   vi.spyOn(Date, 'now').mockReturnValue(now + 3 * 86400000);
@@ -306,16 +306,24 @@ it('offers an across-day continuation with full parent veto, same job ceiling an
       worker_handle: f.conversation.handle,
       routingFeeAtomic: '0',
       capAtomic: '900000',
-      parentPolicy: expect.stringContaining('An unconditional live no-pay instruction'),
-      instruction: expect.stringContaining('final veto'),
+      parentPolicy: expect.stringContaining('It carries no permission'),
+      // The two calls the parent may make, as the tool spells them.
+      instruction: expect.stringMatching(
+        /subagent\(\{offer_id\}\).*subagent\(\{cancel: offer_id\}\)/,
+      ),
     });
     expect(result).toHaveProperty(
       'parentPolicy',
       expect.stringContaining('Never retry a Tenjin worker handle through native tools'),
     );
-    expect('parentPolicy' in result ? result.parentPolicy : undefined).not.toContain(
-      'otherwise retry the original native Agent call unchanged',
-    );
+    // A native SendMessage resumes its subagent with no confirmation: the parent is
+    // asked to judge nothing, in the instruction or the policy.
+    const said =
+      'instruction' in result && 'parentPolicy' in result
+        ? result.instruction + ' ' + result.parentPolicy
+        : '';
+    expect(said).not.toMatch(/veto|Assess|suitable|recommendation/i);
+    expect(said).toContain('no routing fee');
     const selected = await f.model.store.pending('root', 'later-turn');
     expect(selected).toMatchObject({
       task: native.message,

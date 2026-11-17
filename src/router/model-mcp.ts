@@ -9,7 +9,7 @@ import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { workerStop } from './model-worker-control';
+import { WORKER_WALL_MS, workerStop } from './model-worker-control';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
 import {
@@ -254,7 +254,7 @@ export function registerModelTool(
     {
       title: 'Tenjin subagent',
       description:
-        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
       inputSchema: {
@@ -615,16 +615,17 @@ export function registerModelTool(
                   if (!server.server.getClientCapabilities()?.elicitation || signal.aborted)
                     return false;
                   if (Buffer.byteLength(JSON.stringify(input)) > 12000) return false;
-                  return workerPermissionAnswer(
-                    await server.server.elicitInput(
+                  // A native prompt never resolves by itself while it waits: the dialog
+                  // stays for as long as the job may run, not the MCP SDK's 60 seconds.
+                  // A connection that closes, or the job's end, answers no.
+                  return server.server
+                    .elicitInput(
                       workerPermissionForm(tool, input, ask, {
                         jobChoice: options.harness === 'claude',
                       }),
-                      {
-                        signal,
-                      },
-                    ),
-                  );
+                      { signal, timeout: Math.max(1, started + WORKER_WALL_MS - Date.now()) },
+                    )
+                    .then(workerPermissionAnswer, () => false);
                 },
               });
               const envelope = {
@@ -639,7 +640,7 @@ export function registerModelTool(
                 ...(activeConversation
                   ? {
                       worker_handle: activeConversation.handle,
-                      continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). Tenjin will hold it for the parent accept/veto decision.`,
+                      continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). Tenjin holds it until you run it with subagent({offer_id}); it charges no routing fee and spends this job's remaining budget.`,
                     }
                   : {}),
               };

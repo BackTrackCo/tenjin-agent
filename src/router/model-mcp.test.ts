@@ -18,6 +18,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 const worker = vi.hoisted(() => ({
   run: vi.fn(),
   qualified: vi.fn(
@@ -624,9 +625,11 @@ it('advertises display activity as read-only without changing the original subag
     expect(activity?.inputSchema.required).toEqual(['offer_id']);
     const subagent = tools.find((tool) => tool.name === 'subagent');
     expect(subagent?.description).toBe(
-      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
     );
     expect(subagent?.annotations?.readOnlyHint).toBe(false);
+    // No field carries a permission, a mode or an answer to a worker: a parent's text
+    // reaches a worker only as its assignment or a held follow-up.
     expect(Object.keys(subagent?.inputSchema.properties ?? {}).sort()).toEqual([
       'cancel',
       'capture',
@@ -1533,5 +1536,55 @@ it('removes model records a week after their last write when the process starts'
     await expect(stat(old)).rejects.toThrow();
   } finally {
     await f.close();
+  }
+});
+
+it("keeps a worker's permission dialog open past the MCP SDK's 60 seconds, as a native prompt waits, and answers no once the connection is gone", async () => {
+  const f = await ownedClaudeFixture();
+  let asked!: () => void;
+  const shown = new Promise<void>((resolve) => {
+    asked = resolve;
+  });
+  let decide!: (decision: string) => void;
+  const decided = new Promise<string>((resolve) => {
+    decide = resolve;
+  });
+  const forms: string[] = [];
+  f.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    forms.push(request.params.message);
+    asked();
+    return { action: 'accept' as const, content: { decision: await decided } };
+  });
+  const answers: unknown[] = [];
+  worker.run.mockImplementation(async (_job, options) => {
+    const ask = () =>
+      options.permission('Bash', { command: 'pnpm lint' }, new AbortController().signal, {});
+    answers.push(await ask());
+    await f.client.close();
+    answers.push(await ask());
+    return 'completed fixture';
+  });
+  try {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    void f.client
+      .callTool({ name: 'subagent', arguments: { offer_id: f.job.id } }, undefined, {
+        timeout: 3_600_000,
+      })
+      .catch(() => undefined);
+    await shown;
+    // The person takes two minutes. The dialog is still theirs to answer.
+    vi.advanceTimersByTime(120_000);
+    await new Promise((next) => setImmediate(next));
+    expect(answers).toEqual([]);
+    decide('job');
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    expect(forms).toEqual(['DeepSeek worker wants to use Bash\npnpm lint']);
+    // Only the person's own choice in that dialog allows for the job; a dead connection denies.
+    expect(answers).toEqual(['job', false]);
+  } finally {
+    vi.useRealTimers();
+    decide('deny');
+    await f.close().catch(() => undefined);
   }
 });

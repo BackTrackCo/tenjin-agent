@@ -35,10 +35,13 @@ import {
   type ModelNativeTool,
 } from './model-continuation';
 
-const continuationPolicy = parentPolicy.replace(
-  'Pass offer_id only to accept; otherwise retry the original native Agent call unchanged.',
-  'Pass offer_id only to accept. Otherwise cancel this continuation. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.',
-);
+/**
+ * A follow-up to a worker is not a new routing decision: the worker, its history and its
+ * budget are the ones already accepted, as a native SendMessage resumes its subagent with
+ * no confirmation. The parent runs it or cancels it, and judges nothing.
+ */
+const continuationPolicy =
+  'This follow-up continues a DeepSeek worker that was already accepted, with its history. It is not a new offer, and there is nothing to judge. It carries no permission: the worker keeps its permission mode, rules and sandbox, and only the person can approve what those ask about. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.';
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -437,7 +440,7 @@ export class ModelHandoff {
       ...droppedNote(worker.claudeWorkspace),
       consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
       instruction:
-        'Assess the complete follow-up against the full parent policy and current repository constraints. Accept with offer_id only if it remains suitable for this DeepSeek worker. You retain the final veto. This reuses the original history and budget, with no new routing fee. Otherwise cancel the offer; do not send a Tenjin handle to native tools. No worker started.',
+        "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Do not send a Tenjin handle to native tools. Nothing has run yet.",
     };
   }
   private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {

@@ -47,6 +47,7 @@ import {
   jobScopedRules,
   type WorkerPermissionAnswer,
   type WorkerPermissionAsk,
+  NATIVE_SUBAGENT_NOTE,
 } from './model-worker-prompt';
 import {
   claudeWorkspaceWorktrees,
@@ -459,9 +460,10 @@ async function runQualifiedWorker(
           TENJIN_WORKER_GITHUB_TOKEN: undefined,
           TENJIN_WORKER_GITHUB_TOKEN_FILE: undefined,
         },
-        systemPrompt: { type: 'preset', preset: 'claude_code' },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: NATIVE_SUBAGENT_NOTE },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
-        ...(job.native.subagent_type === 'Explore' ? { agent: 'Explore' } : {}),
+        // The native agent the parent asked for, with that agent's own tools.
+        agent: job.native.subagent_type === 'Explore' ? 'Explore' : 'general-purpose',
         effort: 'high',
         abortController: controller,
         permissionMode,
@@ -568,8 +570,8 @@ async function runQualifiedWorker(
           'mcp__plugin_tenjin_router__subagent',
           'mcp__plugin_tenjin_router__request',
           'mcp__plugin_tenjin_router__approve',
-          // In auto mode nobody answers the worker's questions.
-          ...(nobodyAsked ? ['AskUserQuestion'] : []),
+          // A native subagent has no question tool in any mode; it ends with its report.
+          'AskUserQuestion',
         ],
         // Auto mode: the native classifier judges each call that needs a decision.
         // Auto and bypass: a call that would still prompt is answered at once below,

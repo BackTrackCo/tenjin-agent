@@ -208,6 +208,9 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   expect(result.result).toEqual({ success: false, message: offered });
   expect(result.context?.join(' ')).toContain('no continuation started');
   expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
+  // A native SendMessage resumes its subagent with no confirmation: run it or cancel it.
+  expect(result.context?.join(' ')).toContain('subagent tool and this offer_id');
+  expect(result.context?.join(' ')).not.toMatch(/veto|risk rules|parentPolicy/);
 });
 
 test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {

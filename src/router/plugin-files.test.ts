@@ -621,3 +621,13 @@ describe('the Codex runtime render', () => {
     });
   });
 });
+
+it('registers no Elicitation hook on any host, so only the person answers a worker permission dialog', async () => {
+  // Such a hook "can auto-respond (accept/decline) instead of showing the dialog": with one,
+  // "Allow for this job" could be chosen by something other than the person.
+  for (const { hooks } of [renderPluginHooks(), renderCodexHooks()])
+    expect(Object.keys(hooks).filter((event) => /elicitation/i.test(event))).toEqual([]);
+  // Nor does the mod hook it as a function hook (`classic.Elicitation`, `classic.ElicitationResult`).
+  for (const [path, source] of Object.entries(await checkedInMod()))
+    expect(/elicitation/i.test(String(source)), path).toBe(false);
+});
