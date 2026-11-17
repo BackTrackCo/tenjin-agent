@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import {
   ModelWorkerActivity,
+  activityAnswer,
   partialHandback,
   type ModelWorkerActivityBinding,
 } from './model-worker-activity';
@@ -67,7 +68,7 @@ it('records actual tool activity and updates a result without creating another r
   expect(read?.rows[0]?.inputSummary).toContain(join(f.binding.root, 'index.ts'));
 });
 
-it('never includes thinking, authentication, system prompts, raw commands or secret input values', () => {
+it('never includes thinking, authentication, system prompts or secret input values, and shows a shell command to the local display alone', () => {
   const f = fixture();
   f.activity.observe(f.event('system', { subtype: 'init', system: 'private-system-prompt' }));
   f.activity.observe(f.event('auth_status', { output: ['private-auth-output'] }));
@@ -92,7 +93,6 @@ it('never includes thinking, authentication, system prompts, raw commands or sec
     'private-auth-output',
     'private-raw-thinking',
     'ActualPrivateValue987',
-    'private-command-value',
     'private-environment-value',
     '873962',
     'private-nested-value',
@@ -102,6 +102,35 @@ it('never includes thinking, authentication, system prompts, raw commands or sec
   expect(serialized).toContain('Read the source.');
   expect(serialized).toContain('Bash');
   expect(serialized).toContain('redacted');
+  // The command is its own row field, as a native row names a shell call. A value learned
+  // late is replaced in it too, and the parent's partial handback never carries it.
+  const shell = () => f.activity.snapshot().rows.find((row) => row.name === 'Bash');
+  expect(shell()?.command).toBe('printf private-command-value');
+  expect(shell()?.inputSummary).not.toContain('private-command-value');
+  f.activity.rescrub((text) => text.replaceAll('private-command-value', '[env:LATE]'));
+  expect(shell()?.command).toBe('printf [env:LATE]');
+  f.activity.observe(f.tool('shell-two', 'Bash', { command: 'printf handback-check-value' }));
+  expect(JSON.stringify(partialHandback(f.activity.snapshot()))).not.toContain(
+    'handback-check-value',
+  );
+});
+
+it("keeps a completed worker's answer for the viewer, beside its rows and out of the progress file's answer", () => {
+  const f = fixture();
+  f.activity.running();
+  f.activity.observe(f.tool());
+  f.activity.handback('The final answer.');
+  f.activity.finish('completed');
+  const snapshot = f.activity.snapshot();
+  expect(snapshot.result).toBe('The final answer.');
+  expect(snapshot.rows).toHaveLength(1);
+  expect(activityAnswer(snapshot, { rows: true, result: true }).activity.result).toBe(
+    'The final answer.',
+  );
+  expect(activityAnswer(snapshot, { rows: true }).activity).not.toHaveProperty('result');
+  // Set once by the controller: nothing rewrites it after the job ended.
+  f.activity.handback('A later answer.');
+  expect(f.activity.snapshot().result).toBe('The final answer.');
 });
 
 it('omits full SDK and tool errors while retaining the actual failed-tool outcome', () => {

@@ -19,7 +19,7 @@ import { writePrivate } from './store-files';
  */
 const DIRECTORY = join('progress', 'model-workers');
 /** The rows the viewer draws; the rest are counted as dropped. */
-const ROWS = 24;
+const ROWS = 128;
 const TICK_MS = 1000;
 /** A file a crashed run left behind goes once it is this old. */
 const STALE_MS = 24 * 60 * 60_000;

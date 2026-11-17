@@ -54,6 +54,8 @@ export type TenjinModelActivity = {
     name?: string;
     text?: string;
     inputSummary?: string;
+    /** A shell call's command, with the job's replacements already applied by the CLI. */
+    command?: string;
     outputPreview?: string;
     elapsedSeconds?: number;
   }[];
@@ -63,6 +65,20 @@ export type TenjinModelActivity = {
   tokens?: number;
   /** While running, what has settled so far; once ended, the final accounting. */
   spend?: { reservedAtomic: string; actualAtomic: string; uncertain: string[] };
+};
+
+/**
+ * A running worker's rows, added up from the CLI's activity for its viewer's
+ * transcript. Kept only until the viewer has written them into that transcript.
+ */
+export type TenjinModelTranscript = {
+  /** The activity sequence the rows stand at. */
+  sequence: number;
+  /** Oldest rows left out to stay inside the bound. */
+  dropped: number;
+  rows: TenjinModelActivity['rows'];
+  /** True once the viewer's transcript holds the run: the rows here are then released. */
+  written?: true;
 };
 
 /** One accept call's live row, kept by its offer id while the worker runs. Display only. */
@@ -125,6 +141,10 @@ declare module 'claude-code' {
       modelViewers: TenjinModelViewerState;
       /** By offer id: an accept call's live row while its worker runs. */
       modelWorkers: StateFamily<TenjinModelWorker>;
+      /** By offer id: a running worker's rows for its viewer's transcript. */
+      modelTranscripts: StateFamily<TenjinModelTranscript>;
+      /** By offer id: the held call's own prompt, shown as its viewer's first message. */
+      modelAssignments: StateFamily<string>;
     };
   }
 }

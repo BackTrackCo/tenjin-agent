@@ -7,6 +7,7 @@ import { canonicalHash } from '../lib/request-schema';
 const MAX_ROWS = 128;
 const MAX_BYTES = 128 * 1024;
 const MAX_FIELD_BYTES = 1024;
+const MAX_RESULT_BYTES = 256 * 1024;
 const MAX_SEEN = 1024;
 const latestActivations = new Map<string, symbol>();
 const id = z.string().min(1).max(200);
@@ -39,6 +40,8 @@ export type ModelWorkerActivityRow = {
   text?: string;
   name?: string;
   inputSummary?: string;
+  /** A shell call's command, masked and bounded: for the local display, never a handback. */
+  command?: string;
   outputPreview?: string;
   elapsedSeconds?: number;
 };
@@ -66,12 +69,14 @@ export type ModelWorkerActivitySnapshot = {
   tokens: number;
   /** While running, what has settled so far; once terminal, the controller's final accounting. */
   spend?: ModelWorkerActivitySpend;
+  /** A completed worker's answer, as the parent receives it, for the viewer's transcript. */
+  result?: string;
 };
 
 /** What `subagent_activity` answers and the progress file holds: display data only. */
 export function activityAnswer(
   snapshot: ModelWorkerActivitySnapshot,
-  options: { rows: boolean; maxRows?: number },
+  options: { rows: boolean; maxRows?: number; result?: boolean },
 ) {
   const rows = !options.rows
     ? undefined
@@ -95,6 +100,7 @@ export function activityAnswer(
         ? { droppedRows: snapshot.droppedRows + snapshot.rows.length - rows.length, rows }
         : {}),
       ...(snapshot.spend ? { spend: snapshot.spend } : {}),
+      ...(options.result && snapshot.result !== undefined ? { result: snapshot.result } : {}),
     },
   };
 }
@@ -203,6 +209,12 @@ function inputSummary(value: unknown): string {
   return preview(JSON.stringify(fields));
 }
 
+/** A native row names a shell call by its command; the caller has replaced the job's secrets in it. */
+function shellCommand(value: unknown): { command?: string } {
+  const command = object(value)?.command;
+  return typeof command === 'string' && command ? { command: preview(command) } : {};
+}
+
 function toolPreview(value: unknown): string | undefined {
   if (typeof value === 'string') return preview(value);
   if (!Array.isArray(value)) return undefined;
@@ -271,6 +283,16 @@ export class ModelWorkerActivity {
     this.value.started = true;
     this.value.sequence++;
     this.boundSnapshot();
+  }
+
+  /** The completed worker's answer, set by the controller just before it finishes the job. */
+  handback(result: string, generation = this.value.binding.generation): void {
+    if (generation !== this.value.binding.generation || this.terminal()) return;
+    const bytes = Buffer.from(result);
+    this.value.result =
+      bytes.length <= MAX_RESULT_BYTES
+        ? result
+        : bytes.subarray(0, MAX_RESULT_BYTES).toString('utf8') + ' [shortened]';
   }
 
   /** Only the controller supplies terminal state and authoritative payment accounting. */
@@ -354,6 +376,7 @@ export class ModelWorkerActivity {
               state: 'running',
               name: preview(block.name).slice(0, 120),
               inputSummary: inputSummary(block.input),
+              ...shellCommand(block.input),
             });
           } else if (block.type === 'text' && typeof block.text === 'string') {
             const text = preview(block.text);
@@ -462,7 +485,7 @@ export class ModelWorkerActivity {
     try {
       for (const row of this.value.rows) {
         let changed = false;
-        for (const field of ['text', 'inputSummary', 'outputPreview'] as const) {
+        for (const field of ['text', 'inputSummary', 'command', 'outputPreview'] as const) {
           const before = row[field];
           if (before === undefined) continue;
           const after = redact(before);
@@ -485,12 +508,14 @@ export class ModelWorkerActivity {
 
   private boundSnapshot(): void {
     try {
-      let serialized = JSON.stringify(this.value);
+      // The answer has a bound of its own: it never pushes rows out.
+      const bounded = () => JSON.stringify({ ...this.value, result: undefined });
+      let serialized = bounded();
       while (this.value.rows.length > MAX_ROWS || Buffer.byteLength(serialized) > MAX_BYTES) {
         if (!this.value.rows.length) return;
         this.value.rows.shift();
         this.value.droppedRows++;
-        serialized = JSON.stringify(this.value);
+        serialized = bounded();
       }
     } catch {
       // Never change the execution result because a display snapshot is unavailable.

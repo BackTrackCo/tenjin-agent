@@ -14,6 +14,7 @@ import {
 } from './hook-data';
 import type {
   TenjinModelActivity,
+  TenjinModelTranscript,
   TenjinModelViewerRecord,
   TenjinModelViewerState,
   TenjinModelWorker,
@@ -23,9 +24,23 @@ import type {
 const TYPE = 'tenjin:deepseek-viewer';
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const SERVER = 'plugin:tenjin:router';
-const LIVE_MESSAGE = 'DeepSeek worker activity\n';
 const STATE = { plugin: 'tenjin', key: 'modelViewers' } as const;
 const WORKERS = { plugin: 'tenjin', key: 'modelWorkers' } as const;
+const TRANSCRIPTS = { plugin: 'tenjin', key: 'modelTranscripts' } as const;
+const ASSIGNMENTS = { plugin: 'tenjin', key: 'modelAssignments' } as const;
+/**
+ * What the viewer agent is told. Its record's description follows, so the
+ * transcript's first message can be drawn as the worker's real assignment.
+ */
+const VIEWER_PROMPT = 'Observe only the already owned DeepSeek worker activity.';
+/** A run's rows in memory, until its viewer has written them into its transcript. */
+const TRANSCRIPT_ROWS = 2000;
+const TRANSCRIPT_CHARS = 512 * 1024;
+/** What the engine draws of a message, at most. */
+const ASSIGNMENT_CHARS = 100_000;
+const RESULT_CHARS = 256 * 1024;
+/** The CLI's own window of latest rows (`model-worker-activity.ts`). */
+const ACTIVITY_ROWS = 128;
 /** How often a running worker's row reads its activity file and its clock moves. */
 const POLL_MS = 1000;
 /** How long retirement waits for a viewer still starting, so it binds first. */
@@ -36,6 +51,12 @@ const SPAWN_WAIT_MS = 10_000;
  * the spinner is then the engine's own until the next accept.
  */
 const liveWorkers = new Set<string>();
+/**
+ * Each running worker's rows, by offer id. A viewer's turn is one long hook
+ * call, and its state reads all stand at the moment it began, so the rows the
+ * timer adds are shared here; the state copy is what the live drawing reads.
+ */
+const runs = new Map<string, TenjinModelTranscript>();
 const ALIASES = 'deepseek-viewer-alias-v1:';
 const SERIAL = 'deepseek-viewer-serial-v1';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -80,6 +101,16 @@ function clean(value: string, bytes = 512): string {
   return encoded.length <= bytes
     ? text
     : new TextDecoder().decode(encoded.slice(0, bytes - 4)) + '…';
+}
+/** Display text of several lines: terminal and format controls removed, line breaks kept. */
+function plain(value: string, chars: number): string {
+  const text = value
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/(?![\n\t])[\p{Cc}\p{Cf}]/gu, ' ')
+    .trim();
+  return text.length <= chars ? text : text.slice(0, chars - 1) + '…';
 }
 function json(value: unknown): Json | undefined {
   if (typeof value !== 'string' || value.length > 300_000) return undefined;
@@ -225,7 +256,11 @@ async function registerType($: Dollar): Promise<void> {
   });
 }
 
-/** Called only after the existing local handoff validated its offer. No assignment is persisted here. */
+/**
+ * Called only after the existing local handoff validated its offer. The held
+ * call's own prompt is kept in the session's state, for its viewer's first
+ * message alone; nothing here is saved across sessions but the serial.
+ */
 export async function rememberModelOffer(
   $: Dollar,
   offerId: string,
@@ -238,12 +273,14 @@ export async function rememberModelOffer(
     const priorSerial = await serial($);
     const title = titleOf(nativeInput, profile);
     await registerType($);
+    let released: string | undefined;
     const current = await change($, (state) => {
+      released = undefined;
       if (state.records.some((r) => r.offerId === offerId)) return;
       if (state.records.length >= 16) {
         const free = state.records.findIndex((r) => !r.active);
         if (free < 0) return;
-        state.records.splice(free, 1);
+        released = state.records.splice(free, 1)[0]?.offerId;
       }
       const ordinal = Math.max(state.serial, priorSerial) + 1;
       if (!Number.isSafeInteger(ordinal)) return;
@@ -259,6 +296,13 @@ export async function rememberModelOffer(
     });
     if (current) {
       await $.store.set(SERIAL, Math.max(await serial($), current.serial));
+      // An Agent call's prompt, or a follow-up's message to its worker.
+      const assignment = [nativeInput.prompt, nativeInput.message].find(
+        (text): text is string => typeof text === 'string' && text.trim().length > 0,
+      );
+      if (assignment && current.records.some((r) => r.offerId === offerId))
+        await $.state.set({ ...ASSIGNMENTS, id: offerId }, plain(assignment, ASSIGNMENT_CHARS));
+      if (released) await $.state.set({ ...ASSIGNMENTS, id: released }, '');
     }
   } catch {
     /* An unavailable viewer never changes the held assignment or acceptance. */
@@ -283,7 +327,7 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
     return;
   const rows: TenjinModelActivity['rows'] = [];
   if (Array.isArray(a.rows))
-    for (const value of a.rows.slice(-24)) {
+    for (const value of a.rows.slice(-ACTIVITY_ROWS)) {
       const r = record(value);
       if (
         !r ||
@@ -301,6 +345,7 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
         ...(typeof r.name === 'string' ? { name: clean(r.name, 120) } : {}),
         ...(typeof r.text === 'string' ? { text: clean(r.text) } : {}),
         ...(typeof r.inputSummary === 'string' ? { inputSummary: clean(r.inputSummary) } : {}),
+        ...(typeof r.command === 'string' ? { command: clean(r.command, 1024) } : {}),
         ...(typeof r.outputPreview === 'string' ? { outputPreview: clean(r.outputPreview) } : {}),
         ...(typeof r.elapsedSeconds === 'number' &&
         Number.isFinite(r.elapsedSeconds) &&
@@ -331,7 +376,7 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
     droppedRows:
       (Number.isSafeInteger(a.droppedRows) && Number(a.droppedRows) >= 0
         ? Number(a.droppedRows)
-        : 0) + (Array.isArray(a.rows) ? Math.max(0, a.rows.length - 24) : 0),
+        : 0) + (Array.isArray(a.rows) ? Math.max(0, a.rows.length - ACTIVITY_ROWS) : 0),
     rows,
     ...(Number.isSafeInteger(a.toolUses) && Number(a.toolUses) >= 0
       ? { toolUses: Number(a.toolUses) }
@@ -393,6 +438,89 @@ async function refresh($: Dollar, offerId: string, isCurrent = () => true): Prom
   return true;
 }
 
+function rowChars(row: TenjinModelActivity['rows'][number]): number {
+  return (
+    64 +
+    (row.text?.length ?? 0) +
+    (row.inputSummary?.length ?? 0) +
+    (row.command?.length ?? 0) +
+    (row.outputPreview?.length ?? 0)
+  );
+}
+/**
+ * Adds what the CLI reports now to the run's rows. The CLI shows a window of
+ * its latest rows; a row is kept here by its id as it changes, so the viewer's
+ * transcript holds the whole run, inside the bound above.
+ */
+async function addRows(
+  $: Dollar,
+  offerId: string,
+  activity: TenjinModelActivity,
+): Promise<TenjinModelTranscript> {
+  const held = runs.get(offerId);
+  if (held && held.sequence >= activity.sequence) return held;
+  const rows = [...(held?.rows ?? [])];
+  const at = new Map(rows.map((row, index) => [row.id, index]));
+  for (const row of activity.rows) {
+    const index = at.get(row.id);
+    if (index !== undefined) rows[index] = row;
+    else {
+      at.set(row.id, rows.length);
+      rows.push(row);
+    }
+  }
+  let dropped = held?.dropped ?? 0;
+  let chars = rows.reduce((sum, row) => sum + rowChars(row), 0);
+  while (rows.length > TRANSCRIPT_ROWS || chars > TRANSCRIPT_CHARS) {
+    chars -= rowChars(rows.shift()!);
+    dropped++;
+  }
+  const next: TenjinModelTranscript = { sequence: activity.sequence, dropped, rows };
+  runs.set(offerId, next);
+  await $.state.set({ ...TRANSCRIPTS, id: offerId }, next);
+  return next;
+}
+type TranscriptLine = { kind: 'call' | 'under' | 'text' | 'note'; text: string };
+/**
+ * A run as a native subagent's transcript reads: each tool call as
+ * `Read(src/a.ts)` or `Bash(pnpm lint)`, a refused or failed call's reason
+ * under it, and the worker's own text between calls.
+ */
+function transcriptLines(rows: TenjinModelActivity['rows'], cwd: string): TranscriptLine[] {
+  const lines: TranscriptLine[] = [];
+  for (const row of rows) {
+    if (row.kind === 'tool') {
+      const target = row.command ? clean(row.command, 240) : targetOf(row.inputSummary, cwd);
+      lines.push({ kind: 'call', text: (row.name ?? 'Tool') + (target ? '(' + target + ')' : '') });
+      if (row.state === 'error' && row.outputPreview)
+        lines.push({ kind: 'under', text: clean(row.outputPreview, 400) });
+      else if (row.state === 'cancelled') lines.push({ kind: 'under', text: 'Interrupted' });
+    } else if (row.kind === 'text') {
+      if (row.text) lines.push({ kind: 'text', text: row.text });
+    } else if (row.text) lines.push({ kind: 'note', text: row.text });
+  }
+  return lines;
+}
+const LINE_MARK = { call: '⏺ ', under: '  ⎿  ', note: '· ', text: '' } as const;
+/** The run as the text the viewer's transcript keeps: rows verbatim, the worker's text as it wrote it. */
+function writtenLines(lines: TranscriptLine[], dropped: number): string {
+  let out = dropped ? dropped + ' earlier events omitted\n' : '';
+  let fenced = false;
+  const fence = (open: boolean) => {
+    if (open !== fenced) out += '```\n';
+    fenced = open;
+  };
+  for (const line of lines) {
+    fence(line.kind !== 'text');
+    out +=
+      line.kind === 'text'
+        ? '\n' + line.text + '\n\n'
+        : LINE_MARK[line.kind] + line.text.replaceAll('```', "'''") + '\n';
+  }
+  fence(false);
+  return out;
+}
+
 /** The one input a native row shows for a step: a path, under the session's folder when it is. */
 function targetOf(summary: string | undefined, cwd: string): string | undefined {
   if (!summary) return undefined;
@@ -414,7 +542,7 @@ function stepOf(activity: TenjinModelActivity, cwd: string): string | undefined 
   if (latest?.kind === 'status' && latest.state === 'running' && latest.text) return latest.text;
   const tool = [...activity.rows].reverse().find((r) => r.kind === 'tool' && r.name);
   if (!tool?.name) return undefined;
-  const target = targetOf(tool.inputSummary, cwd);
+  const target = tool.command ? clean(tool.command, 96) : targetOf(tool.inputSummary, cwd);
   return target ? tool.name + '(' + target + ')' : tool.name;
 }
 /** The viewer's band takes the newest activity the live file carried. Display only. */
@@ -468,7 +596,10 @@ async function pollWorker($: Dollar, offerId: string, path: string, cwd: string)
       : {}),
   };
   if (JSON.stringify(live) !== JSON.stringify(held)) await $.state.set(ref, live);
-  if (activity) await showActivity($, activity);
+  if (activity) {
+    await addRows($, offerId, activity);
+    await showActivity($, activity);
+  }
 }
 
 function displayPreview(message: string, content: string): boolean {
@@ -833,7 +964,7 @@ export function registerModelViewer(on: On): void {
               const viewer = await $.agent.spawn({
                 subagentType: TYPE,
                 description: item.description,
-                prompt: 'Observe only the already owned DeepSeek worker activity.',
+                prompt: VIEWER_PROMPT + ' ' + item.description,
                 cwd: current.cwd,
               });
               if (viewer.agentId) {
@@ -861,6 +992,8 @@ export function registerModelViewer(on: On): void {
       closed = true;
       try {
         timer?.cancel();
+        // Its viewer writes the rows into its transcript at once; with no viewer they are let go.
+        $.clock.after(60_000, () => void runs.delete(offerId));
         if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
       } catch {
         /* Timer failures do not rewrite the handback. */
@@ -908,7 +1041,10 @@ export function registerModelViewer(on: On): void {
           e,
           'DeepSeek activity observation finished. The worker result is returned separately to the parent.',
         );
-      yield { kind: 'text', index: 0, text: LIVE_MESSAGE };
+      // The transcript opens with the worker's own name: while only this line stands, the
+      // rows draw live under it; the whole run is written after it when the worker ends.
+      const header = owned.item.description + '\n';
+      yield { kind: 'text', index: 0, text: header };
       let tail = 'Activity unavailable. The worker result is returned separately to the parent.';
       try {
         const response = await $.mcp.call(SERVER, 'subagent_activity', {
@@ -922,7 +1058,7 @@ export function registerModelViewer(on: On): void {
           value?.status === 'activity' &&
           ended?.offerId === owned.item.offerId
         )
-          tail = endingOf(ended);
+          tail = await writtenRun($, owned.item, ended);
       } catch {
         /* An observer error never cancels, retries or replaces the actual worker. */
       }
@@ -931,7 +1067,7 @@ export function registerModelViewer(on: On): void {
       return {
         turnId: e.turnId,
         index: e.index,
-        answer: LIVE_MESSAGE + tail,
+        answer: header + tail,
         toolUses: [],
         stopReason: 'end_turn',
         usage: null,
@@ -1128,6 +1264,67 @@ export function registerModelViewer(on: On): void {
     const { Box } = $.ui.resolve(e);
     return <Box display="none" />;
   });
+  // THE VIEWER'S TRANSCRIPT. While its reply holds only the worker's name, the
+  // run so far draws under it and grows with each tick; once the worker ended
+  // the reply itself holds the run, and the engine draws that stored text.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const header = e.props.text.trim();
+    if (!header.startsWith('DeepSeek #') || header.includes('\n')) return next(e);
+    const state = (await $.state.get(STATE)).value;
+    const item = state?.records.find((r) => r.description === header);
+    if (!state || !item) return next(e);
+    const held = (await $.state.get({ ...TRANSCRIPTS, id: item.offerId })).value;
+    if (held?.written) return next(e);
+    const { Box, Text } = $.ui.resolve(e);
+    const lines = transcriptLines(held?.rows ?? [], state.cwd);
+    const phase = item.inspectionUnavailable ? undefined : item.activity?.state;
+    return (
+      <Box flexDirection="column">
+        {[
+          <Text key="header" bold>
+            {header}
+          </Text>,
+          ...(held?.dropped
+            ? [
+                <Text key="dropped" dimColor>
+                  {held.dropped + ' earlier events omitted'}
+                </Text>,
+              ]
+            : []),
+          ...lines.map((line, index) => (
+            <Text key={String(index)} dimColor={line.kind === 'under' || line.kind === 'note'}>
+              {LINE_MARK[line.kind] + line.text}
+            </Text>
+          )),
+          ...(phase === undefined || phase === 'starting' || phase === 'running'
+            ? [
+                <Text key="phase" dimColor>
+                  {phase === 'running' ? 'Working…' : 'Starting…'}
+                </Text>,
+              ]
+            : []),
+        ]}
+      </Box>
+    );
+  });
+  // Its first message is the worker's real assignment, as a native subagent's
+  // is the prompt its parent sent. The drawing alone: the viewer agent was told
+  // only the short line above, and nothing is sent to its model.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const told = e.props.text.trim();
+    if (!told.startsWith(VIEWER_PROMPT + ' ')) return next(e);
+    const description = told.slice(VIEWER_PROMPT.length + 1);
+    const item = (await $.state.get(STATE)).value?.records.find(
+      (r) => r.description === description,
+    );
+    const assignment = item
+      ? (await $.state.get({ ...ASSIGNMENTS, id: item.offerId })).value
+      : undefined;
+    // After a restart the prompt is no longer held: say whose viewer this is.
+    const text =
+      assignment || 'DeepSeek worker for: ' + description.replace(/^DeepSeek #\d+ · /, '');
+    return next({ ...e, props: { ...e.props, text } });
+  });
   // THE SPINNER names the worker's step while an accept call runs, in place
   // of whatever state label the host last left there.
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
@@ -1139,10 +1336,60 @@ export function registerModelViewer(on: On): void {
   });
 }
 
+/**
+ * The whole run as the viewer's transcript keeps it after the worker ended:
+ * every row added up while it ran and the CLI's last window, the answer the
+ * parent received, and the counts line. The rows held in memory are then released.
+ */
+async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json): Promise<string> {
+  let held = runs.get(item.offerId);
+  let answer: string | undefined;
+  try {
+    // The run is over, so this read returns at once: its last rows and its answer.
+    const last = await $.mcp.call(SERVER, 'subagent_activity', { offer_id: item.offerId });
+    const data = activityOf(last, item.offerId);
+    if (data) held = await addRows($, item.offerId, data);
+    const result = record(body(last)?.activity)?.result;
+    if (typeof result === 'string' && result.trim()) answer = plain(result, RESULT_CHARS);
+  } catch {
+    /* The rows read while it ran still stand. */
+  }
+  const [live, state] = await Promise.all([
+    $.state.get({ ...WORKERS, id: item.offerId }),
+    $.state.get(STATE),
+  ]);
+  const counts = doneParts(
+    { ...ended, ...(live.value ? { elapsedMs: live.value.elapsedMs } : {}) },
+    live.value,
+  ).join(' · ');
+  const end =
+    ended.state === 'completed'
+      ? 'Done (' + counts + ')'
+      : ended.started === false
+        ? endingOf(ended)
+        : (ended.state === 'cancelled' ? 'Interrupted' : 'Stopped') +
+          ' (' +
+          counts +
+          ')\n' +
+          endingOf(ended);
+  const text =
+    writtenLines(transcriptLines(held?.rows ?? [], state.value?.cwd ?? ''), held?.dropped ?? 0) +
+    (answer ? '\n' + answer + '\n' : '') +
+    '\n' +
+    end;
+  runs.delete(item.offerId);
+  try {
+    await $.state.set(
+      { ...TRANSCRIPTS, id: item.offerId },
+      { sequence: held?.sequence ?? 0, dropped: 0, rows: [], written: true },
+    );
+  } catch {
+    /* Display only. */
+  }
+  return text;
+}
 /** How the viewer's transcript ends: what happened to the worker, never a run that did not happen. */
 function endingOf(activity: Json): string {
-  if (activity.state === 'completed')
-    return 'Activity observation finished. The worker result is returned separately to the parent.';
   if (activity.started === false)
     return activity.state === 'cancelled'
       ? 'Not started: the start was interrupted, so no work ran.'

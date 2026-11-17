@@ -68,16 +68,17 @@ it('writes the running activity and settled spend where the plugin reads it, the
   );
   expect((await stat(w.path)).mode & 0o777).toBe(0o600);
   w.activity.running();
-  for (let at = 0; at < 30; at++) w.activity.observe(w.tool('read-' + at));
+  // The file carries the activity's whole window: the viewer's transcript adds rows up from it.
+  for (let at = 0; at < 140; at++) w.activity.observe(w.tool('read-' + at));
   await vi.advanceTimersByTimeAsync(1000);
   await vi.waitFor(async () =>
     expect((await w.read()).activity).toMatchObject({
       state: 'running',
-      toolUses: 30,
-      droppedRows: 6,
+      toolUses: 140,
+      droppedRows: 12,
     }),
   );
-  expect((await w.read()).activity.rows).toHaveLength(24);
+  expect((await w.read()).activity.rows).toHaveLength(128);
   await progress.stop();
   await expect(stat(w.path)).rejects.toThrow();
 });

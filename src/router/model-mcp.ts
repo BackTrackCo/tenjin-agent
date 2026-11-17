@@ -136,7 +136,7 @@ export function registerModelTool(
           activity.binding.configDir !== configDir
         )
           return answer({ status: 'unavailable' });
-        return answer(activityAnswer(activity, { rows: !args.follow }));
+        return answer(activityAnswer(activity, { rows: !args.follow, result: !args.follow }));
       },
     );
   server.registerTool(
@@ -553,6 +553,11 @@ export function registerModelTool(
                 // job update is repaired by replay, never by another worker.
                 await model.store.finish(job.id, 'completed').catch(() => undefined);
               } else await model.store.finish(job.id, 'completed', result);
+              try {
+                activity?.handback(result);
+              } catch {
+                // Display only.
+              }
               activity?.finish(
                 'completed',
                 'reservedAtomic' in envelope.spend ? envelope.spend : undefined,

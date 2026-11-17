@@ -4,7 +4,7 @@ import type { TenjinModelViewerState } from '../types';
 import { DATA, NOW, OFFER, SESSION, SURFACES, sha256Hex, shownLines, toolRow } from './fixtures';
 
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
-const LIVE_MESSAGE = 'DeepSeek worker activity\n';
+const HEADER = 'DeepSeek #1 · Read selected source\n';
 const TYPE = 'tenjin:deepseek-viewer';
 const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
 const INPUT = {
@@ -40,6 +40,9 @@ function setup(_$: Engine, on: On) {
     nativeSteps: 0,
     phase: 'running',
     started: true,
+    rows: undefined as unknown[] | undefined,
+    sequence: undefined as number | undefined,
+    result: undefined as string | undefined,
     inspections: 0,
     reads: 0,
     aliasReads: 0,
@@ -124,13 +127,14 @@ function setup(_$: Engine, on: On) {
       workerHandle: WORKER,
       generation: 'owned-generation',
       nativeProfile: state.nativeProfile,
-      sequence: state.phase === 'running' ? 2 : 3,
+      sequence: state.sequence ?? (state.phase === 'running' ? 2 : 3),
       state: state.phase,
       started: state.started,
       droppedRows: 8,
       toolUses: 1,
       tokens: 41_234,
-      rows: [
+      ...(state.result !== undefined ? { result: state.result } : {}),
+      rows: state.rows ?? [
         {
           id: 'tool-actual',
           sequence: 1,
@@ -290,7 +294,9 @@ async function startWithViewer($: Engine, f: ReturnType<typeof setup>) {
     messageCount: 0,
   });
   const marker = await stream.next();
-  expect(marker.value).toEqual({ kind: 'text', index: 0, text: LIVE_MESSAGE });
+  // The transcript opens with the worker's own name; its rows draw live under it.
+  expect(marker.value).toMatchObject({ kind: 'text', index: 0 });
+  expect((marker.value as { text: string }).text).toMatch(/^DeepSeek #\d+ · .+\n$/);
   const firstStep = (async () => {
     while (true) {
       const item = await stream.next();
@@ -986,7 +992,8 @@ test('a blocked final inspector cannot delay or alter the exact original parent 
   });
   await f.clock.settle();
   expect(returned).toEqual(exact);
-  expect(f.state.inspections).toBe(1);
+  // The viewer's last read and the retirement's: both wait, and neither holds the handback.
+  expect(f.state.inspections).toBe(2);
   release();
   await f.clock.settle();
   expect(await running).toEqual(exact);
@@ -1110,7 +1117,7 @@ test('the worker starts before its viewer does, and the viewer still binds to it
   expect(f.state.calls).toBe(1);
   expect(f.state.snapshot?.records[0]?.active).toBe(true);
   await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
-  expect((await step($, 'native-viewer-1')).answer).toContain(LIVE_MESSAGE);
+  expect((await step($, 'native-viewer-1')).answer).toContain(HEADER);
   release();
   await f.clock.settle();
   expect(f.state.snapshot?.records[0]).toMatchObject({
@@ -1334,22 +1341,19 @@ test('a folded run that holds an accept unfolds, so the DeepSeek row draws in pl
   }
 });
 
-for (const [phase, started, ending] of [
-  [
-    'completed',
-    true,
-    'Activity observation finished. The worker result is returned separately to the parent.',
-  ],
+for (const [phase, started, rows, ending] of [
   [
     'unknown',
     false,
+    [],
     'Not started: Claude Code did not start, so no work ran. The parent keeps this task native.',
   ],
-  ['cancelled', false, 'Not started: the start was interrupted, so no work ran.'],
+  ['cancelled', false, [], 'Not started: the start was interrupted, so no work ran.'],
   [
     'cancelled',
     true,
-    'Interrupted: the worker was stopped before it finished. What it had done is returned to the parent.',
+    undefined,
+    '```\n⏺ Read(src/example.ts)\n```\n\nInterrupted (1 tool use · 41.2k tokens · 0s · $0.0043)\nInterrupted: the worker was stopped before it finished. What it had done is returned to the parent.',
   ],
 ] as const)
   test(
@@ -1370,9 +1374,154 @@ for (const [phase, started, ending] of [
       const { running, firstStep } = await startWithViewer($, f);
       f.state.phase = phase;
       f.state.started = started;
+      if (rows) f.state.rows = [...rows];
       release();
       await running;
-      expect((await firstStep).answer).toBe(LIVE_MESSAGE + ending);
+      // Nothing ran: no row, no counts, and never a line that reads as a finished run.
+      expect((await firstStep).answer).toBe(HEADER + (rows ? '\n' : '') + ending);
       await f.clock.settle();
     },
   );
+
+test("the viewer's transcript grows with the worker's rows and keeps the whole run, its denial and its answer", async ($, on) => {
+  const f = setup($, on);
+  on('ui.render', { component: 'AssistantMessage' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['stored: ' + e.props.text] }),
+  );
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  const read = {
+    id: 'read',
+    sequence: 1,
+    kind: 'tool',
+    name: 'Read',
+    state: 'completed',
+    inputSummary: '{"file_path":"/repo/src/router/model-mcp.ts"}',
+    outputPreview: 'PRIVATE_FILE_BODY',
+  };
+  const said = {
+    id: 'said',
+    sequence: 2,
+    kind: 'text',
+    state: 'completed',
+    text: 'The cancel path reads one turn. Checking lint.',
+  };
+  const push = {
+    id: 'push',
+    sequence: 3,
+    kind: 'tool',
+    name: 'Bash',
+    state: 'error',
+    inputSummary: '{"command":"[text: 20 chars]"}',
+    command: 'git push origin main',
+    outputPreview:
+      'Permission to use Bash was denied by the classifier: pushes to main need a person.',
+  };
+  const lint = {
+    id: 'lint',
+    sequence: 4,
+    kind: 'tool',
+    name: 'Bash',
+    state: 'completed',
+    inputSummary: '{"command":"[text: 9 chars]"}',
+    command: 'pnpm lint',
+  };
+  f.state.rows = [read];
+  await remember($);
+  const { running, firstStep } = await startWithViewer($, f);
+  const transcript = async () => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'AssistantMessage',
+      props: { text: HEADER, isFirstOfReply: true },
+    });
+    const lines = await shownLines(ui);
+    await ui.unmount();
+    return lines;
+  };
+  await f.clock.advance(1000);
+  expect(await transcript()).toEqual([
+    'DeepSeek #1 · Read selected source',
+    '⏺ Read(src/router/model-mcp.ts)',
+    'Working…',
+  ]);
+  // The CLI's window moved on: the first row left it and stays in the transcript.
+  f.state.rows = [said, { ...push, state: 'running', outputPreview: undefined }];
+  f.state.sequence = 5;
+  await f.clock.advance(1000);
+  expect(await transcript()).toEqual([
+    'DeepSeek #1 · Read selected source',
+    '⏺ Read(src/router/model-mcp.ts)',
+    'The cancel path reads one turn. Checking lint.',
+    '⏺ Bash(git push origin main)',
+    'Working…',
+  ]);
+  f.state.rows = [push, lint];
+  f.state.sequence = 9;
+  f.state.phase = 'completed';
+  f.state.result = 'Cancel looks up the current turn only.\nLint passes.';
+  release();
+  await running;
+  const stored = (await firstStep).answer;
+  expect(stored).toBe(
+    [
+      'DeepSeek #1 · Read selected source',
+      '```',
+      '⏺ Read(src/router/model-mcp.ts)',
+      '```',
+      '',
+      'The cancel path reads one turn. Checking lint.',
+      '',
+      '```',
+      '⏺ Bash(git push origin main)',
+      '  ⎿  Permission to use Bash was denied by the classifier: pushes to main need a person.',
+      '⏺ Bash(pnpm lint)',
+      '```',
+      '',
+      'Cancel looks up the current turn only.',
+      'Lint passes.',
+      '',
+      'Done (1 tool use · 41.2k tokens · 2s · $0.0043)',
+    ].join('\n'),
+  );
+  // A successful call's output is never copied into the transcript.
+  expect(stored).not.toContain('PRIVATE_');
+  await f.clock.settle();
+  // Written: the rows held while it ran are released, and the engine draws the stored reply.
+  expect(await transcript()).toEqual(['stored: ' + HEADER]);
+});
+
+test("the viewer's first message draws the worker's real assignment, and a short line once it is no longer held", async ($, on) => {
+  setup($, on);
+  const shown: string[] = [];
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    shown.push(e.props.text);
+    return $.ui.resolve(e).Text({ children: [e.props.text] });
+  });
+  await remember($);
+  const message = async (text: string) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'UserMessage',
+      props: { text, origin: { kind: 'plugin', name: 'tenjin' }, isExpanded: true },
+    });
+    await ui.unmount();
+    return shown.at(-1);
+  };
+  const told = 'Observe only the already owned DeepSeek worker activity. ';
+  expect(await message(told + 'DeepSeek #1 · Read selected source')).toBe(INPUT.prompt);
+  // No record for it in this session, as after a restart: never the internal line.
+  expect(await message(told + 'DeepSeek #9 · Earlier job')).toBe(
+    'DeepSeek worker for: Earlier job',
+  );
+  // Any other message is the engine's own.
+  expect(await message('Read src/example.ts.')).toBe('Read src/example.ts.');
+});
