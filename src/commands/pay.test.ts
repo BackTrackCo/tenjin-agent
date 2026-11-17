@@ -20,7 +20,11 @@ import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { privateKeyToAccount } from 'viem/accounts';
-import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from '@x402/core/http';
+import {
+  decodePaymentRequiredHeader,
+  encodePaymentRequiredHeader,
+  encodePaymentResponseHeader,
+} from '@x402/core/http';
 import { parseSIWxHeader, verifySIWxSignature } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import {
@@ -1176,22 +1180,54 @@ describe('runPay, a seller that asks only for a sign-in', () => {
 });
 
 describe('signInForPoll, a router poll the seller answers with a sign-in', () => {
+  /** A 402's header lookup that carries this PAYMENT-REQUIRED value. */
+  const carrying = (value: string) => (name: string) =>
+    name === 'PAYMENT-REQUIRED' ? value : undefined;
+
   // A POST poll reads the challenge with no catch around it: a header that
   // decoded to JSON null threw a raw TypeError out of the poll.
   it('reads a PAYMENT-REQUIRED that decodes to null as no sign-in', () => {
-    expect(signInOnlyHeader(Buffer.from('null').toString('base64'))).toBeUndefined();
+    expect(signInOnlyHeader(carrying(Buffer.from('null').toString('base64')))).toBeUndefined();
   });
 
   const POLL_URL = 'https://seller.example/v1/runs/R1';
   const SUBMIT_URL = 'https://seller.example/v1/run';
   const PAYER = testSigner().address;
   const OTHER = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`)).address;
+  /** The lookup of a 402 that asks only for a sign-in at the poll URL. */
+  const signInHeader = () => carrying(buildSignInChallenge(POLL_URL).header);
+
+  // The SDK reader throws on a 402 with no header, and a POST poll reads the
+  // challenge with no catch around it. The cap is on the header as carried.
+  it.each([
+    { name: 'no header', header: () => undefined },
+    { name: 'an empty header', header: carrying('') },
+    { name: 'a header that is not base64 JSON', header: carrying('!not-base64-json!') },
+    {
+      name: 'a sign-in challenge past the cap',
+      header: carrying(
+        encodePaymentRequiredHeader({
+          ...decodePaymentRequiredHeader(buildSignInChallenge(POLL_URL).header),
+          error: 'x'.repeat(16_384),
+        }),
+      ),
+    },
+  ])('reads $name as no sign-in, and signs nothing for it', async ({ header }) => {
+    expect(signInOnlyHeader(header)).toBeUndefined();
+    const getSigner = vi.fn(async () => testSigner());
+    const answer = await signInForPoll(header, POLL_URL, makeCtx(), {
+      provider: { ...testWalletProvider(), getSigner },
+      paidBy: { from: PAYER, url: SUBMIT_URL },
+    });
+    expect(answer).toBeUndefined();
+    expect(getSigner).not.toHaveBeenCalled();
+  });
 
   // The take is the proof of payment: a submit whose ledger row was never
   // written (its write swallows its own error) still collects its result.
   it('signs for the wallet that paid the take, with no ledger row', async () => {
     const challenge = buildSignInChallenge(POLL_URL);
-    const answer = await signInForPoll(challenge.header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(carrying(challenge.header), POLL_URL, makeCtx(), {
       provider: testWalletProvider(),
       paidBy: { from: PAYER, url: SUBMIT_URL },
     });
@@ -1203,7 +1239,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
   // names the wallet that paid, so the take can wait for it.
   it('signs nothing for a take another wallet paid, and names that wallet', async () => {
     const getSigner = vi.fn(async () => testSigner());
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: { ...testWalletProvider(), getSigner },
       paidBy: { from: OTHER, url: SUBMIT_URL },
     });
@@ -1221,7 +1257,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
     { name: 'a take that names no payer', paidBy: { url: SUBMIT_URL } },
   ])('signs nothing for $name, and opens no wallet', async ({ paidBy }) => {
     const getSigner = vi.fn(async () => testSigner());
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: { ...testWalletProvider(), getSigner },
       paidBy,
     });
@@ -1244,7 +1280,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
       savedFiles: [],
       payer: PAYER,
     });
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: testWalletProvider(),
       paidBy: { url: SUBMIT_URL },
     });
@@ -1256,7 +1292,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
   // A locked wallet or a keychain that did not answer ended a paid take for
   // good; it is an error the poll counts and survives.
   it('answers a wallet that will not open with an error, never a refusal', async () => {
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: {
         ...testWalletProvider(),
         getSigner: async () => {

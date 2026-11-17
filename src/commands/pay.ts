@@ -1,5 +1,4 @@
 import { tmpdir } from 'node:os';
-import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements, SettleResponse } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
@@ -1887,24 +1886,26 @@ function paymentRequiredError(
 }
 
 /**
- * A SELLER'S SIGN-IN CHALLENGE, read from a 402's PAYMENT-REQUIRED header:
- * the challenge and its `sign-in-with-x` extension when the 402 offers no
- * payment and asks only for a sign-in, else undefined (a price, a header too
- * long or one that does not decode). Reading it signs nothing and opens no
- * wallet, so a router poll uses it to tell a sign-in it refuses from a seller
- * asking to be paid again.
+ * A SELLER'S SIGN-IN CHALLENGE, read from a 402's PAYMENT-REQUIRED header by
+ * the shared SDK reader, with no body: the challenge and its `sign-in-with-x`
+ * extension when the 402 offers no payment and asks only for a sign-in, else
+ * undefined (a price, no header, a header too long or one that does not
+ * decode). Reading it signs nothing and opens no wallet, so a router poll
+ * uses it to tell a sign-in it refuses from a seller asking to be paid again.
  */
 export function signInOnlyHeader(
-  paymentRequiredHeader: string,
+  header: (name: string) => string | undefined,
 ):
   | { challenge: PaymentRequired; extension: NonNullable<ReturnType<typeof signInOnlyChallenge>> }
   | undefined {
-  if (paymentRequiredHeader.length > MAX_CHALLENGE_CHARS) return undefined;
   let challenge: PaymentRequired;
   try {
-    challenge = decodePaymentRequiredHeader(paymentRequiredHeader);
+    challenge = headerReader.getPaymentRequiredResponse((name) => {
+      const value = header(name);
+      return value !== undefined && value.length <= MAX_CHALLENGE_CHARS ? value : undefined;
+    });
   } catch {
-    return undefined;
+    return undefined; // No readable PAYMENT-REQUIRED header.
   }
   const extension = signInOnlyChallenge(challenge);
   return extension !== undefined ? { challenge, extension } : undefined;
@@ -1939,7 +1940,7 @@ export type PollSignInAnswer =
  * pay's write is (`sign_in_method`).
  */
 export async function signInForPoll(
-  paymentRequiredHeader: string,
+  header: (name: string) => string | undefined,
   url: string,
   ctx: CommandContext,
   deps: {
@@ -1947,7 +1948,7 @@ export async function signInForPoll(
     paidBy: { from?: string; url: string };
   },
 ): Promise<PollSignInAnswer> {
-  const read = signInOnlyHeader(paymentRequiredHeader);
+  const read = signInOnlyHeader(header);
   if (read === undefined) return undefined;
   const { challenge, extension } = read;
   const { paidBy } = deps;

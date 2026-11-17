@@ -1013,6 +1013,33 @@ describe('a poll the seller answers with a sign-in challenge', () => {
     expect(auth.authorize).toHaveBeenCalledTimes(1);
   });
 
+  // The SDK reader throws on a 402 with no readable challenge. Read as a
+  // sign-in failure, that would be a poll error the take survives, polled to
+  // its deadline; it is a seller asking to be paid again, which ends the take.
+  it.each<{ name: string; headers: Record<string, string> }>([
+    { name: 'no PAYMENT-REQUIRED header', headers: {} },
+    { name: 'an empty PAYMENT-REQUIRED header', headers: { 'PAYMENT-REQUIRED': '' } },
+    {
+      name: 'a PAYMENT-REQUIRED header that does not decode',
+      headers: { 'PAYMENT-REQUIRED': '!not-base64-json!' },
+    },
+  ])('fails the take on a 402 poll with $name, and signs nothing', async ({ headers }) => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([{ status: 402, body: {}, headers }]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(String(result.envelope.reason)).toContain(
+      'the seller asked for another payment to return the result; none was sent',
+    );
+    expect(signIns(seen)).toEqual([undefined]);
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
   // A locked wallet or a keychain that did not answer once ended a paid take
   // for good, while the seller still held its result.
   it('keeps the take through a wallet that would not open, and signs on the next poll', async () => {

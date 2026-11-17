@@ -218,8 +218,8 @@ export type PollAnswer =
   | { state: 'expired'; status: number };
 
 /**
- * Answers a seller's sign-in challenge on a poll: handed the 402's
- * PAYMENT-REQUIRED header and the poll URL, it returns the headers that
+ * Answers a seller's sign-in challenge on a poll: handed the 402's header
+ * lookup, for the SDK reader, and the poll URL, it returns the headers that
  * answer it, why it was not signed (`refused`, which ends the take), why the
  * wallet could not sign this time (`error`, a poll error the take survives),
  * that this machine's wallet is not the one that paid (`otherWallet`, which
@@ -227,7 +227,7 @@ export type PollAnswer =
  * not a sign-in challenge. It never pays.
  */
 export type PollSignIn = (
-  paymentRequiredHeader: string,
+  header: (name: string) => string | undefined,
   url: string,
 ) => Promise<
   | { headers: Record<string, string> }
@@ -465,14 +465,12 @@ type Attempt =
 async function pollSignedIn(take: PolledTake, deps: PollDeps): Promise<Attempt> {
   const first = await pollOnce(take, deps);
   if (first.kind !== 'answer' || first.status !== 402 || deps.signIn === undefined) return first;
-  const challenge = first.header('PAYMENT-REQUIRED');
-  if (challenge === undefined) return first;
   // A sign-in answers only a GET, as a direct pay's does: a signed POST resends
   // its body as the wallet, a write that could spend credit the seller holds
   // for it. Its challenge is refused unsigned, and the take ends as any
   // refused sign-in does; no wallet is opened for it.
   if (take.poll.method !== 'GET') {
-    return signInOnlyHeader(challenge) !== undefined
+    return signInOnlyHeader(first.header) !== undefined
       ? {
           ...first,
           signIn: 'refused',
@@ -481,7 +479,7 @@ async function pollSignedIn(take: PolledTake, deps: PollDeps): Promise<Attempt> 
       : first;
   }
   const answer = await deps
-    .signIn(challenge, take.poll.url)
+    .signIn(first.header, take.poll.url)
     .catch((err: unknown) => ({ error: `the sign-in failed (${errorText(err)})` }));
   if (answer === undefined) return first;
   if ('error' in answer) {
