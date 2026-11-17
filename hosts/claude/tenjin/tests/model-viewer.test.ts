@@ -1152,9 +1152,41 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
     return { result: handback, text: handback };
   };
   await remember($);
+  // Claude Code is still starting: no activity file yet.
+  f.state.liveFile = false;
   const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
-  await f.clock.advance(1000);
+  await f.clock.settle();
   const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  for (const surface of SURFACES) {
+    // The row and the spinner say so from the moment of accept, before any tick.
+    const row = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: accept,
+    });
+    expect((await shownLines(row)).join('')).toBe(
+      '⏺DeepSeek(Read selected source) · starting · 0s',
+    );
+    await row.unmount();
+    await (
+      await $.ui.mount({ plugin: 'tenjin', surface, component: 'Spinner', props: spinner })
+    ).unmount();
+    expect(spinners.at(-1)?.message).toBe('DeepSeek · starting');
+  }
+  await f.clock.advance(12_000);
+  const waiting = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: accept,
+  });
+  expect((await shownLines(waiting)).join('')).toBe(
+    '⏺DeepSeek(Read selected source) · starting · 12s',
+  );
+  await waiting.unmount();
+  f.state.liveFile = true;
+  await f.clock.advance(1000);
   for (const surface of SURFACES) {
     const row = await $.ui.mount({
       plugin: 'tenjin',
@@ -1163,7 +1195,7 @@ test('an accept call is one live DeepSeek row that ends in a native Done line, a
       props: accept,
     });
     expect((await shownLines(row)).join('')).toBe(
-      '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
+      '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 13s · $0.0043 so far  ⎿  Read(src/example.ts)',
     );
     await row.unmount();
     const turn = await $.ui.mount({
@@ -1231,7 +1263,19 @@ test('a worker that stops, is interrupted or never starts says so, never Done', 
     partial: { rows: [], omittedRows: 0 },
   });
   const refused = JSON.stringify({ action: 'native', reason: 'Offer expired' });
+  const notStarted = JSON.stringify({
+    status: 'not_started',
+    stopReason: { kind: 'not_started', reason: 'startup_timeout' },
+    elapsedMs: 61_000,
+    spend: { reservedAtomic: '0', actualAtomic: '0', uncertain: [] },
+    nextStep: 'No worker started',
+  });
   for (const [props, shown, color] of [
+    [
+      { ...accept, isRunning: false, output: notStarted },
+      '⏺DeepSeek(subagent)  ⎿  Not started (1m 1s)',
+      'error',
+    ],
     [
       { ...accept, isRunning: false, output: stopped },
       '⏺DeepSeek(subagent)  ⎿  Stopped (1 tool use · 15 tokens · 3s · $0.003 · settlement unresolved)',
@@ -1258,5 +1302,32 @@ test('a worker that stops, is interrupted or never starts says so, never Done', 
     const [dot] = await row.findAll({ type: 'Text', text: '⏺' });
     expect(dot?.props.color).toBe(color);
     await row.unmount();
+  }
+});
+
+test('a folded run that holds an accept unfolds, so the DeepSeek row draws in place of the count line', async ($, on) => {
+  setup($, on);
+  const groups: { isExpanded: boolean }[] = [];
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    groups.push(e.props);
+    return $.ui.resolve(e).Text({ children: ['Calling plugin:tenjin:router…'] });
+  });
+  const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  const read = toolRow('read_1', 'Read', { file_path: '/repo/a.ts' });
+  for (const [calls, unfolds] of [
+    [[accept], true],
+    [[read, accept], true],
+    [[read], false],
+    // A cancel is not an accept: its row stays the engine's.
+    [[toolRow('parent_cancel', ACCEPT, { cancel: OFFER })], false],
+  ] as const) {
+    const group = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
+      props: { calls, isActive: true, isExpanded: false },
+    });
+    expect(groups.at(-1)?.isExpanded).toBe(unfolds);
+    await group.unmount();
   }
 });

@@ -769,8 +769,46 @@ export function registerModelViewer(on: On): void {
       closed = false,
       prepared = false,
       viewerStarted = false;
-    try {
-      if (await enabled($)) {
+    if (await enabled($).catch(() => false)) {
+      // THE LIVE ROW AND THE SPINNER come first and stand alone: they read the
+      // CLI's own activity file, so they need neither the viewer, nor its
+      // bookkeeping below, nor a second call on this connection.
+      try {
+        const known = (await $.state.get(STATE)).value?.records.find((r) => r.offerId === offerId);
+        await $.state.set(
+          { ...WORKERS, id: offerId },
+          {
+            offerId,
+            title: known?.title ?? 'subagent',
+            startedAt: await $.clock.now(),
+            elapsedMs: 0,
+            state: 'starting',
+          },
+        );
+      } catch {
+        /* The row then draws without its title or clock. */
+      }
+      liveWorkers.delete(offerId);
+      liveWorkers.add(offerId);
+      try {
+        $.ui.invalidate('ui.render');
+        const [path, cwd] = await Promise.all([progressPath($, offerId), $.session.cwd()]);
+        if (path)
+          timer = $.clock.every(POLL_MS, async () => {
+            if (closed || polling) return;
+            polling = true;
+            try {
+              await pollWorker($, offerId, path, cwd);
+            } catch {
+              /* Display only. */
+            } finally {
+              polling = false;
+            }
+          });
+      } catch {
+        /* Display only. */
+      }
+      try {
         const current = await change($, (state) => {
           prepared = false;
           const item = state.records.find((r) => r.offerId === offerId);
@@ -785,38 +823,6 @@ export function registerModelViewer(on: On): void {
             cwd: current.cwd,
             offerId: item.offerId,
           };
-        // THE LIVE ROW AND THE SPINNER read the CLI's own activity file, so
-        // they need neither the viewer nor a second call on this connection.
-        const [path, cwd, startedAt] = await Promise.all([
-          progressPath($, offerId),
-          current?.cwd ?? $.session.cwd(),
-          $.clock.now(),
-        ]);
-        await $.state.set(
-          { ...WORKERS, id: offerId },
-          {
-            offerId,
-            title: item?.title ?? 'subagent',
-            startedAt,
-            elapsedMs: 0,
-            state: 'starting',
-          },
-        );
-        liveWorkers.delete(offerId);
-        liveWorkers.add(offerId);
-        $.ui.invalidate('ui.render');
-        if (path)
-          timer = $.clock.every(POLL_MS, async () => {
-            if (closed || polling) return;
-            polling = true;
-            try {
-              await pollWorker($, offerId, path, cwd);
-            } catch {
-              /* Display only. */
-            } finally {
-              polling = false;
-            }
-          });
         if (current && item && prepared && liveViewerGuards.size + pendingViewerSpawns < 16) {
           // Count the pending spawn until it returns, even after classic-start tags its id.
           pendingViewerSpawns++;
@@ -844,9 +850,9 @@ export function registerModelViewer(on: On): void {
             }
           })();
         }
+      } catch {
+        /* All observation setup is optional. */
       }
-    } catch {
-      /* All observation setup is optional. */
     }
     try {
       return await next(e);
@@ -1040,7 +1046,10 @@ export function registerModelViewer(on: On): void {
       const head = { name: 'DeepSeek', argument: live?.title ?? 'subagent' };
       const ui = $.ui.resolve(e);
       if (output === undefined && !isInterrupted) {
+        // From the moment of accept: Claude Code is still starting until the first tick says more.
+        const starting = live?.state !== 'running';
         const parts = [
+          starting ? 'starting' : undefined,
           live?.toolUses ? toolUses(live.toolUses) : undefined,
           live?.tokens ? tokens(live.tokens) : undefined,
           live ? duration(live.elapsedMs) : undefined,
@@ -1049,8 +1058,8 @@ export function registerModelViewer(on: On): void {
         return workerRow(ui, {
           ...head,
           state: 'running',
-          ...(parts.length ? { tail: ' · ' + parts.join(' · ') } : {}),
-          under: live?.current ?? (live?.state === 'running' ? 'Working' : 'Starting'),
+          tail: ' · ' + parts.join(' · '),
+          ...(starting ? {} : { under: live?.current ?? 'Working' }),
         });
       }
       const ended = json(textOf(output));
@@ -1064,10 +1073,19 @@ export function registerModelViewer(on: On): void {
           under: word + ' (' + doneParts(ended!, live).join(' · ') + ')',
         });
       }
+      // Nothing ran: a start that never finished, an Esc during it, or a refused accept.
+      const waited =
+        typeof ended?.elapsedMs === 'number'
+          ? ended.elapsedMs
+          : isInterrupted
+            ? live?.elapsedMs
+            : undefined;
       return workerRow(ui, {
         ...head,
-        state: isInterrupted || isErrored ? 'error' : 'held',
-        under: isInterrupted ? 'Interrupted' : 'Not started',
+        state: isInterrupted || isErrored || status === 'not_started' ? 'error' : 'held',
+        under:
+          (isInterrupted ? 'Interrupted' : 'Not started') +
+          (waited !== undefined ? ' (' + duration(waited) + ')' : ''),
       });
     }
     if (tool === 'Agent' || tool === 'Task') {
@@ -1085,6 +1103,18 @@ export function registerModelViewer(on: On): void {
       });
     }
     return next(e);
+  });
+  // The transcript folds a run of calls into one count line, which for an
+  // accept reads `Calling plugin:tenjin:router…` and draws no row at all. A
+  // group that holds an accept unfolds, so its DeepSeek row draws.
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    const accepts = e.props.calls.some((call) => {
+      const offerId = record(call.input)?.offer_id;
+      return call.tool === ACCEPT && short(offerId) && UUID.test(offerId);
+    });
+    return next(
+      accepts && !e.props.isExpanded ? { ...e, props: { ...e.props, isExpanded: true } } : e,
+    );
   });
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const { tool, output, isExpanded } = e.props;
