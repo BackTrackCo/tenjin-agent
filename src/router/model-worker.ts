@@ -36,6 +36,7 @@ import {
   type NativeCodexSnapshot,
 } from './codex-native-worker';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
+import { markSessionServed } from './alive';
 import { modelSettings } from './model-settings';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
@@ -1096,6 +1097,11 @@ async function runQualifiedWorker(
       if (message.type === 'system' && message.subtype === 'init') {
         diagnostics.mark('childReady');
         diagnostics.init(message);
+        // The plugin's `SessionStart` entry (`tenjin hook alive`) marks a session it serves,
+        // and the mod skips that event in a worker as a native subagent has none: the
+        // worker's session is marked here instead, so an older settings install's legs stay
+        // silent in it as before.
+        await markSessionServed(options.dataDir, { session_id: message.session_id });
         const matches = message.permissionMode === permissionMode;
         if (session) {
           if ((await realpath(message.cwd)) !== (await realpath(job.root)))

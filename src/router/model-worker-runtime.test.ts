@@ -93,6 +93,7 @@ vi.mock('./model-worker-agent-prompt', async (original) => {
   };
 });
 import { readNativeAgentPrompt } from './model-worker-agent-prompt';
+import { sessionServedByPlugin } from './alive';
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
@@ -183,6 +184,20 @@ const options = () => ({
   claudePermissionMode: 'default' as const,
   currentClaudePermissionMode: () => 'default',
   permission: vi.fn(async () => false),
+});
+// Failure caught: with the mod skipping SessionStart in a worker (a native subagent has
+// none), the plugin's `hook alive` no longer marks the worker's session, and an older
+// settings install's legs would speak there.
+it("marks the worker's session as one the plugin serves, as the plugin's SessionStart entry did", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'worker-alive-'));
+  const sessionId = '22222222-3333-4444-8555-666666666666';
+  sdkResult({ subtype: 'success', result: 'done' }, sessionId);
+  try {
+    await runModelWorker(job, { ...options(), dataDir });
+    expect(await sessionServedByPlugin(dataDir, { session_id: sessionId })).toBe(true);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
 });
 function sdkResult(
   result: Record<string, unknown>,

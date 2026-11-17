@@ -101,7 +101,25 @@ type Shape = {
 };
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
+/**
+ * A DEEPSEEK WORKER GETS THE HOOK EVENTS A NATIVE SUBAGENT GETS. A native subagent fires
+ * no `SessionStart` when it starts or resumes and no `UserPromptSubmit` for its prompts,
+ * so in a worker's process those two events end here, above the person's settings hooks
+ * and the plugins' command hooks: none of them runs, and no context they add reaches the
+ * worker. A compaction's `SessionStart` still runs, as it does in a native subagent, and
+ * so does every other event (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`
+ * and the rest), untouched. Managed settings hooks sit above every mod and still run.
+ * Where the worker flag cannot be read, the event runs as before.
+ */
+async function inWorker($: Dollar): Promise<boolean> {
+  return (await $.env.get('TENJIN_MODEL_WORKER').catch(() => undefined)) === '1';
+}
+
 export const register: Register = (on) => {
+  on('classic.SessionStart', async ($, e, next) =>
+    (e.source === 'startup' || e.source === 'resume') && (await inWorker($)) ? {} : next(e),
+  );
+  on('classic.UserPromptSubmit', async ($, e, next) => ((await inWorker($)) ? {} : next(e)));
   registerModelViewer(on);
   on('tool.describe', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
     const data = await tenjinDataDir($);
