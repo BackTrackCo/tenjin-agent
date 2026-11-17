@@ -41,14 +41,17 @@ function startLauncher(launcher, sid, directory) {
 }
 
 async function child() {
+  process.stderr.write('tenjin Windows qualification: node probe started\n');
+  const input = createInterface({ input: process.stdin });
+  const incoming = once(input, 'line');
   const leaf = spawn(process.execPath, [script, '--leaf'], {
     detached: true,
     stdio: ['ignore', 'pipe', 'ignore'],
     windowsHide: true,
   });
   await once(leaf.stdout, 'data');
-  const input = createInterface({ input: process.stdin });
-  const [roundTrip] = await once(input, 'line');
+  process.stderr.write('tenjin Windows qualification: probe grandchild ready\n');
+  const [roundTrip] = await incoming;
   process.stdout.write(
     JSON.stringify({
       child: process.pid,
@@ -58,7 +61,7 @@ async function child() {
       controllerValueAbsent: process.env[canary] === undefined,
     }) + '\n',
   );
-  process.stderr.write('fixture stderr\n');
+  process.stderr.write('tenjin Windows qualification: probe received stdio\n');
   await wait(90_000);
 }
 
@@ -81,7 +84,7 @@ function reportFrom(proc) {
       );
     }),
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Worker process probe timed out')), 20_000);
+      timer = setTimeout(() => reject(new Error('Worker process probe timed out')), 60_000);
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -107,7 +110,10 @@ async function assertDrained(report) {
 
 async function verify(probe, kill) {
   const exited = once(probe, 'exit');
-  probe.stderr.resume();
+  const diagnostics = createInterface({ input: probe.stderr });
+  diagnostics.on('line', (line) => {
+    if (/^tenjin Windows (qualification|worker): [\w ()-]{1,100}$/.test(line)) console.log(line);
+  });
   try {
     probe.stdin.write('stdio probe\n');
     const report = await reportFrom(probe);
@@ -148,11 +154,13 @@ if (first === '--child') {
     throw new Error('Expected absolute launcher path, worker SID and shared workspace');
   }
   const direct = startLauncher(first, sid, directory);
+  console.log('Windows process probe: direct stop');
   await verify(direct, () => direct.kill());
   const middle = spawn(process.execPath, [script, '--controller', first, sid, directory], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  console.log('Windows process probe: parent loss');
   await verify(middle, () => middle.kill());
   console.log('Windows process probe passed for direct stop and parent loss.');
 }

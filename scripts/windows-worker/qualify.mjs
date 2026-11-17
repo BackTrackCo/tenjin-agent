@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, isAbsolute, join, relative } from 'node:path';
+import { createInterface } from 'node:readline';
 import { clearTimeout, setTimeout } from 'node:timers';
 import { query } from '@anthropic-ai/claude-agent-sdk/core';
 
@@ -227,7 +228,11 @@ async function qualify({ launcher, binary, sid, workspace, canary, tool }) {
             },
           );
           closed = new Promise((resolve) => child.once('close', resolve));
-          child.stderr.resume();
+          const diagnostics = createInterface({ input: child.stderr });
+          diagnostics.on('line', (line) => {
+            if (/^tenjin Windows (qualification|worker): [\w ()-]{1,100}$/.test(line))
+              console.log(line);
+          });
           return child;
         },
       },

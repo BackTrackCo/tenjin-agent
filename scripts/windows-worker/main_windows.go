@@ -48,16 +48,22 @@ func main() {
 }
 
 func runBootstrap() (int, error) {
+	trace("bootstrap started")
 	record, err := receiveLaunch(os.Stdin)
 	if err != nil {
 		return 125, err
 	}
+	trace("bootstrap received launch frame")
 	child := exec.Command(record.Executable, record.Arguments...)
 	child.Dir = record.Directory
 	child.Env = workerEnvironment(os.Environ(), record.Overlay)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	if err := child.Run(); err != nil {
+	if err := child.Start(); err != nil {
+		return 125, operationError("start native worker executable", err)
+	}
+	trace("native worker started")
+	if err := child.Wait(); err != nil {
 		var exited *exec.ExitError
 		if errors.As(err, &exited) {
 			return exited.ExitCode(), nil
@@ -65,6 +71,10 @@ func runBootstrap() (int, error) {
 		return 125, operationError("run native worker executable", err)
 	}
 	return 0, nil
+}
+
+func trace(stage string) {
+	_, _ = fmt.Fprintln(os.Stderr, "tenjin Windows qualification:", stage)
 }
 
 func processCreatedAt(process syscall.Handle) (int64, error) {
@@ -181,7 +191,10 @@ func runController(opts launchOptions) (int, error) {
 		err := sendLaunch(input, frame)
 		clear(frame)
 		if err == nil {
+			trace("controller sent launch frame")
 			_, _ = io.Copy(input, os.Stdin)
+		} else {
+			trace("controller could not send launch frame")
 		}
 		_ = input.Close()
 	}()
@@ -247,11 +260,13 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 		return 0, nil, 0, errors.New("launcher executable path is too long")
 	}
 	cwd, _ := syscall.UTF16PtrFromString(opts.Record.Directory)
+	trace("starting alternate logon")
 	info, err := createAlternateBootstrap(program, cwd, command, &startup)
 	if err != nil {
 		return 0, nil, 0, err
 	}
 	process, thread = info.Process, info.Thread
+	trace("alternate logon created suspended bootstrap")
 	ok, _, winErr := attachToJob.Call(uintptr(job), uintptr(process))
 	if ok == 0 {
 		return 0, nil, 0, operationError("attach suspended worker to its job", winErr)
@@ -259,10 +274,12 @@ func startOwned(launcher string, caller syscall.Handle, opts launchOptions) (sys
 	if err := verifyWorker(process, opts.WorkerSID, caller); err != nil {
 		return 0, nil, 0, err
 	}
+	trace("bootstrap identity verified and assigned to job")
 	previousCount, _, winErr := pauseGate.Call(uintptr(thread))
 	if uint32(previousCount) != 1 {
 		return 0, nil, 0, operationError("resume verified worker", winErr)
 	}
 	success = true
+	trace("controller resumed bootstrap")
 	return process, input, job, nil
 }

@@ -119,10 +119,17 @@ try {
 
   $processProbe = Join-Path $workspacePath 'process-probe.mjs'
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'process-probe.mjs') -Destination $processProbe
-  Invoke-Checked 'node.exe' @($processProbe, $launcherPath, $worker.SID.Value, $workspacePath)
+  $failedProbes = @()
+  try {
+    Invoke-Checked 'node.exe' @($processProbe, $launcherPath, $worker.SID.Value, $workspacePath)
+  } catch { $failedProbes += 'process ownership' }
   foreach ($tool in 'Bash', 'PowerShell') {
-    Invoke-Checked 'node.exe' @($sdkProbe, $launcherPath, $claudePath[0].FullName, $worker.SID.Value, $workspacePath, $canaryPath, $tool)
+    Write-Host "Windows SDK probe: $tool"
+    try {
+      Invoke-Checked 'node.exe' @($sdkProbe, $launcherPath, $claudePath[0].FullName, $worker.SID.Value, $workspacePath, $canaryPath, $tool)
+    } catch { $failedProbes += $tool }
   }
+  if ($failedProbes.Count -gt 0) { throw ('Windows probes failed: ' + ($failedProbes -join ', ')) }
 } finally {
   $password.Dispose()
   try {
