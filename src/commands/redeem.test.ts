@@ -90,7 +90,8 @@ interface Sent {
   headers: Record<string, string>;
   body: unknown;
 }
-type Reply = [number, unknown];
+/** A status and JSON body, or `lost`: the request never hears back. */
+type Reply = [number, unknown] | 'lost';
 
 /**
  * tenjin.sh and github.com, each route answering from its own queue (the last
@@ -122,7 +123,9 @@ function servers(routes: {
     sent.push({ url, headers: Object.fromEntries(new Headers(init?.headers).entries()), body });
     const queue = queues[url];
     if (queue === undefined || queue.length === 0) return new Response('{}', { status: 404 });
-    const [status, json] = queue.length > 1 ? queue.shift()! : queue[0]!;
+    const next = queue.length > 1 ? queue.shift()! : queue[0]!;
+    if (next === 'lost') throw new TypeError('fetch failed');
+    const [status, json] = next;
     return new Response(JSON.stringify(json), {
       status,
       headers: { 'content-type': 'application/json' },
@@ -369,6 +372,56 @@ describe('runRedeem off a terminal: a code that needs GitHub', () => {
       expect(nextStep).toContain('Never ask the person to type "done"');
     },
   );
+});
+
+describe('runRedeem: a lost answer', () => {
+  // The server is idempotent per wallet, so asking again tells what happened.
+  it('asks again and reports its own redemption as added', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const net = servers({
+      redeem: [
+        'lost',
+        [502, '<html>bad gateway</html>'],
+        [200, { ...credited(address), replayed: true }],
+      ],
+    });
+    const res = await redeem(makeCtx({ isTTY: true, json: false }), {
+      provider,
+      fetchImpl: net.fetchImpl,
+      code: 'NCSTATE26',
+    });
+    expect(net.to('/api/promo/redeem')).toHaveLength(3);
+    expect(stderr.join('')).toContain('✓ $2.00 added');
+    expect(res.data).not.toHaveProperty('alreadyRedeemed');
+  });
+
+  it('says so when this wallet redeemed the code on an earlier run', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const net = servers({ redeem: [[200, { ...credited(address), replayed: true }]] });
+    const res = await redeem(makeCtx({ isTTY: true, json: false }), {
+      provider,
+      fetchImpl: net.fetchImpl,
+      code: 'NCSTATE26',
+    });
+    expect(stderr.join('')).toContain('Already redeemed: $2.00 from NCSTATE26 went to this wallet');
+    expect(res.data).toMatchObject({ alreadyRedeemed: true });
+  });
+
+  it('never says retry when no answer comes back: the code may have gone through', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const net = servers({ redeem: ['lost'] });
+    const err = await catchCliError(
+      redeem(makeCtx(), { provider, fetchImpl: net.fetchImpl, code: 'NCSTATE26' }),
+    );
+    expect(err.code).toBe('NETWORK_ERROR');
+    expect(err.message).toContain('may have gone through');
+    expect(err.fix).toContain('tenjin balance');
+    expect(err.fix).toContain('never pays twice');
+    expect(net.to('/api/promo/redeem')).toHaveLength(3);
+  });
 });
 
 describe('runRedeem: refusals', () => {

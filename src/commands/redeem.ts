@@ -6,7 +6,7 @@ import {
   validClientId,
   type DeviceFlowOptions,
 } from '../lib/github-device';
-import { fetchFailureToCliError, httpRequest } from '../lib/http';
+import { httpRequest } from '../lib/http';
 import { liveLine, type LiveLine } from '../lib/live-line';
 import { machineHash as readMachineHash } from '../lib/machine-id';
 import { toMoney } from '../lib/money';
@@ -89,9 +89,22 @@ interface Redeemed {
   txHash: string;
   confirmed: boolean;
   balanceAtomic?: bigint;
+  /** This wallet had redeemed the code before: the server told it again. */
+  replayed: boolean;
 }
 
-type Answer = { kind: 'redeemed'; redeemed: Redeemed } | { kind: 'github'; clientId: string };
+/** `lost`: no answer, or a failure with no word from Tenjin on the code: it may have gone through. */
+type Answer =
+  | { kind: 'redeemed'; redeemed: Redeemed }
+  | { kind: 'github'; clientId: string }
+  | { kind: 'lost' };
+
+/**
+ * Asks after a lost answer. Safe because the server is idempotent per wallet:
+ * asking again returns this wallet's redemption, never a second payment.
+ */
+const ASK_ATTEMPTS = 3;
+const ASK_BACKOFF_MS = 2_000;
 
 export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promise<CommandResult> {
   const code = parseCode(opts.code);
@@ -122,16 +135,33 @@ export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promi
   const machineHash = await (opts.machineHash ?? readMachineHash)().catch(() => undefined);
   const startBalance = await baseline;
 
-  const ask = async (githubToken?: string): Promise<Answer> => {
+  // Set once an answer was lost: a later "already redeemed for this wallet" is then
+  // this run's own redemption arriving, not one from before.
+  let askedAgain = false;
+  const ask = async (githubToken?: string): Promise<Exclude<Answer, { kind: 'lost' }>> => {
     if (human) live.spin('Redeeming…');
     try {
-      return await redeemRequest(ctx, signer, {
-        address,
-        code,
-        ...(machineHash !== undefined ? { machineHash } : {}),
-        ...(githubToken !== undefined ? { githubToken } : {}),
-        ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-      });
+      for (let attempt = 1; ; attempt++) {
+        const answer = await redeemRequest(ctx, signer, {
+          address,
+          code,
+          ...(machineHash !== undefined ? { machineHash } : {}),
+          ...(githubToken !== undefined ? { githubToken } : {}),
+          ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+        });
+        if (answer.kind !== 'lost') return answer;
+        if (attempt >= ASK_ATTEMPTS) {
+          throw new CliError(
+            'NETWORK_ERROR',
+            "Couldn't hear back from Tenjin, so the code may have gone through.",
+            {
+              fix: `Run \`tenjin balance\` in a minute. Running \`tenjin redeem ${code}\` again is safe: it never pays twice.`,
+            },
+          );
+        }
+        askedAgain = true;
+        await sleep(ASK_BACKOFF_MS * attempt);
+      }
     } finally {
       live.stop();
     }
@@ -191,12 +221,21 @@ export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promi
     // `tenjin balance --wait` then counts the credit even if it lands before that wait starts.
     await rememberStartBalance(ctx.dataDir, address, startBalance, now(), ON_ITS_WAY_MS);
   }
-  if (landed && human) live.ok(`${dollars(amount)} added`);
+  // Redeemed on an earlier run: nothing new was added this time.
+  const earlier = redeemed.replayed && !askedAgain;
+  if (landed && human) {
+    live.ok(
+      earlier
+        ? `Already redeemed: ${dollars(amount)} from ${redeemed.code} went to this wallet`
+        : `${dollars(amount)} added`,
+    );
+  }
 
   return {
     data: {
       address,
       code: redeemed.code,
+      ...(earlier ? { alreadyRedeemed: true } : {}),
       added: toMoney(amount.toString()),
       ...(balance !== undefined ? { balance: toMoney(balance.toString()) } : {}),
       txHash: redeemed.txHash,
@@ -378,15 +417,14 @@ async function redeemRequest(
     jsonBody,
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   });
-  if (!res.ok) {
-    throw fetchFailureToCliError(res, {
-      fix: `Check your network, then run \`tenjin balance\`: if the credit is not there, run \`tenjin redeem ${body.code}\` again.`,
-    });
-  }
+  // No answer, or a server failure that says nothing about the code: the request
+  // may have redeemed it, so the caller asks again rather than calling it refused.
+  if (!res.ok) return { kind: 'lost' };
   if (res.status === 200) {
     return { kind: 'redeemed', redeemed: redeemedFrom(res.json, body.address, body.code) };
   }
   const envelope = errorEnvelope(res.json);
+  if (res.status >= 500 && envelope.code?.startsWith('promo_') !== true) return { kind: 'lost' };
   if (res.status === 403 && envelope.code === 'promo_github_required') {
     const clientId = envelope.details?.clientId;
     if (!validClientId(clientId)) {
@@ -481,6 +519,7 @@ function redeemedFrom(json: unknown, address: string, sent: string): Redeemed {
       amountAtomic: BigInt(body.amountAtomic as string),
       txHash: body.txHash,
       confirmed: body.confirmed,
+      replayed: body.replayed === true,
       ...(body.balanceAtomic !== undefined
         ? { balanceAtomic: BigInt(body.balanceAtomic as string) }
         : {}),
