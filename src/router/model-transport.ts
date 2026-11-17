@@ -501,7 +501,7 @@ export class ModelTransport {
         });
         throw new ModelCallFailed(
           'Model payment refused before signing; no authorization sent',
-          { cause: 'payment_refused' },
+          { cause: 'payment_refused', payer: failure.why },
           { cause: failure },
         );
       }

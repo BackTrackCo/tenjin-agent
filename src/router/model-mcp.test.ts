@@ -1307,6 +1307,10 @@ it.each([
   [{ kind: 'harness_limit', reason: 'turn_guard', turns: 3 }, 'turn_limit'],
   [{ kind: 'execution_failure', reason: 'model_call_failed', status: 502 }, 'model_call_failed'],
   [{ kind: 'execution_failure', reason: 'model_call_timeout' }, 'model_call_timeout'],
+  [
+    { kind: 'execution_failure', reason: 'model_call_failed', payer: 'wallet_low' },
+    'model_call_failed',
+  ],
 ] as const)(
   "hands a stopped worker's cause and counts back beside its partial work (%o)",
   async (stop, endedBy) => {
@@ -1342,6 +1346,13 @@ it.each([
           rows: expect.arrayContaining([expect.objectContaining({ name: 'Bash' })]),
         },
       });
+      // The payer's code comes with Tenjin's own words for it and what the person can do.
+      if ('payer' in stop)
+        expect(answer.payment).toEqual({
+          reason: expect.stringContaining('wallet holds less'),
+          fix: expect.stringContaining('tenjin fund'),
+        });
+      else expect(answer).not.toHaveProperty('payment');
       // A later accept in the session reads the same end from the job's record.
       expect(await f.call({ offer_id: f.job.id })).toMatchObject({ status: 'stopped', endedBy });
     } finally {

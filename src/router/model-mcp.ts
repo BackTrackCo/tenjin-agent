@@ -10,6 +10,7 @@ import type { ModelTransport } from './model-transport';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
 import { WORKER_ENDS, WORKER_WALL_MS, workerEnd, workerStop } from './model-worker-control';
+import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
 import {
@@ -809,6 +810,9 @@ export function registerModelTool(
                       : 'unknown',
                 endedBy,
                 ended: WORKER_ENDS[endedBy],
+                // A model call the payer could not complete: why, and what the person can do,
+                // in the words Tenjin uses for an unpaid routing fee.
+                ...(stop?.payer && unpaid(stop.payer) ? { payment: unpaid(stop.payer) } : {}),
                 stopReason: stop,
                 elapsedMs: Date.now() - started,
                 ...counts(),
