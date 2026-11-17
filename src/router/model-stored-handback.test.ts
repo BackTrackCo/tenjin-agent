@@ -1,7 +1,7 @@
 import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -65,6 +65,9 @@ beforeEach(() => {
   vi.mocked(meetsFloor).mockReturnValue(true);
   vi.mocked(resolveSettings).mockResolvedValue({ effective: {} } as never);
 });
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 async function filesUnder(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true, recursive: true });
@@ -78,6 +81,9 @@ it.each(['completed', 'stopped'] as const)(
   async (ending) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-repo-')));
     const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-data-')));
+    // The worker's Claude config folder is part of who owns a job: one that exists, on any machine.
+    const configDir = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-config-')));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
     const password = 'Zq8-v3ry-s3cret-pw';
     const url = `postgres://app:${password}@db.internal:5432/app`;
     try {
@@ -194,7 +200,9 @@ it.each(['completed', 'stopped'] as const)(
       };
       try {
         const first = await call();
-        expect(JSON.parse(first).status).toBe(ending === 'completed' ? 'completed' : 'unknown');
+        expect(JSON.parse(first)).toMatchObject({
+          status: ending === 'completed' ? 'completed' : 'unknown',
+        });
         // What the parent read, and what a later accept reads back from disk.
         const again = await call();
         for (const text of [first, again]) {
@@ -214,8 +222,7 @@ it.each(['completed', 'stopped'] as const)(
         await server.close();
       }
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(dataDir, { recursive: true, force: true });
+      for (const dir of [root, dataDir, configDir]) await rm(dir, { recursive: true, force: true });
     }
   },
 );
