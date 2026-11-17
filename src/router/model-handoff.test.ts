@@ -13,6 +13,7 @@ import {
   ModelHandoff,
   modelOfferSchema,
   MODEL_BRIEF_GUIDANCE,
+  type ModelCaller,
   type ModelSession,
 } from './model-handoff';
 import { MODEL_ROUTE_BODY_BYTES, MODEL_ROUTE_ENVELOPE_BYTES } from './model-limits';
@@ -816,6 +817,183 @@ it('offers two identical calls of one model response each, and settles one of th
   expect(await f.model.store.accept(ids[1]!, 'root')).toBeNull();
   expect(await f.model.store.accept(ids[0]!, 'root')).toBeNull();
   expect(f.route).toHaveBeenCalledTimes(2);
+});
+
+/** A native subagent as the mod sends it: listed, in the session's folder, under the main loop. */
+const child = (agentId: string, more: Partial<ModelCaller> = {}): ModelCaller => ({
+  agentId,
+  agentType: 'general-purpose',
+  parents: [],
+  cwd: join(dir, 'repo'),
+  ...more,
+});
+
+/** A native subagent's own transcript, where Claude Code keeps it beside the session's. */
+async function subagentTranscript(agentId: string, task: string, reply: string) {
+  const folder = join(dir, 'root', 'subagents');
+  await mkdir(folder, { recursive: true });
+  const row = (type: 'user' | 'assistant', text: string) =>
+    JSON.stringify({
+      type,
+      sessionId: 'root',
+      isSidechain: true,
+      agentId,
+      message: { role: type, content: text },
+    });
+  await writeFile(
+    join(folder, `agent-${agentId}.jsonl`),
+    `${row('user', task)}\n${row('assistant', reply)}\n`,
+  );
+}
+
+const offerId = (made: object) => ('offer_id' in made ? String(made.offer_id) : '');
+const routedContext = (route: ReturnType<typeof vi.fn>, call: number) =>
+  (route.mock.calls[call]![0] as { parentContext: { content: string }[] }).parentContext.map(
+    (message) => message.content,
+  );
+
+it("offers a native subagent's call to that subagent, judged with its own conversation after the session's", async () => {
+  // Catches: every subagent call kept native as `input_filter:agentId`, and a subagent's
+  // assignment judged by the parent's latest message alone, not by its own task.
+  const f = await routedFixture();
+  vi.stubEnv('HOME', dir);
+  await subagentTranscript('child-1', 'CHILD TASK: audit the parser.', 'CHILD REPLY: reading it.');
+  const made = await f.model.capture(
+    f.session,
+    'child-call',
+    { description: 'Parser', prompt: 'Read the parser fixture.' },
+    undefined,
+    'Agent',
+    'child-turn:0',
+    child('child-1'),
+  );
+  expect(made).toMatchObject({ action: 'offer', parentPolicy });
+  const id = offerId(made);
+  expect((await f.model.store.owned(id, 'root'))?.caller).toBe('child-1');
+  const context = routedContext(f.route, 0);
+  expect(context).toContain('CHILD TASK: audit the parser.');
+  expect(context.at(-1)).toBe('CHILD REPLY: reading it.');
+  expect(await f.model.store.noOffers()).toEqual([]);
+  // The subagent accepts it by its id in the session, as the main loop does.
+  expect((await f.model.store.accept(id, 'root'))?.state).toBe('running');
+});
+
+it("keeps a subagent's offer native only by that subagent's repeat, never by another loop's same call", async () => {
+  // Catches: a repeat matched by content alone, so the main loop's or another subagent's
+  // identical call settled a subagent's offer, and that subagent's repeat bought a second fee.
+  const f = await routedFixture();
+  vi.stubEnv('HOME', dir);
+  const same = { description: 'Twin', prompt: 'Read the same fixture.' };
+  const call = (id: string, step: string, caller?: ModelCaller) =>
+    f.model.capture(f.session, id, same, undefined, 'Agent', step, caller);
+  const fromChild = await call('child-call', 'child-turn:0', child('child-1'));
+  const fromMain = await call('main-call', 'main-turn:0');
+  const fromOther = await call('other-call', 'other-turn:0', child('child-2'));
+  expect([fromChild, fromMain, fromOther]).toMatchObject([
+    { action: 'offer' },
+    { action: 'offer' },
+    { action: 'offer' },
+  ]);
+  expect(await call('child-repeat', 'child-turn:1', child('child-1'))).toEqual({
+    action: 'native',
+    settled: offerId(fromChild),
+  });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+    code: 'kept_native',
+    offerId: offerId(fromChild),
+    from: 'subagent',
+  });
+  expect((await f.model.store.owned(offerId(fromMain), 'root'))?.state).toBe('offered');
+  expect((await f.model.store.owned(offerId(fromOther), 'root'))?.state).toBe('offered');
+  expect(f.route).toHaveBeenCalledTimes(3);
+});
+
+it("offers a call two native agents deep to the agent that made it, and gives a worker's own calls none", async () => {
+  // Catches: a nested agent's call kept native, judged with another loop's conversation or
+  // kept native by its parent subagent's same call; and a worker's own call offered.
+  const f = await routedFixture();
+  vi.stubEnv('HOME', dir);
+  await subagentTranscript('grandchild', 'NESTED TASK: list the exports.', 'NESTED REPLY: on it.');
+  const same = { prompt: 'Read the nested fixture.' };
+  const nested = child('grandchild', { parents: ['general-purpose'] });
+  const call = (id: string, step: string, caller: ModelCaller, native = same) =>
+    f.model.capture(f.session, id, native, undefined, 'Agent', step, caller);
+  const made = await call('nested', 'g:0', nested);
+  expect(made).toMatchObject({ action: 'offer' });
+  expect((await f.model.store.owned(offerId(made), 'root'))?.caller).toBe('grandchild');
+  expect(routedContext(f.route, 0).at(-1)).toBe('NESTED REPLY: on it.');
+  // Its parent subagent's same call is that subagent's own, offered by itself.
+  expect(await call('parent', 'c:0', child('child-1'))).toMatchObject({ action: 'offer' });
+  expect(await call('nested-repeat', 'g:1', nested)).toEqual({
+    action: 'native',
+    settled: offerId(made),
+  });
+  expect(f.route).toHaveBeenCalledTimes(2);
+  // A DeepSeek worker's own calls, its subagents' included, get no offer and no record.
+  vi.stubEnv('TENJIN_MODEL_WORKER', '1');
+  const before = (await f.model.store.noOffers()).length;
+  expect(await call('worker', 'w:0', nested, { prompt: 'Read B.' })).toEqual({ action: 'native' });
+  expect(f.route).toHaveBeenCalledTimes(2);
+  expect(await f.model.store.noOffers()).toHaveLength(before);
+});
+
+it('records why a subagent cannot take an offer, from a subagent: its tools, a mode of its own at or above it, or a folder of its own', async () => {
+  // Catches: an offer to a subagent that cannot call the accept tool (a fee it can only
+  // repeat away), a worker in the session's mode or folder in place of a child that would
+  // inherit another mode or a worktree, and a record that does not say a subagent made it.
+  const f = await routedFixture();
+  vi.stubEnv('HOME', dir);
+  const agents = join(f.workspace.root, '.claude', 'agents');
+  await mkdir(agents, { recursive: true });
+  const define = (name: string, frontmatter: string) =>
+    writeFile(
+      join(agents, `${name}.md`),
+      `---\nname: ${name}\ndescription: test\n${frontmatter}---\n\nYou are ${name}.\n`,
+    );
+  await define('reader', 'tools: Read, Agent\n');
+  await define('lead', 'permissionMode: acceptEdits\n');
+  await define('helper', 'tools: Read, Agent, mcp__plugin_tenjin_router\n');
+  let n = 0;
+  const capture = (caller: ModelCaller | undefined, session: ModelSession = f.session) =>
+    f.model.capture(
+      session,
+      `call-${++n}`,
+      { prompt: 'Read.' },
+      undefined,
+      'Agent',
+      `${n}`,
+      caller,
+    );
+  const reason = async (caller?: ModelCaller, session?: ModelSession) => {
+    expect(await capture(caller, session)).toEqual({ action: 'native' });
+    const { code, detail, from } = (await f.model.store.noOffers()).at(-1)!;
+    return { code, detail, from };
+  };
+  const unqualified = (detail: string) => ({
+    code: 'caller_unqualified',
+    detail,
+    from: 'subagent',
+  });
+  expect(await reason(child('a', { agentType: 'reader' }))).toEqual(unqualified('tools'));
+  // One the host did not list: nothing says what it can call.
+  expect(await reason({ agentId: 'b' })).toEqual(unqualified('tools'));
+  expect(await reason(child('c', { agentType: 'lead' }))).toEqual(unqualified('mode'));
+  expect(await reason(child('d', { parents: ['lead'] }))).toEqual(unqualified('mode'));
+  // An agent above it that the host no longer lists may have set one.
+  expect(await reason(child('e', { parents: ['general-purpose', ''] }))).toEqual(
+    unqualified('mode'),
+  );
+  const worktree = join(f.workspace.root, '.claude', 'worktrees', 'w');
+  expect(await reason(child('f', { cwd: worktree }))).toEqual(unqualified('folder'));
+  // Any other reason says the same of a subagent's call, and nothing of the main loop's.
+  const plan = { ...f.session, claudePermissionMode: 'plan' as never };
+  const planned = { code: 'permission_mode', detail: 'plan' };
+  expect(await reason(child('g'), plan)).toEqual({ ...planned, from: 'subagent' });
+  expect(await reason(undefined, plan)).toEqual({ ...planned, from: undefined });
+  expect(f.route).not.toHaveBeenCalled();
+  // Tools that name the accept tool's server, under agents in the session's mode: offered.
+  const helper = child('h', { agentType: 'helper', parents: ['general-purpose'] });
+  expect(await capture(helper)).toMatchObject({ action: 'offer' });
 });
 
 it('offers a custom agent whose definition pins no model, and keeps one that pins a model native', async () => {

@@ -29,8 +29,9 @@ import {
   type ClaudeWorkspace,
 } from './claude-workspace';
 import { homedir } from 'node:os';
-import { isAbsolute } from 'node:path';
-import { WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
+import { isAbsolute, resolve } from 'node:path';
+import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
+import { SUBAGENT_TOOL } from './names';
 import {
   continuationRefusal,
   ownedModelReference,
@@ -156,6 +157,41 @@ export function fitAdmission(admission: Admission): Admission {
   return next;
 }
 
+/**
+ * The native subagent whose loop made a held call, at any depth: the loop that
+ * receives the offer and accepts it or keeps it native. Absent for the main loop.
+ */
+export type ModelCaller = {
+  agentId: string;
+  /** The type it runs as, as the host lists it; absent when the host did not list it. */
+  agentType?: string;
+  /** The types of the agents above it, nearest first; '' for one the host no longer lists. */
+  parents?: string[];
+  /** The folder it works in, as the host lists it. */
+  cwd?: string;
+};
+
+/**
+ * Why the subagent that made a call cannot take an offer for it, else null. `tools`:
+ * its tool list leaves the accept tool out (or cannot be read), so an offer would buy
+ * a routing fee it can only answer by sending the call again. `mode`: it or an agent
+ * above it may run in a permission mode of its own, which its native child would
+ * inherit and a worker accepted in the session's mode would not. `folder`: it works
+ * in a folder of its own, such as a worktree, where its native child would work and
+ * a worker, in the session's workspace, would not.
+ */
+async function callerUnqualified(
+  caller: ModelCaller,
+  cwd: string,
+): Promise<'tools' | 'mode' | 'folder' | null> {
+  const lookup = { cwd, homeDir: homedir() };
+  if ((await requestToolAccess(caller.agentType, lookup, SUBAGENT_TOOL)) !== 'allowed')
+    return 'tools';
+  for (const type of [caller.agentType ?? '', ...(caller.parents ?? [])])
+    if (await setsOwnMode(type, lookup)) return 'mode';
+  return caller.cwd === undefined || resolve(caller.cwd) !== resolve(cwd) ? 'folder' : null;
+}
+
 /** A mode's name for a record: one of the host's own, never free text. */
 const modeName = (mode: unknown) =>
   typeof mode === 'string' && /^[A-Za-z]{1,32}$/.test(mode) ? mode : 'unobserved';
@@ -163,7 +199,9 @@ const modeName = (mode: unknown) =>
 /**
  * The first field of a held Agent call that keeps it native, else null. A
  * call that names its agent starts a teammate and returns at once, as a
- * background call does, and the accept call cannot.
+ * background call does, and the accept call cannot. The mod sends the loop
+ * that made a call as `caller`, never in the input, so an `agentId` there is
+ * the call's own field (or an older mod's), and keeps it native.
  */
 function blockedField(native: Record<string, unknown>): string | null {
   if (typeof native.prompt !== 'string' || !native.prompt) return 'prompt';
@@ -298,7 +336,7 @@ export class ModelHandoff {
     session: ModelSession,
     tool: string,
     code: NoOffer['code'],
-    more: Pick<NoOffer, 'detail' | 'bytes' | 'limit' | 'offerId'> = {},
+    more: Pick<NoOffer, 'detail' | 'bytes' | 'limit' | 'offerId' | 'from'> = {},
   ) {
     await this.store.noOffer({ sessionId: session.sessionId, tool, code, ...more });
     return { action: 'native' as const };
@@ -306,7 +344,9 @@ export class ModelHandoff {
   /**
    * One held call, judged by itself: what else its session has on offer or
    * running does not count. `step` names the parent's model request that made
-   * the call, where the host says.
+   * the call, where the host says. `caller` is the native subagent that made
+   * it, at any depth, absent for the main loop: its call is judged as the main
+   * loop's is, and it receives the offer. A worker's own calls get none.
    */
   async capture(
     session: ModelSession,
@@ -315,6 +355,7 @@ export class ModelHandoff {
     signal?: AbortSignal,
     nativeTool: ModelNativeTool = 'Agent',
     step?: string,
+    caller?: ModelCaller,
   ) {
     signal?.throwIfAborted();
     const settings = await this.currentConsent(session.cwd);
@@ -336,8 +377,9 @@ export class ModelHandoff {
       }
     }
     if (nativeTool === 'SendMessage' || isModelWorkerProcess()) return { action: 'native' };
+    // A native subagent's own call is judged as the main loop's is, and its record says so.
     const stay = (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) =>
-      this.stay(session, nativeTool, code, more);
+      this.stay(session, nativeTool, code, { ...more, ...(caller ? { from: 'subagent' } : {}) });
     const { dataDir, transport } = this.options;
     if (!settings)
       return stay((await modelConsentOutdated(dataDir)) ? 'consent_outdated' : 'no_consent');
@@ -351,10 +393,16 @@ export class ModelHandoff {
       nativeTool,
       native,
       step,
+      caller?.agentId,
     );
     if (kept) return { ...(await stay('kept_native', { offerId: kept })), settled: kept };
     const blocked = blockedField(native);
     if (blocked) return stay('input_filter', { detail: blocked });
+    // The subagent that made the call accepts its offer, and a worker stands in for its
+    // native child: so it must be able to call the accept tool, and its child must be
+    // one that would run in the session's mode and folder, as a worker does.
+    const unable = caller && (await callerUnqualified(caller, session.cwd));
+    if (unable) return stay('caller_unqualified', { detail: unable });
     // A custom agent is offered when the project or the person wrote its definition and a
     // worker can run as it: read in the job's root, where the worker will read it. A
     // plugin's agent and the host's other built-ins are never offered.
@@ -382,6 +430,7 @@ export class ModelHandoff {
         native,
         nativeTool,
         ...(step === undefined ? {} : { step }),
+        ...(caller ? { caller: caller.agentId } : {}),
         decision: {
           routerOrigin: transport.origin,
           claudePermissionMode: session.claudePermissionMode,
@@ -514,7 +563,10 @@ export class ModelHandoff {
     const { transport } = this.options;
     const native = async (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) => {
       await this.store.decided(job.id, { action: 'native' });
-      return this.stay(session, job.nativeTool ?? 'Agent', code, more);
+      return this.stay(session, job.nativeTool ?? 'Agent', code, {
+        ...more,
+        ...(job.caller ? { from: 'subagent' } : {}),
+      });
     };
     const settings = await this.currentConsent(session.cwd);
     if (!settings) return native('no_consent');
@@ -540,6 +592,8 @@ export class ModelHandoff {
       session.sessionId,
       task,
       session.harness ?? 'claude',
+      // A subagent's call is judged with that subagent's own conversation after the session's.
+      job.caller ? { agentId: job.caller } : {},
     );
     if (packet.historyStatus !== 'ok' || !packet.history.length)
       return native('parent_context_unavailable');

@@ -635,6 +635,52 @@ it('runs the unchanged Agent repeat of an offer natively through capture, once, 
   }
 });
 
+it("offers a native subagent's held call for that subagent, runs its accept, and records its failure as from a subagent", async () => {
+  // Catches: a capture with no field for the subagent that made the call, so its offer
+  // named no agent (and the main loop's same call could settle it), and its no-offer
+  // record read as the main loop's.
+  const f = await ownedClaudeFixture();
+  vi.stubEnv('HOME', dir);
+  f.route.mockImplementation(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
+  const held = (id: string) =>
+    f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: id,
+        tool: 'Agent',
+        input: { prompt: `Read the ${id} fixture.` },
+        step: 'child-turn:0',
+        agent: { id: 'child-1', type: 'general-purpose', parents: [], cwd: f.repo },
+      },
+    });
+  try {
+    const made = await held('child-call');
+    expect(made).toMatchObject({ action: 'offer' });
+    expect((await f.store.owned(made.offer_id, f.session.sessionId))?.caller).toBe('child-1');
+    expect(await f.call({ offer_id: made.offer_id })).toMatchObject({ status: 'completed' });
+    expect(worker.run).toHaveBeenCalledTimes(1);
+    worker.qualified.mockRejectedValueOnce(new Error('unreadable settings'));
+    expect(await held('failed-call')).toMatchObject({ action: 'native' });
+    expect((await f.store.noOffers()).at(-1)).toMatchObject({
+      code: 'capture_error',
+      from: 'subagent',
+    });
+    // An offer the subagent did not take in time says so too.
+    const late = await held('late-call');
+    const expiresAt = (await f.store.owned(late.offer_id, f.session.sessionId))!.expiresAt;
+    vi.spyOn(Date, 'now').mockReturnValue(expiresAt + 1);
+    expect((await f.call({ offer_id: late.offer_id })).action).toBe('native');
+    expect((await f.store.noOffers()).at(-1)).toMatchObject({
+      code: 'expired',
+      offerId: late.offer_id,
+      from: 'subagent',
+    });
+  } finally {
+    vi.restoreAllMocks();
+    await f.close();
+  }
+});
+
 it('advertises display activity as read-only without changing the original subagent wire contract', async () => {
   const f = await ownedClaudeFixture();
   try {

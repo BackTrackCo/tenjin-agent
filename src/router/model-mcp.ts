@@ -335,6 +335,17 @@ export function registerModelTool(
             input: z.record(z.string(), z.unknown()),
             // The parent's model request that made the held call, as the host numbers it.
             step: z.string().max(200).optional(),
+            // The native subagent whose loop made the call, as the host lists it; absent
+            // for the main loop. It receives the offer and accepts it or keeps it native.
+            agent: z
+              .object({
+                id: z.string().min(1).max(200),
+                type: z.string().max(200).optional(),
+                // The types of the agents above it, nearest first.
+                parents: z.array(z.string().max(200)).max(32).optional(),
+                cwd: z.string().max(4096).optional(),
+              })
+              .optional(),
           })
           .optional(),
         delegation_id: z.string().uuid().optional(),
@@ -360,6 +371,7 @@ export function registerModelTool(
             tool: held.tool ?? 'Agent',
             code,
             ...more,
+            ...(held.agent ? { from: 'subagent' as const } : {}),
           });
       };
       const ownedSessionId = session?.sessionId;
@@ -447,6 +459,12 @@ export function registerModelTool(
                   signal,
                   args.capture.tool,
                   args.capture.step,
+                  args.capture.agent && {
+                    agentId: args.capture.agent.id,
+                    agentType: args.capture.agent.type,
+                    parents: args.capture.agent.parents,
+                    cwd: args.capture.agent.cwd,
+                  },
                 ),
               );
             } catch {
@@ -567,6 +585,7 @@ export function registerModelTool(
                 tool: pending.nativeTool ?? 'Agent',
                 code: 'expired',
                 offerId: pending.id,
+                ...(pending.caller ? { from: 'subagent' as const } : {}),
               });
             return unavailable(
               ownedContinuation

@@ -23,6 +23,8 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   worker_unqualified:
     'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
   input_filter: 'the call set a field a worker cannot match',
+  caller_unqualified:
+    'the subagent that made the call cannot accept an offer (tools), or it or an agent above it may set its own permission mode (mode), or it works in a folder of its own (folder)',
   scope_not_covered: "consent does not cover the session's working directories",
   parent_context_unavailable: "the session's transcript could not be read",
   over_size_limit: "the assignment is over the router's request limit",
@@ -40,7 +42,9 @@ const WHY_SHOWN = 20;
 function whyLine(entry: NoOffer): string {
   const size = entry.bytes === undefined ? '' : ` (${entry.bytes} of ${entry.limit ?? '?'} bytes)`;
   const code = entry.detail === undefined ? entry.code : `${entry.code}:${entry.detail}`;
-  return `${new Date(entry.at).toISOString()}  ${entry.tool}  ${code}${size}  ${NO_OFFER_REASONS[entry.code]}`;
+  // A native subagent's own call, at any depth, is judged as the main loop's is.
+  const tool = entry.from === 'subagent' ? `${entry.tool} from a subagent` : entry.tool;
+  return `${new Date(entry.at).toISOString()}  ${tool}  ${code}${size}  ${NO_OFFER_REASONS[entry.code]}`;
 }
 
 function retainedRepositories(value: unknown, origin: string): string[] {
