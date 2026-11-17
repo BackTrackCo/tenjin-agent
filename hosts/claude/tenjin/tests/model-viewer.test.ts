@@ -1623,3 +1623,32 @@ test('an accept call the host moved to the background stays one live DeepSeek ro
     );
   }
 });
+
+test("the parent model cannot poll a worker with the viewer's own activity read, and the viewer still can", async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  await remember($);
+  const { running, firstStep } = await startWithViewer($, f);
+  const reads = f.state.inspections + f.state.follows;
+  const polled = await $.tool.call({
+    tool: 'mcp__plugin_tenjin_router__subagent_activity',
+    offer_id: OFFER,
+    tool_use_id: 'parent_poll',
+  });
+  // Refused before it reaches the CLI, with what to do in its place.
+  expect(polled.deny).toContain('arrives by itself');
+  expect(f.state.inspections + f.state.follows).toBe(reads);
+  f.state.phase = 'completed';
+  release();
+  await running;
+  // The viewer's own reads are not tool calls: its transcript still gets the run.
+  expect((await firstStep).answer).toContain('Done (');
+  await f.clock.settle();
+});

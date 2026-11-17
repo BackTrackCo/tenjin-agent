@@ -102,8 +102,10 @@ export function registerModelTool(
       'subagent_activity',
       {
         title: 'DeepSeek worker activity',
+        // Worded so the parent model has no reason to call it: it once polled a running
+        // worker with it and read 75,000 characters of activity into its own context.
         description:
-          'Read current activity for an owned DeepSeek worker offer. Set follow to wait for its controller to finish. This display-only operation starts no work.',
+          "Called by the Tenjin plugin's own DeepSeek worker viewer, not by you. A worker's result arrives by itself, as the result of your `subagent` call or as that task's notification, so never check on a worker with this. Display only; it starts no work.",
         annotations: { title: 'DeepSeek worker activity', readOnlyHint: true },
         inputSchema: {
           offer_id: z.string().uuid(),
