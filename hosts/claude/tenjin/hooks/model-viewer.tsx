@@ -1102,7 +1102,9 @@ async function identify(
       (r) =>
         (r.active || (r.nativeId === agentId && !!turnId && r.turnId === turnId)) &&
         r.description === native.description &&
-        r.parentId === native.parentId &&
+        // Under the agent that accepted, or under the main loop where the host does not
+        // place a plugin's agent under another (before 2.1.326).
+        (native.parentId === undefined || r.parentId === native.parentId) &&
         (!r.nativeId || r.nativeId === agentId) &&
         (!turnId || !r.turnId || r.turnId === turnId),
     );
@@ -1342,7 +1344,7 @@ export function registerModelViewer(on: On): void {
           r.active &&
           !r.nativeId &&
           r.description === e.description &&
-          r.parentId === e.parentAgentId,
+          (e.parentAgentId === undefined || r.parentId === e.parentAgentId),
       );
       if (e.resume || next.origin.plugin !== 'tenjin' || matches?.length !== 1)
         return { deny: 'This activity viewer cannot execute or resume an assignment.' };
@@ -1405,8 +1407,9 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
-    // A cancelled offer is settled too: its row has nothing left to offer.
-    if (e.agentId === undefined && short(e.cancel) && UUID.test(e.cancel)) {
+    // A cancelled offer is settled too: its row has nothing left to offer. A native
+    // subagent's cancel of the offer it got settles it as the main loop's does.
+    if (short(e.cancel) && UUID.test(e.cancel)) {
       const outcome = await next(e);
       try {
         const ref = { ...OFFERS, id: e.cancel };
@@ -1418,16 +1421,21 @@ export function registerModelViewer(on: On): void {
       }
       return outcome;
     }
-    // Capture/cancel calls and deterministic viewer calls are never execution accepts.
+    // Capture/cancel calls are never execution accepts. A NATIVE SUBAGENT'S ACCEPT is one:
+    // its worker gets the same row, viewer and end line, the viewer under that subagent.
+    // A viewer's own loop and a DeepSeek worker's process start none (neither has the tool).
     if (
-      e.agentId !== undefined ||
       !short(e.offer_id) ||
       !UUID.test(e.offer_id) ||
       Object.keys(e).some(
         (key) => !['tool', 'tool_use_id', 'agentId', 'requestMeta', 'offer_id'].includes(key),
-      )
+      ) ||
+      (e.agentId !== undefined &&
+        (liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => true)))) ||
+      (await $.env.get('TENJIN_MODEL_WORKER').catch(() => undefined)) === '1'
     )
       return next(e);
+    const caller = e.agentId;
     const offerId = e.offer_id;
     // An accept sent again while its worker runs starts nothing: the row that is
     // already live keeps its clock and counts, and ends when that worker does.
@@ -1533,6 +1541,9 @@ export function registerModelViewer(on: On): void {
           const item = state.records.find((r) => r.offerId === offerId);
           if (!item || item.active || item.nativeId) return;
           item.active = true;
+          // The viewer is listed under the agent that accepted, as its own subagent is.
+          if (caller !== undefined) item.parentId = caller;
+          else delete item.parentId;
           prepared = true;
         });
         const item = current?.records.find((r) => r.offerId === offerId);
@@ -1550,6 +1561,7 @@ export function registerModelViewer(on: On): void {
             try {
               const viewer = await $.agent.spawn({
                 subagentType: TYPE,
+                ...(caller !== undefined ? { parentAgentId: caller } : {}),
                 description: item.description,
                 prompt: VIEWER_PROMPT + ' ' + offerId + ' ' + item.description,
                 cwd: current.cwd,

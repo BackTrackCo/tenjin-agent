@@ -20,10 +20,10 @@ async function step($: Engine, agentId: string, index = 0, turnId = 'viewer-turn
     if (item.done) return item.value;
   }
 }
-function setup(_$: Engine, on: On) {
+function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
   const files = new Map<string, string>();
   const clock = mock.clock(on, { now: NOW });
-  mock.env(on, { HOME: '/home/test' });
+  mock.env(on, { HOME: '/home/test', ...env });
   files.set(DATA + '/config.json', JSON.stringify({ router: { subagents: true } }));
   const store = new Map<string, unknown>();
   const state = {
@@ -2526,4 +2526,71 @@ test('the viewer is listed by the task’s description and its row reads DeepSee
   await running;
   await firstStep;
   await f.clock.settle();
+});
+
+// Greptile thread on register.tsx (item X): a native subagent's accept passed this hook
+// untouched, so its worker ran with no row, no agent-list entry and no viewer to stop it.
+test("a native subagent's accept draws the worker's row and its viewer under that subagent, whose stop cancels the worker", async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  f.state.followWait = blocked;
+  await remember($);
+  f.state.offer = OFFER2;
+  const second = (await remember($, INPUT2)).result;
+  f.state.offer = OFFER;
+  const accept = { tool: ACCEPT, offer_id: OFFER, tool_use_id: 'child_accept' };
+  const running = $.tool.call({ ...accept, agentId: 'native-child' });
+  await f.clock.settle();
+  await f.clock.advance(1000);
+  expect((await acceptRow($, 'child_accept', OFFER))[0]).toBe(
+    '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
+  );
+  // Listed under the subagent that accepted (2.1.326); an older host lists it under main.
+  expect(f.state.agents.map((a) => [a.type, a.description])).toEqual([
+    [TYPE, 'Read selected source'],
+  ]);
+  expect([undefined, 'native-child']).toContain(f.state.agents[0]?.parentId);
+  await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+  const viewing = step($, 'native-viewer-1');
+  await f.clock.settle();
+  expect(f.state.snapshot?.records[0]).toMatchObject({
+    nativeId: 'native-viewer-1',
+    parentId: 'native-child',
+    active: true,
+  });
+  // The subagent's cancel of the other offer it got settles that offer's row too.
+  await $.tool.call({ tool: ACCEPT, cancel: OFFER2, agentId: 'native-child' });
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe('');
+  // Stopping the viewer from the agent list cancels its worker.
+  f.state.agents[0]!.status = 'killed';
+  await complete($, 'native-viewer-1');
+  expect(f.state.cancellations).toContainEqual({ cancel: OFFER, reason: 'agent_stopped' });
+  release();
+  await running;
+  await viewing;
+  await f.clock.settle();
+});
+
+// A worker's own calls never get an offer (it has no Agent or subagent tool); should one
+// reach this hook in its process, it starts nothing of the viewer's.
+test("a DeepSeek worker's own accept passes through with no row or viewer", async ($, on) => {
+  const f = setup($, on, { TENJIN_MODEL_WORKER: '1' });
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine row'] }),
+  );
+  const call = { tool: ACCEPT, offer_id: OFFER, tool_use_id: 'worker_accept' };
+  expect((await $.tool.call({ ...call, agentId: 'native-child' })).result).toBe(
+    'actual worker result',
+  );
+  expect(f.state.calls).toBe(0);
+  expect((await acceptRow($, 'worker_accept', OFFER, 'actual worker result'))[0]).toBe(
+    'engine row',
+  );
 });
