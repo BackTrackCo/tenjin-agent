@@ -3,7 +3,7 @@ import { ModelLifecycle } from './model-lifecycle';
 
 it('interrupts a selection before its worker controller exists, drains it and fences late replays', async () => {
   const lifecycle = new ModelLifecycle();
-  const session = { sessionId: 'root', turnId: 'turn', cwd: '/repo', transcript: '/owned' };
+  const session = 'root:turn';
   let selecting!: () => void, release!: () => void;
   const selected = new Promise<void>((resolve) => {
     selecting = resolve;
@@ -30,7 +30,7 @@ it('interrupts a selection before its worker controller exists, drains it and fe
       workers++;
     }),
   ).rejects.toThrow('interrupted');
-  await lifecycle.run({ ...session, turnId: 'next' }, undefined, async () => {
+  await lifecycle.run('root:next', undefined, async () => {
     workers++;
   });
   expect(workers).toBe(1);

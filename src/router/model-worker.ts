@@ -4,7 +4,13 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { findDefinition } from './agent-tools';
+import {
+  findDefinition,
+  unmatchedDefinitionKey,
+  WORKER_BUILTIN_AGENTS,
+  workerAgent,
+  type WorkerAgent,
+} from './agent-tools';
 import {
   query,
   resolveSettings as resolveWorkerSettings,
@@ -98,7 +104,9 @@ export async function qualifiedModelWorker(
   if (!claudeWorkerAuthCompatible(process.env)) return null;
   const state = await readClaudeCode(process.env, cwd);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
-  if (await findDefinition(agentType, { cwd, homeDir: homedir() })) return null;
+  // A custom agent's definition qualifies when a worker can run as that agent.
+  const definition = await findDefinition(agentType, { cwd, homeDir: homedir() });
+  if (definition !== null && unmatchedDefinitionKey(definition) !== null) return null;
   const resolved = await resolveWorkerSettings({
     cwd,
     settingSources: ['user', 'project', 'local'],
@@ -169,14 +177,22 @@ export async function runModelWorker(
       job.decision.claudePermissionMode,
       current.currentClaudePermissionMode(),
     );
+    const agentType = String(job.native.subagent_type ?? 'general-purpose');
     const binary = await qualifiedModelWorker(
       job.root,
-      String(job.native.subagent_type ?? 'general-purpose'),
+      agentType,
       undefined,
       current.dataDir,
       signal,
       current.claudePermissionMode,
     );
+    // A custom agent runs from its definition as read here, never from a name alone.
+    const custom = WORKER_BUILTIN_AGENTS.has(agentType)
+      ? null
+      : await workerAgent(agentType, { cwd: job.root, homeDir: homedir() });
+    if (custom && !('agent' in custom))
+      throw new Error('Custom agent definition is unavailable or changed; keep native');
+    const customAgent = custom?.agent;
     signal.throwIfAborted();
     assertClaudeWorkerMode(
       job.decision.claudePermissionMode,
@@ -186,14 +202,18 @@ export async function runModelWorker(
     const saved = savedClaudeWorkspace(job.decision.claudeWorkspace);
     if (!saved || !binary.claudeWorkspace || !sameClaudeWorkspace(saved, binary.claudeWorkspace))
       throw new Error('Owned Claude workspace scope changed or is unavailable');
-    return runQualifiedWorker(job, current, binary);
+    return runQualifiedWorker(job, current, { ...binary, customAgent });
   });
 }
 
 async function runQualifiedWorker(
   job: ModelJob,
   options: Parameters<typeof runModelWorker>[1],
-  binary: { path: string; claudeWorkspace?: ClaudeWorkspace },
+  binary: {
+    path: string;
+    claudeWorkspace?: ClaudeWorkspace;
+    customAgent?: WorkerAgent;
+  },
 ) {
   options.signal.throwIfAborted();
   const permissionMode = assertClaudeWorkerMode(
@@ -463,7 +483,10 @@ async function runQualifiedWorker(
         systemPrompt: { type: 'preset', preset: 'claude_code', append: NATIVE_SUBAGENT_NOTE },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         // The native agent the parent asked for, with that agent's own tools.
-        agent: job.native.subagent_type === 'Explore' ? 'Explore' : 'general-purpose',
+        agent: String(job.native.subagent_type ?? 'general-purpose'),
+        ...(binary.customAgent
+          ? { agents: { [String(job.native.subagent_type)]: binary.customAgent } }
+          : {}),
         effort: 'high',
         abortController: controller,
         permissionMode,

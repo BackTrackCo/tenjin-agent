@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { accessOf, agentsWithoutRequestTool, requestToolAccess } from './agent-tools';
+import { accessOf, agentsWithoutRequestTool, requestToolAccess, workerAgent } from './agent-tools';
 
 let root: string;
 let home: string;
@@ -146,6 +146,46 @@ describe('finding the definition an agent type names', () => {
   it('lets a definition file override a built-in of the same name', async () => {
     await define(join(home, '.claude', 'agents'), 'Explore.md', agent('Explore', 'tools: Read\n'));
     expect(await requestToolAccess('Explore', { homeDir: home })).toBe('excluded');
+  });
+});
+
+describe('the custom agents a DeepSeek worker can run as', () => {
+  const lookup = () => ({ cwd: join(project, 'src'), homeDir: home });
+  const defined = (frontmatter: string) =>
+    define(join(project, '.claude', 'agents'), 'worker.md', agent('worker', frontmatter));
+
+  it('takes the prompt and tools of a definition that pins no model, from any depth', async () => {
+    await defined('model: inherit\neffort: high\ntools: Read, Bash\ndisallowedTools: [Write]\n');
+    expect(await workerAgent('worker', lookup())).toEqual({
+      agent: {
+        description: 'worker',
+        prompt: 'You do things.',
+        tools: ['Read', 'Bash'],
+        disallowedTools: ['Write'],
+      },
+    });
+  });
+
+  it.each([
+    ['model: sonnet\n', 'definition:model'],
+    ['permissionMode: bypassPermissions\n', 'definition:permissionMode'],
+    ['isolation: worktree\n', 'definition:isolation'],
+    ['background: true\n', 'definition:background'],
+    ['hooks:\n  PreToolUse: []\n', 'definition:hooks'],
+  ])('keeps a definition with %j native, naming the key', async (frontmatter, unmatched) => {
+    await defined(frontmatter);
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched });
+  });
+
+  it('has no worker form for a type with no definition file, a plugin agent or an empty prompt', async () => {
+    expect(await workerAgent('Plan', lookup())).toEqual({ unmatched: 'subagent_type' });
+    expect(await workerAgent('tools:reader', lookup())).toEqual({ unmatched: 'subagent_type' });
+    await define(
+      join(project, '.claude', 'agents'),
+      'empty.md',
+      '---\nname: empty\ndescription: nothing\n---\n\n',
+    );
+    expect(await workerAgent('empty', lookup())).toEqual({ unmatched: 'definition:prompt' });
   });
 });
 

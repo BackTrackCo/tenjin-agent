@@ -1,20 +1,17 @@
-import type { ModelSession } from './model-handoff';
-
 type Operation = { abort: AbortController; done: Promise<void> };
-/** Register before the first await, so interruption also owns a selection in flight. */
+/**
+ * Register before the first await, so interruption also owns a selection in
+ * flight. A window is what one fence ends: a Codex turn, or one Claude job.
+ */
 export class ModelLifecycle {
   private windows = new Map<string, Set<Operation>>();
   private fenced = new Set<string>();
   private stopped = false;
-  private key(session: ModelSession) {
-    return JSON.stringify([session.sessionId, session.turnId]);
-  }
   async run<T>(
-    session: ModelSession,
+    key: string,
     signal: AbortSignal | undefined,
     fn: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const key = this.key(session);
     if (this.stopped || this.fenced.has(key)) throw new Error('Delegation window interrupted');
     const abort = new AbortController();
     const cancel = () => abort.abort();
@@ -40,8 +37,7 @@ export class ModelLifecycle {
       complete();
     }
   }
-  fence(session: ModelSession): Promise<void> {
-    const key = this.key(session);
+  fence(key: string): Promise<void> {
     this.fenced.add(key);
     const active = [...(this.windows.get(key) ?? [])];
     for (const operation of active) operation.abort.abort();

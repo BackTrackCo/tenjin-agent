@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
-import { ModelJobStore, sweepModelRecords, type ModelJob } from './model-job';
+import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
@@ -46,6 +46,11 @@ const jobOwner = (job: ModelJob): ModelConversationOwner => ({
       ? job.decision.workerConfigDir
       : claudeWorkerConfigDir(job.root),
 });
+
+/** What one fence ends: a Codex turn, one Claude job, and nothing for a Claude offer request. */
+const turnWindow = (session: ModelSession) => JSON.stringify([session.sessionId, session.turnId]);
+const jobWindow = (job: Pick<ModelJob, 'sessionId' | 'id'>) =>
+  JSON.stringify([job.sessionId, 'job', job.id]);
 
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
@@ -164,11 +169,16 @@ export function registerModelTool(
   const answer = (value: unknown) => ({
     content: [{ type: 'text' as const, text: JSON.stringify(value) }],
   });
-  const fence = async (session: ModelSession) => {
-    const draining = lifecycle.fence(session);
-    await jobs.fence(session.sessionId, session.turnId, 'cancelling');
+  /** Ends one window: its operations in flight, its job and that job's conversation. */
+  const fenceWindow = async (
+    key: string,
+    mark: (state: 'cancelling' | 'cancelled') => Promise<void>,
+    current: () => Promise<ModelJob | null>,
+  ) => {
+    const draining = lifecycle.fence(key);
+    await mark('cancelling');
     const model = await getHandoff();
-    const pending = await model.store.pending(session.sessionId, session.turnId);
+    const pending = await current();
     const fenceConversation = async () => {
       if (options.harness !== 'claude' || !pending) return;
       const active = controllers.get(pending.id)?.conversation;
@@ -183,8 +193,21 @@ export function registerModelTool(
     await fenceConversation();
     await draining;
     await fenceConversation();
-    await model.store.fence(session.sessionId, session.turnId);
+    await mark('cancelled');
   };
+  const fence = (session: ModelSession) =>
+    fenceWindow(
+      turnWindow(session),
+      (state) => jobs.fence(session.sessionId, session.turnId, state),
+      () => jobs.pending(session.sessionId, session.turnId),
+    );
+  /** One Claude job by its own id: its session's other offers and workers go on. */
+  const fenceJob = (job: ModelJob) =>
+    fenceWindow(
+      jobWindow(job),
+      (state) => jobs.fenceOwned(job.id, job.sessionId, state),
+      () => jobs.owned(job.id, job.sessionId),
+    );
   if (options.harness === 'claude')
     server.registerTool(
       'subagent_activity',
@@ -267,6 +290,8 @@ export function registerModelTool(
             tool_use_id: z.string(),
             tool: z.enum(['Agent', 'Task', 'SendMessage']).optional(),
             input: z.record(z.string(), z.unknown()),
+            // The parent's model request that made the held call, as the host numbers it.
+            step: z.string().max(200).optional(),
           })
           .optional(),
         delegation_id: z.string().uuid().optional(),
@@ -280,6 +305,17 @@ export function registerModelTool(
       const unavailable = (reason: string) =>
         answer(ownedContinuation ? continuationRefusal(reason) : { action: 'native', reason });
       const session = options.session();
+      // Why a held subagent call got no offer, for `tenjin config subagents why`.
+      const noOffer = async (code: NoOffer['code'], more: Partial<NoOffer> = {}) => {
+        const held = args.capture;
+        if (held && held.tool !== 'SendMessage' && !ownedContinuation && !isModelWorkerProcess())
+          await jobs.noOffer({
+            sessionId: held.session_id,
+            tool: held.tool ?? 'Agent',
+            code,
+            ...more,
+          });
+      };
       const ownedSessionId = session?.sessionId;
       const ownedTurnId = session?.turnId;
       const currentClaudeMode = () => {
@@ -292,8 +328,10 @@ export function registerModelTool(
         !session ||
         isModelWorkerProcess() ||
         (options.harness === 'codex' && extra._meta?.['threadId'] !== session.sessionId)
-      )
+      ) {
+        await noOffer(session ? 'host_unqualified' : 'no_session');
         return unavailable('Host worker permission bridge is not qualified');
+      }
       if (
         [args.offer_id, args.cancel, args.capture, args.delegation_id].filter(
           (v) => v !== undefined,
@@ -302,24 +340,26 @@ export function registerModelTool(
         return unavailable('Use one subagent operation');
       await repaired;
       if (args.cancel) {
-        // An offer or a worker outlives the parent turn it was made in, so it is found by
-        // its own id, then by its own turn: on Claude from its record, in any process.
-        const record =
-          options.harness === 'claude' ? await jobs.owned(args.cancel, session.sessionId) : null;
+        if (options.harness === 'claude') {
+          // By its own id, in any turn and any process: the session's other jobs go on.
+          const record = await jobs.owned(args.cancel, session.sessionId);
+          if (!record) return answer({ status: 'not_owned' });
+          await fenceJob(record);
+          return answer({ status: 'cancelled' });
+        }
+        // A worker outlives the parent turn it was accepted in, so it is found by its own turn.
         const running = controllers.get(args.cancel)?.session;
-        const owned = record
-          ? { ...session, turnId: record.turnId }
-          : running?.sessionId === session.sessionId
-            ? running
-            : session;
+        const owned = running?.sessionId === session.sessionId ? running : session;
         const pending = await (await getHandoff()).store.pending(owned.sessionId, owned.turnId);
         if (pending?.id !== args.cancel) return answer({ status: 'not_owned' });
         await fence(owned);
         return answer({ status: 'cancelled' });
       }
-      // A Claude offer is found by its own id in any turn of its session, so its
-      // operations run in the window of the turn that made it.
-      let window = session;
+      // A Claude offer is found by its own id in any turn of its session, and its
+      // operations run in its own window: a cancel ends that job and no other. A
+      // Claude offer request has no window a fence could close.
+      let window =
+        options.harness === 'claude' ? JSON.stringify([session.sessionId]) : turnWindow(session);
       const offered = args.offer_id && options.harness === 'claude' ? args.offer_id : undefined;
       if (offered) {
         const record = await jobs.owned(offered, session.sessionId);
@@ -332,7 +372,7 @@ export function registerModelTool(
           const kept = await handback(record, extra.signal);
           if (kept) return 'value' in kept ? answer(kept.value) : unavailable(kept.refused);
         }
-        window = { ...session, turnId: record.turnId };
+        window = jobWindow(record);
         accepting.set(offered, (accepting.get(offered) ?? 0) + 1);
       }
       return lifecycle
@@ -342,8 +382,12 @@ export function registerModelTool(
               options.harness !== 'claude' ||
               args.capture.session_id !== session.sessionId ||
               !server.server.getClientCapabilities()?.elicitation
-            )
+            ) {
+              await noOffer(
+                args.capture.session_id === session.sessionId ? 'host_unqualified' : 'no_session',
+              );
               return unavailable('Owned root or permission prompts unavailable');
+            }
             try {
               return answer(
                 await (
@@ -354,9 +398,11 @@ export function registerModelTool(
                   args.capture.input,
                   signal,
                   args.capture.tool,
+                  args.capture.step,
                 ),
               );
             } catch {
+              await noOffer(signal.aborted ? 'interrupted' : 'capture_error');
               return unavailable('Model routing unavailable');
             }
           }
@@ -465,12 +511,21 @@ export function registerModelTool(
             !job ||
             job.root !== current.root ||
             job.decision.routerOrigin !== current.routerOrigin
-          )
+          ) {
+            // An offer nobody took in time: the call it held has run natively or not at all.
+            if (!job && pending?.state === 'offered' && pending.expiresAt <= Date.now())
+              await jobs.noOffer({
+                sessionId: pending.sessionId,
+                tool: pending.nativeTool ?? 'Agent',
+                code: 'expired',
+                offerId: pending.id,
+              });
             return unavailable(
               ownedContinuation
                 ? 'Continuation expired, changed, already selected or consent revoked'
                 : 'Offer expired, changed, already selected or consent revoked; retry original native call unchanged',
             );
+          }
           if (
             options.harness === 'claude' &&
             job.decision.claudePermissionMode !== currentClaudeMode()
@@ -723,7 +778,10 @@ export function registerModelTool(
           });
           return done;
         })
-        .catch(() => unavailable('Delegation interrupted; no new worker may start from this offer'))
+        .catch(async () => {
+          await noOffer('interrupted');
+          return unavailable('Delegation interrupted; no new worker may start from this offer');
+        })
         .finally(() => {
           if (!offered) return;
           const left = (accepting.get(offered) ?? 1) - 1;
@@ -754,7 +812,7 @@ export function registerModelTool(
       )
         return null;
       return lifecycle
-        .run(session, undefined, async (signal) =>
+        .run(turnWindow(session), undefined, async (signal) =>
           (await getHandoff()).captureCodex(
             session,
             raw.tool_use_id as string,

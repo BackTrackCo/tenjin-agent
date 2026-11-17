@@ -127,6 +127,90 @@ export async function agentsWithoutRequestTool(
   return found.sort();
 }
 
+/** Frontmatter a worker honours or that changes nothing about how the agent runs. */
+const WORKER_MATCHED_KEYS = new Set([
+  'name',
+  'description',
+  'tools',
+  'disallowedTools',
+  'color',
+  'effort',
+]);
+
+/**
+ * The first frontmatter key of a custom agent's definition that a DeepSeek
+ * worker cannot match, else null. A worker runs the agent's prompt and tools on
+ * its own model, in the accepted session's permission mode, in the foreground:
+ * a definition that pins a model, a mode, isolation, background running,
+ * memory, or its own hooks, servers or skills runs natively. `model: inherit`
+ * pins nothing.
+ */
+export function unmatchedDefinitionKey(definition: string): string | null {
+  const frontmatter = frontmatterOf(definition);
+  if (frontmatter === null) return 'frontmatter';
+  for (const line of frontmatter) {
+    const field = /^([A-Za-z][\w-]*)\s*:(.*)$/.exec(line);
+    if (field === null) continue;
+    const [, key, value] = field as unknown as [string, string, string];
+    if (
+      key === 'model'
+        ? !['', 'inherit'].includes(unquote(value.trim()))
+        : !WORKER_MATCHED_KEYS.has(key)
+    )
+      return key;
+  }
+  return null;
+}
+
+/** The agent types Claude Code ships that a worker runs as, with no definition file. */
+export const WORKER_BUILTIN_AGENTS: ReadonlySet<string> = new Set(['general-purpose', 'Explore']);
+
+export type WorkerAgent = {
+  description: string;
+  prompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+};
+
+/**
+ * What a worker runs a custom agent as: the definition's own prompt and tools,
+ * handed to its Claude Code by value. Its Claude Code does not find every
+ * definition the session's does (one in a folder above the job's root is
+ * missed, and it then runs with every tool and no agent prompt, seen on
+ * 2.1.326), so the worker never looks one up by name. `unmatched` says why a
+ * type has no worker form: no definition file (a plugin's agent and another
+ * built-in included), or the definition's first key a worker cannot match.
+ */
+export async function workerAgent(
+  agentType: string,
+  lookup: AgentLookup,
+): Promise<{ agent: WorkerAgent } | { unmatched: string }> {
+  const text =
+    TYPE_RE.test(agentType) && !agentType.includes(':')
+      ? await findDefinition(agentType, lookup).catch(() => null)
+      : null;
+  const frontmatter = text === null ? null : frontmatterOf(text);
+  if (text === null || frontmatter === null) return { unmatched: 'subagent_type' };
+  const key = unmatchedDefinitionKey(text);
+  const lines = text.split(/\r?\n/);
+  const open = lines.findIndex((line) => line.trim() === '---');
+  const prompt = lines
+    .slice(lines.findIndex((line, i) => i > open && line.trim() === '---') + 1)
+    .join('\n')
+    .trim();
+  if (key !== null || !prompt) return { unmatched: `definition:${key ?? 'prompt'}` };
+  const tools = listField(frontmatter, 'tools');
+  const disallowedTools = listField(frontmatter, 'disallowedTools');
+  return {
+    agent: {
+      description: agentType,
+      prompt,
+      ...(tools ? { tools } : {}),
+      ...(disallowedTools ? { disallowedTools } : {}),
+    },
+  };
+}
+
 export async function findDefinition(
   agentType: string,
   lookup: AgentLookup,

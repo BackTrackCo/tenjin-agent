@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { testCtx } from '../context-test-utils';
 import { runConfigSubagents } from './config-subagents';
 import { modelSettings } from '../router/model-settings';
+import { ModelJobStore } from '../router/model-job';
 import { currentModelGithubRepositories } from '../router/model-repositories';
 
 let dir: string;
@@ -192,4 +193,25 @@ it('an explicit repository command narrows native-workspace disclosure to the na
   expect(saved.router.subagentConsent).toMatchObject({ version: 2, repositories: [repository] });
   expect(saved.router.subagentConsent).not.toHaveProperty('scope');
   expect(await modelSettings(dir, dir)).toBeNull();
+});
+
+it('lists why recent subagent calls got no offer, newest first, without changing any setting', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  expect((await runConfigSubagents('why', {}, testCtx(dir))).data).toEqual({ noOffers: [] });
+  const store = new ModelJobStore(dir);
+  await store.noOffer({ sessionId: 's', tool: 'Agent', code: 'input_filter', detail: 'name' });
+  await store.noOffer({
+    sessionId: 's',
+    tool: 'Task',
+    code: 'over_size_limit',
+    bytes: 17_203,
+    limit: 16_384,
+  });
+  const result = await runConfigSubagents('why', {}, testCtx(dir));
+  expect(result.data).toMatchObject({
+    noOffers: [{ code: 'over_size_limit', bytes: 17_203 }, { code: 'input_filter' }],
+  });
+  expect(result.humanLines?.[1]).toMatch(/Task {2}over_size_limit \(17203 of 16384 bytes\)/);
+  expect(result.humanLines?.[2]).toContain('Agent  input_filter:name');
+  await expect(stat(join(dir, 'config.json'))).rejects.toThrow();
 });

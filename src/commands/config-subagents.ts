@@ -9,6 +9,37 @@ import { persist } from './config';
 import { modelConsentSchema } from '../router/model-settings';
 import { modelGithubRepositories } from '../router/model-repositories';
 import { MODEL_MINIMUM_JOB_ATOMIC } from '../router/model-limits';
+import { ModelJobStore, type NoOffer } from '../router/model-job';
+
+/** What each no-offer code means, in the words `tenjin config subagents why` prints. */
+const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
+  kept_native: 'the parent sent the offered call again unchanged, which keeps it native',
+  no_session: 'this Tenjin process had not seen an event of the session yet',
+  host_unqualified: 'the host cannot show a worker permission prompt',
+  no_consent: 'no DeepSeek consent covers this directory at this router',
+  permission_mode: 'the session was in plan mode, or its mode was not seen',
+  worker_unqualified:
+    'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
+  input_filter: 'the call set a field a worker cannot match',
+  scope_not_covered: "consent does not cover the session's working directories",
+  parent_context_unavailable: "the session's transcript could not be read",
+  over_size_limit: "the assignment is over the router's request limit",
+  job_cap_too_low: 'the job ceiling is under the minimum a job needs',
+  capture_error: 'a local error before routing',
+  route_error: 'the routing request failed, or a spend limit refused its fee',
+  server_declined: 'the router judged that the work stays native',
+  invalid_offer: "the router's answer was not a valid offer",
+  superseded: 'the call was cancelled while it was routed',
+  expired: 'the offer was not accepted within 15 minutes',
+  interrupted: 'the session closed or was interrupted while routing',
+};
+const WHY_SHOWN = 20;
+
+function whyLine(entry: NoOffer): string {
+  const size = entry.bytes === undefined ? '' : ` (${entry.bytes} of ${entry.limit ?? '?'} bytes)`;
+  const code = entry.detail === undefined ? entry.code : `${entry.code}:${entry.detail}`;
+  return `${new Date(entry.at).toISOString()}  ${entry.tool}  ${code}${size}  ${NO_OFFER_REASONS[entry.code]}`;
+}
 
 function retainedRepositories(value: unknown, origin: string): string[] {
   const prior = modelConsentSchema.safeParse(value);
@@ -41,8 +72,23 @@ export async function runConfigSubagents(
       humanLines: ['Subagent model routing is off. No new DeepSeek jobs may start.'],
     };
   }
+  if (mode === 'why') {
+    // Read only: the codes the CLI kept on this machine, newest first. Nothing is sent.
+    const noOffers = (await new ModelJobStore(ctx.dataDir).noOffers()).reverse();
+    return {
+      data: { noOffers },
+      humanLines: noOffers.length
+        ? [
+            'Subagent calls that got no DeepSeek offer, newest first (kept 7 days, on this machine only):',
+            ...noOffers.slice(0, WHY_SHOWN).map(whyLine),
+          ]
+        : [
+            'No subagent call without an offer is on record. A call is recorded only while subagent routing is on.',
+          ],
+    };
+  }
   if (mode !== 'on' || !flags.repository || !flags.maxJob)
-    throw new CliError('USAGE', 'Use on --repository <path> --max-job <USD>, or off.');
+    throw new CliError('USAGE', 'Use on --repository <path> --max-job <USD>, off, or why.');
   const repository = await realpath(flags.repository);
   const maxJob = BigInt(parseUsdToAtomic(flags.maxJob));
   const settings = await resolveContextSettings(ctx);

@@ -9,11 +9,13 @@ vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
 import { qualifiedModelWorker } from './model-worker';
 import { makeInstructionContext } from './model-instructions';
 import {
+  fitAdmission,
   ModelHandoff,
   modelOfferSchema,
   MODEL_BRIEF_GUIDANCE,
   type ModelSession,
 } from './model-handoff';
+import { MODEL_ROUTE_BODY_BYTES, MODEL_ROUTE_ENVELOPE_BYTES } from './model-limits';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
@@ -171,11 +173,27 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   expect(instruction).toContain('as one call with no comment on the choice');
   expect(instruction).not.toContain('tenjin-native');
   expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
-  // The person typed while the parent worked, so its next calls land in a later turn.
+  // A second, different call of the same turn is judged by itself and gets its own offer,
+  // while the first is still open: a native parent's calls all run.
+  const second = await f.model.capture(session, 'changed-call', changed);
+  expect(second).toMatchObject({ action: 'offer' });
+  const ids = [first, second].map((made) => ('offer_id' in made ? String(made.offer_id) : ''));
+  expect(new Set(ids).size).toBe(2);
+  // Each repeat names the one offer it settled, and that offer alone ends.
   const later = { ...session, turnId: 'typed-turn' };
-  expect(await f.model.capture(later, 'changed-call', changed)).toMatchObject({ action: 'offer' });
-  expect(await f.model.capture(later, 'repeat-call', held)).toEqual({ action: 'native' });
-  expect(await f.model.capture(later, 'changed-repeat', changed)).toEqual({ action: 'native' });
+  expect(await f.model.capture(later, 'repeat-call', held)).toEqual({
+    action: 'native',
+    settled: ids[0],
+  });
+  expect((await f.model.store.owned(ids[1]!, 'root'))?.state).toBe('offered');
+  expect(await f.model.capture(later, 'changed-repeat', changed)).toEqual({
+    action: 'native',
+    settled: ids[1],
+  });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+    code: 'kept_native',
+    offerId: ids[1],
+  });
   expect(f.route).toHaveBeenCalledTimes(2);
   // Once per offer: the same call again is a new call, offered and routed again.
   expect(await f.model.capture(later, 'second-repeat', held)).toMatchObject({ action: 'offer' });
@@ -338,7 +356,10 @@ it('holds an across-day continuation to run or cancel, with nothing to judge, th
     );
     expect(result).toHaveProperty('instruction', expect.stringContaining('binding restrictions'));
     expect(said).toContain('no routing fee');
-    const selected = await f.model.store.pending('root', 'later-turn');
+    const selected = await f.model.store.owned(
+      'offer_id' in result ? String(result.offer_id) : '',
+      'root',
+    );
     expect(selected).toMatchObject({
       task: native.message,
       decision: {
@@ -735,10 +756,189 @@ it('keeps a legacy undersized job native before purchasing model routing', async
     }),
   ).toMatchObject({ action: 'native' });
   expect(f.route).not.toHaveBeenCalled();
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'job_cap_too_low' });
   config.router.subagentConsent.maxJobAtomic = '1000000';
   await writeFile(join(dir, 'config.json'), JSON.stringify(config));
   await f.model.capture({ ...f.session, turnId: 'control', transcript }, 'control-call', {
     prompt: 'Read the fixture.',
   });
   expect(f.route).toHaveBeenCalledTimes(1);
+});
+
+async function routedFixture() {
+  const f = await continuationFixture();
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the fixture and report its facts.' },
+    }) + '\n',
+  );
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+  }));
+  return { ...f, session: { ...f.session, transcript } };
+}
+
+it('offers a call made while another job of the session runs, in a turn no prompt started', async () => {
+  const f = await routedFixture();
+  const first = await f.model.capture(f.session, 'first-call', { prompt: 'Read A.' });
+  const running = 'offer_id' in first ? String(first.offer_id) : '';
+  expect((await f.model.store.accept(running, 'root'))?.state).toBe('running');
+  // A task notification woke the parent: no prompt was typed, so the turn id is the same.
+  const next = await f.model.capture(f.session, 'woken-call', { prompt: 'Read B.' });
+  expect(next).toMatchObject({ action: 'offer', routingFeeAtomic: offer.routingFeeAtomic });
+  expect('offer_id' in next ? next.offer_id : running).not.toBe(running);
+  // The running job is untouched by the new offer.
+  expect((await f.model.store.owned(running, 'root'))?.state).toBe('running');
+  expect(f.route).toHaveBeenCalledTimes(2);
+});
+
+it('offers two identical calls of one model response each, and settles one of them a repeat', async () => {
+  const f = await routedFixture();
+  const same = { description: 'Twin', prompt: 'Read the same fixture.' };
+  const capture = (call: string, step: string) =>
+    f.model.capture(f.session, call, same, undefined, 'Agent', step);
+  const made = [await capture('twin-a', 'turn:3'), await capture('twin-b', 'turn:3')];
+  expect(made).toMatchObject([{ action: 'offer' }, { action: 'offer' }]);
+  const ids = made.map((one) => ('offer_id' in one ? String(one.offer_id) : ''));
+  expect(new Set(ids).size).toBe(2);
+  // One fee an offer, and none for a repeat: the next response keeps the first native.
+  expect(f.route).toHaveBeenCalledTimes(2);
+  expect(await capture('repeat-a', 'turn:4')).toEqual({ action: 'native', settled: ids[0] });
+  // The other offer is still open, is accepted by its own id, and starts one worker.
+  expect((await f.model.store.accept(ids[1]!, 'root'))?.id).toBe(ids[1]);
+  expect(await f.model.store.accept(ids[1]!, 'root')).toBeNull();
+  expect(await f.model.store.accept(ids[0]!, 'root')).toBeNull();
+  expect(f.route).toHaveBeenCalledTimes(2);
+});
+
+it('offers a custom agent whose definition pins no model, and keeps one that pins a model native', async () => {
+  const f = await routedFixture();
+  const agents = join(f.workspace.root, '.claude', 'agents');
+  await mkdir(agents, { recursive: true });
+  const define = (name: string, frontmatter: string) =>
+    writeFile(
+      join(agents, `${name}.md`),
+      `---\nname: ${name}\ndescription: test\n${frontmatter}---\n\nYou are ${name}.\n`,
+    );
+  await define('loop-worker', 'model: inherit\neffort: high\ntools: Read, Bash\n');
+  await define('pinned-worker', 'model: opus\n');
+  const call = (type: string) =>
+    f.model.capture(f.session, `call-${type}`, {
+      prompt: 'Read the fixture.',
+      subagent_type: type,
+    });
+  expect(await call('loop-worker')).toMatchObject({ action: 'offer' });
+  // The worker is qualified as that agent, so its accept and its run read the same type.
+  expect(vi.mocked(qualifiedModelWorker).mock.calls.at(-1)?.[1]).toBe('loop-worker');
+  expect(await call('pinned-worker')).toEqual({ action: 'native' });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+    code: 'input_filter',
+    detail: 'definition:model',
+  });
+  expect(f.route).toHaveBeenCalledTimes(1);
+});
+
+it('records one code for each reason a held call gets no offer, and never its text', async () => {
+  const f = await routedFixture();
+  const call = { prompt: 'PRIVATE-ASSIGNMENT read the fixture.' };
+  let n = 0;
+  const reason = async (
+    native: Record<string, unknown> = call,
+    session: ModelSession = f.session,
+  ) => {
+    expect(await f.model.capture(session, `call-${n++}`, native)).toMatchObject({
+      action: 'native',
+    });
+    const { code, detail, bytes, limit } = (await f.model.store.noOffers()).at(-1)!;
+    return { code, detail, bytes, limit };
+  };
+  expect(await reason(call, { ...f.session, claudePermissionMode: 'plan' as never })).toMatchObject(
+    { code: 'permission_mode', detail: 'plan' },
+  );
+  for (const field of ['name', 'run_in_background', 'isolation', 'resume'])
+    expect(await reason({ ...call, [field]: 'set' })).toMatchObject({
+      code: 'input_filter',
+      detail: field,
+    });
+  expect(await reason({ ...call, subagent_type: 'custom-agent' })).toMatchObject({
+    code: 'input_filter',
+    detail: 'subagent_type',
+  });
+  vi.mocked(qualifiedModelWorker).mockResolvedValueOnce(null);
+  expect(await reason()).toMatchObject({ code: 'worker_unqualified' });
+  vi.mocked(qualifiedModelWorker).mockResolvedValueOnce({
+    path: '/fixture/worker',
+    claudeWorkspace: { ...f.workspace, workingDirectories: [f.workspace.root, '/elsewhere'] },
+  });
+  expect(await reason()).toMatchObject({ code: 'scope_not_covered' });
+  expect(
+    await reason(call, { ...f.session, transcript: join(dir, 'missing.jsonl') }),
+  ).toMatchObject({ code: 'parent_context_unavailable' });
+  const large = await reason({ prompt: 'x'.repeat(20_000) });
+  expect(large).toMatchObject({ code: 'over_size_limit', limit: MODEL_ROUTE_BODY_BYTES });
+  expect(large.bytes).toBeGreaterThan(20_000);
+  expect(f.route).not.toHaveBeenCalled();
+  f.route.mockRejectedValueOnce(new Error('PRIVATE-ASSIGNMENT refused'));
+  expect(await reason()).toMatchObject({ code: 'route_error' });
+  f.route.mockResolvedValueOnce({ schemaVersion: 1, action: 'native', reason: 'no_paid' });
+  expect(await reason()).toMatchObject({ code: 'server_declined', detail: 'no_paid' });
+  f.route.mockResolvedValueOnce({ ...offer, jobId: randomUUID() });
+  expect(await reason()).toMatchObject({ code: 'invalid_offer' });
+  // Cancelled while its route request was being built: the answer is no longer wanted.
+  const made = f.model.store.offer.bind(f.model.store);
+  vi.spyOn(f.model.store, 'offer').mockImplementationOnce(async (...args) => {
+    const job = await made(...args);
+    await f.model.store.fenceOwned(job.id, 'root');
+    return job;
+  });
+  expect(await reason()).toMatchObject({ code: 'superseded' });
+  // The session closed while the router was asked.
+  const closing = new AbortController();
+  f.route.mockImplementationOnce(async () => {
+    closing.abort();
+    throw new Error('aborted');
+  });
+  const other = { prompt: 'PRIVATE-ASSIGNMENT read another fixture.' };
+  expect(await f.model.capture(f.session, 'closing-call', other, closing.signal)).toMatchObject({
+    action: 'native',
+  });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'interrupted' });
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  config.router.subagentConsent.routerOrigin = 'https://elsewhere.test';
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  expect(await reason(other)).toMatchObject({ code: 'no_consent' });
+  expect(await readFile(join(dir, 'model-jobs', 'no-offers.json'), 'utf8')).not.toContain(
+    'PRIVATE-ASSIGNMENT',
+  );
+});
+
+it('fits a route request by giving up parent context, oldest first, and never the assignment', () => {
+  const size = (value: unknown) =>
+    Buffer.byteLength(JSON.stringify(value)) + MODEL_ROUTE_ENVELOPE_BYTES;
+  const admission = (task: string, context: string[]) => ({
+    schemaVersion: 1 as const,
+    consent: true as const,
+    accepts: ['deepseek-flash'] as ['deepseek-flash'],
+    subagentTask: task,
+    parentContext: context.map((content) => ({ role: 'user' as const, content })),
+  });
+  const task = 'Assignment "quoted"\n'.repeat(300);
+  const small = admission(task, ['one', 'two']);
+  expect(fitAdmission(small)).toEqual(small);
+  const fitted = fitAdmission(admission(task, ['old '.repeat(2000), 'mid', 'new\n'.repeat(4000)]));
+  expect(size(fitted)).toBeLessThanOrEqual(MODEL_ROUTE_BODY_BYTES);
+  expect(fitted.subagentTask).toBe(task);
+  // The newest message is the one kept, cut at its end; the router needs one entry.
+  expect(fitted.parentContext).toHaveLength(1);
+  expect(fitted.parentContext[0]!.content.startsWith('new\nnew\n')).toBe(true);
+  // An assignment over the limit by itself is never cut: the request stays over.
+  const over = fitAdmission(admission('x'.repeat(17_000), ['context']));
+  expect(over.subagentTask).toHaveLength(17_000);
+  expect(over.parentContext).toEqual([{ role: 'user', content: '' }]);
+  expect(size(over)).toBeGreaterThan(MODEL_ROUTE_BODY_BYTES);
 });

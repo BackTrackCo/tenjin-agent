@@ -16,6 +16,8 @@ const jobSchema = z.object({
   task: z.string(),
   native: z.record(z.string(), z.unknown()),
   nativeTool: z.enum(['Agent', 'Task']).optional(),
+  /** The parent's model request that made the call, as the host numbers it. */
+  step: z.string().optional(),
   decision: z.record(z.string(), z.unknown()),
   capAtomic: z.string().regex(/^\d+$/),
   state: z.enum([
@@ -67,6 +69,53 @@ export async function sweepModelRecords(dataDir: string, now = Date.now()): Prom
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 /** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
 const REPEATABLE: readonly ModelJob['state'][] = ['offered', 'cancelled', 'unknown'];
+/** How long an offer can be accepted, and how long after a worker stopped its call repeats free. */
+const OFFER_MS = 15 * 60_000;
+const unresolved = (job: ModelJob) =>
+  job.state !== 'native' &&
+  job.state !== 'completed' &&
+  (job.expiresAt > Date.now() || ['running', 'cancelling'].includes(job.state));
+
+/** Why a subagent call the hook saw got no offer. Codes only: never the assignment. */
+export const NO_OFFER_CODES = [
+  'kept_native',
+  'no_session',
+  'host_unqualified',
+  'no_consent',
+  'permission_mode',
+  'worker_unqualified',
+  'input_filter',
+  'scope_not_covered',
+  'parent_context_unavailable',
+  'over_size_limit',
+  'job_cap_too_low',
+  'capture_error',
+  'route_error',
+  'server_declined',
+  'invalid_offer',
+  'superseded',
+  'expired',
+  'interrupted',
+] as const;
+const noOfferSchema = z.object({
+  at: z.number(),
+  sessionId: z.string(),
+  tool: z.string(),
+  code: z.enum(NO_OFFER_CODES),
+  /** A field name, a mode or the server's own code. */
+  detail: z
+    .string()
+    .regex(/^[A-Za-z0-9_.:-]{1,64}$/)
+    .optional(),
+  bytes: z.number().optional(),
+  limit: z.number().optional(),
+  offerId: z.uuid().optional(),
+});
+export type NoOffer = z.infer<typeof noOfferSchema>;
+const NO_OFFERS_KEPT = 200;
+const NO_OFFERS_FILE = 'no-offers.json';
+/** Open offers one assignment text can have at once before the oldest stops repeating free. */
+const REPEATS_KEPT = 16;
 
 /**
  * What "unchanged" means for a repeated Agent call. Every field counts and key
@@ -87,7 +136,7 @@ function repeatKey(native: Record<string, unknown>): Record<string, unknown> {
   );
 }
 
-/** One active foreground delegation per root turn; immutable calls, atomic selection. */
+/** Immutable held calls, atomic selection: a job a call on Claude, one delegation a turn on Codex. */
 export class ModelJobStore {
   private dir: string;
   constructor(dataDir: string) {
@@ -100,7 +149,15 @@ export class ModelJobStore {
   private window(sessionId: string, turnId: string) {
     return join(this.dir, `window-${canonicalHash({ sessionId, turnId })}.json`);
   }
-  /** The latest held Claude call with this content in this session and root, in any turn. */
+  private callPath(sessionId: string, callId: string) {
+    return join(this.dir, `call-${canonicalHash({ sessionId, callId })}.json`);
+  }
+  /** The held Claude calls with this content in this session and root, oldest first. */
+  private async repeatIds(path: string): Promise<string[]> {
+    const index = await readJsonFile(path, 4000);
+    const ids = Array.isArray(index?.ids) ? index.ids : [index?.id];
+    return ids.filter((id): id is string => z.uuid().safeParse(id).success);
+  }
   private repeatPath(
     sessionId: string,
     root: string,
@@ -121,47 +178,51 @@ export class ModelJobStore {
     const p = jobSchema.safeParse(raw);
     return p.success ? p.data : null;
   }
+  /**
+   * `call` (Claude): every held call is its own job, whatever else its session
+   * has open or running. `turn` (Codex): one unresolved delegation a turn.
+   */
   async offer(
     input: NewJob,
     state: 'awaiting_prompt' | 'routing' | 'offered' = 'offered',
+    scope: 'call' | 'turn' = 'call',
   ): Promise<ModelJob> {
     return this.locked(async () => {
-      const previous = await readJsonFile(this.window(input.sessionId, input.turnId), 1000);
-      if (typeof previous?.id === 'string') {
-        const old = await this.read(previous.id);
+      const index =
+        scope === 'turn'
+          ? this.window(input.sessionId, input.turnId)
+          : this.callPath(input.sessionId, input.callId);
+      const previous = await readJsonFile(index, 1000);
+      const old = typeof previous?.id === 'string' ? await this.read(previous.id) : null;
+      if (old && unresolved(old)) {
+        // The same call seen twice is one job: no second route, no second fee.
         if (
-          old &&
-          old.state !== 'native' &&
-          old.state !== 'completed' &&
-          (old.expiresAt > Date.now() || ['running', 'cancelling'].includes(old.state))
-        ) {
-          if (
-            old.callId === input.callId &&
-            canonicalHash(old.native) === canonicalHash(input.native)
-          )
-            return old;
-          throw new Error('An unresolved delegation already owns this turn');
-        }
+          old.callId === input.callId &&
+          canonicalHash(old.native) === canonicalHash(input.native)
+        )
+          return old;
+        throw new Error(
+          scope === 'turn'
+            ? 'An unresolved delegation already owns this turn'
+            : 'This call id already names another unresolved delegation',
+        );
       }
       const job: ModelJob = {
         ...input,
         id: randomUUID(),
         state,
-        expiresAt: Date.now() + 15 * 60_000,
+        expiresAt: Date.now() + OFFER_MS,
       };
       const serialized = JSON.stringify(job);
       if (Buffer.byteLength(serialized) > 1_000_000)
         throw new Error('Complete model assignment exceeds private record size limit');
       await writePrivate(this.path(job.id), serialized);
-      await writePrivate(
-        this.window(input.sessionId, input.turnId),
-        JSON.stringify({ id: job.id }),
-      );
-      if (input.nativeTool)
-        await writePrivate(
-          this.repeatPath(input.sessionId, input.root, input.nativeTool, input.native),
-          JSON.stringify({ id: job.id }),
-        );
+      await writePrivate(index, JSON.stringify({ id: job.id }));
+      if (input.nativeTool) {
+        const path = this.repeatPath(input.sessionId, input.root, input.nativeTool, input.native);
+        const ids = [...(await this.repeatIds(path)), job.id].slice(-REPEATS_KEPT);
+        await writePrivate(path, JSON.stringify({ ids }));
+      }
       return job;
     });
   }
@@ -206,11 +267,19 @@ export class ModelJobStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw error;
     }
-    return this.locked(async () => {
-      const job = await this.pending(session, turn);
-      if (!job || ['native', 'completed', 'cancelled', 'unknown'].includes(job.state)) return;
-      await writePrivate(this.path(job.id), JSON.stringify({ ...job, state }));
-    });
+    return this.locked(async () => this.fenced(await this.pending(session, turn), state));
+  }
+  /** Fences one job by its own id, for its session: nothing else of the session is touched. */
+  async fenceOwned(
+    id: string,
+    session: string,
+    state: 'cancelling' | 'cancelled' = 'cancelled',
+  ): Promise<void> {
+    return this.locked(async () => this.fenced(await this.owned(id, session), state));
+  }
+  private async fenced(job: ModelJob | null, state: 'cancelling' | 'cancelled') {
+    if (!job || ['native', 'completed', 'cancelled', 'unknown'].includes(job.state)) return;
+    await writePrivate(this.path(job.id), JSON.stringify({ ...job, state }));
   }
   async decided(id: string, decision: Record<string, unknown>) {
     return this.locked(async () => {
@@ -281,6 +350,7 @@ export class ModelJobStore {
       const ended: ModelJob = {
         ...job,
         state: 'unknown',
+        expiresAt: Math.max(job.expiresAt, Date.now() + OFFER_MS),
         result: JSON.stringify(STRANDED_HANDBACK),
       };
       await writePrivate(this.path(id), JSON.stringify(ended));
@@ -313,33 +383,41 @@ export class ModelJobStore {
    * unchanged. Matched by content, never by call ID, so the host's permission
    * review sees the call that runs. Once per offer: a match ends the offer, so
    * it cannot be accepted after, and a later repeat is a new call. It matches
-   * in the same session and workspace root, for the rest of the offer's turn,
-   * and in a later turn until the offer expires.
+   * in the same session and workspace root until the offer expires, or for the
+   * same time after its accepted worker stopped. No turn boundary is read.
+   *
+   * Several open offers can hold the same content. One repeat settles one of
+   * them, the oldest first. A call made by the same model request (`step`) as
+   * an offered call was written before that offer was read: it is a second
+   * call, not its repeat, and is judged by itself.
+   *
+   * @returns the offer the repeat settled, else null.
    */
   async nativeRepeat(
     session: string,
-    turn: string,
     root: string,
     tool: 'Agent' | 'Task',
     native: Record<string, unknown>,
-  ): Promise<boolean> {
+    step?: string,
+  ): Promise<string | null> {
     return this.locked(async () => {
-      const index = await readJsonFile(this.repeatPath(session, root, tool, native), 1000);
-      const job = z.uuid().safeParse(index?.id).success
-        ? await this.read(index!.id as string)
-        : null;
-      if (
-        !job ||
-        job.sessionId !== session ||
-        job.root !== root ||
-        job.nativeTool !== tool ||
-        !REPEATABLE.includes(job.state) ||
-        (job.turnId !== turn && job.expiresAt <= Date.now()) ||
-        canonicalHash(repeatKey(job.native)) !== canonicalHash(repeatKey(native))
-      )
-        return false;
-      await writePrivate(this.path(job.id), JSON.stringify({ ...job, state: 'native' }));
-      return true;
+      for (const id of await this.repeatIds(this.repeatPath(session, root, tool, native))) {
+        const job = await this.read(id);
+        if (
+          !job ||
+          job.sessionId !== session ||
+          job.root !== root ||
+          job.nativeTool !== tool ||
+          !REPEATABLE.includes(job.state) ||
+          job.expiresAt <= Date.now() ||
+          (step !== undefined && job.step === step) ||
+          canonicalHash(repeatKey(job.native)) !== canonicalHash(repeatKey(native))
+        )
+          continue;
+        await writePrivate(this.path(job.id), JSON.stringify({ ...job, state: 'native' }));
+        return job.id;
+      }
+      return null;
     });
   }
   async finish(id: string, state: 'completed' | 'cancelled' | 'unknown', result?: string) {
@@ -348,8 +426,44 @@ export class ModelJobStore {
       if (!job || !['running', 'cancelling'].includes(job.state)) return;
       await writePrivate(
         this.path(id),
-        JSON.stringify({ ...job, state, ...(result ? { result } : {}) }),
+        JSON.stringify({
+          ...job,
+          state,
+          // A worker that stopped leaves its call a free native repeat, from now.
+          ...(state === 'completed'
+            ? {}
+            : { expiresAt: Math.max(job.expiresAt, Date.now() + OFFER_MS) }),
+          ...(result ? { result } : {}),
+        }),
       );
     });
+  }
+  /** Records why a call got no offer, newest last, in one bounded private file. Never throws. */
+  async noOffer(entry: Omit<NoOffer, 'at'>): Promise<void> {
+    try {
+      const parsed = noOfferSchema.safeParse({ ...entry, at: Date.now() });
+      if (!parsed.success) return;
+      await this.locked(async () => {
+        const kept = (await this.noOffers()).filter(
+          (old) => parsed.data.at - old.at < MODEL_RECORD_TTL_MS,
+        );
+        await writePrivate(
+          join(this.dir, NO_OFFERS_FILE),
+          JSON.stringify({ records: [...kept, parsed.data].slice(-NO_OFFERS_KEPT) }),
+        );
+      });
+    } catch {
+      // Diagnostics only: a failed write never changes what the call does.
+    }
+  }
+  /** The kept no-offer records, oldest first. */
+  async noOffers(): Promise<NoOffer[]> {
+    const raw = await readJsonFile(join(this.dir, NO_OFFERS_FILE), 200_000).catch(() => null);
+    return Array.isArray(raw?.records)
+      ? raw.records.flatMap((entry) => {
+          const parsed = noOfferSchema.safeParse(entry);
+          return parsed.success ? [parsed.data] : [];
+        })
+      : [];
   }
 }

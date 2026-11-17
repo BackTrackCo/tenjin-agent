@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MODEL_RECORD_TTL_MS, ModelJobStore, sweepModelRecords } from './model-job';
+import { canonicalHash } from '../lib/request-schema';
 let dir: string;
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -50,9 +51,9 @@ it('keeps a held Agent call native once when it is sent again unchanged, in a la
     subagent_type: 'general-purpose',
     run_in_background: false,
   };
-  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', repeat)).toBe(true);
-  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', repeat)).toBe(false);
-  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(false);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', repeat)).toBe(job.id);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', repeat)).toBeNull();
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBeNull();
   expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
 });
 
@@ -69,15 +70,117 @@ it('treats a changed, foreign, other-root or other-tool call as a new call and l
     ['root', '/sibling', 'Agent', HELD],
     ['foreign', '/repo', 'Agent', HELD],
   ] as const)
-    expect(await store.nativeRepeat(session, 'turn', root, tool, native)).toBe(false);
-  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(true);
+    expect(await store.nativeRepeat(session, root, tool, native)).toBeNull();
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBeTruthy();
 });
 
-it('lasts for the rest of the offer turn, and in later turns only until the offer expires', async () => {
+it('repeats free until the offer expires, with no turn read, and for as long again after its worker stopped', async () => {
   const { store, job } = await heldAgentCall();
-  vi.spyOn(Date, 'now').mockReturnValue(job.expiresAt);
-  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', HELD)).toBe(false);
-  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(true);
+  const now = vi.spyOn(Date, 'now');
+  // A session woken by task notifications stays in one turn for hours: the offer still ends.
+  now.mockReturnValue(job.expiresAt);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBeNull();
+  // An accepted worker that stopped later than that leaves its call a free repeat from then.
+  now.mockReturnValue(job.expiresAt - 1);
+  await store.accept(job.id, 'root');
+  now.mockReturnValue(job.expiresAt + 20 * 60_000);
+  await store.finish(job.id, 'unknown');
+  now.mockReturnValue(job.expiresAt + 34 * 60_000);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBe(job.id);
+});
+
+it('gives two calls of one turn a job each, and the same call seen twice one job', async () => {
+  const { store, job } = await heldAgentCall();
+  const second = { ...job, callId: 'second-call', native: { prompt: 'Another task' } };
+  const other = await store.offer({ ...second, task: 'Another task' }, 'routing');
+  expect(other.id).not.toBe(job.id);
+  // The first is untouched by the second, and each is accepted by its own id.
+  expect((await store.owned(job.id, 'root'))?.state).toBe('offered');
+  expect(await store.offer({ ...second, task: 'Another task' }, 'routing')).toMatchObject({
+    id: other.id,
+  });
+  await store.decided(other.id, { action: 'model' });
+  expect((await store.accept(other.id, 'root'))?.id).toBe(other.id);
+  // A third call is offered while that worker runs.
+  const third = await store.offer({ ...second, callId: 'third-call' });
+  expect((await store.accept(third.id, 'root'))?.id).toBe(third.id);
+  expect((await store.accept(job.id, 'root'))?.id).toBe(job.id);
+  // Cancelling one leaves the others running.
+  await store.fenceOwned(third.id, 'root');
+  expect((await store.unfinished()).map((left) => left.id).sort()).toEqual(
+    [job.id, other.id].sort(),
+  );
+});
+
+it('settles one of two open offers for identical assignments a repeat, the oldest first', async () => {
+  const { store, job } = await heldAgentCall();
+  const twin = await store.offer({ ...job, callId: 'twin-call', step: 'turn:0' });
+  expect(twin.id).not.toBe(job.id);
+  // A call the same model request made was written before either offer was read.
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD, 'turn:0')).toBe(job.id);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD, 'turn:0')).toBeNull();
+  expect((await store.owned(twin.id, 'root'))?.state).toBe('offered');
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD, 'turn:1')).toBe(twin.id);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD, 'turn:2')).toBeNull();
+  // One offer's end never reaches the other's record.
+  expect((await store.owned(job.id, 'root'))?.state).toBe('native');
+});
+
+it('still repeats an offer whose index an earlier build wrote', async () => {
+  const { store, job } = await heldAgentCall();
+  const index = join(
+    dir,
+    'model-jobs',
+    `repeat-${canonicalHash({ sessionId: 'root', root: '/repo', tool: 'Agent', native: HELD })}.json`,
+  );
+  await writeFile(index, JSON.stringify({ id: job.id }));
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBe(job.id);
+});
+
+it('keeps why a call got no offer as codes in one private bounded file, with no text of the call', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-no-offer-'));
+  const store = new ModelJobStore(dir);
+  const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+  await store.noOffer({ sessionId: 's', tool: 'Agent', code: 'input_filter', detail: 'name' });
+  // Free text is refused whole: only a code-shaped detail is ever written.
+  await store.noOffer({
+    sessionId: 's',
+    tool: 'Agent',
+    code: 'server_declined',
+    detail: 'the assignment said to read /secret',
+  });
+  now.mockReturnValue(2_000);
+  await store.noOffer({
+    sessionId: 's',
+    tool: 'Agent',
+    code: 'over_size_limit',
+    bytes: 20_000,
+    limit: 16_384,
+  });
+  expect(await store.noOffers()).toEqual([
+    { at: 1_000, sessionId: 's', tool: 'Agent', code: 'input_filter', detail: 'name' },
+    {
+      at: 2_000,
+      sessionId: 's',
+      tool: 'Agent',
+      code: 'over_size_limit',
+      bytes: 20_000,
+      limit: 16_384,
+    },
+  ]);
+  const path = join(dir, 'model-jobs', 'no-offers.json');
+  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  // Bounded: the newest 200, and none older than the other records' 7 days.
+  for (let i = 0; i < 205; i++)
+    await store.noOffer({ sessionId: 's', tool: 'Task', code: 'expired' });
+  expect(await store.noOffers()).toHaveLength(200);
+  now.mockReturnValue(2_000 + MODEL_RECORD_TTL_MS);
+  await store.noOffer({ sessionId: 's', tool: 'Agent', code: 'no_consent' });
+  expect((await store.noOffers()).map((entry) => entry.code)).toEqual(['no_consent']);
+  // And the file goes with the other job records once nothing wrote it for 7 days.
+  now.mockRestore();
+  await sweepModelRecords(dir, Date.now() + MODEL_RECORD_TTL_MS + 60_000);
+  expect(await store.noOffers()).toEqual([]);
 });
 
 it.each([
@@ -88,16 +191,16 @@ it.each([
 ] as const)('repeats a $name offer natively: $matches', async ({ steps, matches }) => {
   const { store, job } = await heldAgentCall();
   for (const step of steps)
-    if (step === 'fence') await store.fence('root', 'turn');
+    if (step === 'fence') await store.fenceOwned(job.id, 'root');
     else if (step === 'accept') await store.accept(job.id, 'root', 'turn');
     else await store.finish(job.id, step);
-  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(matches);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBe(matches ? job.id : null);
 });
 
 it('lets exactly one of a repeat and an acceptance win across stores', async () => {
   const { store, job } = await heldAgentCall();
   const outcomes = await Promise.all([
-    store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD),
+    store.nativeRepeat('root', '/repo', 'Agent', HELD),
     new ModelJobStore(dir).accept(job.id, 'root', 'turn'),
   ]);
   expect(outcomes.filter(Boolean)).toHaveLength(1);
@@ -136,6 +239,7 @@ it('binds one Codex plaintext submission and fences stale selection on interrupt
       capAtomic: '1000000',
     },
     'awaiting_prompt',
+    'turn',
   );
   expect(await store.submit(job.id, 'foreign', 'turn', 'assignment')).toBeNull();
   expect(await store.submit(job.id, 'root', 'old-turn', 'assignment')).toBeNull();
@@ -161,10 +265,10 @@ it('never permits a second held assignment to take the first assignment’s wind
     decision: {},
     capAtomic: '1000000',
   };
-  await store.offer(input, 'awaiting_prompt');
-  await expect(store.offer({ ...input, callId: 'second' }, 'awaiting_prompt')).rejects.toThrow(
-    'unresolved',
-  );
+  await store.offer(input, 'awaiting_prompt', 'turn');
+  await expect(
+    store.offer({ ...input, callId: 'second' }, 'awaiting_prompt', 'turn'),
+  ).rejects.toThrow('unresolved');
 });
 
 it('finds an offer by its own id in a later turn and from another process, for its own session only', async () => {

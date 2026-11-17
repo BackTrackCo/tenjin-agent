@@ -16,7 +16,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   resolveSettings: vi.fn(),
 }));
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
-vi.mock('./agent-tools', () => ({ findDefinition: vi.fn(async () => null) }));
+vi.mock('./agent-tools', async (original) => ({
+  ...(await original<typeof import('./agent-tools')>()),
+  findDefinition: vi.fn(async () => null),
+}));
 vi.mock('./model-settings', async (original) => ({
   ...(await original<typeof import('./model-settings')>()),
   modelSettings: vi.fn(),

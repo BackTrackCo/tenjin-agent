@@ -9,7 +9,7 @@ import { qualifiedModelWorker } from './model-worker';
 import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
-import { ModelJobStore } from './model-job';
+import { ModelJobStore, type NoOffer } from './model-job';
 import { modelSettings, type ModelSettings } from './model-settings';
 import { currentModelGithubRepositories, modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
@@ -28,7 +28,9 @@ import {
   sameClaudeWorkspace,
   type ClaudeWorkspace,
 } from './claude-workspace';
+import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
+import { WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import {
   continuationRefusal,
   ownedModelReference,
@@ -124,6 +126,59 @@ function nativeRepositories(job: ModelJob, workspace: ClaudeWorkspace | null): s
   return parsed.success ? parsed.data : null;
 }
 
+type Admission = {
+  schemaVersion: 1;
+  consent: true;
+  accepts: ['deepseek-flash'];
+  subagentTask: string;
+  parentContext: { role: 'user' | 'assistant'; content: string }[];
+};
+/**
+ * Fits a route request under the router's body limit by giving up parent
+ * context, never the assignment: the oldest context message first, then the end
+ * of the last one left. The router needs at least one context entry. A request
+ * whose assignment alone is over the limit is returned as it is, still over.
+ */
+export function fitAdmission(admission: Admission): Admission {
+  const over = (value: Admission) =>
+    Buffer.byteLength(JSON.stringify(value)) + MODEL_ROUTE_ENVELOPE_BYTES - MODEL_ROUTE_BODY_BYTES;
+  let next = admission;
+  while (next.parentContext.length > 1 && over(next) > 0)
+    next = { ...next, parentContext: next.parentContext.slice(1) };
+  for (let last = next.parentContext[0]; last && last.content && over(next) > 0;) {
+    // JSON escaping can make a character several bytes, so cut by at least the excess.
+    last = {
+      ...last,
+      content: last.content.slice(0, Math.max(0, last.content.length - over(next))),
+    };
+    next = { ...next, parentContext: [last] };
+  }
+  return next;
+}
+
+/** A mode's name for a record: one of the host's own, never free text. */
+const modeName = (mode: unknown) =>
+  typeof mode === 'string' && /^[A-Za-z]{1,32}$/.test(mode) ? mode : 'unobserved';
+
+/**
+ * The first field of a held Agent call that keeps it native, else null. A
+ * call that names its agent starts a teammate and returns at once, as a
+ * background call does, and the accept call cannot.
+ */
+function blockedField(native: Record<string, unknown>): string | null {
+  if (typeof native.prompt !== 'string' || !native.prompt) return 'prompt';
+  const set = [
+    'agentId',
+    'agent_id',
+    'run_in_background',
+    'resume',
+    'name',
+    'team_name',
+    'isolation',
+  ].find((key) => native[key]);
+  return set ?? null;
+}
+
 export class ModelHandoff {
   readonly store: ModelJobStore;
   readonly conversations: ModelConversationStore;
@@ -195,6 +250,7 @@ export class ModelHandoff {
         capAtomic: settings.maxJobAtomic.toString(),
       },
       'awaiting_prompt',
+      'turn',
     );
     return held(
       `The native child has not started. Submit the same complete plaintext assignment through the Tenjin subagent tool with delegation_id=${job.id} and task=<the full assignment text>. ${MODEL_BRIEF_GUIDANCE} Tenjin attaches parent context itself. This obtains a recommendation only. Accept its offer_id or keep native by retrying the original native call unchanged; it bypasses this hold once. Ignoring this launches neither worker.`,
@@ -237,12 +293,28 @@ export class ModelHandoff {
     if (!job) return { action: 'native', reason: 'Stale, changed or foreign delegation' };
     return this.route(session, job, signal);
   }
+  /** Records why a call got no offer and answers that it runs natively. Codes only. */
+  private async stay(
+    session: ModelSession,
+    tool: string,
+    code: NoOffer['code'],
+    more: Pick<NoOffer, 'detail' | 'bytes' | 'limit' | 'offerId'> = {},
+  ) {
+    await this.store.noOffer({ sessionId: session.sessionId, tool, code, ...more });
+    return { action: 'native' as const };
+  }
+  /**
+   * One held call, judged by itself: what else its session has on offer or
+   * running does not count. `step` names the parent's model request that made
+   * the call, where the host says.
+   */
   async capture(
     session: ModelSession,
     callId: string,
     native: Record<string, unknown>,
     signal?: AbortSignal,
     nativeTool: ModelNativeTool = 'Agent',
+    step?: string,
   ) {
     signal?.throwIfAborted();
     const settings = await this.currentConsent(session.cwd);
@@ -263,60 +335,51 @@ export class ModelHandoff {
         return continuationRefusal('DeepSeek continuation is unavailable or interrupted');
       }
     }
-    if (nativeTool === 'SendMessage') return { action: 'native' };
+    if (nativeTool === 'SendMessage' || isModelWorkerProcess()) return { action: 'native' };
+    const stay = (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) =>
+      this.stay(session, nativeTool, code, more);
     const { dataDir, transport } = this.options;
-    if (
-      !settings ||
-      isModelWorkerProcess() ||
-      !claudeWorkerPermissionMode(session.claudePermissionMode)
-    )
-      return { action: 'native' };
+    if (!settings) return stay('no_consent');
+    if (!claudeWorkerPermissionMode(session.claudePermissionMode))
+      return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();
     // The parent kept a held call native by sending it again unchanged: no new routing, no fee.
-    if (
-      await this.store.nativeRepeat(
-        session.sessionId,
-        session.turnId,
-        settings.root,
-        nativeTool,
-        native,
-      )
-    )
-      return { action: 'native' };
+    const kept = await this.store.nativeRepeat(
+      session.sessionId,
+      settings.root,
+      nativeTool,
+      native,
+      step,
+    );
+    if (kept) return { ...(await stay('kept_native', { offerId: kept })), settled: kept };
+    const blocked = blockedField(native);
+    if (blocked) return stay('input_filter', { detail: blocked });
+    // A custom agent is offered when a worker can run as it. Its definition is
+    // looked up from the job's root, where the worker will read it.
+    const agentType = String(native.subagent_type ?? 'general-purpose');
+    const custom = WORKER_BUILTIN_AGENTS.has(agentType)
+      ? null
+      : await workerAgent(agentType, { cwd: settings.root, homeDir: homedir() });
+    if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
     const worker = await qualifiedModelWorker(
       session.cwd,
-      String(native.subagent_type ?? 'general-purpose'),
+      agentType,
       undefined,
       dataDir,
       signal,
       session.claudePermissionMode,
     );
-    if (!worker?.claudeWorkspace || !claudeWorkerPermissionMode(session.claudePermissionMode))
-      return { action: 'native' };
-    const task = native.prompt;
-    if (
-      typeof task !== 'string' ||
-      !task ||
-      native.agentId ||
-      native.agent_id ||
-      native.run_in_background ||
-      native.resume ||
-      native.name ||
-      native.team_name ||
-      native.isolation ||
-      (native.subagent_type !== undefined &&
-        !['general-purpose', 'Explore'].includes(String(native.subagent_type)))
-    )
-      return { action: 'native' };
+    if (!worker?.claudeWorkspace) return stay('worker_unqualified');
     const job = await this.store.offer(
       {
         sessionId: session.sessionId,
         turnId: session.turnId,
         callId,
         root: settings.root,
-        task,
+        task: native.prompt as string,
         native,
         nativeTool,
+        ...(step === undefined ? {} : { step }),
         decision: {
           routerOrigin: transport.origin,
           claudePermissionMode: session.claudePermissionMode,
@@ -422,7 +485,7 @@ export class ModelHandoff {
       task,
     });
     if (!offered || offered.state !== 'offered') {
-      await this.store.fence(session.sessionId, session.turnId);
+      await this.store.fenceOwned(job.id, session.sessionId);
       return continuationRefusal('This continuation cannot be selected again');
     }
     signal?.throwIfAborted();
@@ -447,12 +510,13 @@ export class ModelHandoff {
   }
   private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {
     const { transport } = this.options;
-    const native = async () => {
+    const native = async (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) => {
       await this.store.decided(job.id, { action: 'native' });
-      return { action: 'native' };
+      return this.stay(session, job.nativeTool ?? 'Agent', code, more);
     };
     const settings = await this.currentConsent(session.cwd);
-    if (!settings || settings.root !== job.root) return native();
+    if (!settings) return native('no_consent');
+    if (settings.root !== job.root) return native('scope_not_covered');
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
@@ -460,53 +524,56 @@ export class ModelHandoff {
       session.harness !== 'codex' &&
       (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
     )
-      return native();
+      return native('scope_not_covered');
     const disclosureRepositories = nativeRepositories(job, claudeWorkspace);
-    if (settings.scope === 'native-workspace' && !disclosureRepositories) return native();
+    if (settings.scope === 'native-workspace' && !disclosureRepositories)
+      return native('scope_not_covered');
     if (
       session.harness === 'codex' &&
       (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
     )
-      return native();
+      return native('worker_unqualified');
     const packet = await buildPromptPacket(
       session.transcript,
       session.sessionId,
       task,
       session.harness ?? 'claude',
     );
-    if (packet.historyStatus !== 'ok' || !packet.history.length) return native();
+    if (packet.historyStatus !== 'ok' || !packet.history.length)
+      return native('parent_context_unavailable');
     const history =
       settings.context === 'turn'
         ? packet.history.slice(Math.max(0, packet.history.map((m) => m.role).lastIndexOf('user')))
         : packet.history;
-    const parentContext = history.slice(-6).map((m) => ({ role: m.role, content: mask(m.text) }));
-    const admission = {
+    const admission = fitAdmission({
       schemaVersion: 1,
       consent: true,
       accepts: ['deepseek-flash'],
       subagentTask: mask(task),
-      parentContext,
-    };
-    if (
-      Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES >
-        MODEL_ROUTE_BODY_BYTES ||
-      settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC
-    )
-      return native();
+      parentContext: history.slice(-6).map((m) => ({ role: m.role, content: mask(m.text) })),
+    });
+    const bytes = Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES;
+    if (bytes > MODEL_ROUTE_BODY_BYTES)
+      return native('over_size_limit', { bytes, limit: MODEL_ROUTE_BODY_BYTES });
+    if (settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC) return native('job_cap_too_low');
     const input = { ...admission, jobId: job.id };
     let raw: unknown;
     try {
       signal?.throwIfAborted();
-      const pending = await this.store.pending(session.sessionId, session.turnId);
+      // By its own id on Claude: another call of the session never stands in its way.
+      const pending =
+        session.harness === 'codex'
+          ? await this.store.pending(session.sessionId, session.turnId)
+          : await this.store.owned(job.id, session.sessionId);
       signal?.throwIfAborted();
       if (pending?.id !== job.id || !['routing', 'offered'].includes(pending.state))
-        return native();
+        return native('superseded');
       if (instructions) await assertInstructionMetadataCurrent(instructions);
       signal?.throwIfAborted();
       raw = job.state === 'offered' ? job.decision : await transport.route(input, signal);
       signal?.throwIfAborted();
     } catch {
-      await this.store.decided(job.id, { action: 'native' });
+      await native(signal?.aborted ? 'interrupted' : 'route_error');
       return { action: 'native', reason: 'Routing failed or interrupted; retry native unchanged' };
     }
     const parsed = modelOfferSchema.safeParse(raw);
@@ -515,8 +582,15 @@ export class ModelHandoff {
       parsed.data.jobId !== job.id ||
       BigInt(parsed.data.routingFeeAtomic) > MODEL_ROUTING_FEE_CEILING_ATOMIC
     ) {
-      await this.store.decided(job.id, { action: 'native' });
-      return { action: 'native' };
+      // The server's own answer that the work stays native names its reason as a code.
+      const declined = z.object({ action: z.literal('native'), reason: z.string() }).safeParse(raw);
+      return declined.success
+        ? native('server_declined', {
+            ...(/^[A-Za-z0-9_.:-]{1,64}$/.test(declined.data.reason)
+              ? { detail: declined.data.reason }
+              : {}),
+          })
+        : native('invalid_offer');
     }
     const consent = await this.currentConsent(session.cwd);
     if (
@@ -525,7 +599,7 @@ export class ModelHandoff {
       consent.maxJobAtomic < BigInt(job.capAtomic) ||
       (claudeWorkspace && !modelClaudeWorkspaceCovered(claudeWorkspace, consent))
     )
-      return native();
+      return native(consent ? 'scope_not_covered' : 'no_consent');
     await this.store.decided(job.id, {
       ...parsed.data,
       routerOrigin: transport.origin,
@@ -562,7 +636,7 @@ export class ModelHandoff {
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
-      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No worker started.`,
+      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap. Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No worker started.`,
     };
   }
 }

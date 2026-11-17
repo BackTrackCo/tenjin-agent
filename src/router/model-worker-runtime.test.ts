@@ -52,7 +52,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
-vi.mock('./agent-tools', () => ({ findDefinition: vi.fn(async () => null) }));
+vi.mock('./agent-tools', async (original) => ({
+  ...(await original<typeof import('./agent-tools')>()),
+  findDefinition: vi.fn(async () => null),
+  workerAgent: vi.fn(async () => ({ unmatched: 'subagent_type' })),
+}));
+import { workerAgent } from './agent-tools';
 vi.mock('./model-settings', async (original) => ({
   ...(await original<typeof import('./model-settings')>()),
   modelSettings: vi.fn(async () => ({ root: '/repo', repositories: ['/repo'] })),
@@ -1746,6 +1751,23 @@ it.each([
     });
   },
 );
+
+it('runs a custom agent from its definition by value, and starts nothing once the definition no longer matches', async () => {
+  const definition = { description: 'loop-worker', prompt: 'You are a worker.', tools: ['Read'] };
+  const custom = { ...job, native: { subagent_type: 'loop-worker' } } as unknown as ModelJob;
+  vi.mocked(workerAgent).mockResolvedValueOnce({ agent: definition });
+  sdkResult({ subtype: 'success', result: 'custom fixture' });
+  await runModelWorker(custom, options());
+  const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+  // Named alone, a definition above the job's root is missed and the worker gets every tool.
+  expect(sent.agent).toBe('loop-worker');
+  expect(sent.agents).toEqual({ 'loop-worker': definition });
+  const started = vi.mocked(query).mock.calls.length;
+  // Edited after the offer to pin a model: it now runs natively on that model.
+  vi.mocked(workerAgent).mockResolvedValueOnce({ unmatched: 'definition:model' });
+  await expect(runModelWorker(custom, options())).rejects.toThrow('keep native');
+  expect(vi.mocked(query).mock.calls).toHaveLength(started);
+});
 
 it("gives a parent's text no permission: the same mode, rules, sandbox and ask whatever the assignment or follow-up claims", async () => {
   const claims =

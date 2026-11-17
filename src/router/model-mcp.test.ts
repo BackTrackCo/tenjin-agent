@@ -66,6 +66,17 @@ import { workerProgressPath } from './model-worker-progress';
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 
 let dir: string;
+/** A Claude job is found by its own id; the tests name theirs by the turn that made it. */
+async function jobOf(turn: string): Promise<ModelJob | null> {
+  const folder = join(dir, 'model-jobs');
+  let found: ModelJob | null = null;
+  for (const name of await readdir(folder)) {
+    if (!/^[0-9a-f-]{36}\.json$/.test(name)) continue;
+    const job = JSON.parse(await readFile(join(folder, name), 'utf8')) as ModelJob;
+    if (job.sessionId === 'root' && job.turnId === turn) found = job;
+  }
+  return found;
+}
 beforeEach(() => {
   vi.clearAllMocks();
   worker.qualified.mockImplementation(async (cwd = '/repo') => ({
@@ -179,7 +190,7 @@ it.each(
       expect(offered.consent).toMatchObject({ version, repository: repo, repositories: [repo] });
       if (version === 3) expect(offered.consent.scope).toBe('native-workspace');
       const store = new ModelJobStore(dir);
-      const pending = await store.pending('root', 'turn');
+      const pending = await jobOf('turn');
       expect(pending?.decision.claudePermissionMode).toBe(mode);
       expect(JSON.stringify(route.mock.calls)).not.toContain('permissionMode');
       const accepted = await client.callTool({
@@ -221,7 +232,7 @@ it.each(
         ),
       ).toContain('native');
       expect(worker.run.mock.calls.length).toBe(before);
-      expect((await store.pending('root', 'next-turn'))?.state).toBe('offered');
+      expect((await jobOf('next-turn'))?.state).toBe('offered');
     } finally {
       await model.shutdown();
       await client.close();
@@ -259,16 +270,20 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
     codexPolicy: { approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: {} },
   };
   const store = new ModelJobStore(dir);
-  const job = await store.offer({
-    sessionId: 'root',
-    turnId: 'turn',
-    callId: 'call',
-    root: repo,
-    task: 'Read fixture',
-    native: {},
-    capAtomic: '1000000',
-    decision: { routerOrigin: 'http://localhost:3939' },
-  });
+  const job = await store.offer(
+    {
+      sessionId: 'root',
+      turnId: 'turn',
+      callId: 'call',
+      root: repo,
+      task: 'Read fixture',
+      native: {},
+      capAtomic: '1000000',
+      decision: { routerOrigin: 'http://localhost:3939' },
+    },
+    'offered',
+    'turn',
+  );
   let started!: () => void;
   const began = new Promise<void>((resolve) => {
     started = resolve;
@@ -362,16 +377,20 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
     codexPolicy: { approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: {} },
   };
   const store = new ModelJobStore(dir);
-  const job = await store.offer({
-    sessionId: 'root',
-    turnId: 'turn',
-    callId: 'call',
-    root: repo,
-    task: 'Read fixture',
-    native: {},
-    capAtomic: '1000000',
-    decision: { routerOrigin: 'http://localhost:3939' },
-  });
+  const job = await store.offer(
+    {
+      sessionId: 'root',
+      turnId: 'turn',
+      callId: 'call',
+      root: repo,
+      task: 'Read fixture',
+      native: {},
+      capAtomic: '1000000',
+      decision: { routerOrigin: 'http://localhost:3939' },
+    },
+    'offered',
+    'turn',
+  );
   const spend = { actualAtomic: '3000', reservedAtomic: '3000', uncertain: ['owned-invocation'] };
   worker.run.mockRejectedValue(
     new ModelWorkerStopped({
@@ -603,7 +622,7 @@ it('runs the unchanged Agent repeat of an offer natively through capture, once, 
       },
     });
   try {
-    expect(await capture('repeat-call')).toEqual({ action: 'native' });
+    expect(await capture('repeat-call')).toEqual({ action: 'native', settled: f.job.id });
     expect(await f.store.accept(f.job.id, f.session.sessionId, f.session.turnId)).toBeNull();
     expect(f.route).not.toHaveBeenCalled();
     expect(worker.run).not.toHaveBeenCalled();
@@ -650,7 +669,7 @@ it('keeps activity unavailable inside a model worker without claiming or startin
     expect(await f.activity({ offer_id: f.job.id, follow: true })).toEqual({
       status: 'unavailable',
     });
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    expect((await jobOf('first-turn'))?.state).toBe('offered');
     expect(worker.run).not.toHaveBeenCalled();
     expect(f.route).not.toHaveBeenCalled();
   } finally {
@@ -678,7 +697,7 @@ it('rejects an unrelated activity follow without initializing transport or mutat
     expect(worker.qualified).not.toHaveBeenCalled();
     expect(f.route).not.toHaveBeenCalled();
     expect(await jobFiles()).toEqual(before);
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    expect((await jobOf('first-turn'))?.state).toBe('offered');
   } finally {
     await f.close();
   }
@@ -721,7 +740,7 @@ it('inspects only owned activity without starting work, changing selection or ad
   try {
     expect(await f.activity({ offer_id: f.job.id })).toEqual({ status: 'unavailable' });
     expect(worker.run).not.toHaveBeenCalled();
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    expect((await jobOf('first-turn'))?.state).toBe('offered');
     following = f.activity({ offer_id: f.job.id, follow: true });
     accepted = f.call({ offer_id: f.job.id });
     await ready;
@@ -746,7 +765,7 @@ it('inspects only owned activity without starting work, changing selection or ad
     expect((await f.call({ offer_id: f.job.id, cancel: f.job.id })).reason).toBe(
       'Use one subagent operation',
     );
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('running');
+    expect((await jobOf('first-turn'))?.state).toBe('running');
     release();
     const completed = await accepted;
     expect(completed.status).toBe('completed');
@@ -872,7 +891,7 @@ it.each(['general-purpose', 'Explore'] as const)(
       expect(f.requireResumeBudget.mock.calls.every(([job]) => job.id === f.job.id)).toBe(true);
       expect(await f.call({ offer_id: held.offer_id })).toEqual(result);
       expect(worker.run).toHaveBeenCalledTimes(2);
-      const local = await f.store.pending('root', 'followup-turn');
+      const local = await jobOf('followup-turn');
       expect(local?.state).toBe('completed');
       expect(local?.result).toBeUndefined();
       const replay = await f.conversations.accept(
@@ -911,7 +930,7 @@ it('refuses acceptance when the independently qualified native workspace no long
       reason: expect.stringContaining('Host permissions changed'),
     });
     expect(worker.run).not.toHaveBeenCalled();
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    expect((await jobOf('first-turn'))?.state).toBe('offered');
   } finally {
     await f.close();
   }
@@ -925,7 +944,7 @@ it('replays a near-limit Claude result with JSON-escaped control characters from
     const first = await f.call({ offer_id: f.job.id });
     expect(first.status).toBe('completed');
     expect(first.result === text).toBe(true);
-    const local = await f.store.pending('root', 'first-turn');
+    const local = await jobOf('first-turn');
     expect(local?.state).toBe('completed');
     expect(local?.result).toBeUndefined();
     const replay = await f.call({ offer_id: f.job.id });
@@ -945,7 +964,7 @@ it.each(['running', 'unknown'] as const)(
       finish.mockRejectedValueOnce(new Error('Synthetic local completion write failure'));
       const first = await f.call({ offer_id: f.job.id });
       expect(first.status).toBe('completed');
-      expect((await f.store.pending('root', 'first-turn'))?.state).toBe('running');
+      expect((await jobOf('first-turn'))?.state).toBe('running');
       if (state === 'unknown') await f.store.finish(f.job.id, 'unknown');
       // Crash after continuation completion, before the separate conversation-idle
       // write and local job completion. No new model/tool activity may repair it.
@@ -957,7 +976,7 @@ it.each(['running', 'unknown'] as const)(
       const conversation = JSON.parse(await readFile(path, 'utf8'));
       await writeFile(path, JSON.stringify({ ...conversation, state: 'running' }));
       expect(await f.call({ offer_id: f.job.id })).toEqual(first);
-      expect((await f.store.pending('root', 'first-turn'))?.state).toBe(
+      expect((await jobOf('first-turn'))?.state).toBe(
         state === 'running' ? 'completed' : 'unknown',
       );
       expect(worker.run).toHaveBeenCalledTimes(1);
@@ -1010,7 +1029,7 @@ it('refuses a missing original ledger before activation and keeps a foreign Clau
     const held = await f.capture(first.worker_handle);
     f.requireResumeBudget.mockRejectedValue(new Error('Original ledger missing'));
     expect((await f.call({ offer_id: held.offer_id })).action).toBe('refused');
-    expect((await f.store.pending('root', 'ledger-turn'))?.state).toBe('offered');
+    expect((await jobOf('ledger-turn'))?.state).toBe('offered');
     expect(worker.run).toHaveBeenCalledTimes(1);
     f.session.sessionId = 'foreign';
     f.session.turnId = 'foreign-turn';
@@ -1089,7 +1108,7 @@ it('fences and drains a running Claude continuation before refusing duplicate ac
     await began;
     expect((await f.call({ offer_id: held.offer_id })).action).toBe('refused');
     let fenced = false;
-    const stop = f.model.fence(f.session).then(() => {
+    const stop = f.call({ cancel: held.offer_id }).then(() => {
       fenced = true;
     });
     await Promise.resolve();
@@ -1134,7 +1153,7 @@ it('cancels a running Claude worker by its offer after a later parent prompt cha
     expect(await f.call({ cancel: randomUUID() })).toEqual({ status: 'not_owned' });
     expect(await f.call({ cancel: f.job.id })).toEqual({ status: 'cancelled' });
     expect((await running).status).toBe('cancelled');
-    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('cancelled');
+    expect((await jobOf('first-turn'))?.state).toBe('cancelled');
   } finally {
     await f.close();
   }
@@ -1586,5 +1605,147 @@ it("keeps a worker's permission dialog open past the MCP SDK's 60 seconds, as a 
     vi.useRealTimers();
     decide('deny');
     await f.close().catch(() => undefined);
+  }
+});
+
+it('runs two offers of one turn as two workers, each with its own result, and a cancel ends only its own', async () => {
+  const f = await ownedClaudeFixture();
+  const second = await f.store.offer({
+    sessionId: 'root',
+    turnId: 'first-turn',
+    callId: 'second-call',
+    root: f.repo,
+    task: 'A second assignment.',
+    native: {},
+    capAtomic: '1000000',
+    decision: { ...(await f.store.owned(f.job.id, 'root'))!.decision },
+  });
+  const finish = new Map<string, (result: string) => void>();
+  let bothStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    bothStarted = resolve;
+  });
+  worker.run.mockImplementation(
+    (job: ModelJob, options: { signal: AbortSignal }) =>
+      new Promise<string>((resolve, reject) => {
+        finish.set(job.id, resolve);
+        options.signal.addEventListener('abort', () => reject(new Error('cancelled')), {
+          once: true,
+        });
+        if (finish.size === 2) bothStarted();
+      }),
+  );
+  f.route.mockImplementation(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
+  try {
+    const first = f.call({ offer_id: f.job.id });
+    const other = f.call({ offer_id: second.id });
+    await started;
+    // A repeated accept of a running offer starts no third worker.
+    expect((await f.call({ offer_id: second.id })).reason).toContain('still running');
+    expect(await f.call({ cancel: second.id })).toEqual({ status: 'cancelled' });
+    expect((await other).status).toBe('cancelled');
+    expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+    // A cancel used to close its whole turn: the next held call of the turn is still offered.
+    const held = await f.call({
+      capture: {
+        session_id: 'root',
+        tool_use_id: 'third-call',
+        tool: 'Agent',
+        input: { prompt: 'Read the third fixture.' },
+      },
+    });
+    expect(held).toMatchObject({ action: 'offer', routingFeeAtomic: offer.routingFeeAtomic });
+    expect(f.route).toHaveBeenCalledTimes(1);
+    finish.get(f.job.id)!('result of the first');
+    const done = await first;
+    expect(done).toMatchObject({ status: 'completed', result: 'result of the first' });
+    // Each offer answers with its own stored result afterwards, and nothing ran twice.
+    expect(await f.call({ offer_id: f.job.id })).toEqual(done);
+    expect((await f.call({ offer_id: second.id })).status).toBe('cancelled');
+    expect(worker.run).toHaveBeenCalledTimes(2);
+  } finally {
+    await f.close();
+  }
+});
+
+it('records a failed capture, a held call of another session and an offer nobody took in time', async () => {
+  const f = await ownedClaudeFixture();
+  const held = (session: string) =>
+    f.call({
+      capture: {
+        session_id: session,
+        tool_use_id: `call-${session}`,
+        tool: 'Agent',
+        input: { prompt: 'Read the fixture.' },
+      },
+    });
+  try {
+    worker.qualified.mockRejectedValueOnce(new Error('unreadable settings'));
+    expect(await held('root')).toMatchObject({ action: 'native' });
+    expect(await held('another-session')).toMatchObject({ action: 'native' });
+    vi.spyOn(Date, 'now').mockReturnValue(f.job.expiresAt + 1);
+    expect((await f.call({ offer_id: f.job.id })).action).toBe('native');
+    expect(worker.run).not.toHaveBeenCalled();
+    expect(
+      (await f.store.noOffers()).map(({ code, sessionId, offerId }) => ({
+        code,
+        sessionId,
+        offerId,
+      })),
+    ).toEqual([
+      { code: 'capture_error', sessionId: 'root' },
+      { code: 'no_session', sessionId: 'another-session' },
+      { code: 'expired', sessionId: 'root', offerId: f.job.id },
+    ]);
+  } finally {
+    vi.restoreAllMocks();
+    await f.close();
+  }
+});
+
+it('records that a host with no permission prompt, or no session yet, kept a held call native', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'claude-no-offer-')));
+  let session: ModelSession | undefined = {
+    sessionId: 'root',
+    turnId: 'turn',
+    cwd: dir,
+    transcript: '',
+    harness: 'claude',
+    claudePermissionMode: 'default',
+  };
+  const server = new McpServer({ name: 'test', version: '1' });
+  const model = registerModelTool(server, {
+    dataDir: dir,
+    harness: 'claude',
+    session: () => session,
+    transport: async () => ({ origin: 'http://localhost:3939' }) as unknown as ModelTransport,
+  });
+  const client = new Client({ name: 'test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  await client.connect(b);
+  const held = async () => {
+    const reply = await client.callTool({
+      name: 'subagent',
+      arguments: {
+        capture: { session_id: 'root', tool_use_id: 'call', tool: 'Task', input: { prompt: 'x' } },
+      },
+    });
+    return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
+  };
+  try {
+    expect(await held()).toMatchObject({ action: 'native' });
+    session = undefined;
+    expect(await held()).toMatchObject({ action: 'native' });
+    expect(
+      (await new ModelJobStore(dir).noOffers()).map(({ code, tool }) => ({ code, tool })),
+    ).toEqual([
+      { code: 'host_unqualified', tool: 'Task' },
+      { code: 'no_session', tool: 'Task' },
+    ]);
+  } finally {
+    await model.shutdown();
+    await client.close();
+    await server.close();
   }
 });

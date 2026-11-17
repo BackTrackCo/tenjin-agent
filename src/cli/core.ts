@@ -251,13 +251,15 @@ Examples:
       });
     });
   addGlobalFlags(config.command('subagents <mode>'))
-    .summary('enable DeepSeek for repositories or a containing folder, or turn it off')
+    .summary(
+      'enable DeepSeek for repositories or a containing folder, turn it off, or list why calls got no offer',
+    )
     .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
     .option('--max-job <USD>', 'total routing and inference ceiling per job')
     .addHelpText(
       'after',
       configExamples(
-        ['subagents on --repository . --max-job 1.00', 'subagents off'],
+        ['subagents on --repository . --max-job 1.00', 'subagents off', 'subagents why'],
         'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
       ),
     )
@@ -648,7 +650,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
-  subagents on|off              enable DeepSeek for repositories or a containing folder
+  subagents on|off|why          enable DeepSeek for repositories or a folder; why: calls with no offer
 
 Values
   get <key> / set <key> <value>

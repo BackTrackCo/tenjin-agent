@@ -341,12 +341,17 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     if (typeof id !== 'string') return;
     sessions.delete(id);
     sessions.set(id, { transcript_path: raw['transcript_path'], cwd: raw['cwd'] });
+    // A typed prompt renews the session's record. A session whose first event here is
+    // not one (resumed, or woken by a task notification) is known from its first tool
+    // event of the main loop, so its subagent calls can be offered too.
+    const event = raw['hook_event_name'];
     if (
-      raw['hook_event_name'] === 'UserPromptSubmit' &&
       !raw['agent_id'] &&
       typeof raw['cwd'] === 'string' &&
       typeof raw['transcript_path'] === 'string' &&
-      (!modelSession || modelSession.sessionId === id)
+      (event === 'UserPromptSubmit'
+        ? !modelSession || modelSession.sessionId === id
+        : !modelSession && (event === 'PreToolUse' || event === 'PostToolUse'))
     ) {
       modelSession = {
         sessionId: id,
