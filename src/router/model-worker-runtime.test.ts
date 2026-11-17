@@ -1,8 +1,8 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { query, resolveSettings, type Options } from '@anthropic-ai/claude-agent-sdk/core';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
-import { qualifiedModelWorker, runModelWorker } from './model-worker';
+import { qualifiedModelWorker, runModelWorker, type EarlyWorkerAccept } from './model-worker';
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
 import { modelSettings } from './model-settings';
 import { ModelCallFailed, workerStop } from './model-worker-control';
@@ -99,7 +99,11 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   resolveSettings: vi.fn(),
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
-vi.mock('./claude-cli', () => ({ readClaudeCodeCached: vi.fn(), meetsFloor: vi.fn() }));
+vi.mock('./claude-cli', async (original) => ({
+  ...(await original<typeof import('./claude-cli')>()),
+  readClaudeCodeCached: vi.fn(),
+  meetsFloor: vi.fn(),
+}));
 vi.mock('./agent-tools', async (original) => ({
   ...(await original<typeof import('./agent-tools')>()),
   findDefinition: vi.fn(async () => null),
@@ -144,8 +148,11 @@ vi.mock('node:http', async (original) => ({
   },
 }));
 
+let groupKill: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   vi.clearAllMocks();
+  // This file supplies synthetic PIDs to the custom SDK spawn.
+  groupKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
   // The worker reads its config folder's settings files: never the real one in a test.
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(tmpdir(), 'tenjin-test-no-claude-config'));
   native.promptMessages.length = 0;
@@ -159,6 +166,8 @@ beforeEach(() => {
   vi.mocked(realpath).mockImplementation(async (path) => String(path));
   vi.mocked(modelSettings).mockResolvedValue({ root: '/repo', repositories: ['/repo'] } as never);
 });
+
+afterEach(() => groupKill.mockRestore());
 
 const job = {
   id: 'owned',
@@ -1323,6 +1332,105 @@ function startingQuery(account: Promise<unknown>) {
     });
   });
 }
+
+it('keeps the initialized worker input and its model and Exa bridge closed before accept', async () => {
+  const assigned = vi.fn();
+  const web = vi.fn();
+  const transport = { messages: vi.fn(async () => ({ type: 'message', content: [] })) };
+  const bridgeBody = { model: 'deepseek-flash', messages: [], max_tokens: 32_000 };
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    expect((await oneBridgeRequest(JSON.stringify(bridgeBody))).status).toBe(200);
+  });
+  let notifyStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    notifyStarted = resolve;
+  });
+  const sdk = vi.mocked(query).getMockImplementation()!;
+  vi.mocked(query).mockImplementation((call) => {
+    const worker = sdk(call);
+    const accountInfo = worker.accountInfo;
+    worker.accountInfo = () => {
+      notifyStarted();
+      return accountInfo();
+    };
+    return worker;
+  });
+  let accept!: (value: EarlyWorkerAccept) => void;
+  const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+    accept = resolve;
+  });
+  const runOptions = {
+    ...options(),
+    transport: transport as unknown as ModelTransport,
+    web,
+    early: { accept: accepted, onRelease: assigned },
+  };
+  const run = runModelWorker(job, runOptions);
+  await Promise.race([started, run]);
+  await expect(oneBridgeRequest(JSON.stringify(bridgeBody))).resolves.toMatchObject({
+    status: 503,
+  });
+  await expect(oneBridgeRequest(JSON.stringify(NESTED_SEARCH))).resolves.toMatchObject({
+    status: 503,
+  });
+  expect(native.promptMessages).toEqual([]);
+  expect(transport.messages).not.toHaveBeenCalled();
+  expect(web).not.toHaveBeenCalled();
+  expect(assigned).not.toHaveBeenCalled();
+
+  accept({ ...runOptions, job });
+  await expect(run).resolves.toBe('done');
+  expect(native.promptMessages).toHaveLength(1);
+  expect(transport.messages).toHaveBeenCalledOnce();
+  expect(assigned).toHaveBeenCalledOnce();
+  expect(query).toHaveBeenCalledOnce();
+});
+
+it.each(['settings', 'consent', 'binary', 'agent definition'] as const)(
+  'withholds the assignment when the %s changes after warm initialization',
+  async (changed) => {
+    vi.mocked(modelSettings).mockResolvedValue({
+      root: '/repo',
+      repositories: ['/repo'],
+      maxJobAtomic: 1_000_000n,
+    } as never);
+    const spawned = startingQuery(
+      Promise.resolve({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+    );
+    let accept!: (value: EarlyWorkerAccept) => void;
+    const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+      accept = resolve;
+    });
+    const onRelease = vi.fn();
+    const runOptions = options();
+    const run = runModelWorker(job, { ...runOptions, early: { accept: accepted, onRelease } });
+    const failure = run.catch((error: unknown) => error);
+    await Promise.race([spawned, run]);
+    if (changed === 'settings')
+      vi.mocked(resolveSettings).mockResolvedValue({
+        effective: { permissions: { deny: ['Bash'] } },
+      } as never);
+    else if (changed === 'consent')
+      vi.mocked(modelSettings).mockResolvedValue({
+        root: '/repo',
+        repositories: ['/repo'],
+        maxJobAtomic: 900_000n,
+      } as never);
+    else if (changed === 'binary')
+      vi.mocked(readClaudeCodeCached).mockResolvedValue({
+        binary: { path: '/fixture/new-claude' },
+        version: '2.1.326',
+      } as never);
+    else vi.mocked(findDefinition).mockResolvedValueOnce({ path: '/changed/agent.md' } as never);
+
+    accept({ ...runOptions, job });
+    expect(await failure).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/no longer matches/) }),
+    );
+    expect(onRelease).not.toHaveBeenCalled();
+    expect(native.close).toHaveBeenCalled();
+  },
+);
 
 it('waits for a slow Claude Code start as a native subagent does, and still cancels it', async () => {
   vi.useFakeTimers();

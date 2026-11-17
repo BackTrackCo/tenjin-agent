@@ -38,7 +38,8 @@ export type WorkerDiagnostics = {
    * Milliseconds from the accept call reaching `tenjin mcp` to each start phase, the first
    * time it happens: `cliProcess` (negative: when that process started), `checked` (consent
    * and offer checks), `qualified` (worker qualification and the Claude Code version
-   * read), `promptRead` (the native agent prompt), `childSpawned`, `childReady` (the SDK's
+   * read), `promptRead` (the native agent prompt), `childSpawned`, `earlyReady` (SDK initialization
+   * before releasing a warm worker), `childReady` (the SDK's
    * init), `firstRequest` (the bridge's first model request, before its quote round trip),
    * `firstAnswer` (that call answered), `firstActivity` (the first worker reply observed,
    * which the viewer's first row draws from).
@@ -125,6 +126,10 @@ export class WorkerDiagnosticsRecord {
 
   /** Times from the accept on: the accept's own time and the marks made before the run. */
   accepted(at: number, marks: Record<string, number> = {}): void {
+    // A worker started at offer time marked its start before the accept: those phases
+    // are moved to count from the accept too, so they read negative.
+    for (const name of Object.keys(this.value.phases))
+      this.value.phases[name] = this.value.phases[name]! + Math.round(this.acceptedAt - at);
     this.acceptedAt = at;
     for (const [name, when] of Object.entries(marks).slice(0, 16)) this.mark(name, when);
   }

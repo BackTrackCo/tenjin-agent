@@ -338,6 +338,7 @@ async function dependencies(
   const project = (dir: string) => [
     join(dir, 'CLAUDE.md'),
     join(dir, 'CLAUDE.local.md'),
+    join(dir, '.mcp.json'),
     join(dir, '.claude', 'CLAUDE.md'),
     join(dir, '.claude', 'settings.json'),
     join(dir, '.claude', 'settings.local.json'),
@@ -385,23 +386,10 @@ export async function readNativeAgentPromptCached(
   const { ephemeralDirectories = [], ...request } = input;
   const read = deps.read ?? readNativeAgentPrompt;
   const now = deps.now ?? Date.now;
-  let binary: string;
-  try {
-    const path = await realpath(input.binary);
-    binary = (await stamps([path]))[0]!;
-  } catch {
-    return read(request);
-  }
   const ephemeral = new Set(ephemeralDirectories);
   const directories = (input.additionalDirectories ?? []).filter((dir) => !ephemeral.has(dir));
-  const key = JSON.stringify([
-    binary,
-    input.agentType,
-    resolve(input.cwd),
-    directories,
-    input.customAgent ?? null,
-    await dependencies(input.cwd, directories, deps.env ?? process.env, deps.home ?? homedir()),
-  ]);
+  const key = await nativeAgentStartKey({ ...request, additionalDirectories: directories }, deps);
+  if (!key) return read(request);
   const held = prompts.get(key);
   if (held && now() - held.at < PROMPT_TTL_MS) return structuredClone(held.native);
   const native = await read(request);
@@ -412,4 +400,22 @@ export async function readNativeAgentPromptCached(
     if (prompts.size > 16) prompts.delete(prompts.keys().next().value!);
   }
   return native;
+}
+
+/** The inputs Claude used to initialize, checked again before a warm child gets an assignment. */
+export async function nativeAgentStartKey(
+  input: Omit<Parameters<typeof readNativeAgentPrompt>[0], 'signal'>,
+  deps: { env?: NodeJS.ProcessEnv; home?: string } = {},
+): Promise<string | null> {
+  const path = await realpath(input.binary).catch(() => null);
+  if (!path) return null;
+  const directories = input.additionalDirectories ?? [];
+  return JSON.stringify([
+    await stamps([path]),
+    input.agentType,
+    resolve(input.cwd),
+    directories,
+    input.customAgent ?? null,
+    await dependencies(input.cwd, directories, deps.env ?? process.env, deps.home ?? homedir()),
+  ]);
 }

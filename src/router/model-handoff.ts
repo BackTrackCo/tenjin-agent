@@ -560,7 +560,7 @@ export class ModelHandoff {
       ...droppedNote(worker.claudeWorkspace),
       consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
       instruction:
-        "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. Nothing has run yet.",
+        "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
     };
   }
   private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {
@@ -696,7 +696,7 @@ export class ModelHandoff {
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
-      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap. Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No worker started.`,
+      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap. Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No assignment has been sent to a worker.`,
     };
   }
 }

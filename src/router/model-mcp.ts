@@ -5,7 +5,12 @@ import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings } from './model-settings';
-import { qualifiedModelWorker, runModelWorker } from './model-worker';
+import {
+  qualifiedModelWorker,
+  runModelWorker,
+  WorkerStartUnconfirmed,
+  type EarlyWorkerAccept,
+} from './model-worker';
 import type { ModelTransport } from './model-transport';
 import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
@@ -37,6 +42,27 @@ type ActiveConversation = {
   owner: ModelConversationOwner;
   continuationId: string;
 };
+
+type WarmWorker = {
+  sdkSessionId: string;
+  accept: (value: EarlyWorkerAccept, signal: AbortSignal) => void;
+  stop: () => Promise<void>;
+  result: Promise<{ value: string } | { error: unknown; canStartFresh: boolean }>;
+};
+
+const continuationExecution = (job: ModelJob, conversation: ModelConversation): ModelJob => ({
+  ...conversation.originalJob,
+  task: job.task,
+  capAtomic: job.capAtomic,
+  turnId: job.turnId,
+  callId: job.callId,
+  decision: {
+    ...conversation.originalJob.decision,
+    claudePermissionMode: job.decision.claudePermissionMode,
+    claudeWorkspace: job.decision.claudeWorkspace,
+    requireExistingBudget: true,
+  },
+});
 
 /**
  * How long one `follow` read waits before it answers where the worker stands.
@@ -94,6 +120,7 @@ export function registerModelTool(
   const conversations = new ModelConversationStore(options.dataDir);
   /** Accept calls of this process still going, by job: such a job's worker is not stranded. */
   const accepting = new Map<string, number>();
+  const warming = new Map<string, WarmWorker>();
   const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
   /** Who asked for a job to be cancelled, so its end says who or what ended it. */
   const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped'>();
@@ -181,6 +208,102 @@ export function registerModelTool(
       dataDir: options.dataDir,
       transport: await options.transport(),
     }));
+  // The capture request may finish while its worker warms. A separate operation in
+  // the job window gives a veto, cancel, expiry or shutdown ownership of that child.
+  const warmOffer = async (id: string, parentSessionId: string, captureSignal: AbortSignal) => {
+    const job = await jobs.owned(id, parentSessionId);
+    const permissionMode = claudeWorkerPermissionMode(job?.decision.claudePermissionMode);
+    if (
+      !job ||
+      job.state !== 'offered' ||
+      !permissionMode ||
+      sessionEnding ||
+      captureSignal.aborted
+    )
+      return;
+    const resume =
+      typeof job.decision.workerHandle === 'string'
+        ? await conversations.lookup(job.decision.workerHandle, jobOwner(job))
+        : null;
+    if (job.decision.workerHandle && !resume) return;
+    if (
+      warming.has(id) ||
+      accepting.has(id) ||
+      job.expiresAt <= Date.now() ||
+      sessionEnding ||
+      captureSignal.aborted
+    )
+      return;
+    const abort = new AbortController();
+    const sdkSessionId = resume?.sdkSessionId ?? randomUUID();
+    let accept!: (value: EarlyWorkerAccept) => void;
+    const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+      accept = resolve;
+    });
+    let released = false;
+    const result = lifecycle
+      .run(jobWindow(job), abort.signal, async (signal) => {
+        const transport = await options.transport();
+        signal.throwIfAborted();
+        return runModelWorker(resume ? continuationExecution(job, resume) : job, {
+          dataDir: options.dataDir,
+          transport,
+          signal,
+          early: {
+            accept: accepted,
+            onRelease: () => {
+              released = true;
+            },
+          },
+          ...(options.web ? { web: options.web } : {}),
+          ...(options.webIdentities ? { webIdentities: options.webIdentities } : {}),
+          claudePermissionMode: permissionMode,
+          currentClaudePermissionMode: () => {
+            const current = options.session();
+            return current?.sessionId === parentSessionId
+              ? current.claudePermissionMode
+              : undefined;
+          },
+          claudeSession: {
+            ...(resume ? { resume: sdkSessionId } : { sessionId: sdkSessionId }),
+            onSession: async (id) => {
+              if (id !== sdkSessionId) throw new Error('Native Claude changed the owned session');
+            },
+          },
+          permission: async () => false,
+        });
+      })
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({
+          error,
+          canStartFresh: !released && !(error instanceof WorkerStartUnconfirmed),
+        }),
+      );
+    let detachFromAccept: (() => void) | undefined;
+    const stop = async () => {
+      clearTimeout(expiry);
+      abort.abort();
+      await result;
+      detachFromAccept?.();
+      if (warming.get(id)?.result === result) warming.delete(id);
+    };
+    const expiry = setTimeout(() => void stop(), Math.max(0, job.expiresAt - Date.now()));
+    expiry.unref();
+    warming.set(id, {
+      sdkSessionId,
+      accept: (value, signal) => {
+        clearTimeout(expiry);
+        const cancel = () => abort.abort(signal.reason);
+        signal.addEventListener('abort', cancel, { once: true });
+        detachFromAccept = () => signal.removeEventListener('abort', cancel);
+        if (signal.aborted) cancel();
+        accept(value);
+      },
+      stop,
+      result,
+    });
+  };
   const answer = (value: unknown) => ({
     content: [{ type: 'text' as const, text: JSON.stringify(value) }],
   });
@@ -218,11 +341,14 @@ export function registerModelTool(
     );
   /** One Claude job by its own id: its session's other offers and workers go on. */
   const fenceJob = (job: ModelJob) =>
-    fenceWindow(
-      jobWindow(job),
-      (state) => jobs.fenceOwned(job.id, job.sessionId, state),
-      () => jobs.owned(job.id, job.sessionId),
-    );
+    Promise.all([
+      fenceWindow(
+        jobWindow(job),
+        (state) => jobs.fenceOwned(job.id, job.sessionId, state),
+        () => jobs.owned(job.id, job.sessionId),
+      ),
+      warming.get(job.id)?.stop(),
+    ]);
   if (options.harness === 'claude')
     server.registerTool(
       'subagent_activity',
@@ -427,6 +553,10 @@ export function registerModelTool(
       let window =
         options.harness === 'claude' ? JSON.stringify([session.sessionId]) : turnWindow(session);
       const offered = args.offer_id && options.harness === 'claude' ? args.offer_id : undefined;
+      const refuseOffer = async (reason: string) => {
+        if (offered) await warming.get(offered)?.stop();
+        return unavailable(reason);
+      };
       if (offered) {
         const record = await jobs.owned(offered, session.sessionId);
         // Another session's offer, a swept one and one that never was read the same.
@@ -455,24 +585,27 @@ export function registerModelTool(
               return unavailable('Owned root or permission prompts unavailable');
             }
             try {
-              return answer(
-                await (
-                  await getHandoff()
-                ).capture(
-                  session,
-                  args.capture.tool_use_id,
-                  args.capture.input,
-                  signal,
-                  args.capture.tool,
-                  args.capture.step,
-                  args.capture.agent && {
-                    agentId: args.capture.agent.id,
-                    agentType: args.capture.agent.type,
-                    parents: args.capture.agent.parents,
-                    cwd: args.capture.agent.cwd,
-                  },
-                ),
+              const outcome = await (
+                await getHandoff()
+              ).capture(
+                session,
+                args.capture.tool_use_id,
+                args.capture.input,
+                signal,
+                args.capture.tool,
+                args.capture.step,
+                args.capture.agent && {
+                  agentId: args.capture.agent.id,
+                  agentType: args.capture.agent.type,
+                  parents: args.capture.agent.parents,
+                  cwd: args.capture.agent.cwd,
+                },
               );
+              if ('settled' in outcome && typeof outcome.settled === 'string')
+                await warming.get(outcome.settled)?.stop();
+              if ('offer_id' in outcome && typeof outcome.offer_id === 'string')
+                await warmOffer(outcome.offer_id, session.sessionId, signal).catch(() => undefined);
+              return answer(outcome);
             } catch {
               await noOffer(signal.aborted ? 'interrupted' : 'capture_error');
               return unavailable('Model routing unavailable');
@@ -518,13 +651,13 @@ export function registerModelTool(
           const current = await modelSettings(options.dataDir, session.cwd);
           const transport = await options.transport();
           if (!current || current.routerOrigin !== transport.origin)
-            return unavailable('Inference consent revoked or endpoint changed');
+            return refuseOffer('Inference consent revoked or endpoint changed');
           if (
             options.harness === 'claude' &&
             (!claudeWorkerPermissionMode(currentClaudeMode()) ||
               pending?.decision.claudePermissionMode !== currentClaudeMode())
           )
-            return unavailable(
+            return refuseOffer(
               ownedContinuation
                 ? 'Owned permission mode changed'
                 : 'Owned permission mode changed; retry native',
@@ -536,11 +669,11 @@ export function registerModelTool(
               conversation.root !== current.root ||
               pending?.id !== args.offer_id
             )
-              return unavailable('Owned worker history, repository or endpoint changed');
+              return refuseOffer('Owned worker history, repository or endpoint changed');
             try {
               await transport.requireResumeBudget(conversation.originalJob);
             } catch {
-              return unavailable(
+              return refuseOffer(
                 'Original conversation budget is missing, uncertain or unavailable',
               );
             }
@@ -570,7 +703,7 @@ export function registerModelTool(
               JSON.stringify(qualified.nativeSnapshot) !==
                 JSON.stringify(pending?.decision.nativeSnapshot))
           )
-            return unavailable(
+            return refuseOffer(
               ownedContinuation
                 ? 'Host permissions changed'
                 : 'Host permissions changed; retry original native call',
@@ -581,13 +714,16 @@ export function registerModelTool(
             session.sessionId,
             offered ? undefined : session.turnId,
           );
+          const warm = job && warming.get(job.id);
+          if (job) warming.delete(job.id);
           if (
             !job ||
             job.root !== current.root ||
             job.decision.routerOrigin !== current.routerOrigin
           ) {
             // An offer nobody took in time: the call it held has run natively or not at all.
-            if (!job && pending?.state === 'offered' && pending.expiresAt <= Date.now())
+            if (!job && pending?.state === 'offered' && pending.expiresAt <= Date.now()) {
+              if (offered) await warming.get(offered)?.stop();
               await jobs.noOffer({
                 sessionId: pending.sessionId,
                 tool: pending.nativeTool ?? 'Agent',
@@ -595,6 +731,8 @@ export function registerModelTool(
                 offerId: pending.id,
                 ...(pending.caller ? { from: 'subagent' as const } : {}),
               });
+            }
+            await warm?.stop();
             return unavailable(
               ownedContinuation
                 ? 'Continuation expired, changed, already selected or consent revoked'
@@ -605,6 +743,7 @@ export function registerModelTool(
             options.harness === 'claude' &&
             job.decision.claudePermissionMode !== currentClaudeMode()
           ) {
+            await warm?.stop();
             await model.store.finish(job.id, 'cancelled');
             return unavailable(
               ownedContinuation
@@ -628,7 +767,7 @@ export function registerModelTool(
                 conversation = await model.conversations.create({
                   job,
                   parentSessionId: session.sessionId,
-                  sdkSessionId: randomUUID(),
+                  sdkSessionId: warm?.sdkSessionId ?? randomUUID(),
                   configDir: owner.configDir,
                 });
               }
@@ -638,21 +777,9 @@ export function registerModelTool(
               if (accepted?.action !== 'start') throw new Error('Continuation already selected');
               conversation = accepted.conversation;
               activeConversation = { handle: conversation.handle, owner, continuationId: job.id };
-              if (resumed)
-                executionJob = {
-                  ...conversation.originalJob,
-                  task: job.task,
-                  capAtomic: job.capAtomic,
-                  turnId: job.turnId,
-                  callId: job.callId,
-                  decision: {
-                    ...conversation.originalJob.decision,
-                    claudePermissionMode: acceptedClaudeMode,
-                    claudeWorkspace: job.decision.claudeWorkspace,
-                    requireExistingBudget: true,
-                  },
-                };
+              if (resumed) executionJob = continuationExecution(job, conversation);
             } catch {
+              await warm?.stop();
               await model.store.finish(job.id, 'unknown');
               return unavailable('Owned conversation could not be selected; no worker started');
             }
@@ -732,7 +859,7 @@ export function registerModelTool(
           const done = (async () => {
             try {
               signal.throwIfAborted();
-              const result = await runModelWorker(executionJob, {
+              const runOptions: Parameters<typeof runModelWorker>[1] = {
                 dataDir: options.dataDir,
                 accepted: { at: acceptedAt, marks: startMarks },
                 transport,
@@ -772,7 +899,19 @@ export function registerModelTool(
                     )
                     .then(workerPermissionAnswer, () => false);
                 },
-              });
+              };
+              const run = async () => {
+                abort.signal.throwIfAborted();
+                if (warm && warm.sdkSessionId === conversation?.sdkSessionId) {
+                  warm.accept({ ...runOptions, job: executionJob }, abort.signal);
+                  const outcome = await warm.result;
+                  if ('value' in outcome) return outcome.value;
+                  if (!outcome.canStartFresh) throw outcome.error;
+                } else await warm?.stop();
+                abort.signal.throwIfAborted();
+                return runModelWorker(executionJob, runOptions);
+              };
+              const result = await run();
               const envelope = {
                 status: 'completed',
                 label: 'DeepSeek V4.1 Flash 1017',
@@ -868,6 +1007,7 @@ export function registerModelTool(
             } finally {
               // Not awaited: removing a display file never delays the handback.
               void progress?.stop().catch(() => undefined);
+              await warm?.stop();
               views.finished(job.id);
               controllers.delete(job.id);
               signal.removeEventListener('abort', stop);
@@ -896,7 +1036,7 @@ export function registerModelTool(
   const shutdown = async () => {
     await repaired;
     sessionEnding = true;
-    await lifecycle.stop();
+    await Promise.all([lifecycle.stop(), ...[...warming.values()].map((warm) => warm.stop())]);
     for (const running of controllers.values()) running.abort.abort();
     await Promise.allSettled([...controllers.values()].map((c) => c.done));
     await views.shutdown();

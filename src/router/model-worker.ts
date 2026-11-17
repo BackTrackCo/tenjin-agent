@@ -77,6 +77,7 @@ import {
 import {
   NativeAgentPromptUnavailable,
   instructionExcludes,
+  nativeAgentStartKey,
   readNativeAgentPromptCached,
   type NativeAgentPrompt,
 } from './model-worker-agent-prompt';
@@ -173,6 +174,24 @@ export async function qualifiedModelWorker(
     : null;
 }
 
+/** State supplied only after a Claude offer has been accepted and recorded. */
+export type EarlyWorkerAccept = {
+  job: ModelJob;
+  transport: ModelTransport;
+  accepted?: { at: number; marks: Record<string, number> };
+  activity?: Parameters<typeof runModelWorker>[1]['activity'];
+  currentClaudePermissionMode?: Parameters<typeof runModelWorker>[1]['currentClaudePermissionMode'];
+  permission: Parameters<typeof runModelWorker>[1]['permission'];
+};
+
+/** A second worker must not start if the prewarmed worker could not be stopped. */
+export class WorkerStartUnconfirmed extends Error {}
+
+type EarlyWorkerInput = {
+  accept: Promise<EarlyWorkerAccept>;
+  onRelease: () => void;
+};
+
 /** Runs a qualified worker without changing the parent process or provider. */
 export async function runModelWorker(
   job: ModelJob,
@@ -190,6 +209,12 @@ export async function runModelWorker(
     retryWait?: (ms: number, signal: AbortSignal) => Promise<void>;
     /** When the accept reached `tenjin mcp`, and the start phases marked before the run. */
     accepted?: { at: number; marks: Record<string, number> };
+    /**
+     * A worker started at offer time: it starts its Claude Code and brings it to ready,
+     * then waits for `accept` before it sends the assignment. Until then no request leaves
+     * it, its wall time has not begun, and nothing it needs from the accept is known.
+     */
+    early?: EarlyWorkerInput;
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
      *  each search answers that it is not available. */
     web?: WorkerRequest;
@@ -216,7 +241,7 @@ export async function runModelWorker(
     ) => Promise<WorkerPermissionAnswer>;
   },
 ) {
-  return withWorkerDeadline(options.signal, async (signal) => {
+  const run = async (signal: AbortSignal) => {
     const current = { ...options, signal };
     signal.throwIfAborted();
     if (current.codexPolicy)
@@ -259,8 +284,9 @@ export async function runModelWorker(
     const saved = savedClaudeWorkspace(job.decision.claudeWorkspace);
     if (!saved || !binary.claudeWorkspace || !sameClaudeWorkspace(saved, binary.claudeWorkspace))
       throw new Error('Owned Claude workspace scope changed or is unavailable');
-    return runQualifiedWorker(job, current, { ...binary, customAgent });
-  });
+    return runQualifiedWorker(job, current, { ...binary, customAgent }, options.early);
+  };
+  return withWorkerDeadline(options.signal, run, options.early?.accept);
 }
 
 async function runQualifiedWorker(
@@ -271,7 +297,10 @@ async function runQualifiedWorker(
     claudeWorkspace?: ClaudeWorkspace;
     customAgent?: WorkerAgent;
   },
+  early?: EarlyWorkerInput,
 ) {
+  // A worker started at offer time sends nothing until its accept releases it.
+  let released = !early;
   options.signal.throwIfAborted();
   const permissionMode = assertClaudeWorkerMode(
     job.decision.claudePermissionMode,
@@ -311,7 +340,7 @@ async function runQualifiedWorker(
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
     // Checked before each tool call and request, so a value added mid-job is known too.
     settingsEnv.add(resolved.effective.env);
-    return resolved;
+    return { resolved, disclosure };
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
   const worktrees = await claudeWorkspaceWorktrees(workspace);
@@ -464,7 +493,7 @@ async function runQualifiedWorker(
     }
   };
   const fetchFallback = async (event: WorkerFetchEvent, id: unknown) =>
-    controller.signal.aborted
+    !released || controller.signal.aborted
       ? null
       : workerFetchFallback(event, {
           ...web,
@@ -480,6 +509,16 @@ async function runQualifiedWorker(
           (req.headers.authorization !== `Bearer ${token}` && req.headers['x-api-key'] !== token)
         ) {
           res.writeHead(403).end();
+          return;
+        }
+        // Before the accept nothing goes to Tenjin or DeepSeek: a request is refused here.
+        if (!released) {
+          res.writeHead(503, { 'content-type': 'application/json' }).end(
+            JSON.stringify({
+              type: 'error',
+              error: { type: 'overloaded_error', message: 'The DeepSeek job is not accepted yet' },
+            }),
+          );
           return;
         }
         await assertCurrentWorkspace();
@@ -634,7 +673,7 @@ async function runQualifiedWorker(
     CLAUDE_DEEPSEEK_COMPACT_WINDOW,
     MODEL_OUTPUT_TOKENS,
   );
-  if (options.accepted) diagnostics.accepted(options.accepted.at, options.accepted.marks);
+  if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
     diagnostics.repeat(tool, reminder);
@@ -650,7 +689,7 @@ async function runQualifiedWorker(
     const address = bridge.address();
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
     const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
-    const resolved = await assertCurrentWorkspace();
+    const { resolved, disclosure } = await assertCurrentWorkspace();
     const privatePaths = await claudeWorkerPrivatePaths(
       options.dataDir,
       job.root,
@@ -682,14 +721,29 @@ async function runQualifiedWorker(
       ...worktrees,
       ...(temp ? [temp.directory] : []),
     ];
+    const agentInput = {
+      binary: binary.path,
+      cwd: job.root,
+      additionalDirectories: additionalDirectories.filter((dir) => dir !== temp?.directory),
+      agentType,
+      ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
+    };
+    const startSettings = ({
+      resolved,
+      disclosure,
+    }: Awaited<ReturnType<typeof assertCurrentWorkspace>>) =>
+      JSON.stringify([
+        resolved.effective,
+        resolved.sources,
+        disclosure && { ...disclosure, maxJobAtomic: disclosure.maxJobAtomic?.toString() },
+      ]);
+    const offeredSettings = early ? startSettings({ resolved, disclosure }) : undefined;
+    const offeredAgent = early ? await nativeAgentStartKey(agentInput) : undefined;
     try {
       nativeAgent = await readNativeAgentPromptCached({
-        binary: binary.path,
-        cwd: job.root,
+        ...agentInput,
         additionalDirectories,
         ...(temp ? { ephemeralDirectories: [temp.directory] } : {}),
-        agentType,
-        ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
         signal: controller.signal,
       });
       diagnostics.mark('promptRead');
@@ -911,6 +965,14 @@ async function runQualifiedWorker(
             {
               hooks: [
                 async (input) => {
+                  if (!released)
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: 'The DeepSeek job has not been accepted.',
+                      },
+                    };
                   // An env file read by name is known before its content can be forwarded.
                   if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'Read')
                     await envFiles
@@ -1024,6 +1086,8 @@ async function runQualifiedWorker(
             description?: string;
           } & WorkerAsk,
         ) => {
+          if (!released)
+            return { behavior: 'deny', message: 'The DeepSeek job has not been accepted.' };
           assertCurrentMode();
           if (nobodyAsked)
             return sandboxJudgesRead(tool, input, context, permissionMode)
@@ -1087,6 +1151,50 @@ async function runQualifiedWorker(
           'Native Claude selected an unsupported API provider or authentication source; keep native',
         );
       controller.signal.throwIfAborted();
+      if (early) {
+        // SDK initialization can finish before an assignment is sent. Release inference
+        // only after the accept path has won the job and this child still fits its scope.
+        diagnostics.mark('earlyReady');
+        const accept = await Promise.race([early.accept, authenticationStopped]);
+        assertCurrentMode();
+        const current = await assertCurrentWorkspace();
+        const selected = await readClaudeCodeCached(process.env, job.root);
+        const custom = WORKER_BUILTIN_AGENTS.has(agentType)
+          ? null
+          : await workerAgent(agentType, { root: job.root, homeDir: homedir() });
+        const directories = [
+          ...workspace.workingDirectories.slice(1),
+          ...(await claudeWorkspaceWorktrees(workspace)),
+        ];
+        const agent =
+          selected.binary && (!custom || 'agent' in custom)
+            ? await nativeAgentStartKey({
+                ...agentInput,
+                binary: selected.binary.path,
+                additionalDirectories: directories,
+                customAgent: custom?.agent,
+              })
+            : null;
+        if (
+          !offeredAgent ||
+          agent !== offeredAgent ||
+          startSettings(current) !== offeredSettings ||
+          (WORKER_BUILTIN_AGENTS.has(agentType) &&
+            (await findDefinition(agentType, { cwd: job.root, homeDir: homedir() })) !== null)
+        )
+          throw new Error('The warm Claude worker no longer matches the accepted job');
+        controller.signal.throwIfAborted();
+        assertCurrentMode();
+        job = accept.job;
+        web.job = accept.job;
+        web.transport = options.transport = accept.transport;
+        options.permission = accept.permission;
+        options.activity = accept.activity;
+        options.currentClaudePermissionMode = accept.currentClaudePermissionMode;
+        if (accept.accepted) diagnostics.accepted(accept.accepted.at, accept.accepted.marks);
+        early.onRelease();
+        released = true;
+      }
       authorizePrompt(true);
     } finally {
       controller.signal.removeEventListener('abort', stopAuthentication);
@@ -1149,7 +1257,6 @@ async function runQualifiedWorker(
   } catch (error) {
     executionFailure = proxyFailure ?? { error };
   } finally {
-    await diagnostics.write(options.dataDir, job.id);
     authorizePrompt(false);
     clearTimeout(initTimer);
     initialized(false);
@@ -1157,13 +1264,16 @@ async function runQualifiedWorker(
     controller.abort();
     worker?.close();
     const processClosed = (async () => {
-      let cleanupFailure: { error: unknown } | undefined;
-      try {
-        await worker?.return?.();
-      } catch (error) {
-        cleanupFailure = { error };
-      }
-      const drained = await nativeProcess.drain();
+      const stopNow = !released || options.signal.aborted;
+      // Signal the whole group without waiting on the SDK's iterator when interrupted.
+      const returned = Promise.resolve()
+        .then(async () => {
+          await worker?.return?.();
+          return undefined;
+        })
+        .catch((error: unknown) => ({ error }));
+      const drained = await nativeProcess.drain({ now: stopNow });
+      const cleanupFailure = stopNow ? undefined : await returned;
       return cleanupFailure || !drained.successful
         ? {
             error:
@@ -1181,12 +1291,17 @@ async function runQualifiedWorker(
     await new Promise<void>((resolve) => bridge.close(() => resolve()));
     options.signal.removeEventListener('abort', cancel);
     closeFailure = await processClosed;
+    if (released) await diagnostics.write(options.dataDir, job.id);
     await github?.close().catch(() => undefined);
     await temp?.close().catch(() => undefined);
     // Last look, so the result and a stopped worker's partial lose a late value too.
     await refreshEnv().catch(() => undefined);
     envFiles.close();
   }
+  if (early && !released && closeFailure?.quiescent === false)
+    throw new WorkerStartUnconfirmed('Warm Claude worker cleanup could not be confirmed', {
+      cause: closeFailure.error,
+    });
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
   // A child that never started reports that, whatever the SDK threw on the way out,
   // also when the job's wall time is what ended the wait.

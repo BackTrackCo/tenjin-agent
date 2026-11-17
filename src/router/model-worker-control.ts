@@ -248,17 +248,27 @@ export function workerResultError(result: {
 export async function withWorkerDeadline<T>(
   signal: AbortSignal,
   run: (signal: AbortSignal) => Promise<T>,
+  /** A worker started before its accept: its wall time runs from the accept, not the start. */
+  from?: Promise<unknown>,
 ): Promise<T> {
   signal.throwIfAborted();
   const controller = new AbortController();
   const cancel = () => controller.abort(signal.reason);
   signal.addEventListener('abort', cancel, { once: true });
   if (signal.aborted) cancel();
-  const timer = setTimeout(
-    () => controller.abort(new ModelWorkerStopped({ kind: 'harness_limit', reason: 'wall_time' })),
-    WORKER_WALL_MS,
-  );
-  timer.unref();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let ended = false;
+  const arm = () => {
+    if (ended || controller.signal.aborted) return;
+    timer = setTimeout(
+      () =>
+        controller.abort(new ModelWorkerStopped({ kind: 'harness_limit', reason: 'wall_time' })),
+      WORKER_WALL_MS,
+    );
+    timer.unref();
+  };
+  if (from) from.then(arm, () => undefined);
+  else arm();
   try {
     const result = await run(controller.signal);
     controller.signal.throwIfAborted();
@@ -269,6 +279,7 @@ export async function withWorkerDeadline<T>(
     if (controller.signal.reason instanceof ModelWorkerStopped) throw controller.signal.reason;
     throw error;
   } finally {
+    ended = true;
     clearTimeout(timer);
     signal.removeEventListener('abort', cancel);
   }

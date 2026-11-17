@@ -26,7 +26,20 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
   }> = [];
   const folders: string[] = [];
   let closing = false;
-  const drainChildren = async () => {
+  /**
+   * The child's whole process group (it leads one of its own): Claude Code, the MCP
+   * servers and the commands it started. Signalled after the child itself, so nothing
+   * it started outlives it.
+   */
+  const group = (child: ReturnType<typeof spawn>, signal: NodeJS.Signals) => {
+    if (process.platform === 'win32' || child.pid === undefined) return;
+    try {
+      process.kill(-child.pid, signal);
+    } catch {
+      /* The group has gone. */
+    }
+  };
+  const drainChildren = async (now: boolean) => {
     const successful = await Promise.all(
       children.map(async ({ child, closed, isClosed, failed }) => {
         let forced = false;
@@ -39,11 +52,14 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
               /* The close deadline still fails closed. */
             }
           }
+          group(child, signal);
         };
         // The SDK already gives stdin EOF, then TERM/KILL. These are fallback
-        // bounds after its cleanup, for this exact owned child only.
-        const term = setTimeout(() => kill('SIGTERM'), 8000);
-        const hard = setTimeout(() => kill('SIGKILL'), 10000);
+        // bounds after its cleanup, for this exact owned child only. A worker stopped
+        // before its accept has nothing to finish: it is ended at once.
+        if (now) kill('SIGTERM');
+        const term = now ? undefined : setTimeout(() => kill('SIGTERM'), 8000);
+        const hard = setTimeout(() => kill('SIGKILL'), now ? 2000 : 10000);
         let deadline: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -60,6 +76,8 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
           clearTimeout(term);
           clearTimeout(hard);
           clearTimeout(deadline);
+          // A descendant can outlive the child and close its inherited stdio.
+          group(child, 'SIGKILL');
         }
       }),
     );
@@ -93,6 +111,8 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
         signal: options.signal,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        // Its own process group, so a drain reaches everything it started.
+        ...(process.platform === 'win32' ? {} : { detached: true }),
       });
       // The custom-spawn interface leaves stderr to its caller. Drain it without
       // retaining tool output, credentials or native diagnostic text.
@@ -116,10 +136,12 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
       children.push({ child, closed, isClosed: () => isClosed, failed: () => failed });
       return child;
     },
-    async drain() {
+    /** Ends every child. `now`: at once, a group TERM and a KILL 2 s later, for a worker
+     *  stopped before its accept; otherwise after the SDK's own close, as before. */
+    async drain({ now = false }: { now?: boolean } = {}) {
       closing = true;
       try {
-        return await drainChildren();
+        return await drainChildren(now);
       } finally {
         // Every child has closed, or was killed: nothing reads its settings any more.
         await Promise.all(

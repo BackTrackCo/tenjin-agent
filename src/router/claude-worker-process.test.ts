@@ -24,11 +24,17 @@ const options = () => ({
   env: { HOME: '/fixture/home', ANTHROPIC_AUTH_TOKEN: 'fixture-only' },
   signal: new AbortController().signal,
 });
+// The fixture children are not real: no group signal may reach a real process group.
+let groupKill: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
+  groupKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  groupKill.mockRestore();
+});
 
 it('preserves the SDK command, args, cwd, environment and forwarded abort signal', async () => {
   const child = new Child();
@@ -42,6 +48,8 @@ it('preserves the SDK command, args, cwd, environment and forwarded abort signal
     signal: supplied.signal,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    // Its own process group, which a drain signals after the child.
+    ...(globalThis.process.platform === 'win32' ? {} : { detached: true }),
   });
   expect(vi.mocked(spawn).mock.calls[0]![2]?.signal).toBe(supplied.signal);
   child.exitCode = 0;
@@ -131,3 +139,24 @@ it('starts no child whose command line would still carry a secret', () => {
   ).toThrow(/command line/);
   expect(spawn).not.toHaveBeenCalled();
 });
+
+// A child can close before its descendants, including ones that ignore TERM
+// and closed their inherited stdio. Draining must still kill their group.
+it.skipIf(process.platform === 'win32')(
+  'terminates the warm child and its group immediately',
+  async () => {
+    const child = new Child();
+    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    const worker = claudeWorkerProcess();
+    worker.spawn(options());
+
+    const stopped = worker.drain({ now: true });
+    expect(groupKill).toHaveBeenCalledWith(-child.pid!, 'SIGTERM');
+    child.signalCode = 'SIGTERM';
+    child.emit('close', null, 'SIGTERM');
+
+    await expect(stopped).resolves.toEqual({ successful: false });
+    expect(groupKill).toHaveBeenLastCalledWith(-child.pid!, 'SIGKILL');
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);

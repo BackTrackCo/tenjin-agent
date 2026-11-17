@@ -21,6 +21,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 const worker = vi.hoisted(() => ({
   run: vi.fn(),
+  warm: vi.fn(),
   qualified: vi.fn(
     async (cwd = '/repo', _profile?: string, ..._other: unknown[]) =>
       ({
@@ -47,10 +48,13 @@ const worker = vi.hoisted(() => ({
   ),
 }));
 vi.mock('./model-worker', () => ({
-  runModelWorker: worker.run,
+  runModelWorker: (job: ModelJob, options: { early?: unknown }) =>
+    (options.early ? worker.warm : worker.run)(job, options),
+  WorkerStartUnconfirmed: class extends Error {},
   qualifiedModelWorker: worker.qualified,
 }));
 import { registerModelTool } from './model-mcp';
+import { WorkerStartUnconfirmed, type EarlyWorkerAccept } from './model-worker';
 import { MODEL_RECORD_TTL_MS, ModelJobStore } from './model-job';
 import type { ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
@@ -79,6 +83,7 @@ async function jobOf(turn: string): Promise<ModelJob | null> {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  worker.warm.mockReset().mockRejectedValue(new Error('No warm process in this fixture'));
   worker.qualified.mockImplementation(async (cwd = '/repo') => ({
     path: 'worker',
     claudeWorkspace: {
@@ -680,6 +685,159 @@ it("offers a native subagent's held call for that subagent, runs its accept, and
     await f.close();
   }
 });
+
+function captureNewOffer(
+  f: Awaited<ReturnType<typeof ownedClaudeFixture>>,
+  id: string,
+  step: string,
+) {
+  return f.call({
+    capture: {
+      session_id: f.session.sessionId,
+      tool_use_id: id,
+      tool: 'Agent',
+      input: { prompt: 'Read the worker fixture.' },
+      step,
+    },
+  });
+}
+
+type WarmOptions = {
+  signal: AbortSignal;
+  early: { accept: Promise<EarlyWorkerAccept>; onRelease: () => void };
+};
+
+it('warms one worker per offer and releases it only when an accept wins the job', async () => {
+  const f = await ownedClaudeFixture();
+  f.route.mockImplementation(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
+  let reportAccept!: (accepted: EarlyWorkerAccept) => void;
+  const acceptedByWorker = new Promise<EarlyWorkerAccept>((resolve) => {
+    reportAccept = resolve;
+  });
+  worker.warm.mockImplementation(async (_job: ModelJob, options: WarmOptions) => {
+    const accepted = await options.early.accept;
+    options.early.onRelease();
+    reportAccept(accepted);
+    return 'completed warm fixture';
+  });
+  try {
+    const held = await captureNewOffer(f, 'warm-call', 'turn-1');
+    expect(held.action).toBe('offer');
+    const duplicate = await captureNewOffer(f, 'warm-call', 'turn-1');
+    expect(duplicate.offer_id).toBe(held.offer_id);
+    expect(worker.warm).toHaveBeenCalledOnce();
+    expect(worker.run).not.toHaveBeenCalled();
+    expect((await f.store.owned(held.offer_id, f.session.sessionId))?.state).toBe('offered');
+
+    f.session.turnId = 'accepted-in-a-later-turn';
+    const running = f.call({ offer_id: held.offer_id });
+    expect((await acceptedByWorker).job).toMatchObject({ id: held.offer_id, state: 'running' });
+    const answer = await running;
+    expect(answer).toMatchObject({ status: 'completed', result: 'completed warm fixture' });
+    expect(await f.call({ offer_id: held.offer_id })).toEqual(answer);
+    expect(worker.run).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it.each(['veto', 'expiry', 'parent end', 'cancel', 'mode changed', 'consent revoked'] as const)(
+  'stops a still-unaccepted warm worker on %s without releasing its assignment',
+  async (reason) => {
+    const f = await ownedClaudeFixture();
+    if (reason === 'expiry') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    f.route.mockImplementation(async (body: { jobId: string }) => ({
+      ...offer,
+      jobId: body.jobId,
+    }));
+    let onSpawn!: (options: WarmOptions) => void;
+    let onStop!: () => void;
+    const began = new Promise<WarmOptions>((resolve) => {
+      onSpawn = resolve;
+    });
+    const stopped = new Promise<void>((resolve) => {
+      onStop = resolve;
+    });
+    const assigned = vi.fn();
+    worker.warm.mockImplementation(async (_job: ModelJob, options: WarmOptions) => {
+      const stop = new Promise<never>((_, reject) =>
+        options.signal.addEventListener(
+          'abort',
+          () => {
+            onStop();
+            reject(new Error('Warm worker stopped'));
+          },
+          { once: true },
+        ),
+      );
+      onSpawn(options);
+      return Promise.race([options.early.accept.then(assigned), stop]);
+    });
+    try {
+      const held = await captureNewOffer(f, 'warm-call', 'turn-1');
+      expect(held.action).toBe('offer');
+      const child = await began;
+      if (reason === 'veto') {
+        expect(await captureNewOffer(f, 'veto-call', 'turn-2')).toEqual({
+          action: 'native',
+          settled: held.offer_id,
+        });
+      } else if (reason === 'expiry') {
+        const job = (await f.store.owned(held.offer_id, f.session.sessionId))!;
+        await vi.advanceTimersByTimeAsync(job.expiresAt - Date.now());
+      } else if (reason === 'parent end') {
+        await f.model.shutdown();
+      } else if (reason === 'mode changed') {
+        f.session.claudePermissionMode = 'auto';
+        expect((await f.call({ offer_id: held.offer_id })).action).toBe('native');
+      } else if (reason === 'consent revoked') {
+        await writeFile(join(dir, 'config.json'), '{}');
+        expect((await f.call({ offer_id: held.offer_id })).action).toBe('native');
+      } else {
+        expect(await f.call({ cancel: held.offer_id })).toEqual({ status: 'cancelled' });
+      }
+      await stopped;
+      expect(child.signal.aborted).toBe(true);
+      expect(assigned).not.toHaveBeenCalled();
+      expect(worker.run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await f.close();
+    }
+  },
+);
+
+it.each(['startup failed', 'cleanup unconfirmed', 'already released'] as const)(
+  'handles %s without replaying a released or unconfirmed warm worker',
+  async (reason) => {
+    const f = await ownedClaudeFixture();
+    f.route.mockImplementation(async (body: { jobId: string }) => ({
+      ...offer,
+      jobId: body.jobId,
+    }));
+    worker.warm.mockImplementation(async (_job: ModelJob, options: WarmOptions) => {
+      if (reason === 'cleanup unconfirmed') throw new WorkerStartUnconfirmed('Unknown descendants');
+      if (reason === 'already released') {
+        await options.early.accept;
+        options.early.onRelease();
+      }
+      throw new Error('warm fixture stopped');
+    });
+    try {
+      const held = await captureNewOffer(f, 'warm-call', 'turn-1');
+      const answer = await f.call({ offer_id: held.offer_id });
+      if (reason === 'startup failed') {
+        expect(answer.status).toBe('completed');
+        expect(worker.run).toHaveBeenCalledOnce();
+      } else {
+        expect(answer.status).toBe('unknown');
+        expect(worker.run).not.toHaveBeenCalled();
+      }
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 it('advertises display activity as read-only without changing the original subagent wire contract', async () => {
   const f = await ownedClaudeFixture();
