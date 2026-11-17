@@ -27,6 +27,48 @@ export class ModelWorkerStopped extends Error {
   }
 }
 
+/**
+ * Who or what ended a worker that did not end by itself, as one fixed code and
+ * the plain words the parent reads beside it. A native subagent's result says
+ * why it stopped too; a job once read `cancelled` with nothing to tell by what.
+ */
+export const WORKER_ENDS = {
+  parent_cancel: 'The parent cancelled it with subagent({cancel}).',
+  agent_stopped: "The person stopped the worker's agent.",
+  host_aborted: 'The host ended the call that was running it.',
+  session_ended: 'Its session or its Tenjin process ended.',
+  time_limit: "It reached the job's time limit.",
+  turn_limit: "It reached the job's turn limit.",
+  budget: 'It reached its spending limit.',
+  output_limit: "It reached the model's output limit.",
+  context_limit: "It reached the model's context limit.",
+  not_started: 'Its Claude Code did not start.',
+  env_file_unscanned:
+    'An env file appeared that could not be read in full, so nothing more could be forwarded.',
+  worker_error: 'The worker or the provider failed.',
+} as const;
+export type WorkerEnd = keyof typeof WORKER_ENDS;
+
+/** The end code of a worker that stopped without an abort, from its stop reason. */
+export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
+  switch (stop?.reason) {
+    case 'wall_time':
+      return 'time_limit';
+    case 'turn_guard':
+      return 'turn_limit';
+    case 'budget_guard':
+      return 'budget';
+    case 'output_limit':
+    case 'context_limit':
+    case 'env_file_unscanned':
+      return stop.reason;
+    case 'startup_timeout':
+      return 'not_started';
+    default:
+      return 'worker_error';
+  }
+}
+
 export function workerStop(error: unknown): WorkerStop | undefined {
   return error instanceof ModelWorkerStopped ? error.stop : undefined;
 }

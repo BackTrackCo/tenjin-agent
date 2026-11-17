@@ -114,6 +114,8 @@ export type TenjinModelWorker = {
    * time and nothing here could say how it ended.
    */
   ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started' | 'unseen';
+  /** Who or what ended a worker that did not complete: the CLI's fixed code. */
+  endedBy?: string;
   /** The final spend still has an unsettled part. */
   unresolved?: boolean;
 };

@@ -53,6 +53,8 @@ function setup(_$: Engine, on: On) {
     inspectionBlocked: undefined as Promise<void> | undefined,
     inspectionFails: false,
     followFails: false,
+    /** Set: a follow read waits until the test opens it, and answers `waiting` while the worker runs. */
+    followGate: undefined as (() => void)[] | undefined,
     follows: 0,
     followWait: undefined as Promise<void> | undefined,
     finishFollow: (() => undefined) as () => void,
@@ -185,6 +187,17 @@ function setup(_$: Engine, on: On) {
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
   });
   on('mcp.call', async (_$, e) => {
+    if (e.args.follow === true && state.followGate && state.phase === 'running') {
+      state.follows++;
+      await new Promise<void>((resolve) => state.followGate!.push(resolve));
+      if (state.phase === 'running')
+        return {
+          value: {
+            isError: false,
+            content: [{ type: 'text' as const, text: '{"status":"waiting"}' }],
+          },
+        };
+    }
     if (e.tool === 'subagent') {
       state.cancellations.push(e.args);
       return {
@@ -274,6 +287,7 @@ function setup(_$: Engine, on: On) {
     return { result: 'native unchanged' as never };
   });
   on('classic.SubagentStart', () => ({}));
+  on('classic.SubagentStop', () => ({}));
   on('turn.step', async function* (_$, e): AsyncGenerator<TurnStepChunk, TurnStepResult> {
     state.nativeSteps++;
     yield { kind: 'text', index: 0, text: 'native pass-through' };
@@ -372,7 +386,9 @@ test('the owned viewer binds before spawn returns while the parent work runs exa
   expect(result).toEqual(exact);
   expect(worked).toBe(1);
   expect(f.state.calls).toBe(1);
-  expect(f.state.registrations).toContainEqual(expect.objectContaining({ maxTurns: 1, tools: [] }));
+  expect(f.state.registrations).toContainEqual(
+    expect.objectContaining({ maxTurns: 10, tools: [] }),
+  );
   for (const registration of f.state.registrations) {
     // Explicit MCP servers append model-visible tools independently of tools: [].
     expect(registration).not.toHaveProperty('mcpServers');
@@ -914,13 +930,191 @@ test('TaskStop still requests the owned cancellation after canonical cwd access 
   await remember($);
   const { running } = await startWithViewer($, f);
   f.state.statFails = true;
+  f.state.agents[0]!.status = 'killed';
   await complete($, 'native-viewer-1');
-  expect(f.state.cancellations).toEqual([{ cancel: OFFER }]);
+  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
   expect(f.state.accepted).toBe(1);
   release();
   expect((await running).result).toBe('actual cancellation handback');
   await f.clock.settle();
 });
+
+// Job 8f2d28ff: Claude Code's stall watchdog ended the viewer's one long step at 600 s,
+// its turn completed `aborted`, and the mod cancelled a healthy worker.
+test('a viewer turn the host ends never cancels its worker, and the row stays live', async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  await remember($);
+  const { running } = await startWithViewer($, f);
+  f.state.agents[0]!.status = 'failed';
+  await complete($, 'native-viewer-1');
+  await f.clock.advance(5000);
+  expect(f.state.cancellations).toEqual([]);
+  expect((await acceptRow($, 'parent_accept', OFFER))[0]).toMatch(
+    /^⏺DeepSeek\(Read selected source\) · 1 tool use · 41\.2k tokens · \d+s · \$0\.0043 so far/,
+  );
+  release();
+  await running;
+  await f.clock.settle();
+});
+
+test('a viewer stopped from the agent list cancels its worker with the reason, also when the stop lands late', async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  await remember($);
+  const { running } = await startWithViewer($, f);
+  // The turn ends before the list marks the agent stopped.
+  await complete($, 'native-viewer-1');
+  expect(f.state.cancellations).toEqual([]);
+  f.state.agents[0]!.status = 'killed';
+  await f.clock.advance(1500);
+  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
+  // The reason is the plugin's word alone: the model's own is refused before the CLI.
+  const own = await $.tool.call({ tool: ACCEPT, cancel: OFFER, reason: 'agent_stopped' });
+  expect(own.deny).toContain('cancel alone');
+  release();
+  await running;
+  await f.clock.settle();
+});
+
+// Eight minutes of the row's one-second ticks: longer than the kit's default time for a test.
+test(
+  "a viewer step ends before the host's ten-minute bound, and the next step of its turn follows on",
+  { timeoutMs: 60_000 },
+  async ($, on) => {
+    const f = setup($, on);
+    const gate: (() => void)[] = [];
+    f.state.followGate = gate;
+    // Each follow read waits 25 s, as the CLI's does.
+    const read = async () => {
+      await f.clock.advance(25_000);
+      for (const open of gate.splice(0)) open();
+      await f.clock.settle();
+    };
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.state.work = async () => {
+      await blocked;
+      return { result: 'handback', text: 'handback' };
+    };
+    await remember($);
+    const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+    await f.clock.settle();
+    await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+    const startedAt = f.clock.now();
+    let endedAt: number | undefined;
+    const first = step($, 'native-viewer-1', 0).then((value) => {
+      endedAt = f.clock.now();
+      return value;
+    });
+    while (endedAt === undefined && f.clock.now() - startedAt < 11 * 60_000) await read();
+    // Five minutes, and the one read then in flight.
+    expect(endedAt! - startedAt).toBeLessThanOrEqual(5 * 60_000 + 25_000);
+    expect((await first).answer).toBe(HEADER);
+    const stop = {
+      agent_id: 'native-viewer-1',
+      agent_type: TYPE,
+      stop_hook_active: false,
+      agent_transcript_path: '/t.jsonl',
+    };
+    // The worker still runs: the viewer's stop is held, so its agent stays listed.
+    expect((await $.classic.SubagentStop(stop)).block).toContain('still running');
+    const second = step($, 'native-viewer-1', 1);
+    await read();
+    f.state.phase = 'completed';
+    release();
+    await read();
+    expect((await second).answer).toContain('Done (');
+    await running;
+    await f.clock.settle();
+    expect((await $.classic.SubagentStop(stop)).block).toBeUndefined();
+    expect(f.state.cancellations).toEqual([]);
+  },
+);
+
+// The host's own bound finds a step past its planned end: whatever the agent then reads,
+// that abort is not a person's stop.
+test(
+  'a viewer turn aborted at or past its step’s planned end never cancels, even read as stopped',
+  { timeoutMs: 60_000 },
+  async ($, on) => {
+    const f = setup($, on);
+    const gate: (() => void)[] = [];
+    f.state.followGate = gate;
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.state.work = async () => {
+      await blocked;
+      return { result: 'handback', text: 'handback' };
+    };
+    await remember($);
+    const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+    await f.clock.settle();
+    await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+    const first = step($, 'native-viewer-1', 0);
+    await f.clock.settle();
+    // One read held open past the planned end.
+    await f.clock.advance(5 * 60_000);
+    f.state.agents[0]!.status = 'killed';
+    await complete($, 'native-viewer-1');
+    await f.clock.advance(1500);
+    expect(f.state.cancellations).toEqual([]);
+    for (const open of gate.splice(0)) open();
+    await first;
+    f.state.phase = 'completed';
+    release();
+    await running;
+    await f.clock.settle();
+  },
+);
+
+// The CLI's `endedBy` codes, each in a native-sounding word.
+for (const [endedBy, word] of [
+  ['agent_stopped', 'Stopped by you'],
+  ['parent_cancel', 'Cancelled by the parent'],
+  ['host_aborted', 'Interrupted'],
+  ['session_ended', 'Session ended'],
+  ['time_limit', 'Time limit reached'],
+  ['budget', 'Budget reached'],
+  ['worker_error', 'Stopped'],
+] as const)
+  test('a worker ended by ' + endedBy + ' says so on its row', async ($, on) => {
+    const f = setup($, on);
+    const answer = JSON.stringify({
+      status: endedBy === 'worker_error' ? 'unknown' : 'cancelled',
+      elapsedMs: 61_000,
+      toolUses: 3,
+      tokens: 900,
+      endedBy,
+    });
+    const line = '⏺DeepSeek(subagent)  ⎿  ' + word + ' (3 tool uses · 900 tokens · 1m 1s)';
+    expect((await acceptRow($, 'parent_accept', OFFER, answer))[0]).toBe(line);
+    // From the job's own record, for a row nothing here followed.
+    f.state.liveView = false;
+    f.state.liveFile = false;
+    f.state.ended = JSON.parse(answer);
+    await acceptRow($, 'accept_after_resume', OFFER, MOVED);
+    await f.clock.settle();
+    expect((await acceptRow($, 'accept_after_resume', OFFER, MOVED))[0]).toBe(line);
+  });
 
 for (const terminal of ['completed', 'cancelled'] as const) {
   test(

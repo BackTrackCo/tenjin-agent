@@ -60,6 +60,26 @@ const POLL_MS = 1000;
 /** How long retirement waits for a viewer still starting, so it binds first. */
 const SPAWN_WAIT_MS = 10_000;
 /**
+ * How long one viewer step follows the worker, so it ends by itself (by one 25 s
+ * read more at most) well before Claude Code ends it: the host aborts a background
+ * agent that shows no progress for ten minutes (its stall watchdog, 2.1.326). The
+ * viewer's stop is then held while the worker runs, and the next step follows on.
+ */
+const STEP_MS = 5 * 60_000;
+/**
+ * Steps one viewer turn may take: 45 minutes, past the job's 40-minute wall time.
+ * Claude Code ends a turn whose stop was held more than 8 times in a row.
+ */
+const MAX_STEPS = 9;
+/** Viewer agents whose step ended at its bound, for their stop to be held once. */
+const handedOver = new Set<string>();
+/** Each running viewer step's planned end: an abort from then on is the host's, not a person's. */
+const stepEnds = new Map<string, number>();
+/** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
+const RECHECK_MS = 1500;
+/** Set once the session ends: what ends with it is not a person stopping an agent. */
+let sessionEnding = false;
+/**
  * Workers whose rows this module follows: an accept call in flight, or one it
  * took up again after a reload. A reload forgets them; a row then drawn as
  * running asks the CLI how its job stands (`adopt`).
@@ -283,8 +303,9 @@ async function registerType($: Dollar): Promise<void> {
     prompt:
       'Display the already owned DeepSeek worker activity. Never execute its assignment or request model inference.',
     tools: [],
-    // The observer owns one text response; worker limits are independent.
-    maxTurns: 1,
+    // Every step is the plugin's own made-up response; a held stop continues the turn
+    // only up to this bound. Worker limits are independent.
+    maxTurns: MAX_STEPS + 1,
     omitClaudeMd: true,
   });
 }
@@ -679,6 +700,7 @@ function endedFrom(answer: Json | undefined): Partial<TenjinModelWorker> | undef
   return {
     ended: status,
     state: status === 'not_started' ? 'unknown' : status,
+    ...(endedByOf(answer!.endedBy) ? { endedBy: answer!.endedBy as string } : {}),
     ...(uses !== undefined ? { toolUses: uses } : {}),
     ...(used !== undefined ? { tokens: used } : {}),
     ...(elapsed !== undefined ? { elapsedMs: elapsed } : {}),
@@ -794,6 +816,24 @@ function adopt($: Dollar, offerId: string, title: string): void {
     adopted.delete(offerId);
   }
 }
+/** Who or what ended a worker that did not complete, by the CLI's fixed code (`endedBy`). */
+const ENDED_BY: Record<string, string> = {
+  agent_stopped: 'Stopped by you',
+  parent_cancel: 'Cancelled by the parent',
+  host_aborted: 'Interrupted',
+  session_ended: 'Session ended',
+  time_limit: 'Time limit reached',
+  budget: 'Budget reached',
+  worker_error: 'Stopped',
+};
+function endedByOf(code: unknown): code is string {
+  return typeof code === 'string' && Object.hasOwn(ENDED_BY, code);
+}
+/** The end word of a worker that did not complete; an older CLI sends no code. */
+function stopWord(status: unknown, endedBy: unknown): string {
+  if (endedByOf(endedBy)) return ENDED_BY[endedBy]!;
+  return status === 'cancelled' ? 'Interrupted' : 'Stopped';
+}
 /** An ended worker's line, as a native subagent's: `Done (12 tool uses · 41.2k tokens · 2m 13s · $0.039)`. */
 function endLine(live: TenjinModelWorker): string {
   const time = live.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [];
@@ -803,11 +843,9 @@ function endLine(live: TenjinModelWorker): string {
   const word =
     live.ended === 'completed'
       ? 'Done'
-      : live.ended === 'cancelled'
-        ? 'Interrupted'
-        : unseen
-          ? 'Outcome not shown here'
-          : 'Stopped';
+      : unseen
+        ? 'Outcome not shown here'
+        : stopWord(live.ended, live.endedBy);
   const parts = [
     ...(live.toolUses !== undefined || time.length ? [toolUses(live.toolUses ?? 0)] : []),
     ...(live.tokens !== undefined ? [tokens(live.tokens)] : []),
@@ -1078,6 +1116,24 @@ export function registerModelViewer(on: On): void {
     }
     return next(e);
   });
+  on('session.end', (_$, e, next) => {
+    sessionEnding = true;
+    return next(e);
+  });
+  // A STEP THAT ENDED AT ITS BOUND while its worker runs: the viewer's stop is held,
+  // so the next step of the same turn follows on and its agent stays listed.
+  on('classic.SubagentStop', async ($, e, next) => {
+    if (next.origin.plugin !== 'engine' || e.agent_type !== TYPE || !handedOver.has(e.agent_id))
+      return next(e);
+    try {
+      const item = (await $.state.get(STATE)).value?.records.find((r) => r.nativeId === e.agent_id);
+      if (item?.active) return { block: 'The DeepSeek worker is still running.' };
+    } catch {
+      /* The viewer ends; the worker runs on. */
+    }
+    handedOver.delete(e.agent_id);
+    return next(e);
+  });
   on('classic.SubagentStart', async ($, e, next) => {
     if (next.origin.plugin === 'engine' && e.agent_type === TYPE) {
       // Tag before any fallible host call; the native event pins this type and id.
@@ -1139,6 +1195,11 @@ export function registerModelViewer(on: On): void {
     if (e.capture !== undefined && next.origin.plugin !== 'tenjin')
       return {
         deny: 'Tenjin makes an offer only for an Agent, Task or SendMessage call it holds. Call that tool; never send capture yourself.',
+      };
+    // `reason` says the person stopped the worker's agent, so only this plugin sends it.
+    if (e.reason !== undefined && next.origin.plugin !== 'tenjin')
+      return {
+        deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
     // A cancelled offer is settled too: its row has nothing left to offer.
     if (e.agentId === undefined && short(e.cancel) && UUID.test(e.cancel)) {
@@ -1355,16 +1416,19 @@ export function registerModelViewer(on: On): void {
           e,
           'DeepSeek activity unavailable. Continue through the owned worker handle.',
         );
-      if (e.index !== 0)
+      // A later step follows on only after a step that ended at its bound.
+      if (e.index !== 0 && !handedOver.delete(e.agentId))
         return yield* finish(
           e,
           'DeepSeek activity observation finished. The worker result is returned separately to the parent.',
         );
       // The transcript opens with the worker's own name: while only this line stands, the
       // rows draw live under it; the whole run is written after it when the worker ends.
-      const header = owned.item.description + '\n';
-      yield { kind: 'text', index: 0, text: header };
+      const header = e.index === 0 ? owned.item.description + '\n' : '';
+      if (header) yield { kind: 'text', index: 0, text: header };
       let tail = 'Activity unavailable. The worker result is returned separately to the parent.';
+      const stepStart = await $.clock.now();
+      stepEnds.set(e.agentId, stepStart + STEP_MS);
       try {
         // Followed in short reads, never one held open for the run: a call past two
         // minutes becomes a background task of the parent session, with its own lines
@@ -1372,6 +1436,14 @@ export function registerModelViewer(on: On): void {
         let quick = 0;
         for (let read = 0; read < 240; read++) {
           const before = await $.clock.now();
+          if (before - stepStart >= STEP_MS) {
+            // Ended here, before the host's ten-minute bound; the last step may not hand over.
+            if (e.index + 1 < MAX_STEPS) {
+              handedOver.add(e.agentId);
+              tail = '';
+            }
+            break;
+          }
           const response = await $.mcp.call(SERVER, 'subagent_activity', {
             offer_id: owned.item.offerId,
             follow: true,
@@ -1394,7 +1466,8 @@ export function registerModelViewer(on: On): void {
       } catch {
         /* An observer error never cancels, retries or replaces the actual worker. */
       }
-      yield { kind: 'text', index: 0, text: tail };
+      // The planned end stays until the turn's end reads it: an abort ends a step's reads first.
+      if (tail) yield { kind: 'text', index: 0, text: tail };
       yield { kind: 'stop', stopReason: 'end_turn', usage: null };
       return {
         turnId: e.turnId,
@@ -1421,18 +1494,49 @@ export function registerModelViewer(on: On): void {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
     }
+    const planned = e.agentId ? stepEnds.get(e.agentId) : undefined;
+    if (e.agentId) {
+      handedOver.delete(e.agentId);
+      stepEnds.delete(e.agentId);
+    }
     try {
-      if (e.agentId && e.reason === 'aborted') {
-        const [parentSessionId, held] = await Promise.all([$.session.id(), $.state.get(STATE)]);
-        const state = held.value;
+      // ONLY A STOP OF THE AGENT CANCELS ITS WORKER: a person's from the agent list, or the
+      // parent's TaskStop, as for a native subagent. An abort is also the host ending the
+      // viewer's turn for its own reasons (its stall watchdog, at ten minutes), which says
+      // nothing about the worker; only a stopped agent reads `killed`, and an abort once a
+      // step is past its planned end is the host's bound, whatever the agent reads.
+      const late = planned !== undefined && (await $.clock.now()) >= planned;
+      if (e.agentId && e.reason === 'aborted' && !sessionEnding && !late) {
+        const agentId = e.agentId;
         // Cancellation uses the prior binding even when cwd access was revoked. This
         // grants no work/scope authority; the backend still checks its owned pending offer.
-        const item =
-          state?.version === 1 && state.parentSessionId === parentSessionId
-            ? state.records.find((r) => r.nativeId === e.agentId)
-            : undefined;
-        if (item?.active && (!item.turnId || item.turnId === e.turnId))
-          await $.mcp.call(SERVER, 'subagent', { cancel: item.offerId });
+        const bound = async () => {
+          const [parentSessionId, held] = await Promise.all([$.session.id(), $.state.get(STATE)]);
+          const state = held.value;
+          const item =
+            state?.version === 1 && state.parentSessionId === parentSessionId
+              ? state.records.find((r) => r.nativeId === agentId)
+              : undefined;
+          return item?.active && (!item.turnId || item.turnId === e.turnId) ? item : undefined;
+        };
+        const stopped = async () =>
+          (await $.agent.list()).some(
+            (a) => a.id === agentId && (a.status === 'killed' || a.taskStatus === 'killed'),
+          );
+        const cancel = (offerId: string) =>
+          $.mcp.call(SERVER, 'subagent', { cancel: offerId, reason: 'agent_stopped' });
+        const item = await bound();
+        if (item && (await stopped())) await cancel(item.offerId);
+        else if (item)
+          // A stop may mark the agent a moment after its turn ends: read it once more.
+          $.clock.after(RECHECK_MS, async () => {
+            try {
+              const still = await bound();
+              if (still && !sessionEnding && (await stopped())) await cancel(still.offerId);
+            } catch {
+              /* Not a stop that can be told: the worker runs on. */
+            }
+          });
       }
     } catch {
       /* Failed UI cancellation is not a new execution or payment. */
@@ -1519,8 +1623,7 @@ export function registerModelViewer(on: On): void {
       const ended = json(said);
       const status = ended?.status;
       if (status === 'completed' || status === 'cancelled' || status === 'unknown') {
-        const word =
-          status === 'completed' ? 'Done' : status === 'cancelled' ? 'Interrupted' : 'Stopped';
+        const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
         return workerRow(ui, {
           ...head,
           state: status === 'completed' ? 'done' : 'error',
@@ -1667,10 +1770,10 @@ export function registerModelViewer(on: On): void {
           ? 'finished'
           : how === 'not_started'
             ? 'did not start'
-            : how === 'cancelled'
-              ? 'was interrupted'
-              : how === undefined
-                ? 'ended'
+            : how === undefined || endedByOf(live.endedBy)
+              ? 'ended'
+              : how === 'cancelled'
+                ? 'was interrupted'
                 : 'stopped') +
         (live.ended ? ' · ' + endLine(live) : '');
       // AS A NATIVE SUBAGENT'S RETURN READS in the compact view: one dim line naming the
@@ -1759,6 +1862,7 @@ async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json)
   let held = runs.get(item.offerId);
   let answer: string | undefined;
   let own: unknown;
+  let endedBy: unknown = ended.endedBy;
   try {
     // The run is over, so this read returns at once: its last rows and its answer.
     const last = await $.mcp.call(SERVER, 'subagent_activity', { offer_id: item.offerId });
@@ -1767,6 +1871,7 @@ async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json)
     const result = record(body(last)?.activity)?.result;
     if (typeof result === 'string' && result.trim()) answer = plain(result, RESULT_CHARS);
     own = record(body(last)?.ended)?.elapsedMs;
+    endedBy = record(body(last)?.ended)?.endedBy ?? endedBy;
   } catch {
     /* The rows read while it ran still stand. */
   }
@@ -1791,11 +1896,7 @@ async function writtenRun($: Dollar, item: TenjinModelViewerRecord, ended: Json)
       ? 'Done (' + counts + ')'
       : ended.started === false
         ? endingOf(ended)
-        : (ended.state === 'cancelled' ? 'Interrupted' : 'Stopped') +
-          ' (' +
-          counts +
-          ')\n' +
-          endingOf(ended);
+        : stopWord(ended.state, endedBy) + ' (' + counts + ')\n' + endingOf(ended);
   const text =
     writtenLines(transcriptLines(held?.rows ?? [], state.value?.cwd ?? ''), held?.dropped ?? 0) +
     (answer ? '\n' + answer + '\n' : '') +

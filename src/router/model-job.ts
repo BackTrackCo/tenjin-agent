@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { pidAlive, withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
-import { WORKER_WALL_MS } from './model-worker-control';
+import { WORKER_ENDS, WORKER_WALL_MS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
 
 const jobSchema = z.object({
@@ -54,6 +54,8 @@ const RUN_OVER_MS = WORKER_WALL_MS + 5 * 60_000;
 /** What a later accept of a worker that died with its process answers. */
 export const STRANDED_HANDBACK = {
   status: 'unknown',
+  endedBy: 'session_ended',
+  ended: WORKER_ENDS.session_ended,
   stopReason: { kind: 'interrupted', reason: 'session_ended' },
   nextStep:
     'This worker stopped when its session or Tenjin process ended, as a native subagent does. It cannot be continued. If the work is still needed, start a fresh assignment with the needed context.',

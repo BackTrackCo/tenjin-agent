@@ -3,6 +3,8 @@ import {
   ModelWorkerStopped,
   withWorkerDeadline,
   WorkerRepeatReminder,
+  WORKER_ENDS,
+  workerEnd,
   workerResultError,
   workerStop,
 } from './model-worker-control';
@@ -146,4 +148,23 @@ it('reports known provider output/context limits and omits invalid turn counts',
     ),
   ).toEqual({ kind: 'provider_limit', reason: 'context_limit' });
   expect(workerStop(new Error('secret-key=private'))).toBeUndefined();
+});
+
+it.each([
+  ['wall_time', 'time_limit'],
+  ['turn_guard', 'turn_limit'],
+  ['budget_guard', 'budget'],
+  ['output_limit', 'output_limit'],
+  ['context_limit', 'context_limit'],
+  ['env_file_unscanned', 'env_file_unscanned'],
+  ['startup_timeout', 'not_started'],
+  ['structured_output_guard', 'worker_error'],
+  ['worker_execution', 'worker_error'],
+] as const)('names a %s stop as %s, with words for the parent', (reason, end) => {
+  expect(workerEnd({ kind: 'harness_limit', reason })).toBe(end);
+  expect(WORKER_ENDS[end]).toMatch(/^[A-Z].*\.$/);
+});
+
+it('names a stop with no known reason as a worker error', () => {
+  expect(workerEnd(undefined)).toBe('worker_error');
 });

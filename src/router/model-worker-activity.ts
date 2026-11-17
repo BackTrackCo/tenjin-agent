@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { canonicalHash } from '../lib/request-schema';
+import { WORKER_ENDS } from './model-worker-control';
 
 const MAX_ROWS = 128;
 const MAX_BYTES = 128 * 1024;
@@ -128,8 +129,10 @@ export function endedDisplay(state: string, kept: string | null | undefined) {
     handback.tokens,
   ].map(count);
   const spend = spendSchema.safeParse(handback.spend);
+  const endedBy = Object.keys(WORKER_ENDS).find((code) => code === handback.endedBy);
   return {
     status: state === 'unknown' && handback.status === 'not_started' ? 'not_started' : state,
+    ...(endedBy ? { endedBy } : {}),
     ...(elapsedMs !== undefined ? { elapsedMs } : {}),
     ...(toolUses !== undefined ? { toolUses } : {}),
     ...(tokens !== undefined ? { tokens } : {}),

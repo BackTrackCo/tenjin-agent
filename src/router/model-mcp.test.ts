@@ -654,6 +654,8 @@ it('advertises display activity as read-only without changing the original subag
       'capture',
       'delegation_id',
       'offer_id',
+      // With cancel: a label for the job's record of who ended it, one fixed value.
+      'reason',
       'task',
     ]);
     expect(subagent?.inputSchema.required ?? []).toEqual([]);
@@ -1748,4 +1750,61 @@ it('records that a host with no permission prompt, or no session yet, kept a hel
     await client.close();
     await server.close();
   }
+});
+
+it.each([
+  ['parent_cancel', 'the parent cancels it'],
+  ['agent_stopped', "the person stops the worker's agent"],
+  ['host_aborted', 'the host ends the accept call'],
+  ['session_ended', 'the session ends'],
+  ['time_limit', 'the wall limit passes'],
+] as const)('records %s as what ended a job when %s', async (endedBy, _when) => {
+  // A live job once read `cancelled` with nothing to say who or what had ended it.
+  const f = await ownedClaudeFixture();
+  let started!: () => void;
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  worker.run.mockImplementation(
+    (_job: ModelJob, options: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        const stopped = (cause: Error) => reject(cause);
+        options.signal.addEventListener('abort', () => stopped(new Error('aborted')), {
+          once: true,
+        });
+        started();
+        if (endedBy === 'time_limit')
+          stopped(new ModelWorkerStopped({ kind: 'harness_limit', reason: 'wall_time' }));
+      }),
+  );
+  const host = new AbortController();
+  const running = f.client
+    .callTool({ name: 'subagent', arguments: { offer_id: f.job.id } }, undefined, {
+      signal: host.signal,
+    })
+    .then(
+      (reply) => JSON.parse((reply.content as Array<{ text: string }>)[0]!.text),
+      () => undefined,
+    );
+  await began;
+  if (endedBy === 'parent_cancel') await f.call({ cancel: f.job.id });
+  if (endedBy === 'agent_stopped') await f.call({ cancel: f.job.id, reason: 'agent_stopped' });
+  if (endedBy === 'host_aborted') host.abort();
+  const closing = endedBy === 'host_aborted' || endedBy === 'session_ended';
+  if (closing) await f.model.shutdown();
+  const result = await running;
+  // The accept call's own answer says it where one is delivered, and the record always.
+  if (!closing) expect(result).toMatchObject({ endedBy });
+  const record = await f.store.owned(f.job.id, 'root');
+  expect(JSON.parse(record!.result!)).toMatchObject({
+    endedBy,
+    status: endedBy === 'time_limit' ? 'unknown' : 'cancelled',
+  });
+  // A later read from a process with no live view of the job draws the same end.
+  await f.restart();
+  expect(await f.activity({ offer_id: f.job.id })).toMatchObject({
+    status: 'ended',
+    ended: { endedBy },
+  });
+  await f.close();
 });

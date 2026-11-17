@@ -219,6 +219,8 @@ it.each(['completed', 'stopped'] as const)(
         const handed = JSON.parse(first);
         const ended = {
           status: handed.status,
+          // What ended a job that did not complete travels with its end, for the row's words.
+          ...(handed.endedBy ? { endedBy: handed.endedBy } : {}),
           elapsedMs: handed.elapsedMs,
           toolUses: handed.toolUses,
           tokens: handed.tokens,

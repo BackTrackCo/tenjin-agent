@@ -9,7 +9,7 @@ import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { WORKER_WALL_MS, workerStop } from './model-worker-control';
+import { WORKER_ENDS, WORKER_WALL_MS, workerEnd, workerStop } from './model-worker-control';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
 import {
@@ -88,6 +88,9 @@ export function registerModelTool(
   /** Accept calls of this process still going, by job: such a job's worker is not stranded. */
   const accepting = new Map<string, number>();
   const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
+  /** Who asked for a job to be cancelled, so its end says who or what ended it. */
+  const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped'>();
+  let sessionEnding = false;
   const conversationOf = (job: ModelJob) =>
     typeof job.decision.workerHandle === 'string'
       ? conversations.lookup(job.decision.workerHandle, jobOwner(job))
@@ -323,6 +326,9 @@ export function registerModelTool(
           .optional(),
         delegation_id: z.string().uuid().optional(),
         task: z.string().optional(),
+        // With cancel, from the plugin alone: the person stopped the worker's agent. A
+        // label for the job's record, never a permission.
+        reason: z.enum(['agent_stopped']).optional(),
       },
     },
     async (args, extra) => {
@@ -371,6 +377,7 @@ export function registerModelTool(
           // By its own id, in any turn and any process: the session's other jobs go on.
           const record = await jobs.owned(args.cancel, session.sessionId);
           if (!record) return answer({ status: 'not_owned' });
+          cancelledBy.set(record.id, args.reason ?? 'parent_cancel');
           await fenceJob(record);
           return answer({ status: 'cancelled' });
         }
@@ -379,6 +386,7 @@ export function registerModelTool(
         const owned = running?.sessionId === session.sessionId ? running : session;
         const pending = await (await getHandoff()).store.pending(owned.sessionId, owned.turnId);
         if (pending?.id !== args.cancel) return answer({ status: 'not_owned' });
+        cancelledBy.set(pending.id, 'parent_cancel');
         await fence(owned);
         return answer({ status: 'cancelled' });
       }
@@ -610,6 +618,19 @@ export function registerModelTool(
             }
           }
           const abort = new AbortController();
+          // WHO OR WHAT ABORTED IT, read at the abort itself: a cancel call names its
+          // sender, this process ending is the session's end, and any other abort is the
+          // host ending the accept call. A job once read `cancelled` with no way to tell.
+          let abortedBy: 'parent_cancel' | 'agent_stopped' | 'session_ended' | 'host_aborted' =
+            'host_aborted';
+          abort.signal.addEventListener(
+            'abort',
+            () => {
+              abortedBy = cancelledBy.get(job.id) ?? (sessionEnding ? 'session_ended' : abortedBy);
+              cancelledBy.delete(job.id);
+            },
+            { once: true },
+          );
           const stop = () => abort.abort();
           signal.addEventListener('abort', stop, { once: true });
           if (signal.aborted) stop();
@@ -767,8 +788,11 @@ export function registerModelTool(
               // Claude Code did not start in its window: nothing ran, no inference was bought,
               // and the unchanged repeat of the offered call runs native with no second fee.
               const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
+              const endedBy = abort.signal.aborted ? abortedBy : workerEnd(stop);
               const stopped = {
                 status: abort.signal.aborted ? 'cancelled' : notStarted ? 'not_started' : 'unknown',
+                endedBy,
+                ended: WORKER_ENDS[endedBy],
                 stopReason: stop,
                 elapsedMs: Date.now() - started,
                 ...counts(),
@@ -818,6 +842,7 @@ export function registerModelTool(
   );
   const shutdown = async () => {
     await repaired;
+    sessionEnding = true;
     await lifecycle.stop();
     for (const running of controllers.values()) running.abort.abort();
     await Promise.allSettled([...controllers.values()].map((c) => c.done));
