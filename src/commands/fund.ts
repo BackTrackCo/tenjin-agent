@@ -28,6 +28,7 @@ import {
   readLinkStatus,
   recallLink,
   rememberLink,
+  rememberStartBalance,
   STATUS_GRACE_MS,
   tokenExpiry,
   tokenOf,
@@ -502,31 +503,8 @@ async function fundByUsdc(
   const startBalance = c.shouldWait
     ? await c.readBalance()
     : await withTimeout(c.readBalance(), BASELINE_TIMEOUT_MS);
-  // Remembered with no url and no token: `tenjin fund` finds no status to
-  // follow, so it never reads this as a checkout on its way. A live checkout
-  // link with a token is kept instead: replacing it would hide a card payment
-  // still landing from the next `tenjin fund`, which would open a second
-  // checkout. Its starting balance drops to this reading when that is lower
-  // or it has none (its own read failed, or money was spent since), so
-  // `tenjin balance --wait` counts a transfer that lands before it starts,
-  // and a card payment still rises above it.
   if (startBalance !== undefined) {
-    const prior = await recallLink(ctx.dataDir, address, now());
-    if (prior?.token === undefined) {
-      const issuedAt = now();
-      await rememberLink(ctx.dataDir, {
-        version: 1,
-        address: address.toLowerCase(),
-        issuedAt,
-        expiresAt: issuedAt + USDC_WAIT_MS,
-        startBalanceAtomic: startBalance.toString(),
-      });
-    } else if (
-      prior.startBalanceAtomic === undefined ||
-      startBalance < BigInt(prior.startBalanceAtomic)
-    ) {
-      await rememberLink(ctx.dataDir, { ...prior, startBalanceAtomic: startBalance.toString() });
-    }
+    await rememberStartBalance(ctx.dataDir, address, startBalance, now(), USDC_WAIT_MS);
   }
   if (human) {
     const err = ctx.io.stderr;
