@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -95,6 +96,75 @@ describe('withFileLock', () => {
     expect((err as LockTimeoutError).lockPath).toBe(lock);
     expect((err as Error).message).toContain(lock);
     expect((err as Error).message).toMatch(/remove that directory/);
+  });
+});
+
+describe('withFileLock with takeOverDead', () => {
+  // A pid that ran and ended: nothing answers for it.
+  const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+  const leave = (lock: string, meta?: string): void => {
+    mkdirSync(lock);
+    if (meta !== undefined) writeFileSync(join(lock, 'meta'), meta);
+  };
+  const quick = { timeoutMs: 80, retryMs: 10 };
+
+  it('runs after a holder that died with the lock, and only when asked to', async () => {
+    const lock = join(dir, 'dead.lock');
+    leave(lock, JSON.stringify({ pid: deadPid(), acquiredAt: Date.now() }));
+    await expect(withFileLock(lock, async () => 'ran', quick)).rejects.toBeInstanceOf(
+      LockTimeoutError,
+    );
+    expect(await withFileLock(lock, async () => 'ran', { ...quick, takeOverDead: true })).toBe(
+      'ran',
+    );
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('never takes a lock whose holder is running', async () => {
+    const lock = join(dir, 'live.lock');
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: 0 }));
+    await expect(
+      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+    expect(existsSync(join(lock, 'meta'))).toBe(true);
+  });
+
+  it('takes a lock with no readable holder only once it is older than 10 s', async () => {
+    const lock = join(dir, 'ownerless.lock');
+    leave(lock, '{"pid":');
+    await expect(
+      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+    const old = new Date(Date.now() - 11_000);
+    utimesSync(lock, old, old);
+    expect(await withFileLock(lock, async () => 'ran', { ...quick, takeOverDead: true })).toBe(
+      'ran',
+    );
+  });
+
+  it('lets waiters on one dead lock run one at a time, each landing its update', async () => {
+    const lock = join(dir, 'raced.lock');
+    const file = join(dir, 'count');
+    await writeFile(file, '0');
+    leave(lock, JSON.stringify({ pid: deadPid(), acquiredAt: Date.now() }));
+    let inside = 0;
+    await Promise.all(
+      Array.from({ length: 6 }, () =>
+        withFileLock(
+          lock,
+          async () => {
+            expect(++inside).toBe(1);
+            const count = Number(await readFile(file, 'utf8'));
+            await delay(2);
+            await writeFile(file, String(count + 1));
+            inside--;
+          },
+          { timeoutMs: 2_000, retryMs: 5, takeOverDead: true },
+        ),
+      ),
+    );
+    expect(await readFile(file, 'utf8')).toBe('6');
+    expect(readdirSync(dir)).toEqual(['count']);
   });
 });
 
