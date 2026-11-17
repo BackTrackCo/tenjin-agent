@@ -9,7 +9,7 @@ export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
 export const CLAUDE_DEEPSEEK_WORKER_MODEL = `${CLAUDE_DEEPSEEK_MODEL}[1m]`;
 export type ClaudeWorkerPermissionMode =
   'default' | 'acceptEdits' | 'auto' | 'dontAsk' | 'bypassPermissions';
-// A plan-mode parent stays native; a bypass parent's worker keeps the sandbox and hard denies.
+// A plan-mode parent stays native; a bypass parent's worker keeps the sandbox and the secrets boundary.
 const MODES = new Set(['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']);
 const CLEARED_ENV = [
   'CLAUDE_CODE_USE_BEDROCK',

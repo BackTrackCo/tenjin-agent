@@ -1593,9 +1593,9 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
   },
 );
 
-it('denies credential probes and pushes to main in the worker hook whatever the mode', async () => {
+it('refuses a credential probe in the worker hook whatever the mode, and leaves a push to the mode', async () => {
   const decisions: unknown[] = [];
-  sdkResult({ subtype: 'success', result: 'floor fixture' }, undefined, async () => {
+  sdkResult({ subtype: 'success', result: 'probe fixture' }, undefined, async () => {
     const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
     for (const command of [
       'security find-generic-password -s gh:github.com',
@@ -1619,7 +1619,8 @@ it('denies credential probes and pushes to main in the worker hook whatever the 
   expect(decisions[0]).toMatchObject({
     hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: /not run/ },
   });
-  expect(decisions[1]).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  // No hook decision: the native permission flow of the accepted mode judges both pushes.
+  expect(decisions[1]).toEqual({});
   expect(decisions[2]).toEqual({});
 });
 
