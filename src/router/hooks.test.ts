@@ -3009,6 +3009,7 @@ describe('a discovered service', () => {
         'tolerant',
         'settings',
         'mcp',
+        'funding',
       ],
     });
     // The footer names the seller, and the id binds this session for `request`.
@@ -3144,6 +3145,7 @@ describe('a discovered service', () => {
       'tolerant',
       'settings',
       'mcp',
+      'funding',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3168,6 +3170,7 @@ describe('a discovered service', () => {
       'bazaar',
       'settings',
       'mcp',
+      'funding',
     ]);
   });
 
@@ -3469,6 +3472,7 @@ describe('a question to the user', () => {
         'tolerant',
         'settings',
         'mcp',
+        'funding',
       ],
     });
   });

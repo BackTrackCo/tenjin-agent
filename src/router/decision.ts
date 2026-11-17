@@ -747,6 +747,10 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
 
+/** A catalog task id as the router sends it: letters and spaces, which go into
+ *  the person's sentence as they are. */
+const TaskCategorySchema = z.string().regex(/^[a-z][A-Za-z ]{0,63}$/);
+
 function envelope<T extends z.ZodTypeAny>(decision: T) {
   return z.object({
     schemaVersion: z.literal(1),
@@ -763,6 +767,9 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
     /** A plain sentence about the CALL, such as an id that had expired. Never a
      *  failure: the decision beside it ran anyway. */
     note: z.string().max(500).optional(),
+    /** Asked for with {@link FUNDING_ACCEPT}: the answer offers no tool only
+     *  because the wallet covered none of a paid offer's options. */
+    unfunded: z.object({ category: TaskCategorySchema }).optional(),
     jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
   });
 }
@@ -1045,6 +1052,22 @@ export const CLIENT_ACCEPTS: readonly string[] = [
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
 export const FREE_QUERY_ACCEPT = 'free-query';
+/**
+ * Sent on the hook's routing call only: the hook tells the person when funds
+ * would let a paid tool run, so it asks for `unfunded`, the task of an offer the
+ * router held back because the wallet covered none of its options. A router
+ * that predates it drops the token, as it drops any it does not know.
+ */
+export const FUNDING_ACCEPT = 'funding';
+
+const PaidOfferBodySchema = z.object({ paidOffer: z.object({ category: TaskCategorySchema }) });
+
+/** The task an unpaid 402's body names for the paid offer it quotes, or none:
+ *  a 402 with no decision, and every router from before the body, name none. */
+export function paidOfferCategory(body: unknown): string | undefined {
+  const parsed = PaidOfferBodySchema.safeParse(body);
+  return parsed.success ? parsed.data.paidOffer.category : undefined;
+}
 
 /** Every feature this build has, which a `requires` list is read against:
  *  `bazaar` included, which it runs whether or not it asks for one. */
@@ -1052,6 +1075,7 @@ const CLIENT_FEATURES: ReadonlySet<string> = new Set([
   ...CLIENT_ACCEPTS,
   BAZAAR_ACCEPT,
   FREE_QUERY_ACCEPT,
+  FUNDING_ACCEPT,
   SETTINGS_ACCEPT,
   MCP_ACCEPT,
 ]);
@@ -1323,18 +1347,27 @@ export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
    *  ({@link isUnreachable}), so the call reads as that transport failure.
    *  `quotedAtomic`: the fee the router quoted, when the payer read one.
-   *  `answered`: the router answered a request of this call (its 402, say). */
+   *  `answered`: the router answered a request of this call (its 402, say).
+   *  `offerCategory`: the task of the paid offer that 402 quoted
+   *  ({@link paidOfferCategory}). */
   readonly unreached: FetchJsonFailure | undefined;
   readonly quotedAtomic: bigint | undefined;
   readonly answered: boolean;
+  readonly offerCategory: string | undefined;
   constructor(
     readonly why: string,
-    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint; answered?: boolean } = {},
+    opts: {
+      unreached?: FetchJsonFailure;
+      quotedAtomic?: bigint;
+      answered?: boolean;
+      offerCategory?: string;
+    } = {},
   ) {
     super(`routing fee not paid: ${why}`);
     this.unreached = opts.unreached;
     this.quotedAtomic = opts.quotedAtomic;
     this.answered = opts.answered === true;
+    this.offerCategory = opts.offerCategory;
   }
 }
 
@@ -1378,8 +1411,15 @@ export type DecisionOutcome<T> =
   /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
    *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
    *  the router quoted, when the payer read one. `answered`: the router
-   *  answered first, so it is reachable. */
-  | { status: 'skipped'; why: string; quotedAtomic?: bigint; answered?: true };
+   *  answered first, so it is reachable. `offerCategory`: the task of the
+   *  paid offer its 402 quoted, when it named one. */
+  | {
+      status: 'skipped';
+      why: string;
+      quotedAtomic?: bigint;
+      answered?: true;
+      offerCategory?: string;
+    };
 
 /**
  * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
@@ -1426,7 +1466,10 @@ export async function requestDecision(
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+            accepts: [
+              ...acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+              FUNDING_ACCEPT,
+            ],
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
             budgetMs: Math.min(5_000, Math.max(0, timeoutMs)),
@@ -1495,6 +1538,7 @@ async function sendPaid<R extends HookResponse | ToolResponse>(
       why: err.why,
       ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
       ...(err.answered ? { answered: true as const } : {}),
+      ...(err.offerCategory !== undefined ? { offerCategory: err.offerCategory } : {}),
     };
   }
   if (deps.route === undefined && response.ok && response.status === 402) {

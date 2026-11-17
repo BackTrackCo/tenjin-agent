@@ -81,6 +81,9 @@ export class FakeRouter {
   depositError: string | null = null;
   /** The `error` a deposit over {@link walletAtomic} is refused with. */
   insufficientError = INSUFFICIENT;
+  /** The task an unpaid routing 402's body names, as a router that decided a
+   *  paid offer before payment sends it; null is the `{}` of one from before. */
+  offerCategory: string | null = null;
   readonly requirement: PaymentRequirements;
   /** The router's fixed quote, offered second beside this answer's own when
    *  the fake is built with `legacy`, as the router does for released CLIs. */
@@ -161,7 +164,7 @@ export class FakeRouter {
       if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
       return json(warm ? WARM : this.body, 200);
     }
-    if (signature === null) return this.required(url.toString(), requirement);
+    if (signature === null) return this.required(url.toString(), requirement, warm);
     const decoded = decodePaymentSignatureHeader(signature);
     // The offer the voucher was signed for; the server charges at most it.
     const matched = BigInt(decoded.accepted?.amount ?? this.requirement.amount);
@@ -248,8 +251,15 @@ export class FakeRouter {
     };
   }
 
-  private required(url: string, requirement: PaymentRequirements = this.requirement): Response {
-    return json({}, 402, {
+  private required(
+    url: string,
+    requirement: PaymentRequirements = this.requirement,
+    warm = false,
+  ): Response {
+    // `warm` routes nothing, so its 402 names no offer.
+    const body =
+      warm || this.offerCategory === null ? {} : { paidOffer: { category: this.offerCategory } };
+    return json(body, 402, {
       'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
         x402Version: 2,
         resource: { url, description: 'routing', mimeType: 'application/json' },

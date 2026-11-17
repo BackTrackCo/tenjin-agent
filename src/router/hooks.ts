@@ -34,7 +34,13 @@ import {
 import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
 import { canSign, type SignVerdict } from './eligibility';
-import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import {
+  depositSentence,
+  fundingReminder,
+  fundsWouldPay,
+  unpaidSentence,
+  type RouteFor,
+} from './fee';
 import { termsNotice } from './terms-notice';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
@@ -1991,13 +1997,21 @@ async function decide(
     // The router answered (its 402, say) before the skip: it is reachable.
     if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
     footer.unpaid(outcome.why);
-    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
+    // Only a 402 that named a paid offer proves a paid tool fits; one with no
+    // decision, or from a router before the body, keeps the notice it had.
+    if (outcome.offerCategory !== undefined && fundsWouldPay(outcome.why)) {
+      await remind(deps, sessionId, outcome.why, outcome.offerCategory, now);
+    } else await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
   // ONLY A COMPLETED SIGNED PAYMENT establishes paid routing recovered.
-  // A free decision, or a background deposit, proves no such recovery.
-  if (outcome.status === 'decided' && route?.paid?.() === true) {
+  // A free decision, or a background deposit, proves no such recovery, and
+  // neither does an answer whose offer the wallet could not cover.
+  const unfunded = outcome.status === 'decided' ? outcome.decision.unfunded : undefined;
+  if (unfunded !== undefined) {
+    await remind(deps, sessionId, 'wallet_low', unfunded.category, now);
+  } else if (outcome.status === 'decided' && route?.paid?.() === true) {
     const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
     if (cleared !== null) deps.notice?.(cleared);
   }
@@ -2060,6 +2074,23 @@ async function tellOnce(
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);
+}
+
+/**
+ * THE FUNDING REMINDER, ON EVERY CALL whose paid offer the wallet could not
+ * pay, in the leg's `systemMessage` and in place of the wallet notice. Its
+ * reason is still marked told, so the session hears paid routing work again
+ * once funds let a call pay.
+ */
+async function remind(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  category: string,
+  now: number,
+) {
+  await noticeFor(deps.dataDir, sessionId, why, now).catch(() => undefined);
+  deps.notice?.(fundingReminder(category));
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */
