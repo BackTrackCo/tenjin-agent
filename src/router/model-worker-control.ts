@@ -18,6 +18,7 @@ export type WorkerStop = {
     | 'model_call_failed'
     | 'model_call_timeout'
     | 'payment_refused'
+    | 'provider_failed'
     | 'worker_execution';
   turns?: number;
   /** The router's HTTP status, when a model call got an answer that was not a result. */
@@ -36,7 +37,7 @@ export class ModelCallFailed extends Error {
   constructor(
     message: string,
     readonly detail: {
-      cause: 'failed' | 'timeout' | 'budget' | 'payment_refused';
+      cause: 'failed' | 'timeout' | 'budget' | 'payment_refused' | 'provider';
       status?: number;
       payer?: string;
     },
@@ -71,7 +72,9 @@ export function modelCallStop(error: unknown): unknown {
           ? 'model_call_timeout'
           : cause === 'payment_refused'
             ? 'payment_refused'
-            : 'model_call_failed',
+            : cause === 'provider'
+              ? 'provider_failed'
+              : 'model_call_failed',
     ...(status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599
       ? { status }
       : {}),
@@ -110,6 +113,7 @@ export const WORKER_ENDS = {
   model_call_timeout:
     'Its model call through Tenjin timed out; that call stays reserved until its receipt is read.',
   payment_refused: 'Tenjin refused to pay for its next model call, and sent nothing for it.',
+  provider: 'DeepSeek could not take its next request, and nothing was charged for that call.',
   worker_error: 'The worker or the provider failed.',
 } as const;
 export type WorkerEnd = keyof typeof WORKER_ENDS;
@@ -130,6 +134,8 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
     case 'model_call_timeout':
     case 'payment_refused':
       return stop.reason;
+    case 'provider_failed':
+      return 'provider';
     case 'startup_timeout':
       return 'not_started';
     default:

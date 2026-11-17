@@ -20,6 +20,35 @@ import {
 } from './model-limits';
 import { ModelCallFailed, timedOut } from './model-worker-control';
 
+/**
+ * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
+ * `incomplete_model_response` and `model_response_too_large`): it marks that call's record
+ * with no charge and settles nothing on the error answer.
+ */
+const PROVIDER_FAILURES = new Set([
+  'model_inference_failed',
+  'incomplete_model_response',
+  'model_response_too_large',
+]);
+
+/** An error answer's fixed code (`{error: {code}}`), never its message. */
+async function errorCode(response: Response): Promise<{ code?: string }> {
+  try {
+    const code = ((await response.json()) as { error?: { code?: unknown } })?.error?.code;
+    return typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? { code } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The router's record says a call cost nothing: its voucher cancelled, or it failed unpaid. */
+function costNothing(server: { state: string; voucherState: string }): boolean {
+  return (
+    server.voucherState === 'cancelled' ||
+    (server.state === 'unknown' && server.voucherState !== 'accepted')
+  );
+}
+
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
   calls: z.record(
@@ -417,6 +446,7 @@ export class ModelTransport {
     }
     let signingStarted = false;
     let paymentSent = false;
+    let paidError: { status: number; code?: string } | undefined;
     let first = true;
     const cachedFetch: typeof fetch = async (input, init) => {
       signal.throwIfAborted();
@@ -427,14 +457,20 @@ export class ModelTransport {
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : undefined),
       );
-      if (headers.has('payment-signature')) paymentSent = true;
-      return boundedResponse(
+      const paying = headers.has('payment-signature');
+      if (paying) paymentSent = true;
+      const response = boundedResponse(
         await fetchFn(input, {
           ...init,
           signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
         }),
         resultLimit,
       );
+      // The router's answer to the signed request when it is an error: its status and
+      // its fixed error code, read from a copy, never its message.
+      if (paying && response.status >= 400)
+        paidError = { status: response.status, ...(await errorCode(response.clone())) };
+      return response;
     };
     const payer = new Payer({
       ...payerDeps,
@@ -505,6 +541,28 @@ export class ModelTransport {
           { cause: failure },
         );
       }
+      // THE PROVIDER FAILED THE CALL: the router says so in a fixed code. Its own record
+      // then says whether anything was charged; a call that cost nothing is released at
+      // once, with the same read and rule as `reconcile`, and nothing is bought again.
+      if (paidError?.code !== undefined && PROVIDER_FAILURES.has(paidError.code)) {
+        const server = await this.recover(body.invocationId, signal, protocol).catch(() => null);
+        if (server && costNothing(server)) {
+          await modelLock(`${path}.lock`, async () => {
+            const state = await load();
+            const call = state.calls[key];
+            if (call?.invocationId === body.invocationId && !call.completed) {
+              state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
+              delete state.calls[key];
+              await writePrivate(path, JSON.stringify(state));
+            }
+          });
+          throw new ModelCallFailed(
+            'The model provider failed the call; nothing was charged for it',
+            { cause: 'provider', status: paidError.status },
+            { cause: failure },
+          );
+        }
+      }
       // The payer's own code says how far the paid call went, such as `payment_failed`
       // when the router answered the signed request with an error.
       throw new ModelCallFailed(
@@ -512,6 +570,7 @@ export class ModelTransport {
         {
           cause: timedOut(failure) ? 'timeout' : 'failed',
           ...(failure instanceof RouteSkipped ? { payer: failure.why } : {}),
+          ...(paidError ? { status: paidError.status } : {}),
         },
         { cause: failure },
       );
@@ -625,9 +684,7 @@ export class ModelTransport {
         const server = await this.recover(call.invocationId, signal, protocol).catch(() => null);
         if (!server) continue;
         const spent = server.state === 'completed' && server.voucherState === 'accepted';
-        const free =
-          server.voucherState === 'cancelled' ||
-          (server.state === 'unknown' && server.voucherState !== 'accepted');
+        const free = costNothing(server);
         if (!spent && !free) continue;
         const actual = spent ? BigInt(server.actualAtomic) : 0n;
         await modelLock(`${path}.lock`, async () => {

@@ -164,6 +164,7 @@ it.each([
   ['model_call_failed', 'model_call_failed'],
   ['model_call_timeout', 'model_call_timeout'],
   ['payment_refused', 'payment_refused'],
+  ['provider_failed', 'provider'],
   ['structured_output_guard', 'worker_error'],
   ['worker_execution', 'worker_error'],
 ] as const)('names a %s stop as %s, with words for the parent', (reason, end) => {

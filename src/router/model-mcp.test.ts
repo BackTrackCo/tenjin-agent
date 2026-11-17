@@ -1307,6 +1307,7 @@ it.each([
   [{ kind: 'harness_limit', reason: 'turn_guard', turns: 3 }, 'turn_limit'],
   [{ kind: 'execution_failure', reason: 'model_call_failed', status: 502 }, 'model_call_failed'],
   [{ kind: 'execution_failure', reason: 'model_call_timeout' }, 'model_call_timeout'],
+  [{ kind: 'execution_failure', reason: 'provider_failed', status: 500 }, 'provider'],
   [
     { kind: 'execution_failure', reason: 'model_call_failed', payer: 'wallet_low' },
     'model_call_failed',

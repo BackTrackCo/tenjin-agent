@@ -1296,6 +1296,10 @@ it.each([
   [{ cause: 'timeout' }, { reason: 'model_call_timeout' }],
   [{ cause: 'budget' }, { kind: 'harness_limit', reason: 'budget_guard' }],
   [{ cause: 'payment_refused' }, { reason: 'payment_refused' }],
+  [
+    { cause: 'provider', status: 500 },
+    { reason: 'provider_failed', status: 500 },
+  ],
 ] as const)(
   'ends a worker whose model call failed (%o) with that cause as its stop',
   async (detail, stop) => {

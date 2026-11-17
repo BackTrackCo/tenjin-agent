@@ -838,8 +838,9 @@ it('says how a model call failed: the status of an answer that is not a result, 
       : real(input, init);
   const paid = await failure();
   expect(paid).toBeInstanceOf(ModelCallFailed);
-  // The payer's code says the router answered the signed request with an error.
-  expect(paid?.detail).toEqual({ cause: 'failed', payer: 'payment_failed' });
+  // The payer's code says the router answered the signed request with an error. The
+  // router's record here says the call completed, so it stays reserved for reconciling.
+  expect(paid?.detail).toEqual({ cause: 'failed', payer: 'payment_failed', status: 500 });
   expect(paid?.message).toMatch(/uncertain/);
   expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
   // A quote over what is left of the ceiling is the job's budget.
@@ -849,6 +850,31 @@ it('says how a model call failed: the status of an answer that is not a result, 
     .messages(small.job, { messages: [] }, new AbortController().signal)
     .catch((error: unknown) => error as ModelCallFailed);
   expect(over?.detail).toEqual({ cause: 'budget' });
+});
+
+// Live case: the provider's account was empty, so the router failed every paid call; the
+// worker's job ended `unknown` and each call stayed reserved as uncertain.
+it('releases at once a call the provider failed when the router record says it cost nothing', async () => {
+  const f = await fixture();
+  const real = f.deps.fetchImpl!;
+  f.setRecoveryState('unknown');
+  f.setVoucher('cancelled');
+  f.deps.fetchImpl = async (input, init) =>
+    new Request(input, init).headers.has('payment-signature')
+      ? Response.json(
+          { error: { code: 'model_inference_failed', message: 'Model invocation failed' } },
+          { status: 500 },
+        )
+      : real(input, init);
+  const failed = await f
+    .make()
+    .messages(f.job, { messages: [] }, new AbortController().signal)
+    .catch((error: unknown) => error as ModelCallFailed);
+  expect(failed).toBeInstanceOf(ModelCallFailed);
+  expect(failed?.detail).toEqual({ cause: 'provider', status: 500 });
+  // One free read of the router's record, nothing bought again, and the quote released.
+  expect(f.signedGets()).toBe(1);
+  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
 });
 
 it('retains exposure when signing starts but fails before a paid request is sent', async () => {
