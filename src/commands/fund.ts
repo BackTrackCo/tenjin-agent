@@ -237,6 +237,21 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     const expiresAt =
       (token !== undefined ? tokenExpiry(token) : undefined) ??
       issuedAt + (hosted ? HOSTED_LIFETIME_MS : LINK_LIFETIME_MS);
+    // A redeem link is not a payment: it keeps a checkout still landing on
+    // record, as `--usdc` does, so the next `tenjin fund` waits on that payment
+    // instead of opening a second checkout. Only the starting balance is kept.
+    if (opts.code !== undefined) {
+      if (startBalance !== undefined) {
+        await rememberStartBalance(
+          ctx.dataDir,
+          address,
+          startBalance,
+          issuedAt,
+          expiresAt - issuedAt,
+        );
+      }
+      return { url, ...(token !== undefined ? { token } : {}), expiresAt, hosted };
+    }
     // Every link is remembered, a hosted one too: its starting balance is what
     // a later `tenjin balance --wait` measures an arrival from. Only a Tenjin
     // link has a token, so only it has a status to follow.

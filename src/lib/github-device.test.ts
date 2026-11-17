@@ -201,6 +201,15 @@ describe('pollForToken', () => {
       ok: false,
       reason: 'network',
     });
+    // A GitHub that answers only 5xx is down too, not a code left to expire.
+    const failing = github([
+      { status: 503, json: {} },
+      { status: 503, json: {} },
+      { status: 503, json: {} },
+    ]);
+    expect(
+      await pollForToken('Iv1.abc123', CODE, { fetchImpl: failing.fetchImpl, ...clock() }),
+    ).toEqual({ ok: false, reason: 'network' });
   });
 
   it('any other OAuth error is a refusal that names it', async () => {

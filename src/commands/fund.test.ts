@@ -807,6 +807,38 @@ describe('runFund: the link, its context and its status', () => {
     expect(server.mints[2]!.body).not.toHaveProperty('machineHash');
   });
 
+  it('a redeem link keeps a checkout still landing on record', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const checkout = pageLink(Date.now() + 600_000);
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: fundServer([checkout]).fetchImpl,
+      wait: false,
+      open: false,
+    });
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: fundServer([pageLink(Date.now() + 500_000)]).fetchImpl,
+      wait: false,
+      open: false,
+      code: 'NCSTATE26',
+    });
+    // The card payment is still landing: the next fund waits on that checkout, not the code's page.
+    const again = fundServer(
+      [pageLink(Date.now() + 400_000)],
+      [[200, { state: 'paying', updatedAt: 'x' }]],
+    );
+    const res = await fund(makeCtx(), {
+      provider,
+      fetchImpl: again.fetchImpl,
+      wait: false,
+      open: false,
+    });
+    expect(again.mints).toHaveLength(0);
+    expect(res.data).toMatchObject({ paymentInFlight: true, checkoutUrl: checkout });
+  });
+
   it('waits on a payment already on its way instead of opening a second checkout', async () => {
     const { provider } = fakeProvider();
     const link = pageLink(Date.now() + 600_000);

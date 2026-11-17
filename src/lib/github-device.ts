@@ -127,7 +127,8 @@ export async function pollForToken(
       { client_id: clientId, device_code: code.deviceCode, grant_type: GRANT_TYPE },
       opts,
     );
-    if (!res.ok) {
+    // No answer and a 5xx both count toward the limit; only a real answer resets it.
+    if (!res.ok || res.status >= 500) {
       networkFailures += 1;
       if (networkFailures >= MAX_NETWORK_FAILURES) return { ok: false, reason: 'network' };
       continue;
@@ -147,11 +148,6 @@ export async function pollForToken(
     }
     if (error === 'expired_token') return { ok: false, reason: 'expired' };
     if (error === 'access_denied') return { ok: false, reason: 'denied' };
-    if (res.status >= 500) {
-      networkFailures += 1;
-      if (networkFailures >= MAX_NETWORK_FAILURES) return { ok: false, reason: 'network' };
-      continue;
-    }
     return {
       ok: false,
       reason: 'refused',
