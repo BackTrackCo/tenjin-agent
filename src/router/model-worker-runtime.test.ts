@@ -1620,9 +1620,33 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
     ).resolves.toBe('finished');
     const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
     if (mode !== 'default') {
-      // Auto and bypass: nothing may wait on a person dialog.
-      expect(sent.permissionPrompts).toBe('none');
-      expect(sent.canUseTool).toBeUndefined();
+      // Auto and bypass: nothing may wait on a person dialog, so each ask is answered at once
+      // and the person's own permission surface is never reached.
+      const ask = (reason: string, command = 'WT=/repo; cd "$WT"; ls') =>
+        sent.canUseTool!(
+          'Bash',
+          { command },
+          {
+            signal: new AbortController().signal,
+            decisionReason: reason,
+            toolUseID: 't',
+            requestId: 'r',
+          },
+        );
+      // The read block's ask about a command whose paths cannot be worked out: the sandbox
+      // refuses a read outside consent at the read, so the command runs.
+      expect(
+        await ask(
+          'ls names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)',
+        ),
+      ).toMatchObject({ behavior: 'allow' });
+      // Any other ask is refused, in words about this one call and not the tool.
+      const refused = await ask('The classifier could not decide this action');
+      expect(refused).toMatchObject({ behavior: 'deny' });
+      expect((refused as { message: string }).message).toContain('Only this call was refused');
+      expect((refused as { message: string }).message).not.toMatch(
+        /do not retry|rest of this session/,
+      );
       expect(sent.disallowedTools).toContain('AskUserQuestion');
       expect(sent.allowDangerouslySkipPermissions).toBe(mode === 'bypassPermissions' || undefined);
     } else {

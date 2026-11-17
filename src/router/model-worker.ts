@@ -42,6 +42,7 @@ import {
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
 import { workerCredentialProbe } from './worker-credential-probes';
+import { sandboxJudgesRead, unattendedDenial } from './worker-unattended';
 import {
   jobScopedRules,
   type WorkerPermissionAnswer,
@@ -571,9 +572,8 @@ async function runQualifiedWorker(
           ...(nobodyAsked ? ['AskUserQuestion'] : []),
         ],
         // Auto mode: the native classifier judges each call that needs a decision.
-        // Auto and bypass: a call that would still prompt is denied at once with the
-        // reason, as for a native agent with no approval surface. No call waits for a person.
-        ...(nobodyAsked ? { permissionPrompts: 'none' as const } : {}),
+        // Auto and bypass: a call that would still prompt is answered at once below,
+        // by `worker-unattended`. No call waits for a person.
         ...(permissionMode === 'bypassPermissions'
           ? { allowDangerouslySkipPermissions: true }
           : {}),
@@ -664,54 +664,54 @@ async function runQualifiedWorker(
             },
           ],
         },
-        ...(nobodyAsked
-          ? {}
-          : {
-              canUseTool: async (
-                tool: string,
-                input: Record<string, unknown>,
-                context: {
-                  signal: AbortSignal;
-                  suggestions?: PermissionUpdate[];
-                  suppressAlwaysAllowRule?: boolean;
-                  title?: string;
-                  description?: string;
-                  decisionReason?: string;
-                },
-              ) => {
-                assertCurrentMode();
-                if (permissionMode === 'dontAsk')
-                  return {
-                    behavior: 'deny',
-                    message: 'Inherited dontAsk mode does not authorize a prompt',
-                  };
-                const key = JSON.stringify([tool, input]);
-                if (allowedForJob.has(key)) return { behavior: 'allow', updatedInput: input };
-                const allowed = await options.permission(tool, input, context.signal, {
-                  ...(context.title ? { title: context.title } : {}),
-                  ...(context.description ? { description: context.description } : {}),
-                  ...(context.decisionReason ? { reason: context.decisionReason } : {}),
-                });
-                assertCurrentMode();
-                if (allowed === 'job') {
-                  allowedForJob.add(key);
-                  const rules = context.suppressAlwaysAllowRule
-                    ? []
-                    : jobScopedRules(context.suggestions);
-                  return {
-                    behavior: 'allow',
-                    updatedInput: input,
-                    ...(rules.length ? { updatedPermissions: rules } : {}),
-                  };
-                }
-                return allowed
-                  ? { behavior: 'allow', updatedInput: input }
-                  : {
-                      behavior: 'deny',
-                      message: 'User or inherited permission policy declined this action',
-                    };
-              },
-            }),
+        canUseTool: async (
+          tool: string,
+          input: Record<string, unknown>,
+          context: {
+            signal: AbortSignal;
+            suggestions?: PermissionUpdate[];
+            suppressAlwaysAllowRule?: boolean;
+            title?: string;
+            description?: string;
+            decisionReason?: string;
+          },
+        ) => {
+          assertCurrentMode();
+          if (nobodyAsked)
+            return sandboxJudgesRead(tool, input, context.decisionReason)
+              ? { behavior: 'allow', updatedInput: input }
+              : { behavior: 'deny', message: unattendedDenial(context.decisionReason) };
+          if (permissionMode === 'dontAsk')
+            return {
+              behavior: 'deny',
+              message: 'Inherited dontAsk mode does not authorize a prompt',
+            };
+          const key = JSON.stringify([tool, input]);
+          if (allowedForJob.has(key)) return { behavior: 'allow', updatedInput: input };
+          const allowed = await options.permission(tool, input, context.signal, {
+            ...(context.title ? { title: context.title } : {}),
+            ...(context.description ? { description: context.description } : {}),
+            ...(context.decisionReason ? { reason: context.decisionReason } : {}),
+          });
+          assertCurrentMode();
+          if (allowed === 'job') {
+            allowedForJob.add(key);
+            const rules = context.suppressAlwaysAllowRule
+              ? []
+              : jobScopedRules(context.suggestions);
+            return {
+              behavior: 'allow',
+              updatedInput: input,
+              ...(rules.length ? { updatedPermissions: rules } : {}),
+            };
+          }
+          return allowed
+            ? { behavior: 'allow', updatedInput: input }
+            : {
+                behavior: 'deny',
+                message: 'User or inherited permission policy declined this action',
+              };
+        },
       },
     });
     controller.signal.throwIfAborted();
