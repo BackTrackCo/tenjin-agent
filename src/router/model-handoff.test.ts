@@ -167,6 +167,8 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   expect(instruction).toContain(
     'To keep it native, send the original Agent call again unchanged; that repeat costs no second routing fee.',
   );
+  // Either choice is one call and no narration: a parent once explained each veto in prose.
+  expect(instruction).toContain('as one call with no comment on the choice');
   expect(instruction).not.toContain('tenjin-native');
   expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
   // The person typed while the parent worked, so its next calls land in a later turn.

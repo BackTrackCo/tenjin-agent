@@ -557,7 +557,7 @@ export class ModelHandoff {
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
-      } You retain the final veto. No worker started.`,
+      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No worker started.`,
     };
   }
 }

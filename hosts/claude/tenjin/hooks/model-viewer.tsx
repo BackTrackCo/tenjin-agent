@@ -29,6 +29,18 @@ const STATE = { plugin: 'tenjin', key: 'modelViewers' } as const;
 const WORKERS = { plugin: 'tenjin', key: 'modelWorkers' } as const;
 const TRANSCRIPTS = { plugin: 'tenjin', key: 'modelTranscripts' } as const;
 const ASSIGNMENTS = { plugin: 'tenjin', key: 'modelAssignments' } as const;
+const OFFERS = { plugin: 'tenjin', key: 'modelOffers' } as const;
+/** How long the CLI keeps an offer open (`model-job.ts`). */
+const OFFER_MS = 15 * 60_000;
+/** Open offers by what their held call asked, so its unchanged repeat is known as the veto it is. */
+const offerCalls = new Map<string, string>();
+function callKey(input: Json): string {
+  return JSON.stringify([
+    typeof input.prompt === 'string' ? input.prompt.trim() : '',
+    typeof input.description === 'string' ? input.description.trim() : '',
+    input.subagent_type ?? 'general-purpose',
+  ]);
+}
 /**
  * What the viewer agent is told. Its record's description follows, so the
  * transcript's first message can be drawn as the worker's real assignment.
@@ -316,6 +328,9 @@ export async function rememberModelOffer(
       );
       if (assignment && current.records.some((r) => r.offerId === offerId))
         await $.state.set({ ...ASSIGNMENTS, id: offerId }, plain(assignment, ASSIGNMENT_CHARS));
+      await $.state.set({ ...OFFERS, id: offerId }, { at: await $.clock.now(), state: 'offered' });
+      if (offerCalls.size >= 64) offerCalls.delete(offerCalls.keys().next().value!);
+      offerCalls.set(callKey(nativeInput), offerId);
       if (released) await $.state.set({ ...ASSIGNMENTS, id: released }, '');
     }
   } catch {
@@ -968,6 +983,30 @@ export function registerModelViewer(on: On): void {
     deny: "This read is the Tenjin plugin's own, for the DeepSeek worker's viewer. A worker's result arrives by itself: as the result of your subagent call, or as that task's notification when the call was moved to the background. Do not check on it. If someone asks how it is doing, say it is still running and that they can open the DeepSeek agent in the agent list. To stop it, call subagent with cancel.",
   }));
 
+  // THE VETO IS THE SAME CALL SENT AGAIN, which the CLI lets run native. Its offer
+  // is then settled, and its row gives way to the native call's own: one row a task.
+  on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
+    try {
+      const offerId = e.agentId === undefined ? offerCalls.get(callKey(e as Json)) : undefined;
+      if (offerId !== undefined) {
+        const ref = { ...OFFERS, id: offerId };
+        const [offer, worker, now] = await Promise.all([
+          $.state.get(ref),
+          $.state.get({ ...WORKERS, id: offerId }),
+          $.clock.now(),
+        ]);
+        // Open, never accepted: this call is its repeat.
+        if (offer.value?.state === 'offered' && !worker.value && now - offer.value.at <= OFFER_MS) {
+          await $.state.set(ref, { ...offer.value, state: 'native' });
+          offerCalls.delete(callKey(e as Json));
+        }
+      }
+    } catch {
+      /* Display only. */
+    }
+    return next(e);
+  });
+
   on('tool.call', { tool: ACCEPT }, async ($, e, next) => {
     // ONLY A HELD CALL ASKS FOR AN OFFER. `capture` is this mod's own transport,
     // sent for an Agent, Task or SendMessage call it holds. Sent by the model it
@@ -976,6 +1015,19 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin makes an offer only for an Agent, Task or SendMessage call it holds. Call that tool; never send capture yourself.',
       };
+    // A cancelled offer is settled too: its row has nothing left to offer.
+    if (e.agentId === undefined && short(e.cancel) && UUID.test(e.cancel)) {
+      const outcome = await next(e);
+      try {
+        const ref = { ...OFFERS, id: e.cancel };
+        const offer = (await $.state.get(ref)).value;
+        if (offer && json(outcome.text)?.status === 'cancelled')
+          await $.state.set(ref, { ...offer, state: 'cancelled' });
+      } catch {
+        /* Display only. */
+      }
+      return outcome;
+    }
     // Capture/cancel calls and deterministic viewer calls are never execution accepts.
     if (
       e.agentId !== undefined ||
@@ -1377,6 +1429,26 @@ export function registerModelViewer(on: On): void {
     if (tool === 'Agent' || tool === 'Task') {
       const held = heldOffer(output);
       if (!held) return next(e);
+      const offerId = String(record(output)?.agentId ?? '').slice(13);
+      if (held !== 'unavailable' && UUID.test(offerId)) {
+        const [offer, worker, now] = await Promise.all([
+          $.state.get({ ...OFFERS, id: offerId }),
+          $.state.get({ ...WORKERS, id: offerId }),
+          $.clock.now(),
+        ]);
+        // ONE ROW A TASK. An offer that was accepted, kept native by its repeated
+        // call, cancelled or left to expire is settled: the worker's row or the
+        // native call's own row is the task's row, and this one draws nothing.
+        // ctrl+o still shows the held call and its offer.
+        if (
+          worker.value ||
+          (offer.value && (offer.value.state !== 'offered' || now - offer.value.at > OFFER_MS))
+        ) {
+          if (e.props.isExpanded === true) return next(e);
+          const { Box } = $.ui.resolve(e);
+          return <Box display="none" />;
+        }
+      }
       return workerRow($.ui.resolve(e), {
         state: 'held',
         name: tool,

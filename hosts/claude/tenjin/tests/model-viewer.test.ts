@@ -59,6 +59,7 @@ function setup(_$: Engine, on: On) {
     cancellations: [] as unknown[],
     captures: [] as { input: Record<string, unknown>; tool: string }[],
     nativeCalls: [] as unknown[],
+    keepNative: false,
     accepted: 0,
     snapshot: undefined as TenjinModelViewerState | undefined,
     liveFile: true,
@@ -217,6 +218,11 @@ function setup(_$: Engine, on: On) {
       state.captures.push(
         structuredClone(e.capture) as { input: Record<string, unknown>; tool: string },
       );
+      // The CLI's answer to a held call sent again unchanged: it runs native.
+      if (state.keepNative) {
+        const native = JSON.stringify({ action: 'native' });
+        return { result: native, text: native };
+      }
       const offered = JSON.stringify({
         action: 'offer',
         started: false,
@@ -224,6 +230,10 @@ function setup(_$: Engine, on: On) {
         label: 'DeepSeek V4.1 Flash 1017',
       });
       return { result: offered, text: offered };
+    }
+    if (typeof e.cancel === 'string' && e.offer_id === undefined) {
+      const cancelled = JSON.stringify({ status: 'cancelled' });
+      return { result: cancelled, text: cancelled };
     }
     state.accepted++;
     try {
@@ -1733,3 +1743,43 @@ test("the parent model cannot poll a worker with the viewer's own activity read,
   expect((await firstStep).answer).toContain('Done (');
   await f.clock.settle();
 });
+
+for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as const)
+  test(
+    'an offer that is ' + settled + ' draws no row of its own, so the task has one row',
+    async ($, on) => {
+      const f = setup($, on);
+      const held = await remember($);
+      const offerRow = async () => {
+        const ui = await $.ui.mount({
+          plugin: 'tenjin',
+          surface: 'terminal',
+          component: 'ToolUse',
+          props: {
+            ...toolRow('held_agent', 'Agent', INPUT),
+            isRunning: false,
+            output: held.result,
+          },
+        });
+        const lines = (await shownLines(ui)).join('');
+        await ui.unmount();
+        return lines;
+      };
+      // Open: the held call reads as the offer it is.
+      expect(await offerRow()).toBe('⏺Agent(Read selected source) · Tenjin offered DeepSeek');
+      if (settled === 'accepted') {
+        f.state.work = () => ({ result: 'handback', text: 'handback' });
+        await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+      } else if (settled === 'kept native') {
+        // The veto is the same call again, with nothing said: the CLI lets it run native.
+        f.state.keepNative = true;
+        await remember($);
+        expect(f.state.nativeCalls).toHaveLength(1);
+      } else if (settled === 'cancelled') {
+        await $.tool.call({ tool: ACCEPT, cancel: OFFER, tool_use_id: 'parent_cancel' });
+      } else await f.clock.advance(15 * 60_000 + 1000);
+      // Settled: only the worker's row or the native call's own row is left for the task.
+      expect(await offerRow()).toBe('');
+      await f.clock.settle();
+    },
+  );

@@ -79,6 +79,17 @@ export type TenjinModelTranscript = {
   rows: TenjinModelActivity['rows'];
 };
 
+/**
+ * An offer's own row draws only while the offer is open. Accepted, kept native
+ * by the repeated call, cancelled or expired, the task has one row: the
+ * worker's, or the native call's.
+ */
+export type TenjinModelOffer = {
+  /** When the offer was made, on the plugin's clock. */
+  at: number;
+  state: 'offered' | 'native' | 'cancelled';
+};
+
 /** One accept call's live row, kept by its offer id while the worker runs. Display only. */
 export type TenjinModelWorker = {
   offerId: string;
@@ -151,6 +162,8 @@ declare module 'claude-code' {
       modelTranscripts: StateFamily<TenjinModelTranscript>;
       /** By offer id: the held call's own prompt, shown as its viewer's first message. */
       modelAssignments: StateFamily<string>;
+      /** By offer id: when the offer was made and how it was settled, for its row. */
+      modelOffers: StateFamily<TenjinModelOffer>;
     };
   }
 }
