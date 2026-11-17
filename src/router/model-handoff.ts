@@ -356,6 +356,9 @@ export class ModelHandoff {
       return continuationRefusal('A continuation cannot change its native worker profile');
     if (original.decision.routerOrigin !== transport.origin)
       return continuationRefusal('Original worker endpoint changed');
+    // No run is going (the conversation is idle), so what an earlier run left
+    // uncertain is settled with the server before it counts against this one.
+    await transport.reconcile(original, signal ?? new AbortController().signal);
     await transport.requireResumeBudget(original);
     await prepareClaudeWorkerSession(
       { resume: conversation.sdkSessionId, onSession: async () => {} },

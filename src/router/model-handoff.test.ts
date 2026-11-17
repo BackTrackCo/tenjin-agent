@@ -66,13 +66,15 @@ async function continuationFixture(multiple = false) {
     }),
   );
   const route = vi.fn(),
-    requireResumeBudget = vi.fn(async () => {});
+    requireResumeBudget = vi.fn(async () => {}),
+    reconcile = vi.fn(async () => {});
   const model = new ModelHandoff({
     dataDir: dir,
     transport: {
       origin: 'http://localhost:3939',
       route,
       requireResumeBudget,
+      reconcile,
     } as unknown as ModelTransport,
   });
   const initial = await model.store.offer({
@@ -130,6 +132,7 @@ async function continuationFixture(multiple = false) {
     initial,
     route,
     requireResumeBudget,
+    reconcile,
     workspace,
     sibling,
   };
@@ -322,6 +325,14 @@ it('offers an across-day continuation with full parent veto, same job ceiling an
     });
     expect(f.requireResumeBudget).toHaveBeenCalledWith(
       expect.objectContaining({ id: f.initial.id }),
+    );
+    // What the earlier run left uncertain is settled with the server before the budget counts.
+    expect(f.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: f.initial.id }),
+      expect.any(AbortSignal),
+    );
+    expect(f.reconcile.mock.invocationCallOrder[0]).toBeLessThan(
+      f.requireResumeBudget.mock.invocationCallOrder[0]!,
     );
     expect(f.route).not.toHaveBeenCalled();
     expect(
