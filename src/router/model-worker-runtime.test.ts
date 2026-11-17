@@ -6,7 +6,7 @@ import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
 import { modelSettings } from './model-settings';
 import { ModelCallFailed, workerStop } from './model-worker-control';
-import { MAX_ENV_FILE_BYTES } from './worker-env-secrets';
+import { MAX_ENV_FILE_BYTES, WorkerEnvSecrets } from './worker-env-secrets';
 import { prepareWorkerGithub } from './worker-github';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -576,6 +576,8 @@ it('keeps native sibling working directories distinct from read-only and shell-w
     },
   } as never);
   sdkResult({ subtype: 'success', result: 'done' });
+  // Where a recursive watcher learns a settings file made during the job (macOS, Windows).
+  const watching = vi.spyOn(WorkerEnvSecrets.prototype, 'watching', 'get').mockReturnValue(true);
   await runModelWorker(
     { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
     options(),
@@ -624,6 +626,22 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       '/read-only/**/.claude/settings.json',
     ]),
   );
+  // Review finding: with no recursive watcher (Linux), a settings file a checkout adds in a
+  // new folder is learned by no check, so a command could print its env values out. They
+  // stay closed to reads there.
+  watching.mockReturnValue(false);
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+    options(),
+  );
+  const unwatched = vi.mocked(query).mock.calls.at(-1)![0];
+  expect(
+    (unwatched.options?.settings as { permissions: { deny: string[] } }).permissions.deny,
+  ).toContain('Read(//sibling/**/.claude/settings.json)');
+  expect(unwatched.options?.sandbox?.filesystem?.denyRead).toContain(
+    '/sibling/**/.claude/settings.json',
+  );
+  watching.mockRestore();
 });
 
 it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
