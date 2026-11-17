@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
-import { readClaudeCode, meetsFloor } from './claude-cli';
+import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -9,7 +9,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
 }));
-vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
+vi.mock('./claude-cli', () => ({ readClaudeCodeCached: vi.fn(), meetsFloor: vi.fn() }));
 vi.mock('./agent-tools', async (original) => ({
   ...(await original<typeof import('./agent-tools')>()),
   findDefinition: vi.fn(async () => null),
@@ -17,7 +17,7 @@ vi.mock('./agent-tools', async (original) => ({
 beforeEach(() => vi.clearAllMocks());
 
 it('keeps an auto parent native when managed settings disable native auto mode', async () => {
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/native/claude', source: 'path' },
     version: '2.1.325',
   } as never);
@@ -32,7 +32,7 @@ it('keeps an auto parent native when managed settings disable native auto mode',
 });
 
 it('keeps a bypass parent native when settings disable bypass mode', async () => {
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/native/claude', source: 'path' },
     version: '2.1.325',
   } as never);
@@ -54,7 +54,7 @@ it('keeps a bypass parent native when settings disable bypass mode', async () =>
 });
 
 it('keeps a conflicting managed provider native before starting a worker', async () => {
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/native/claude', source: 'path' },
     version: '2.1.325',
   } as never);
@@ -87,5 +87,5 @@ it('rejects a changed or unsupported Claude mode before querying a worker or pro
   };
   await expect(runModelWorker(job, options)).rejects.toThrow(/changed/);
   expect(query).not.toHaveBeenCalled();
-  expect(readClaudeCode).not.toHaveBeenCalled();
+  expect(readClaudeCodeCached).not.toHaveBeenCalled();
 });

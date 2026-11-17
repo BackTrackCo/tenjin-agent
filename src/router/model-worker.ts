@@ -35,7 +35,7 @@ import {
   runNativeCodexWorker,
   type NativeCodexSnapshot,
 } from './codex-native-worker';
-import { readClaudeCode, meetsFloor } from './claude-cli';
+import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
 import { MODEL_MESSAGES_MAX_TOOLS, MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 import type { ModelJob } from './model-job';
@@ -130,7 +130,8 @@ export async function qualifiedModelWorker(
   if (!dataDir) return null;
   if (codexPolicy) return qualifyNativeCodexWorker({ cwd, policy: codexPolicy, dataDir, signal });
   if (!claudeWorkerAuthCompatible(process.env)) return null;
-  const state = await readClaudeCode(process.env, cwd);
+  // Read at every offer and again at its accept: once per binary file, not per call.
+  const state = await readClaudeCodeCached(process.env, cwd);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
   // A built-in a file redefines, a plugin's agent and the host's other built-ins run
   // natively. A custom type's own definition is read where it is offered and where it runs.

@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
-import { readClaudeCode, meetsFloor } from './claude-cli';
+import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { registerModelTool } from './model-mcp';
 import { ModelJobStore } from './model-job';
 import { modelSettings } from './model-settings';
@@ -39,7 +39,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   resolveSettings: vi.fn(),
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
-vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
+vi.mock('./claude-cli', () => ({ readClaudeCodeCached: vi.fn(), meetsFloor: vi.fn() }));
 vi.mock('./agent-tools', async (original) => ({
   ...(await original<typeof import('./agent-tools')>()),
   findDefinition: vi.fn(async () => null),
@@ -61,7 +61,7 @@ vi.mock('node:http', async (original) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/fixture/claude' },
     version: '2.1.325',
   } as never);

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { qualifyNativeCodexWorker, runNativeCodexWorker } from './codex-native-worker';
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
-import { readClaudeCode, meetsFloor } from './claude-cli';
+import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -15,7 +15,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
 }));
-vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
+vi.mock('./claude-cli', () => ({ readClaudeCodeCached: vi.fn(), meetsFloor: vi.fn() }));
 vi.mock('./agent-tools', async (original) => ({
   ...(await original<typeof import('./agent-tools')>()),
   findDefinition: vi.fn(async () => null),
@@ -36,7 +36,7 @@ it.each([
   'CLAUDE_CODE_USE_MANTLE',
   'CLAUDE_CODE_USE_GATEWAY',
 ])('refuses settings-supplied host auth before disclosure or SDK work: %s', async (key) => {
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/native/claude' },
     version: '2.1.325',
   } as never);
@@ -79,13 +79,13 @@ it('qualifies genuine Codex independently of Claude installation or permission s
     dataDir: '/data',
     signal: undefined,
   });
-  expect(readClaudeCode).not.toHaveBeenCalled();
+  expect(readClaudeCodeCached).not.toHaveBeenCalled();
   expect(query).not.toHaveBeenCalled();
 });
 it('an unsupported Codex authority stays native instead of silently using the Claude tool broker', async () => {
   vi.mocked(qualifyNativeCodexWorker).mockResolvedValue(null);
   expect(await qualifiedModelWorker('/repo', 'general-purpose', policy, '/data')).toBeNull();
-  expect(readClaudeCode).not.toHaveBeenCalled();
+  expect(readClaudeCodeCached).not.toHaveBeenCalled();
 });
 it('executes an accepted Codex job only through the genuine native runner', async () => {
   vi.mocked(runNativeCodexWorker).mockResolvedValue('native completed result');
@@ -114,7 +114,7 @@ it('executes an accepted Codex job only through the genuine native runner', asyn
   permission.mockResolvedValueOnce(false);
   expect(await passed('Bash', {}, new AbortController().signal)).toBe(false);
   expect(query).not.toHaveBeenCalled();
-  expect(readClaudeCode).not.toHaveBeenCalled();
+  expect(readClaudeCodeCached).not.toHaveBeenCalled();
 });
 it('does not start a native or SDK worker after cancellation', async () => {
   const controller = new AbortController();
@@ -159,7 +159,7 @@ it('applies the shared wall guard to an accepted native Codex worker', async () 
 });
 
 it('keeps managed mandatory auto memory native before SDK or transport work', async () => {
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/native/claude' },
     version: '2.1.325',
   } as never);

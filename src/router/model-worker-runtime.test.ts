@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { query, resolveSettings, type Options } from '@anthropic-ai/claude-agent-sdk/core';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
-import { readClaudeCode, meetsFloor } from './claude-cli';
+import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
 import { modelSettings } from './model-settings';
@@ -92,7 +92,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   resolveSettings: vi.fn(),
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
-vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
+vi.mock('./claude-cli', () => ({ readClaudeCodeCached: vi.fn(), meetsFloor: vi.fn() }));
 vi.mock('./agent-tools', async (original) => ({
   ...(await original<typeof import('./agent-tools')>()),
   findDefinition: vi.fn(async () => null),
@@ -143,7 +143,7 @@ beforeEach(() => {
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(tmpdir(), 'tenjin-test-no-claude-config'));
   native.promptMessages.length = 0;
   native.worktrees = [];
-  vi.mocked(readClaudeCode).mockResolvedValue({
+  vi.mocked(readClaudeCodeCached).mockResolvedValue({
     binary: { path: '/fixture/claude' },
     version: '2.1.325',
   } as never);
