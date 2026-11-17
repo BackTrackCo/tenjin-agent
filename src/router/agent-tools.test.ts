@@ -150,11 +150,11 @@ describe('finding the definition an agent type names', () => {
 });
 
 describe('the custom agents a DeepSeek worker can run as', () => {
-  const lookup = () => ({ cwd: join(project, 'src'), homeDir: home });
+  const lookup = () => ({ root: project, homeDir: home });
   const defined = (frontmatter: string) =>
     define(join(project, '.claude', 'agents'), 'worker.md', agent('worker', frontmatter));
 
-  it('takes the prompt and tools of a definition that pins no model, from any depth', async () => {
+  it('takes the prompt and tools of a definition that pins no model', async () => {
     await defined('model: inherit\neffort: high\ntools: Read, Bash\ndisallowedTools: [Write]\n');
     expect(await workerAgent('worker', lookup())).toEqual({
       agent: {
@@ -177,9 +177,54 @@ describe('the custom agents a DeepSeek worker can run as', () => {
     expect(await workerAgent('worker', lookup())).toEqual({ unmatched });
   });
 
+  it("reads the job root's own agents and the person's, never a folder above the root", async () => {
+    await define(join(home, '.claude', 'agents'), 'mine.md', agent('mine', 'tools: Read\n'));
+    expect(await workerAgent('mine', lookup())).toMatchObject({ agent: { tools: ['Read'] } });
+    // Above the root is outside what the job's consent names.
+    await define(join(root, 'work', '.claude', 'agents'), 'above.md', agent('above', ''));
+    expect(await workerAgent('above', lookup())).toEqual({ unmatched: 'subagent_type' });
+  });
+
+  it("never takes a plugin's agent, installed and matching or redefined in the project", async () => {
+    const install = join(root, 'plugins', 'codex', '1.0.0');
+    await define(
+      join(install, 'agents'),
+      'codex-rescue.md',
+      agent('codex-rescue', 'tools: Bash\n'),
+    );
+    await define(
+      join(home, '.claude', 'plugins'),
+      'installed_plugins.json',
+      JSON.stringify({
+        version: 2,
+        plugins: { 'codex@market': [{ scope: 'user', installPath: install }] },
+      }),
+    );
+    // A project file that claims the plugin's own name changes nothing.
+    await define(
+      join(project, '.claude', 'agents'),
+      'rescue.md',
+      agent('codex:codex-rescue', 'tools: Bash\n'),
+    );
+    for (const type of [
+      'codex:codex-rescue',
+      'vercel:deployment-expert',
+      'stripe:Company Researcher',
+    ])
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
+  });
+
+  it.each([['general-purpose'], ['Explore']])(
+    'has no custom form for the built-in %s, which runs as itself',
+    async (type) => {
+      await define(join(project, '.claude', 'agents'), `${type}.md`, agent(type, 'tools: Read\n'));
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
+    },
+  );
+
   it('has no worker form for a type with no definition file, a plugin agent or an empty prompt', async () => {
-    expect(await workerAgent('Plan', lookup())).toEqual({ unmatched: 'subagent_type' });
-    expect(await workerAgent('tools:reader', lookup())).toEqual({ unmatched: 'subagent_type' });
+    for (const type of ['Plan', 'claude', 'claude-code-guide', 'web-fetch', 'statusline-setup'])
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
     await define(
       join(project, '.claude', 'agents'),
       'empty.md',

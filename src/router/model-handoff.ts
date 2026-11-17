@@ -354,12 +354,13 @@ export class ModelHandoff {
     if (kept) return { ...(await stay('kept_native', { offerId: kept })), settled: kept };
     const blocked = blockedField(native);
     if (blocked) return stay('input_filter', { detail: blocked });
-    // A custom agent is offered when a worker can run as it. Its definition is
-    // looked up from the job's root, where the worker will read it.
+    // A custom agent is offered when the project or the person wrote its definition and a
+    // worker can run as it: read in the job's root, where the worker will read it. A
+    // plugin's agent and the host's other built-ins are never offered.
     const agentType = String(native.subagent_type ?? 'general-purpose');
     const custom = WORKER_BUILTIN_AGENTS.has(agentType)
       ? null
-      : await workerAgent(agentType, { cwd: settings.root, homeDir: homedir() });
+      : await workerAgent(agentType, { root: settings.root, homeDir: homedir() });
     if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
     const worker = await qualifiedModelWorker(
       session.cwd,

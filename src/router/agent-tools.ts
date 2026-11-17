@@ -145,7 +145,7 @@ const WORKER_MATCHED_KEYS = new Set([
  * memory, or its own hooks, servers or skills runs natively. `model: inherit`
  * pins nothing.
  */
-export function unmatchedDefinitionKey(definition: string): string | null {
+function unmatchedDefinitionKey(definition: string): string | null {
   const frontmatter = frontmatterOf(definition);
   if (frontmatter === null) return 'frontmatter';
   for (const line of frontmatter) {
@@ -173,22 +173,40 @@ export type WorkerAgent = {
 };
 
 /**
+ * Whether a type can be one a person or a project defines in an agent file.
+ * A plugin's agent is namespaced (`codex:codex-rescue`) and never is: its
+ * prompt and tool wiring are the plugin's, not the person's to send to another
+ * model, and a worker cannot stand in for one that wraps another tool.
+ */
+export const isCustomAgentType = (agentType: string): boolean =>
+  TYPE_RE.test(agentType) && !agentType.includes(':') && !WORKER_BUILTIN_AGENTS.has(agentType);
+
+/**
  * What a worker runs a custom agent as: the definition's own prompt and tools,
  * handed to its Claude Code by value. Its Claude Code does not find every
  * definition the session's does (one in a folder above the job's root is
  * missed, and it then runs with every tool and no agent prompt, seen on
- * 2.1.326), so the worker never looks one up by name. `unmatched` says why a
- * type has no worker form: no definition file (a plugin's agent and another
- * built-in included), or the definition's first key a worker cannot match.
+ * 2.1.326), so the worker never looks one up by name.
+ *
+ * ONLY A DEFINITION THE PROJECT OR THE PERSON WROTE: the job root's own
+ * `.claude/agents`, then `~/.claude/agents`. No folder above the root is read,
+ * since it is outside what the job's consent names, and no plugin's. `unmatched`
+ * says why a type has no worker form: no such file (a plugin's agent and the
+ * host's other built-ins included), or the definition's first key a worker
+ * cannot match.
  */
 export async function workerAgent(
   agentType: string,
-  lookup: AgentLookup,
+  lookup: { root: string; homeDir: string },
 ): Promise<{ agent: WorkerAgent } | { unmatched: string }> {
-  const text =
-    TYPE_RE.test(agentType) && !agentType.includes(':')
-      ? await findDefinition(agentType, lookup).catch(() => null)
-      : null;
+  let text: string | null = null;
+  if (isCustomAgentType(agentType))
+    for (const base of [lookup.root, lookup.homeDir]) {
+      text = await definitionIn(join(resolve(base), '.claude', 'agents'), agentType).catch(
+        () => null,
+      );
+      if (text !== null) break;
+    }
   const frontmatter = text === null ? null : frontmatterOf(text);
   if (text === null || frontmatter === null) return { unmatched: 'subagent_type' };
   const key = unmatchedDefinitionKey(text);

@@ -63,7 +63,7 @@ vi.mock('./agent-tools', async (original) => ({
   findDefinition: vi.fn(async () => null),
   workerAgent: vi.fn(async () => ({ unmatched: 'subagent_type' })),
 }));
-import { workerAgent } from './agent-tools';
+import { findDefinition, workerAgent } from './agent-tools';
 vi.mock('./model-settings', async (original) => ({
   ...(await original<typeof import('./model-settings')>()),
   modelSettings: vi.fn(async () => ({ root: '/repo', repositories: ['/repo'] })),
@@ -1803,6 +1803,22 @@ it.each([
     });
   },
 );
+
+it("qualifies a custom type and the two built-ins, never a plugin's agent or a built-in a file redefines", async () => {
+  const qualifies = async (type: string) =>
+    (await qualifiedModelWorker('/repo', type, undefined, '/data', undefined, 'default')) !== null;
+  expect(await qualifies('general-purpose')).toBe(true);
+  expect(await qualifies('loop-worker')).toBe(true);
+  // The loops' Codex lane and every other plugin agent: no worker stands in for one.
+  for (const type of [
+    'codex:codex-rescue',
+    'vercel:deployment-expert',
+    'stripe:Company Researcher',
+  ])
+    expect(await qualifies(type)).toBe(false);
+  vi.mocked(findDefinition).mockResolvedValueOnce('---\nname: Explore\n---\n\nRedefined.\n');
+  expect(await qualifies('Explore')).toBe(false);
+});
 
 it('runs a custom agent from its definition by value, and starts nothing once the definition no longer matches', async () => {
   const definition = { description: 'loop-worker', prompt: 'You are a worker.', tools: ['Read'] };

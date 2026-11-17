@@ -10,7 +10,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   resolveSettings: vi.fn(),
 }));
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
-vi.mock('./agent-tools', () => ({ findDefinition: vi.fn(async () => null) }));
+vi.mock('./agent-tools', async (original) => ({
+  ...(await original<typeof import('./agent-tools')>()),
+  findDefinition: vi.fn(async () => null),
+}));
 beforeEach(() => vi.clearAllMocks());
 
 it('keeps an auto parent native when managed settings disable native auto mode', async () => {

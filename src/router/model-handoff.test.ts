@@ -843,6 +843,38 @@ it('offers a custom agent whose definition pins no model, and keeps one that pin
   expect(f.route).toHaveBeenCalledTimes(1);
 });
 
+it.each([
+  ['codex:codex-rescue'],
+  ['vercel:deployment-expert'],
+  ['stripe:Company Researcher'],
+  ['claude-code-guide'],
+  ['Plan'],
+])(
+  "never offers %s: a plugin's agent or the host's own, not the person's to send",
+  async (type) => {
+    const f = await routedFixture();
+    vi.mocked(qualifiedModelWorker).mockClear();
+    // The Codex lane's wrapper would match as a definition if it were read: it is not.
+    const agents = join(f.workspace.root, '.claude', 'agents');
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, 'rescue.md'),
+      '---\nname: codex:codex-rescue\ndescription: test\ntools: Bash\n---\n\nRun codex.\n',
+    );
+    expect(
+      await f.model.capture(f.session, 'call', { prompt: 'Rescue the task.', subagent_type: type }),
+    ).toEqual({ action: 'native' });
+    expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+      code: 'input_filter',
+      detail: 'subagent_type',
+      tool: 'Agent',
+    });
+    // Nothing was qualified, routed or paid for.
+    expect(qualifiedModelWorker).not.toHaveBeenCalled();
+    expect(f.route).not.toHaveBeenCalled();
+  },
+);
+
 it('records one code for each reason a held call gets no offer, and never its text', async () => {
   const f = await routedFixture();
   const call = { prompt: 'PRIVATE-ASSIGNMENT read the fixture.' };
