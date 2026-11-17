@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { delimiter, dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { URL, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -69,14 +70,22 @@ const content = 'TENJIN_WINDOWS_PRODUCTION_WORKSPACE_OK';
 await writeFile(fixture, content);
 
 const children = [];
+const launches = [];
 const spawn = childProcess.spawn;
 childProcess.spawn = function (file, args, options) {
   const child = Reflect.apply(spawn, this, [file, args, options]);
-  if (file === launcherPath && args.includes('--session-id')) {
+  if (args?.[0] === '--worker-sid') {
+    const session = args.includes('--session-id');
     const evidence = { closed: false, ready: false };
-    children.push(evidence);
-    child.once('close', () => {
+    launches.push(evidence);
+    if (session) children.push(evidence);
+    console.log(`Tenjin spawned ${session ? 'worker' : 'prompt probe'}`);
+    child.once('close', (code) => {
       evidence.closed = true;
+      console.log(`Tenjin launch closed (${code})`);
+    });
+    createInterface({ input: child.stderr }).on('line', (line) => {
+      if (/^tenjin Windows (qualification|worker): [\w ()-]{1,130}$/.test(line)) console.log(line);
     });
     let partial = '';
     child.stdout.on('data', (chunk) => {
@@ -180,9 +189,10 @@ const capture = (id, step) =>
     },
   });
 async function waitForChild(index) {
+  const deadline = AbortSignal.timeout(70_000);
   while (!children[index]?.ready) {
     assert(!children[index]?.closed, 'The warmed worker closed before initialization');
-    await delay(100, undefined, { signal });
+    await delay(100, undefined, { signal: AbortSignal.any([signal, deadline]) });
   }
   await delay(200, undefined, { signal });
 }
@@ -219,7 +229,16 @@ try {
   await client.connect(caller);
   const first = await capture('accepted', 'step-1');
   assert.equal(first.action, 'offer', JSON.stringify(first));
-  await waitForChild(0);
+  console.log('Tenjin recorded the first offer');
+  try {
+    await waitForChild(0);
+  } catch (error) {
+    console.log(`Warm startup phase: ${JSON.stringify(launches)}`);
+    accepted = true;
+    const diagnostic = await call({ offer_id: first.offer_id });
+    console.log(`Accept after incomplete warm startup: ${JSON.stringify(diagnostic)}`);
+    throw error;
+  }
   assert.equal(requests, 0);
   accepted = true;
   const result = await call({ offer_id: first.offer_id });
