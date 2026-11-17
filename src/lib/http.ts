@@ -238,8 +238,9 @@ export interface HttpRequestOptions {
    * Keep a binary body as bytes. A sound, an image or any other non-text
    * payload decoded as text is corrupted, so with this set a response whose
    * content type is not text ({@link isBinaryContentType}) comes back with
-   * `bytes` and an empty `text`. The router's provider leg sets it; every other
-   * caller reads text as before.
+   * `bytes` and an empty `text`. `tenjin pay` sets it on every lane (the
+   * router's provider leg and a direct pay); every other caller reads text as
+   * before.
    */
   binaryBody?: boolean;
   /** The cap on such a body; over it the response is a failure, never a

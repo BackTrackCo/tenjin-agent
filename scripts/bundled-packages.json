@@ -5,6 +5,7 @@
   "@noble/ciphers",
   "@noble/curves",
   "@noble/hashes",
+  "@scure/base",
   "@signinwithethereum/siwe",
   "@signinwithethereum/siwe-parser",
   "@x402/core",
