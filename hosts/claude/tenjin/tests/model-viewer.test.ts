@@ -1718,6 +1718,11 @@ for (const [phase, started, rows, ending] of [
 // worker's text between calls, and no plugin-drawn spinner. Each step is one worker reply.
 test("each viewer step is one worker reply: its text, and its calls answered as Claude Code's own with a short result line", async ($, on) => {
   const f = setup($, on);
+  const seen: unknown[] = [];
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    seen.push(e.props);
+    return $.ui.resolve(e).Text({ children: ['engine spinner'] });
+  });
   let release: () => void = () => undefined;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -1876,7 +1881,8 @@ test("each viewer step is one worker reply: its text, and its calls answered as 
   );
   expect(JSON.stringify([first, second, last, read, lint])).not.toContain('PRIVATE_');
   expect(f.state.nativeSteps).toBe(0);
-  // No spinner of the plugin's: the viewer's and the parent's are the host's own.
+  // No spinner of the plugin's: the viewer's and the parent's are the host's own, here the
+  // test's stand-in for the engine, drawn from the props as the host sent them.
   const spinner = { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' as const };
   for (const requestId of ['native-viewer-1', 'main']) {
     const ui = await $.ui.mount({
@@ -1886,9 +1892,10 @@ test("each viewer step is one worker reply: its text, and its calls answered as 
       requestId,
       props: spinner,
     });
-    expect(await shownLines(ui)).toEqual([]);
+    expect(await shownLines(ui)).toEqual(['engine spinner']);
     await ui.unmount();
   }
+  expect(seen).toEqual([spinner, spinner]);
 });
 
 test("the viewer's first message draws the worker's real assignment, and a short line once it is no longer held", async ($, on) => {
@@ -2501,13 +2508,20 @@ test('the viewer is listed by the task’s description and its row reads DeepSee
     await ui.unmount();
     return bodies.at(-1);
   };
-  expect(await row({})).toBe('DeepSeek Read selected source · 1 tool use · 41.2k tokens · 1s');
-  // The host's own summary of the task, when it has one, stands in the description's place.
-  expect(await row({ label: 'Reading the cancel path\nmore' })).toBe(
-    'DeepSeek Reading the cancel path · 1 tool use · 41.2k tokens · 1s',
-  );
-  // Any other agent's row is the host's own.
-  expect(await row({ id: 'native-agent', type: 'general-purpose' })).toBeUndefined();
+  // Claude Code before 2.1.326 has no agent-list row a plugin draws: its own row stands.
+  const drawn = await row({}).catch((error: unknown) => {
+    if (/is not a component/.test(String(error))) return null;
+    throw error;
+  });
+  if (drawn !== null) {
+    expect(drawn).toBe('DeepSeek Read selected source · 1 tool use · 41.2k tokens · 1s');
+    // The host's own summary of the task, when it has one, stands in the description's place.
+    expect(await row({ label: 'Reading the cancel path\nmore' })).toBe(
+      'DeepSeek Reading the cancel path · 1 tool use · 41.2k tokens · 1s',
+    );
+    // Any other agent's row is the host's own.
+    expect(await row({ id: 'native-agent', type: 'general-purpose' })).toBeUndefined();
+  }
   release();
   await running;
   await firstStep;
