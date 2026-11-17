@@ -413,7 +413,7 @@ it('keeps the partial handback within its byte bound by dropping the oldest rows
   expect(partial.omittedRows + partial.rows.length).toBe(40);
 });
 
-it('counts every tool use past the row bound and reads tokens from the latest turn, never a sum', () => {
+it('counts every tool use past the row bound, and tokens as the latest input plus all output', () => {
   const f = fixture();
   f.activity.running();
   const usage = { input_tokens: 900, cache_read_input_tokens: 40_000, output_tokens: 300 };
@@ -441,14 +441,38 @@ it('counts every tool use past the row bound and reads tokens from the latest tu
   const shown = f.activity.snapshot();
   expect(shown.rows.length).toBeLessThan(141);
   expect(shown.toolUses).toBe(141);
-  expect(shown.tokens).toBe(43_400);
+  // The latest request's input (42,900) and both replies' output (800).
+  expect(shown.tokens).toBe(43_700);
   // A usage the SDK could not have sent leaves the last count standing.
   f.activity.observe(
     f.event('assistant', {
       message: { id: 'turn-3', usage: { input_tokens: -1, output_tokens: 1 }, content: [] },
     }),
   );
-  expect(f.activity.snapshot().tokens).toBe(43_400);
+  expect(f.activity.snapshot().tokens).toBe(43_700);
+});
+
+// Live on alpha.68 the row's count jumped around: each block of a reply carried that reply's
+// usage as it then stood, and a compacted request's input is smaller than the one before.
+it('never lowers the token count, as a native subagent row never does', () => {
+  const f = fixture();
+  f.activity.running();
+  const reply = (id: string, input: number, output: number, block: unknown) =>
+    f.event('assistant', {
+      message: { id, usage: { input_tokens: input, output_tokens: output }, content: [block] },
+    });
+  const seen: number[] = [];
+  for (const event of [
+    reply('a', 30_000, 10, { type: 'text', text: 'Reading.' }),
+    reply('a', 30_000, 120, { type: 'tool_use', id: 't1', name: 'Read', input: {} }),
+    reply('b', 31_000, 50, { type: 'tool_use', id: 't2', name: 'Read', input: {} }),
+    // After compaction the next request carries far less input.
+    reply('c', 9_000, 40, { type: 'text', text: 'Done.' }),
+  ]) {
+    f.activity.observe(event);
+    seen.push(f.activity.snapshot().tokens);
+  }
+  expect(seen).toEqual([30_010, 30_120, 31_170, 31_170]);
 });
 
 it('shows settled spend while running, and drops it when final accounting is unreadable', () => {

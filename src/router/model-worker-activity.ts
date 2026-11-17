@@ -84,8 +84,8 @@ export type ModelWorkerActivitySnapshot = {
   rows: ModelWorkerActivityRow[];
   /** Tool calls the worker made, counted past the bounded rows. */
   toolUses: number;
-  /** The latest worker turn's input, cache and output tokens, as a native
-   * subagent counts its own: one turn's usage, never a running sum. */
+  /** As a native subagent's row counts its own: the latest request's input (cache
+   * included) and all its output so far. It never goes down. */
   tokens: number;
   /** While running, what has settled so far; once terminal, the controller's final accounting. */
   spend?: ModelWorkerActivitySpend;
@@ -170,6 +170,11 @@ export function endedDisplay(state: string, kept: string | null | undefined) {
     ...(tokens !== undefined ? { tokens } : {}),
     ...(spend.success ? { spend: spend.data } : {}),
   };
+}
+
+function outputTokens(value: unknown): number | undefined {
+  const count = object(value)?.output_tokens;
+  return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
 }
 
 /** One turn's usage as a native subagent's token count reads it, or undefined. */
@@ -345,6 +350,8 @@ export class ModelWorkerActivity {
   private value: ModelWorkerActivitySnapshot;
   private seen = new Set<string>();
   private listeners = new Set<() => void>();
+  /** Each reply's output tokens, the largest seen for it. */
+  private output = new Map<string, number>();
   private holding = false;
   private held = false;
   /** Calls a router tool served, by row id, until their rows have settled. */
@@ -497,7 +504,21 @@ export class ModelWorkerActivity {
         if (!msg || !Array.isArray(msg.content)) return;
         const messageId = typeof msg.id === 'string' ? msg.id.slice(0, 200) : event.uuid;
         const message = canonicalHash(messageId ?? null).slice(0, 16);
-        const tokens = usageTokens(msg.usage);
+        // AS A NATIVE SUBAGENT'S ROW COUNTS: the latest request's input and all output so
+        // far, and never down. Each content block of one reply arrives with that reply's
+        // usage as it then stood, and a reply's input can be smaller than the one before
+        // (compaction), so the turn's own sum moved up and down.
+        const usage = usageTokens(msg.usage);
+        const output = outputTokens(msg.usage);
+        if (usage !== undefined && output !== undefined && typeof messageId === 'string') {
+          this.output.set(messageId, Math.max(this.output.get(messageId) ?? 0, output));
+          if (this.output.size > MAX_SEEN) this.output.delete(this.output.keys().next().value!);
+        }
+        const outputs = [...this.output.values()].reduce((sum, n) => sum + n, 0);
+        const tokens =
+          usage === undefined
+            ? undefined
+            : Math.max(this.value.tokens, usage - (output ?? 0) + outputs);
         if (tokens !== undefined && tokens !== this.value.tokens) {
           this.value.tokens = tokens;
           this.value.sequence++;
