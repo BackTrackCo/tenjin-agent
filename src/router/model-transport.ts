@@ -4,14 +4,13 @@ import { modelSettings } from './model-settings';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { withFileLock } from '../lib/lock';
 import type { RoutingPayerDeps } from './routing-payer';
 import { RoutingPayer as Payer } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
-import type { ModelJob } from './model-job';
+import { modelLock, type ModelJob } from './model-job';
 import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { RouteSkipped } from './decision';
 import {
@@ -107,7 +106,7 @@ export class ModelTransport {
   /** A continuation must retain every old charge and uncertain reservation. */
   async requireResumeBudget(job: ModelJob) {
     const path = join(this.options.dataDir, 'model-jobs', `${job.id}.budget.json`);
-    await withFileLock(`${path}.lock`, async () => {
+    await modelLock(`${path}.lock`, async () => {
       if (!budgetSchema.safeParse(await readJsonFile(path, 1_000_000)).success)
         throw new Error('Original model budget is unavailable; refusing continuation');
     });
@@ -269,7 +268,7 @@ export class ModelTransport {
       return kept;
     };
     const settle = (call: Call, value: ReturnType<ModelTransport['receipt']>) =>
-      withFileLock(`${path}.lock`, async () => {
+      modelLock(`${path}.lock`, async () => {
         const state = await load();
         const current = state.calls[key];
         if (!current || current.invocationId !== call.invocationId || current.quote !== call.quote)
@@ -306,7 +305,7 @@ export class ModelTransport {
       }
       throw new Error(`Uncertain invocation ${call.invocationId}; no new authorization sent`);
     };
-    const old = await withFileLock(`${path}.lock`, async () => {
+    const old = await modelLock(`${path}.lock`, async () => {
       await consent();
       return (await load()).calls[key];
     });
@@ -375,7 +374,7 @@ export class ModelTransport {
     const quote = BigInt(offers[0]!.amount);
     let reservation: Call | undefined;
     try {
-      reservation = await withFileLock(`${path}.lock`, async () => {
+      reservation = await modelLock(`${path}.lock`, async () => {
         const current = await consent();
         const state = await load();
         if (state.calls[key]) return state.calls[key];
@@ -474,7 +473,7 @@ export class ModelTransport {
       // RouteSkipped alone does not prove safety: it can also follow a signed send.
       // Only a refusal with neither signing nor transmission can release exposure.
       if (failure instanceof RouteSkipped && !signingStarted && !paymentSent) {
-        await withFileLock(`${path}.lock`, async () => {
+        await modelLock(`${path}.lock`, async () => {
           const state = await load();
           const call = state.calls[key];
           if (call?.invocationId === body.invocationId && !call.completed) {
@@ -565,6 +564,57 @@ export class ModelTransport {
       })
       .safeParse(value);
     return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * Checks each reservation an ended run left uncertain against the server's
+   * own record of it: one owner-authenticated read per call, which buys
+   * nothing. A call the server finished with an accepted voucher is recorded
+   * at its actual cost. A call it failed with no accepted voucher, or whose
+   * voucher it cancelled, cost nothing and is released. Any other answer, or
+   * none, keeps the full reservation. Only for a job with no run going: a call
+   * in flight is uncertain by design. Never throws.
+   */
+  async reconcile(
+    job: ModelJob,
+    signal: AbortSignal,
+    protocol: 'messages' | 'responses' = 'messages',
+  ): Promise<void> {
+    try {
+      const { dataDir } = this.options;
+      const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
+      const current = await modelSettings(dataDir, job.root);
+      // The read names the job's calls to its own router only, under consent still in force.
+      if (current?.routerOrigin !== this.origin || job.decision.routerOrigin !== this.origin)
+        return;
+      const kept = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
+      if (!kept.success) return;
+      for (const [key, call] of Object.entries(kept.data.calls)) {
+        if (call.completed) continue;
+        const server = await this.recover(call.invocationId, signal, protocol).catch(() => null);
+        if (!server) continue;
+        const spent = server.state === 'completed' && server.voucherState === 'accepted';
+        const free =
+          server.voucherState === 'cancelled' ||
+          (server.state === 'unknown' && server.voucherState !== 'accepted');
+        if (!spent && !free) continue;
+        const actual = spent ? BigInt(server.actualAtomic) : 0n;
+        await modelLock(`${path}.lock`, async () => {
+          const state = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
+          const now = state.success ? state.data.calls[key] : undefined;
+          if (!state.success || !now || now.completed || now.invocationId !== call.invocationId)
+            return;
+          if (actual > BigInt(now.quote)) return;
+          state.data.charged = (BigInt(state.data.charged) - BigInt(now.quote) + actual).toString();
+          // A released call leaves no entry, so the same request can be bought again.
+          if (spent) state.data.calls[key] = { ...now, completed: true, actual: actual.toString() };
+          else delete state.data.calls[key];
+          await writePrivate(path, JSON.stringify(state.data));
+        });
+      }
+    } catch {
+      // Whatever could not be read stays reserved.
+    }
   }
 
   /** Actual completed usage plus conservative reservations for uncertain calls. */

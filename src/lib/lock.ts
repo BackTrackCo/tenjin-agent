@@ -14,6 +14,13 @@ export interface FileLockOptions {
    * but the leftover blocks later runs, and only the caller can say so.
    */
   onReleaseError?: (lockPath: string, err: unknown) => void;
+  /**
+   * Move aside a lock whose holder's pid is no longer running, or one left
+   * with no readable holder for {@link OWNERLESS_STALE_MS}. For a store whose
+   * holders can be killed mid-update and whose every later operation would
+   * otherwise time out. Off by default: see {@link withFileLock}.
+   */
+  takeOverDead?: boolean;
 }
 
 const DEFAULTS = { timeoutMs: 5000, retryMs: 25 };
@@ -62,10 +69,12 @@ async function acquire(
 
 /**
  * Minimal cross-process mutex: the lock is a directory, and mkdir is atomic, so
- * a second holder gets EEXIST and retries until `timeoutMs`. A stale lock is
- * never stolen: waiters that each judged it stale could remove a fresh holder's
- * directory and lose its update. A crashed holder's lock is removed by hand (the
- * timeout error names the path); the pid+acquiredAt meta only helps diagnose it.
+ * a second holder gets EEXIST and retries until `timeoutMs`. By default a stale
+ * lock is never stolen: waiters that each judged it stale could remove a fresh
+ * holder's directory and lose its update. A crashed holder's lock is removed by
+ * hand (the timeout error names the path); the pid+acquiredAt meta only helps
+ * diagnose it. With `takeOverDead`, a waiter moves a dead holder's lock aside,
+ * one waiter at a time and only the exact lock it judged.
  */
 export async function withFileLock<T>(
   lockPath: string,
@@ -79,6 +88,7 @@ export async function withFileLock<T>(
     timeoutMs,
     retryMs,
     now: () => Date.now(),
+    ...(opts.takeOverDead ? { onBusy: () => takeOverDeadHolder(lockPath) } : {}),
   });
   await writeFile(metaPath, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() })).catch(
     () => undefined,
@@ -86,7 +96,7 @@ export async function withFileLock<T>(
   try {
     return await fn();
   } finally {
-    // Nothing steals this lock, so it is still ours and the plain rm is safe.
+    // Only a dead holder's lock is ever taken over, so it is still ours and the plain rm is safe.
     try {
       rmSync(lockPath, { recursive: true, force: true });
     } catch (err) {
@@ -98,6 +108,64 @@ export async function withFileLock<T>(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The identity of a `withFileLock` directory whose holder is gone, or null
+ * while it may still be held: its inode plus its `meta` bytes, so a takeover
+ * moves only the exact lock it judged.
+ */
+function deadHolder(lockPath: string): string | null {
+  let info;
+  try {
+    info = statSync(lockPath);
+  } catch {
+    return null;
+  }
+  let text = '';
+  let pid: unknown;
+  try {
+    text = readFileSync(join(lockPath, 'meta'), 'utf8');
+    pid = (JSON.parse(text) as { pid?: unknown }).pid;
+  } catch {
+    // No meta, or half of one: a holder killed between its mkdir and its write.
+    return Date.now() - info.mtimeMs > OWNERLESS_STALE_MS ? `${info.ino}:${text}` : null;
+  }
+  return typeof pid === 'number' && !pidAlive(pid) ? `${info.ino}:${text}` : null;
+}
+
+/**
+ * Move a dead holder's lock aside, serialised by `<lock>.takeover` so two
+ * waiters that judged the same lock cannot both take it: the second finds a
+ * different identity, or no lock, once the first has moved it. True when this
+ * call moved it.
+ */
+function takeOverDeadHolder(lockPath: string): boolean {
+  const judged = deadHolder(lockPath);
+  if (judged === null) return false;
+  const gate = `${lockPath}.takeover`;
+  try {
+    mkdirSync(gate);
+  } catch {
+    try {
+      if (Date.now() - statSync(gate).mtimeMs > TAKEOVER_STALE_MS)
+        rmSync(gate, { recursive: true, force: true });
+    } catch {
+      // Released meanwhile.
+    }
+    return false;
+  }
+  try {
+    if (deadHolder(lockPath) !== judged) return false;
+    const aside = `${lockPath}.dead-${randomBytes(6).toString('hex')}`;
+    renameSync(lockPath, aside);
+    rmSync(aside, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(gate, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------

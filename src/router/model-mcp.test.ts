@@ -5,9 +5,12 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,7 +50,7 @@ vi.mock('./model-worker', () => ({
   qualifiedModelWorker: worker.qualified,
 }));
 import { registerModelTool } from './model-mcp';
-import { ModelJobStore } from './model-job';
+import { MODEL_RECORD_TTL_MS, ModelJobStore } from './model-job';
 import type { ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
@@ -471,27 +474,34 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     reservedAtomic: '3000',
     uncertain: [],
   }));
+  const reconcile = vi.fn(async (_job: ModelJob) => {});
   const transport = {
     origin: 'http://localhost:3939',
     route,
     requireResumeBudget,
+    reconcile,
     summary,
   } as unknown as ModelTransport;
   const getTransport = vi.fn(async () => transport);
-  const server = new McpServer({ name: 'test', version: '1' });
-  const model = registerModelTool(server, {
-    dataDir: dir,
-    harness: 'claude',
-    session: () => session,
-    transport: getTransport,
-  });
-  const client = new Client(
-    { name: 'test', version: '1' },
-    { capabilities: { elicitation: { form: {} } } },
-  );
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  await server.connect(a);
-  await client.connect(b);
+  // One `tenjin mcp` process: its own server, tool registration and host connection.
+  const start = async () => {
+    const server = new McpServer({ name: 'test', version: '1' });
+    const model = registerModelTool(server, {
+      dataDir: dir,
+      harness: 'claude',
+      session: () => session,
+      transport: getTransport,
+    });
+    const client = new Client(
+      { name: 'test', version: '1' },
+      { capabilities: { elicitation: { form: {} } } },
+    );
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    await client.connect(b);
+    return { server, model, client };
+  };
+  let { server, model, client } = await start();
   const store = new ModelJobStore(dir),
     conversations = new ModelConversationStore(dir);
   const job = await store.offer(
@@ -553,7 +563,13 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     await client.close();
     await server.close();
   };
+  /** The session resumed: the same session id, records and data folder in a new process. */
+  const restart = async () => {
+    await close();
+    ({ server, model, client } = await start());
+  };
   return {
+    restart,
     repo,
     configDir,
     session,
@@ -568,6 +584,8 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     close,
     route,
     requireResumeBudget,
+    reconcile,
+    summary,
     getTransport,
   };
 }
@@ -606,7 +624,7 @@ it('advertises display activity as read-only without changing the original subag
     expect(activity?.inputSchema.required).toEqual(['offer_id']);
     const subagent = tools.find((tool) => tool.name === 'subagent');
     expect(subagent?.description).toBe(
-      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
     );
     expect(subagent?.annotations?.readOnlyHint).toBe(false);
     expect(Object.keys(subagent?.inputSchema.properties ?? {}).sort()).toEqual([
@@ -1269,6 +1287,250 @@ it("hands a stopped worker's counts back beside its partial work", async () => {
       tokens: 15,
       partial: { rows: [expect.objectContaining({ name: 'Bash' })] },
     });
+  } finally {
+    await f.close();
+  }
+});
+
+// LATER TURNS, RESTARTS AND REPEATED ACCEPTS, in the session that owns the offer.
+
+it('accepts an offer in a later turn of its session, and answers a repeat with the stored result and no second worker', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    f.session.turnId = 'a-later-turn';
+    const first = await f.call({ offer_id: f.job.id });
+    expect(first).toMatchObject({ status: 'completed', result: 'completed owned fixture' });
+    f.session.turnId = 'a-still-later-turn';
+    expect(await f.call({ offer_id: f.job.id })).toEqual(first);
+    // After the conversation has moved on to a follow-up, the first result is still there.
+    const held = await f.capture(first.worker_handle);
+    expect(held.action).toBe('offer');
+    expect(await f.call({ offer_id: f.job.id })).toEqual(first);
+    expect(worker.run).toHaveBeenCalledTimes(1);
+    expect(f.route).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('returns a finished result after the session is resumed in a new process, and continues that worker by its handle with no routing fee', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const first = await f.call({ offer_id: f.job.id });
+    await f.restart();
+    f.session.turnId = 'after-resume';
+    expect(await f.call({ offer_id: f.job.id })).toEqual(first);
+    expect(worker.run).toHaveBeenCalledTimes(1);
+    const held = await f.capture(first.worker_handle);
+    expect(held).toMatchObject({ action: 'offer', continuation: true, routingFeeAtomic: '0' });
+    expect((await f.call({ offer_id: held.offer_id })).status).toBe('completed');
+    expect(worker.run).toHaveBeenCalledTimes(2);
+    expect(worker.run.mock.calls[1]![1].claudeSession).toMatchObject({
+      resume: worker.run.mock.calls[0]![1].claudeSession.sessionId,
+    });
+    expect(f.route).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it.each(['unknown', 'not_started', 'cancelled'] as const)(
+  'keeps a %s handback for a later accept in the same session: what the parent already received, with the spend as it now stands',
+  async (status) => {
+    const f = await ownedClaudeFixture('general-purpose', true);
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    worker.run.mockImplementation(async (_job, options) => {
+      options.activity.running();
+      options.activity.observe({
+        type: 'assistant',
+        uuid: 'turn-one',
+        session_id: options.claudeSession.sessionId,
+        message: {
+          id: 'message-1',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          content: [
+            { type: 'text', text: 'connecting to [env:POSTGRES_URL]' },
+            { type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} },
+          ],
+        },
+      });
+      started();
+      if (status === 'cancelled')
+        await new Promise<void>((resolve) =>
+          options.signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      throw status === 'not_started'
+        ? new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' })
+        : new ModelWorkerStopped({ kind: 'harness_limit', reason: 'turn_guard', turns: 3 });
+    });
+    try {
+      const running = f.call({ offer_id: f.job.id });
+      await began;
+      if (status === 'cancelled')
+        expect(await f.call({ cancel: f.job.id })).toEqual({ status: 'cancelled' });
+      const first = await running;
+      expect(first).toMatchObject({
+        status,
+        toolUses: 1,
+        partial: { lastText: 'connecting to [env:POSTGRES_URL]' },
+      });
+      // On disk: the handback the parent received, less its spend, in a file only the user reads.
+      const path = join(dir, 'model-jobs', `${f.job.id}.json`);
+      const handedBack = Object.fromEntries(
+        Object.entries(first).filter(([key]) => key !== 'spend'),
+      );
+      expect(JSON.parse(JSON.parse(await readFile(path, 'utf8')).result)).toEqual(handedBack);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      f.summary.mockResolvedValue({ actualAtomic: '4000', reservedAtomic: '4000', uncertain: [] });
+      for (const resumed of [false, true]) {
+        if (resumed) await f.restart();
+        f.session.turnId = `later-${resumed}`;
+        const again = await f.call({ offer_id: f.job.id });
+        expect(again).toEqual({
+          ...handedBack,
+          spend: { actualAtomic: '4000', reservedAtomic: '4000', uncertain: [] },
+        });
+      }
+      // The run is over, so its uncertain calls were settled with the server before the report.
+      expect(f.reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({ id: f.job.id }),
+        expect.any(AbortSignal),
+      );
+      expect(worker.run).toHaveBeenCalledTimes(1);
+      expect(f.route).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+it('refuses a repeated accept while the worker runs, and starts exactly one worker for accepts that race', async () => {
+  const f = await ownedClaudeFixture();
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  worker.run.mockImplementation(async () => {
+    await finished;
+    return 'one worker';
+  });
+  try {
+    const raced = [f.call({ offer_id: f.job.id }), f.call({ offer_id: f.job.id })];
+    await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(1));
+    f.session.turnId = 'while-it-runs';
+    const repeat = await f.call({ offer_id: f.job.id });
+    expect(repeat.reason).toContain('still running');
+    expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+    finish();
+    const answers = await Promise.all(raced);
+    expect(answers.filter((answer) => answer.status === 'completed')).toHaveLength(1);
+    expect(answers.filter((answer) => answer.status === undefined)).toHaveLength(1);
+    expect(worker.run).toHaveBeenCalledTimes(1);
+  } finally {
+    finish();
+    await f.close();
+  }
+});
+
+it.each(['a new process', 'the same process'] as const)(
+  'reports a worker its process left running as interrupted to %s, without restarting or continuing it',
+  async (where) => {
+    const f = await ownedClaudeFixture();
+    try {
+      // What a killed `tenjin mcp` leaves: the job, its conversation and its display file say running.
+      const owner = { parentSessionId: 'root', root: f.repo, configDir: f.configDir };
+      const accepted = (await f.store.accept(f.job.id, 'root'))!;
+      const conversation = await f.conversations.create({
+        job: accepted,
+        parentSessionId: 'root',
+        sdkSessionId: randomUUID(),
+        configDir: f.configDir,
+      });
+      await f.conversations.accept(conversation.handle, owner, f.job.id);
+      const shown = workerProgressPath(dir, 'root', f.job.id);
+      await mkdir(join(shown, '..'), { recursive: true });
+      await writeFile(shown, '{}');
+      if (where === 'a new process') {
+        const pid = spawnSync(process.execPath, ['-e', '']).pid;
+        await writeFile(
+          join(dir, 'model-jobs', `${f.job.id}.json`),
+          JSON.stringify({ ...accepted, runner: { pid, acceptedAt: Date.now() } }),
+        );
+        await f.restart();
+      }
+      f.session.turnId = 'after-the-loss';
+      const stopped = await f.call({ offer_id: f.job.id });
+      expect(stopped).toMatchObject({
+        status: 'unknown',
+        stopReason: { kind: 'interrupted' },
+        spend: { actualAtomic: '3000' },
+        nextStep: expect.stringContaining('cannot be continued'),
+      });
+      expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('unknown');
+      expect((await f.conversations.lookup(conversation.handle, owner))?.state).toBe('unknown');
+      await expect(stat(shown)).rejects.toThrow();
+      expect((await f.capture(conversation.handle)).action).toBe('refused');
+      expect(await f.call({ offer_id: f.job.id })).toEqual(stopped);
+      expect(worker.run).not.toHaveBeenCalled();
+      expect(f.route).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+it('gives another session nothing for an offer id: no result, no start and no cancel', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const first = await f.call({ offer_id: f.job.id });
+    const offered = await f.store.offer({
+      sessionId: 'root',
+      turnId: 'second-turn',
+      callId: 'second-call',
+      root: f.repo,
+      task: 'A second assignment.',
+      native: {},
+      capAtomic: '1000000',
+      decision: { ...(await f.store.owned(f.job.id, 'root'))!.decision },
+    });
+    f.session.sessionId = 'another-session';
+    f.session.turnId = 'its-turn';
+    for (const id of [f.job.id, offered.id, randomUUID()]) {
+      expect(await f.call({ offer_id: id })).toEqual({
+        action: 'native',
+        reason: 'No such offer in this session',
+      });
+      expect(await f.call({ cancel: id })).toEqual({ status: 'not_owned' });
+    }
+    expect((await f.store.owned(offered.id, 'root'))?.state).toBe('offered');
+    expect(worker.run).toHaveBeenCalledTimes(1);
+    // The owner still has both.
+    f.session.sessionId = 'root';
+    f.session.turnId = 'owner-returns';
+    expect(await f.call({ offer_id: f.job.id })).toEqual(first);
+    expect(await f.call({ cancel: offered.id })).toEqual({ status: 'cancelled' });
+    expect((await f.store.owned(offered.id, 'root'))?.state).toBe('cancelled');
+    // A cancelled offer that no accept ever reached has no worker to report.
+    expect((await f.call({ offer_id: offered.id })).status).toBeUndefined();
+    expect(worker.run).toHaveBeenCalledTimes(1);
+  } finally {
+    await f.close();
+  }
+});
+
+it('removes model records a week after their last write when the process starts', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const old = join(dir, 'model-jobs', `${randomUUID()}.budget.json`);
+    await writeFile(old, '{}');
+    const then = new Date(Date.now() - MODEL_RECORD_TTL_MS - 60_000);
+    await utimes(old, then, then);
+    await f.restart();
+    expect((await f.call({ offer_id: f.job.id })).status).toBe('completed');
+    await expect(stat(old)).rejects.toThrow();
   } finally {
     await f.close();
   }

@@ -328,3 +328,22 @@ it('keeps an initial job identity immutable and rejects missing config or oversi
   );
   expect(await f.store.lookup(handle, f.owner)).toMatchObject({ state: 'running' });
 });
+
+it('reads a finished activation back for its owner after the conversation moved on, and starts nothing', async () => {
+  const f = await fixture();
+  await f.store.accept(f.conversation.handle, f.owner, f.job.id);
+  expect(await f.store.handback(f.conversation.handle, f.owner, f.job.id)).toBeNull();
+  await f.store.finish(f.conversation.handle, f.owner, f.job.id, 'completed', 'first result');
+  const next = f.followup();
+  await f.store.offer(f.conversation.handle, f.owner, next);
+  expect(await f.store.handback(f.conversation.handle, f.owner, f.job.id)).toBe('first result');
+  // The follow-up is still on offer: reading the old result neither started nor ended it.
+  expect((await f.store.lookup(f.conversation.handle, f.owner))?.state).toBe('offered');
+  expect(await f.store.handback(f.conversation.handle, f.owner, next.id)).toBeNull();
+  for (const foreign of [
+    { ...f.owner, parentSessionId: 'another-session' },
+    { ...f.owner, root: f.dataDir },
+    { ...f.owner, configDir: f.dataDir },
+  ])
+    expect(await f.store.handback(f.conversation.handle, foreign, f.job.id)).toBeNull();
+});

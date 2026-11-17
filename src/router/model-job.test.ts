@@ -1,8 +1,8 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { ModelJobStore } from './model-job';
+import { MODEL_RECORD_TTL_MS, ModelJobStore, sweepModelRecords } from './model-job';
 let dir: string;
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -165,4 +165,93 @@ it('never permits a second held assignment to take the first assignment’s wind
   await expect(store.offer({ ...input, callId: 'second' }, 'awaiting_prompt')).rejects.toThrow(
     'unresolved',
   );
+});
+
+it('finds an offer by its own id in a later turn and from another process, for its own session only', async () => {
+  const { store, job } = await heldAgentCall();
+  const restarted = new ModelJobStore(dir);
+  expect(await restarted.owned(job.id, 'root')).toMatchObject({ id: job.id, state: 'offered' });
+  expect(await restarted.owned(job.id, 'another-session')).toBeNull();
+  expect(await restarted.owned('not-an-id', 'root')).toBeNull();
+  // The turn that made the offer is not asked for: a later one accepts it, once.
+  const accepted = await restarted.accept(job.id, 'root');
+  expect(accepted).toMatchObject({ state: 'running', runner: { pid: process.pid } });
+  expect(await store.accept(job.id, 'root')).toBeNull();
+  expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
+});
+
+it('ends a running record only once the process that accepted it is gone or no run could still be going', async () => {
+  const { store, job } = await heldAgentCall();
+  const accepted = (await store.accept(job.id, 'root'))!;
+  const path = join(dir, 'model-jobs', `${job.id}.json`);
+  const runningIn = (pid: number) =>
+    writeFile(path, JSON.stringify({ ...accepted, runner: { pid, acceptedAt: Date.now() } }));
+  const other = process.pid + 1;
+  // Another live process may still be running the worker: nothing changes.
+  await runningIn(other);
+  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
+  expect((await store.owned(job.id, 'root'))?.state).toBe('running');
+  // Past the wall limit and its drain no run is going, whatever answers for that pid now.
+  expect(
+    await store.strand(job.id, { isAlive: () => true, now: Date.now() + 46 * 60_000 }),
+  ).toMatchObject({ state: 'unknown' });
+  // A process that is gone left it: it ends as interrupted, and stays ended.
+  await runningIn(other);
+  const ended = await store.strand(job.id, { isAlive: () => false });
+  expect(ended?.state).toBe('unknown');
+  expect(JSON.parse(ended!.result!)).toMatchObject({
+    status: 'unknown',
+    stopReason: { kind: 'interrupted' },
+  });
+  expect(await store.strand(job.id, { isAlive: () => true })).toMatchObject({ state: 'unknown' });
+  expect(await store.unfinished()).toEqual([]);
+  // An ended record cannot be accepted again, so no second worker can start from it.
+  expect(await store.accept(job.id, 'root')).toBeNull();
+});
+
+it('lists what was left running across sessions, and nothing else', async () => {
+  const { store, job } = await heldAgentCall();
+  const offered = await store.offer({
+    sessionId: 'other',
+    turnId: 'turn',
+    callId: 'call',
+    task: 'x',
+    root: '/repo',
+    native: {},
+    decision: {},
+    capAtomic: '1',
+  });
+  await store.accept(job.id, 'root');
+  expect((await store.unfinished()).map((left) => left.id)).toEqual([job.id]);
+  expect((await store.owned(offered.id, 'other'))?.state).toBe('offered');
+});
+
+it('removes a record 7 days after its last write and keeps one written a moment later', async () => {
+  const { store, job } = await heldAgentCall();
+  await mkdir(join(dir, 'model-conversations'));
+  const now = Date.now();
+  const files = {
+    old: join(dir, 'model-jobs', `${job.id}.budget.json`),
+    oldConversation: join(dir, 'model-conversations', 'old.json'),
+    kept: join(dir, 'model-jobs', `${job.id}-kept.result.json`),
+    keptConversation: join(dir, 'model-conversations', 'kept.json'),
+  };
+  for (const path of Object.values(files)) await writeFile(path, '{}');
+  const at = (ms: number) => new Date(now - ms);
+  for (const path of [files.old, files.oldConversation])
+    await utimes(path, at(MODEL_RECORD_TTL_MS + 1000), at(MODEL_RECORD_TTL_MS + 1000));
+  for (const path of [files.kept, files.keptConversation])
+    await utimes(path, at(MODEL_RECORD_TTL_MS - 1000), at(MODEL_RECORD_TTL_MS - 1000));
+  await sweepModelRecords(dir, now);
+  const exists = async (path: string) =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  expect(await Promise.all(Object.values(files).map(exists))).toEqual([false, false, true, true]);
+  // The offer written a moment ago stands; once it is as old, it is gone as if it never was.
+  expect((await store.owned(job.id, 'root'))?.id).toBe(job.id);
+  await sweepModelRecords(dir, now + MODEL_RECORD_TTL_MS + 60_000);
+  expect(await store.owned(job.id, 'root')).toBeNull();
+  expect(await readdir(join(dir, 'model-conversations'))).toEqual([]);
 });

@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
-import { ModelJobStore } from './model-job';
+import { ModelJobStore, sweepModelRecords, type ModelJob } from './model-job';
 import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
@@ -12,11 +12,15 @@ import { claudeWorkerPermissionMode } from './claude-model-policy';
 import { workerStop } from './model-worker-control';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
-import type { ModelConversation, ModelConversationOwner } from './model-conversations';
+import {
+  ModelConversationStore,
+  type ModelConversation,
+  type ModelConversationOwner,
+} from './model-conversations';
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
-import { realpath } from 'node:fs/promises';
+import { realpath, rm } from 'node:fs/promises';
 import { ModelWorkerActivity, activityAnswer, partialHandback } from './model-worker-activity';
-import { startWorkerProgress } from './model-worker-progress';
+import { startWorkerProgress, workerProgressPath } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
 
@@ -32,6 +36,16 @@ type ActiveConversation = {
  * the parent session, so a viewer follows in short reads, never one long one.
  */
 const FOLLOW_MS = 25_000;
+
+/** Who may read or end a job's worker: its parent session, its root and its Claude config. */
+const jobOwner = (job: ModelJob): ModelConversationOwner => ({
+  parentSessionId: job.sessionId,
+  root: job.root,
+  configDir:
+    typeof job.decision.workerConfigDir === 'string'
+      ? job.decision.workerConfigDir
+      : claudeWorkerConfigDir(job.root),
+});
 
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
@@ -60,6 +74,87 @@ export function registerModelTool(
   >();
   const views = new ModelWorkerViews();
   const jobs = new ModelJobStore(options.dataDir);
+  const conversations = new ModelConversationStore(options.dataDir);
+  /** Accept calls of this process still going, by job: such a job's worker is not stranded. */
+  const accepting = new Map<string, number>();
+  const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
+  const conversationOf = (job: ModelJob) =>
+    typeof job.decision.workerHandle === 'string'
+      ? conversations.lookup(job.decision.workerHandle, jobOwner(job))
+      : conversations.findByJob(job.id, jobOwner(job));
+  /**
+   * Ends a job, and its conversation, that the process running it left behind.
+   * The job as it now stands, or null while its worker may still be running.
+   */
+  const strand = async (job: ModelJob): Promise<ModelJob | null> => {
+    if (runsHere(job.id)) return null;
+    const ended = await jobs.strand(job.id);
+    if (!ended || ['running', 'cancelling'].includes(ended.state)) return null;
+    const conversation = await conversationOf(job).catch(() => null);
+    if (conversation)
+      await conversations
+        .finish(conversation.handle, jobOwner(job), job.id, 'unknown')
+        .catch(() => false);
+    await rm(workerProgressPath(options.dataDir, job.sessionId, job.id), { force: true }).catch(
+      () => undefined,
+    );
+    return ended;
+  };
+  /**
+   * What accepting a job that is no longer on offer answers: its stored
+   * handback, for the session that owns it. It starts no worker and adds no
+   * charge. Null for a state that keeps no handback.
+   */
+  const handback = async (
+    job: ModelJob,
+    signal: AbortSignal,
+  ): Promise<{ value: unknown } | { refused: string } | null> => {
+    const conversation = await conversationOf(job);
+    const completed = conversation
+      ? await conversations.handback(conversation.handle, jobOwner(job), job.id)
+      : null;
+    if (completed !== null || job.state === 'completed') {
+      let envelope: { status?: unknown; worker_handle?: unknown } | null = null;
+      try {
+        envelope = completed === null ? null : JSON.parse(completed);
+      } catch {
+        // Refused below.
+      }
+      if (envelope?.status !== 'completed' || envelope.worker_handle !== conversation?.handle)
+        return { refused: 'Stored worker completion is unavailable' };
+      // The stored result stands. A local job update that failed earlier is repaired here.
+      await jobs.finish(job.id, 'completed').catch(() => undefined);
+      return { value: envelope };
+    }
+    // An offer that was cancelled or expired before any accept has no worker to report.
+    if (!job.runner) return null;
+    const ended = ['running', 'cancelling'].includes(job.state) ? await strand(job) : job;
+    if (!ended)
+      return {
+        refused:
+          'This offer is already accepted and its worker is still running. Its result returns from the accept call that started it. No second worker started.',
+      };
+    if (ended.state !== 'cancelled' && ended.state !== 'unknown') return null;
+    let stopped: Record<string, unknown> = {};
+    try {
+      stopped = JSON.parse(ended.result ?? '{}');
+    } catch {
+      // A record with no readable handback still reports how it ended.
+    }
+    // The run is over, so what it left uncertain is settled before it is reported.
+    const budget = conversation?.originalJob ?? ended;
+    const transport = await options.transport();
+    await transport.reconcile(budget, signal);
+    const spend = await transport.summary(budget).catch(() => ({ accounting: 'unknown' }));
+    return { value: { status: ended.state, ...stopped, spend } };
+  };
+  // At start, once: nothing this process runs can be among what an earlier one left.
+  const repaired = isModelWorkerProcess()
+    ? Promise.resolve()
+    : (async () => {
+        await sweepModelRecords(options.dataDir);
+        for (const job of await jobs.unfinished()) await strand(job).catch(() => null);
+      })().catch(() => undefined);
   let handoff: ModelHandoff | undefined;
   const getHandoff = async () =>
     (handoff ??= new ModelHandoff({
@@ -77,14 +172,7 @@ export function registerModelTool(
     const fenceConversation = async () => {
       if (options.harness !== 'claude' || !pending) return;
       const active = controllers.get(pending.id)?.conversation;
-      const owner = active?.owner ?? {
-        parentSessionId: session.sessionId,
-        root: pending.root,
-        configDir:
-          typeof pending.decision.workerConfigDir === 'string'
-            ? pending.decision.workerConfigDir
-            : claudeWorkerConfigDir(pending.root),
-      };
+      const owner = active?.owner ?? jobOwner(pending);
       const conversation = active
         ? { handle: active.handle }
         : typeof pending.decision.workerHandle === 'string'
@@ -128,12 +216,9 @@ export function registerModelTool(
         )
           return answer({ status: 'unavailable' });
         if (args.follow && !existing) {
-          const pending = await new ModelJobStore(options.dataDir).pending(
-            session.sessionId,
-            session.turnId,
-          );
-          if (pending?.id !== args.offer_id || pending.root !== root)
-            return answer({ status: 'unavailable' });
+          // By its own id: the offer may have been accepted in a later turn than it was made in.
+          const pending = await jobs.owned(args.offer_id, session.sessionId);
+          if (pending?.root !== root) return answer({ status: 'unavailable' });
         }
         let activity = args.follow ? null : views.get(args.offer_id)?.snapshot();
         if (args.follow) {
@@ -169,7 +254,7 @@ export function registerModelTool(
     {
       title: 'Tenjin subagent',
       description:
-        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
       inputSchema: {
@@ -215,28 +300,43 @@ export function registerModelTool(
         ).length !== 1
       )
         return unavailable('Use one subagent operation');
+      await repaired;
       if (args.cancel) {
-        // A worker outlives the parent turn that accepted it, so it is found by its own turn.
+        // An offer or a worker outlives the parent turn it was made in, so it is found by
+        // its own id, then by its own turn: on Claude from its record, in any process.
+        const record =
+          options.harness === 'claude' ? await jobs.owned(args.cancel, session.sessionId) : null;
         const running = controllers.get(args.cancel)?.session;
-        const owned = running?.sessionId === session.sessionId ? running : session;
+        const owned = record
+          ? { ...session, turnId: record.turnId }
+          : running?.sessionId === session.sessionId
+            ? running
+            : session;
         const pending = await (await getHandoff()).store.pending(owned.sessionId, owned.turnId);
         if (pending?.id !== args.cancel) return answer({ status: 'not_owned' });
         await fence(owned);
         return answer({ status: 'cancelled' });
       }
-      if (args.offer_id && options.harness === 'claude') {
-        const model = await getHandoff();
-        const selected = await model.store.pending(session.sessionId, session.turnId);
+      // A Claude offer is found by its own id in any turn of its session, so its
+      // operations run in the window of the turn that made it.
+      let window = session;
+      const offered = args.offer_id && options.harness === 'claude' ? args.offer_id : undefined;
+      if (offered) {
+        const record = await jobs.owned(offered, session.sessionId);
+        // Another session's offer, a swept one and one that never was read the same.
+        if (!record) return unavailable('No such offer in this session');
         ownedContinuation ||=
-          typeof selected?.decision.workerHandle === 'string' ||
-          (await model.conversations.findByJob(args.offer_id, {
-            parentSessionId: session.sessionId,
-            root: session.cwd,
-            configDir: claudeWorkerConfigDir(session.cwd),
-          })) !== null;
+          typeof record.decision.workerHandle === 'string' ||
+          (await conversations.findByJob(offered, jobOwner(record))) !== null;
+        if (record.state !== 'offered') {
+          const kept = await handback(record, extra.signal);
+          if (kept) return 'value' in kept ? answer(kept.value) : unavailable(kept.refused);
+        }
+        window = { ...session, turnId: record.turnId };
+        accepting.set(offered, (accepting.get(offered) ?? 0) + 1);
       }
       return lifecycle
-        .run(session, extra.signal, async (signal) => {
+        .run(window, extra.signal, async (signal) => {
           if (args.capture) {
             if (
               options.harness !== 'claude' ||
@@ -279,7 +379,9 @@ export function registerModelTool(
           if (!args.offer_id)
             return answer({ action: 'native', reason: 'Unsupported submission on this host' });
           const model = await getHandoff();
-          const pending = await model.store.pending(session.sessionId, session.turnId);
+          const pending = offered
+            ? await model.store.owned(offered, session.sessionId)
+            : await model.store.pending(session.sessionId, session.turnId);
           const owner: ModelConversationOwner = {
             parentSessionId: session.sessionId,
             root: session.cwd,
@@ -294,31 +396,6 @@ export function registerModelTool(
               ? await model.conversations.lookup(pending.decision.workerHandle as string, owner)
               : await model.conversations.findByJob(pending.id, owner);
             ownedContinuation ||= resumed || conversation !== null;
-            // This is local result recovery only. Neither an idle nor a running
-            // record can start here; accept also repairs a completed continuation
-            // saved just before a crash updating its conversation and local job.
-            if (
-              conversation &&
-              ['idle', 'running'].includes(conversation.state) &&
-              conversation.currentContinuationId === pending.id &&
-              ['running', 'completed', 'unknown'].includes(pending.state)
-            ) {
-              const replay = await model.conversations.accept(
-                conversation.handle,
-                owner,
-                pending.id,
-              );
-              if (replay?.action === 'replay') {
-                const envelope = JSON.parse(replay.result);
-                if (
-                  envelope?.status !== 'completed' ||
-                  envelope.worker_handle !== conversation.handle
-                )
-                  return unavailable('Stored worker completion is unavailable');
-                await model.store.finish(pending.id, 'completed').catch(() => undefined);
-                return answer(envelope);
-              }
-            }
           }
           const current = await modelSettings(options.dataDir, session.cwd);
           const transport = await options.transport();
@@ -379,7 +456,11 @@ export function registerModelTool(
                 : 'Host permissions changed; retry original native call',
             );
           signal.throwIfAborted();
-          const job = await model.store.accept(args.offer_id, session.sessionId, session.turnId);
+          const job = await model.store.accept(
+            args.offer_id,
+            session.sessionId,
+            offered ? undefined : session.turnId,
+          );
           if (
             !job ||
             job.root !== current.root ||
@@ -589,37 +670,26 @@ export function registerModelTool(
               );
               return answer(envelope);
             } catch (error) {
+              const state = abort.signal.aborted ? 'cancelled' : 'unknown';
               if (activeConversation)
                 await model.conversations
-                  .finish(
-                    activeConversation.handle,
-                    activeConversation.owner,
-                    job.id,
-                    abort.signal.aborted ? 'cancelled' : 'unknown',
-                  )
+                  .finish(activeConversation.handle, activeConversation.owner, job.id, state)
                   .catch(() => false);
-              await model.store
-                .finish(job.id, abort.signal.aborted ? 'cancelled' : 'unknown')
-                .catch(() => undefined);
               const spend = await transport
                 .summary(executionJob)
                 .catch(() => ({ accounting: 'unknown' }));
-              activity?.finish(
-                abort.signal.aborted ? 'cancelled' : 'unknown',
-                'reservedAtomic' in spend ? spend : undefined,
-              );
+              activity?.finish(state, 'reservedAtomic' in spend ? spend : undefined);
               // What the stopped worker already did, so a retry starts from it.
               const partial = partialHandback(activity?.snapshot());
               const stop = workerStop(error);
               // Claude Code did not start in its window: nothing ran, no inference was bought,
               // and the unchanged repeat of the offered call runs native with no second fee.
               const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
-              return answer({
+              const stopped = {
                 status: abort.signal.aborted ? 'cancelled' : notStarted ? 'not_started' : 'unknown',
                 stopReason: stop,
                 elapsedMs: Date.now() - started,
                 ...counts(),
-                spend,
                 ...(partial ? { partial } : {}),
                 // An initial offer's held call has a free repeat. A continuation has none,
                 // though it runs with the original job's fields.
@@ -629,7 +699,13 @@ export function registerModelTool(
                     : activeConversation
                       ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                       : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
-              });
+              };
+              // On Claude the stopped handback is kept with the job, without its spend: a
+              // later accept in the owning session reads it and reports the spend as it then is.
+              await model.store
+                .finish(job.id, state, offered ? JSON.stringify(stopped) : undefined)
+                .catch(() => undefined);
+              return answer({ ...stopped, spend });
             } finally {
               // Not awaited: removing a display file never delays the handback.
               void progress?.stop().catch(() => undefined);
@@ -646,12 +722,17 @@ export function registerModelTool(
           });
           return done;
         })
-        .catch(() =>
-          unavailable('Delegation interrupted; no new worker may start from this offer'),
-        );
+        .catch(() => unavailable('Delegation interrupted; no new worker may start from this offer'))
+        .finally(() => {
+          if (!offered) return;
+          const left = (accepting.get(offered) ?? 1) - 1;
+          if (left > 0) accepting.set(offered, left);
+          else accepting.delete(offered);
+        });
     },
   );
   const shutdown = async () => {
+    await repaired;
     await lifecycle.stop();
     for (const running of controllers.values()) running.abort.abort();
     await Promise.allSettled([...controllers.values()].map((c) => c.done));

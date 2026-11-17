@@ -1,0 +1,5 @@
+---
+'tenjin-cli': patch
+---
+
+A DeepSeek offer keeps its identity when the Tenjin process restarts, and its operations work by offer id in any later turn of the session that received it. Accepting the same offer again never starts a second worker or adds a charge: after the worker ended it returns the stored result, including a stopped worker's last text and recent steps. A worker still stops when its session ends, as a native subagent does: after you resume the session, a finished worker can be continued by its handle, and one that was running is reported as stopped. Calls an ended run left uncertain are checked against Tenjin's record with a free read, so a call that cost nothing no longer lowers what the job can still spend. Local job, conversation, budget and handback records are removed 7 days after their last write; they were kept without limit before. A lock left by a killed Tenjin process no longer blocks later offers. The model can no longer ask for an offer itself: only a held Agent, Task or SendMessage call does. No fee, quote or settlement rule changes, and nothing new is sent to Tenjin or DeepSeek.
