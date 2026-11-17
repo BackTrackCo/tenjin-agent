@@ -2,8 +2,16 @@ import { realpath } from 'node:fs/promises';
 import { sep } from 'node:path';
 import { z } from 'zod';
 import { loadRawConfig } from '../lib/config';
+import { isRecord } from '../lib/guards';
 import { routerSettings } from './settings';
 
+/**
+ * Who receives a worker's data: Tenjin and DeepSeek its requests, Exa its web search
+ * queries and the address of a page its WebFetch could not fetch.
+ */
+const RECIPIENTS = ['Tenjin', 'DeepSeek', 'Exa'] as const;
+/** The recipients a consent named before Exa was named. */
+const EARLIER_RECIPIENTS = ['Tenjin', 'DeepSeek'] as const;
 const consentFields = {
   routerOrigin: z.url(),
   instructions: z.literal('applicable'),
@@ -13,7 +21,8 @@ const consentFields = {
    * before a worker could read it has no such field and no longer qualifies.
    */
   reads: z.literal('claude-home'),
-  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek')]),
+  /** A consent that names fewer recipients was given under an earlier disclosure. */
+  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
   maxJobAtomic: z.string().regex(/^\d+$/),
 };
 const repositoryConsentSchema = z.object({
@@ -42,7 +51,7 @@ export function nativeWorkspaceModelConsent(options: {
     scope: 'native-workspace',
     instructions: 'applicable',
     reads: 'claude-home',
-    recipients: ['Tenjin', 'DeepSeek'],
+    recipients: [...RECIPIENTS],
     routerOrigin: options.routerOrigin,
     maxJobAtomic: options.maxJobAtomic ?? '1000000',
   });
@@ -50,12 +59,21 @@ export function nativeWorkspaceModelConsent(options: {
 
 /**
  * A consent record given under an earlier disclosure: valid but for what a
- * worker may read today. It qualifies for nothing until the person renews it.
+ * worker may read today, or for naming Tenjin and DeepSeek without Exa. It
+ * qualifies for nothing until the person renews it.
  */
 export function outdatedModelConsent(value: unknown) {
   if (modelConsentSchema.safeParse(value).success) return null;
-  const renewed = value && typeof value === 'object' ? { ...value, reads: 'claude-home' } : value;
-  const parsed = modelConsentSchema.safeParse(renewed);
+  if (!isRecord(value)) return null;
+  const earlier =
+    Array.isArray(value.recipients) &&
+    value.recipients.length === EARLIER_RECIPIENTS.length &&
+    EARLIER_RECIPIENTS.every((name, at) => (value.recipients as unknown[])[at] === name);
+  const parsed = modelConsentSchema.safeParse({
+    ...value,
+    reads: 'claude-home',
+    ...(earlier ? { recipients: [...RECIPIENTS] } : {}),
+  });
   return parsed.success ? parsed.data : null;
 }
 

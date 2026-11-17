@@ -183,7 +183,7 @@ it('an explicit repository command narrows native-workspace disclosure to the na
           scope: 'native-workspace',
           instructions: 'applicable',
           reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek'],
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
           routerOrigin: 'https://tenjin.sh',
           maxJobAtomic: '1000000',
         },
@@ -239,7 +239,10 @@ it('says which recent calls without an offer a native subagent made, and why it 
   expect(result.humanLines?.[2]).toContain('Z  Agent  input_filter:name');
 });
 
-it('renews a consent from before the current disclosure, keeping the directories it named', async () => {
+it.each([
+  ['before a worker could read ~/.claude', true],
+  ['before Exa was named', false],
+])('renews a consent from %s, keeping the directories it named', async (_when, noReads) => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
   const first = join(dir, 'first'),
     second = join(dir, 'second');
@@ -248,13 +251,20 @@ it('renews a consent from before the current disclosure, keeping the directories
   await runConfigSubagents('on', { repository: first, maxJob: '1' }, testCtx(dir));
   const path = join(dir, 'config.json');
   const earlier = JSON.parse(await readFile(path, 'utf8'));
-  expect(earlier.router.subagentConsent.reads).toBe('claude-home');
-  delete earlier.router.subagentConsent.reads;
+  expect(earlier.router.subagentConsent).toMatchObject({
+    reads: 'claude-home',
+    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+  });
+  // The record as the earlier terms wrote it.
+  if (noReads) delete earlier.router.subagentConsent.reads;
+  earlier.router.subagentConsent.recipients = ['Tenjin', 'DeepSeek'];
   await writeFile(path, JSON.stringify(earlier));
   expect(await modelSettings(dir, first)).toBeNull();
   const renewed = await runConfigSubagents('on', { repository: second, maxJob: '1' }, testCtx(dir));
-  // The person reads what a worker can read now, and both directories stand.
+  // The person reads what a worker can read now and who receives what, and both
+  // directories stand.
   expect(JSON.stringify(renewed.data)).toContain('every session transcript');
+  expect(JSON.stringify(renewed.data)).toContain('Exa receives');
   expect(await modelSettings(dir, first)).not.toBeNull();
   expect(await modelSettings(dir, second)).not.toBeNull();
 });

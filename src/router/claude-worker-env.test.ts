@@ -58,3 +58,47 @@ it("keeps the parent's provider, wallet and login keys out of the worker's Claud
     Object.fromEntries(keys.map((key) => [key, 'absent'])),
   );
 });
+
+it("hands the SDK the worker's settings as a file, so the arguments its debug log records hold no token", async () => {
+  // The failure: settings given as an object became a `--settings {...}` argument with the
+  // bridge token and the job's GitHub token, and `DEBUG_CLAUDE_AGENT_SDK` logs every
+  // spawn's arguments (`Spawning Claude Code (custom): <command> <args>`).
+  dir = await mkdtemp(join(tmpdir(), 'worker-child-args-'));
+  const stub = join(dir, 'claude-stub.mjs');
+  await writeFile(stub, 'process.exit(1);');
+  const token = `gho_${'Q7w6'.repeat(9)}`;
+  const bridge = 'bridge-token-5c1e';
+  const owned = claudeWorkerProcess({ secrets: () => [token, bridge] });
+  const settings = owned.settingsFile({
+    env: { GH_TOKEN: token, ANTHROPIC_API_KEY: bridge },
+    sandbox: { enabled: true, failIfUnavailable: true },
+  });
+  const spawned: string[][] = [];
+  const run = query({
+    prompt: 'probe',
+    options: {
+      pathToClaudeCodeExecutable: stub,
+      settings,
+      spawnClaudeCodeProcess: (options) => {
+        spawned.push([options.command, ...options.args]);
+        return owned.spawn(options);
+      },
+      env: {
+        ...claudeDeepSeekWorkerEnv(process.env, 'http://127.0.0.1:9', bridge),
+        DEBUG_CLAUDE_AGENT_SDK: '1',
+      },
+    },
+  });
+  try {
+    for await (const message of run) void message;
+  } catch {
+    // The stand-in exits before the protocol starts.
+  }
+  expect(spawned).toHaveLength(1);
+  const logged = spawned[0]!.join(' ');
+  expect(logged).not.toContain(token);
+  expect(logged).not.toContain(bridge);
+  expect(spawned[0]![spawned[0]!.indexOf('--settings') + 1]).toBe(settings);
+  expect(JSON.parse(await readFile(settings, 'utf8'))).toMatchObject({ env: { GH_TOKEN: token } });
+  await owned.drain();
+});

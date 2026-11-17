@@ -3,32 +3,19 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core';
-
-/**
- * THE SDK PASSES ITS FLAG SETTINGS AS A JSON ARGUMENT, `--settings {...}`, which other
- * processes can read from the process table, and a worker's hold its bridge token and its
- * GitHub env. Claude Code takes a path there as well: the JSON goes in a file of its own
- * folder, which only this user can open and which is outside every working directory, so
- * the worker cannot change it. The folder is removed once the child has closed.
- */
-function settingsOffCommandLine(args: readonly string[], folders: string[]): string[] {
-  const out = [...args];
-  for (let at = 0; at + 1 < out.length; at++) {
-    if (out[at] !== '--settings' || !out[at + 1]!.trimStart().startsWith('{')) continue;
-    const folder = mkdtempSync(join(tmpdir(), 'tenjin-worker-settings-'));
-    folders.push(folder);
-    const file = join(folder, 'settings.json');
-    writeFileSync(file, out[at + 1]!, { mode: 0o600, flag: 'wx' });
-    out[at + 1] = file;
-  }
-  return out;
-}
+import type { Settings, SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core';
 
 /**
  * Observe the maintained SDK's native child without replacing its transport. `secrets`
  * are values that must never be on its command line: a child whose arguments still hold
  * one is not started.
+ *
+ * A WORKER'S FLAG SETTINGS HOLD ITS BRIDGE TOKEN AND ITS GITHUB ENV. Given to the SDK as an
+ * object, they become a `--settings {...}` argument, which other processes read from the
+ * process table and which the SDK's own debug log (`DEBUG_CLAUDE_AGENT_SDK`) records with
+ * every spawn. So they are written first, by {@link settingsFile}, to a file of its own
+ * folder that only this user can open and that is outside every working directory, and
+ * the SDK is given only its path. The folder is removed once every child has closed.
  */
 export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {}) {
   const children: Array<{
@@ -79,20 +66,27 @@ export function claudeWorkerProcess(o: { secrets?: () => readonly string[] } = {
     return { successful: successful.every(Boolean) };
   };
   return {
-    spawn(options: SpawnOptions) {
+    /** The settings, in a file only this user can read: its path, for the SDK's `settings`. */
+    settingsFile(settings: Settings): string {
       if (closing) throw new Error('Claude worker is already draining');
-      const before = folders.length;
-      let args: string[];
+      const folder = mkdtempSync(join(tmpdir(), 'tenjin-worker-settings-'));
+      folders.push(folder);
       try {
-        args = settingsOffCommandLine(options.args, folders);
-        const secrets = (o.secrets?.() ?? []).filter((secret) => secret.length > 0);
-        if (args.some((arg) => secrets.some((secret) => arg.includes(secret))))
-          throw new Error('A Claude worker secret would be on its command line');
+        const file = join(folder, 'settings.json');
+        writeFileSync(file, JSON.stringify(settings), { mode: 0o600, flag: 'wx' });
+        return file;
       } catch (error) {
-        for (const folder of folders.splice(before))
-          rmSync(folder, { recursive: true, force: true });
+        folders.splice(folders.indexOf(folder), 1);
+        rmSync(folder, { recursive: true, force: true });
         throw error;
       }
+    },
+    spawn(options: SpawnOptions) {
+      if (closing) throw new Error('Claude worker is already draining');
+      const { args } = options;
+      const secrets = (o.secrets?.() ?? []).filter((secret) => secret.length > 0);
+      if (args.some((arg) => secrets.some((secret) => arg.includes(secret))))
+        throw new Error('A Claude worker secret would be on its command line');
       const child = spawn(options.command, args, {
         cwd: options.cwd,
         env: options.env,

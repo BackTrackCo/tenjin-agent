@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
+import { query, resolveSettings, type Options } from '@anthropic-ai/claude-agent-sdk/core';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeCode, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
@@ -24,7 +24,31 @@ const native = vi.hoisted(() => ({
   promptMessages: [] as unknown[],
   githubClose: vi.fn(async () => undefined),
   worktrees: [] as string[],
+  /** What each private settings file held, by its path: the file is gone once the job ends. */
+  settings: new Map<string, Record<string, unknown>>(),
 }));
+vi.mock('./claude-worker-process', async (original) => {
+  const actual = await original<typeof import('./claude-worker-process')>();
+  return {
+    ...actual,
+    claudeWorkerProcess: (...args: Parameters<typeof actual.claudeWorkerProcess>) => {
+      const owned = actual.claudeWorkerProcess(...args);
+      return {
+        ...owned,
+        settingsFile: (settings: Parameters<typeof owned.settingsFile>[0]) => {
+          const path = owned.settingsFile(settings);
+          native.settings.set(path, settings as Record<string, unknown>);
+          return path;
+        },
+      };
+    },
+  };
+});
+/** A worker's query options, with what its settings file held in place of the file's path. */
+function given(options: Options | undefined) {
+  const settings = native.settings.get(String(options?.settings));
+  return { ...options, settings, sandbox: settings?.sandbox as Options['sandbox'] };
+}
 // A fixture token, shaped like a GitHub OAuth token so the bridge test is realistic.
 const GITHUB_TOKEN = `gho_${'A1b2'.repeat(9)}`;
 vi.mock('./worker-github', async (original) => ({
@@ -507,7 +531,7 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
     cwd: '/repo',
     persistSession: false,
   });
-  expect(call.options?.settings).toMatchObject({
+  expect(given(call.options).settings).toMatchObject({
     autoMemoryEnabled: false,
     apiKeyHelper: expect.any(String),
     env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
@@ -538,15 +562,19 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
   ]) {
     const path = join(homedir(), name);
     const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-    expect(call.options?.settings).toHaveProperty(
+    expect(given(call.options).settings).toHaveProperty(
       'permissions.deny',
       expect.arrayContaining([`Read(${absolute})`, `Edit(${absolute})`, `Write(${absolute})`]),
     );
-    expect(call.options?.sandbox?.filesystem?.denyRead).toContain(path);
+    expect(given(call.options).sandbox?.filesystem?.denyRead).toContain(path);
   }
-  expect(call.options?.sandbox?.filesystem?.denyRead).not.toContain(join(homedir(), '.claude'));
-  expect(call.options?.sandbox?.filesystem?.denyWrite).not.toContain(join(homedir(), '.claude'));
-  expect(call.options?.settings).not.toHaveProperty(
+  expect(given(call.options).sandbox?.filesystem?.denyRead).not.toContain(
+    join(homedir(), '.claude'),
+  );
+  expect(given(call.options).sandbox?.filesystem?.denyWrite).not.toContain(
+    join(homedir(), '.claude'),
+  );
+  expect(given(call.options).settings).not.toHaveProperty(
     'permissions.deny',
     expect.arrayContaining([`Read(/${join(homedir(), '.claude')}/**)`]),
   );
@@ -584,7 +612,7 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   );
   const call = vi.mocked(query).mock.calls[0]![0];
   expect(call.options?.additionalDirectories).toEqual(['/sibling']);
-  expect(call.options?.settings).toMatchObject({
+  expect(given(call.options).settings).toMatchObject({
     permissions: {
       workingDirectoriesAsGiven: ['/repo', '/sibling'],
       // Beside the session history and user settings every worker may read.
@@ -592,19 +620,20 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       blockWritesOutsideWorkingDirectories: true,
     },
   });
-  expect(call.options?.settings).not.toHaveProperty(
+  expect(given(call.options).settings).not.toHaveProperty(
     'permissions.blockReadsExemptPaths',
     expect.arrayContaining(['/shell-write']),
   );
   // Env files in a working directory follow the native defaults; in an exception they stay private.
-  const deny = (call.options?.settings as { permissions: { deny: string[] } }).permissions.deny;
+  const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
+    .deny;
   expect(deny.filter((rule) => rule.startsWith('Read(//sibling') && rule.includes('.env'))).toEqual(
     [],
   );
   expect(deny).toEqual(
     expect.arrayContaining(['Read(//read-only/**/.env*)', 'Write(//shell-write/**/.env*)']),
   );
-  const denyRead = call.options?.sandbox?.filesystem?.denyRead ?? [];
+  const denyRead = given(call.options).sandbox?.filesystem?.denyRead ?? [];
   expect(denyRead.filter((path) => /^\/(repo|sibling)\/.*\.env/.test(path))).toEqual([]);
   expect(denyRead).toEqual(expect.arrayContaining(['/read-only/**/.env*', '/shell-write/.env*']));
   // So are other repositories' `.claude/settings.json`: read where the scan learns their
@@ -636,9 +665,9 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   );
   const unwatched = vi.mocked(query).mock.calls.at(-1)![0];
   expect(
-    (unwatched.options?.settings as { permissions: { deny: string[] } }).permissions.deny,
+    (given(unwatched.options).settings as { permissions: { deny: string[] } }).permissions.deny,
   ).toContain('Read(//sibling/**/.claude/settings.json)');
-  expect(unwatched.options?.sandbox?.filesystem?.denyRead).toContain(
+  expect(given(unwatched.options).sandbox?.filesystem?.denyRead).toContain(
     '/sibling/**/.claude/settings.json',
   );
   watching.mockRestore();
@@ -670,7 +699,7 @@ it('gives the worker every consented repository and its worktrees, and denies a 
   const call = vi.mocked(query).mock.calls[0]![0];
   // The sandbox keeps a worktree's git metadata read-only unless the worktree is named.
   expect(call.options?.additionalDirectories).toEqual(['/workspace', '/workspace/.worktrees/fix']);
-  expect(call.options?.settings).toHaveProperty(
+  expect(given(call.options).settings).toHaveProperty(
     'permissions.deny',
     expect.arrayContaining([
       'Read(//elsewhere/**)',
@@ -678,8 +707,8 @@ it('gives the worker every consented repository and its worktrees, and denies a 
       'Read(//workspace/**/.claude/settings.local.json)',
     ]),
   );
-  expect(call.options?.sandbox?.filesystem?.denyRead).toContain('/elsewhere');
-  expect(call.options?.sandbox?.filesystem?.denyWrite).toContain('/elsewhere');
+  expect(given(call.options).sandbox?.filesystem?.denyRead).toContain('/elsewhere');
+  expect(given(call.options).sandbox?.filesystem?.denyWrite).toContain('/elsewhere');
 });
 
 it('runs gh and git with a per-job token and config, an allowlisted network and a token-free bridge', async () => {
@@ -766,7 +795,7 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
     GIT_CONFIG_GLOBAL: '/job/gitconfig',
     NODE_USE_ENV_PROXY: '1',
   });
-  const sandbox = call.options?.sandbox;
+  const sandbox = given(call.options).sandbox;
   expect(sandbox?.network?.allowedDomains).toEqual(
     expect.arrayContaining(['github.com', 'api.github.com', 'registry.npmjs.org']),
   );
@@ -789,12 +818,28 @@ it("puts the job's GitHub env above a GitHub token in the person's settings env"
   const call = vi.mocked(query).mock.calls[0]![0];
   // The flag layer outranks user, project and local settings; it reaches Claude Code in a
   // private file, never on its command line (`claude-worker-process`).
-  expect((call.options?.settings as { env: Record<string, string> }).env).toMatchObject({
+  expect((given(call.options).settings as { env: Record<string, string> }).env).toMatchObject({
     GH_TOKEN: GITHUB_TOKEN,
     GH_CONFIG_DIR: '/job/gh',
     GIT_CONFIG_GLOBAL: '/job/gitconfig',
     TENJIN_WORKER_GITHUB_TOKEN: '',
     TENJIN_WORKER_GITHUB_TOKEN_FILE: '',
+  });
+});
+
+it('gives the SDK neither the GitHub token nor the bridge token outside the child env, so its debug log holds none', async () => {
+  // The failure: the settings object reached the SDK, which turned it into a `--settings
+  // {...}` argument that `DEBUG_CLAUDE_AGENT_SDK` logs with every spawn.
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(job, options());
+  const { env, ...rest } = vi.mocked(query).mock.calls[0]![0].options!;
+  const bridge = env!.ANTHROPIC_API_KEY!;
+  expect(typeof rest.settings).toBe('string');
+  expect(rest).not.toHaveProperty('sandbox');
+  for (const secret of [GITHUB_TOKEN, bridge]) expect(JSON.stringify(rest)).not.toContain(secret);
+  // The file holds them, as the flag layer must.
+  expect(given(rest).settings).toMatchObject({
+    env: { GH_TOKEN: GITHUB_TOKEN, ANTHROPIC_API_KEY: bridge },
   });
 });
 
@@ -817,7 +862,9 @@ it("clears the session's GitHub tokens for a named worker token also when the jo
     GITHUB_ENTERPRISE_TOKEN: '',
   };
   expect(call.options?.env).toMatchObject(cleared);
-  expect((call.options?.settings as { env: Record<string, string> }).env).toMatchObject(cleared);
+  expect((given(call.options).settings as { env: Record<string, string> }).env).toMatchObject(
+    cleared,
+  );
 });
 
 it("reads its working directories' env files natively, and only their placeholders leave", async () => {
@@ -901,10 +948,13 @@ it("reads its working directories' env files natively, and only their placeholde
     );
     const call = vi.mocked(query).mock.calls[0]![0];
     // The worker and its commands read the file; native Edit and Write rules decide writes.
-    const deny = (call.options?.settings as { permissions: { deny: string[] } }).permissions.deny;
+    const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
+      .deny;
     expect(deny.filter((rule) => rule.includes('.env'))).toEqual([]);
     expect(
-      (call.options?.sandbox?.filesystem?.denyRead ?? []).filter((path) => path.includes('.env')),
+      (given(call.options).sandbox?.filesystem?.denyRead ?? []).filter((path) =>
+        path.includes('.env'),
+      ),
     ).toEqual([]);
     // Tenjin and DeepSeek, the parent and the activity rows see names, never values.
     const forwarded = JSON.stringify(messages.mock.calls);
@@ -1001,7 +1051,7 @@ async function throughBridge(
     forwarded: JSON.stringify(messages.mock.calls),
     observed: JSON.stringify(activity.observe.mock.calls),
     handedBack,
-    sent: vi.mocked(query).mock.calls[0]![0].options!,
+    sent: given(vi.mocked(query).mock.calls[0]![0].options),
   };
 }
 
@@ -1103,7 +1153,7 @@ it.skipIf(process.getuid?.() === 0)(
         { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
         options(),
       );
-      const sent = vi.mocked(query).mock.calls[0]![0].options;
+      const sent = given(vi.mocked(query).mock.calls[0]![0].options);
       const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
       // The file tools are refused its env files, and commands the whole folder: a
       // command could open `locked/.env.local` by name, and its value was never learned.
@@ -1147,7 +1197,7 @@ it("denies by its path a repository's settings file that cannot be parsed, and l
       { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
       options(),
     );
-    const sent = vi.mocked(query).mock.calls[0]![0].options;
+    const sent = given(vi.mocked(query).mock.calls[0]![0].options);
     const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
     const absolute = `//${broken.replace(/^\/+/, '')}`;
     expect(deny).toEqual(
@@ -1503,7 +1553,7 @@ it('applies native settings-source and project MCP credential guards while prese
   sdkResult({ subtype: 'success', result: 'done' });
   await expect(runModelWorker(job, options())).resolves.toBe('done');
   const call = vi.mocked(query).mock.calls[0]![0];
-  const paths = call.options?.sandbox?.filesystem?.denyRead;
+  const paths = given(call.options).sandbox?.filesystem?.denyRead;
   for (const file of [
     '/repo/.mcp.json',
     '/repo/.claude/settings.local.json',
@@ -1928,7 +1978,7 @@ it.each(['', '/repo/custom-claude'])(
       const call = vi.mocked(query).mock.calls[0]![0];
       const credential = (config || '/repo') + '/.credentials.json';
       expect(call.options?.env?.CLAUDE_CONFIG_DIR).toBe(config);
-      expect(call.options?.settings).toHaveProperty(
+      expect(given(call.options).settings).toHaveProperty(
         'permissions.deny',
         expect.arrayContaining([
           `Read(/${credential})`,
@@ -1936,9 +1986,12 @@ it.each(['', '/repo/custom-claude'])(
           `Write(/${credential})`,
         ]),
       );
-      expect(call.options?.settings).toHaveProperty('env.CLAUDE_CODE_DISABLE_AUTO_MEMORY', '1');
-      expect(call.options?.sandbox?.filesystem?.denyRead).toContain(credential);
-      expect(call.options?.sandbox?.filesystem?.denyRead).not.toContain('/repo');
+      expect(given(call.options).settings).toHaveProperty(
+        'env.CLAUDE_CODE_DISABLE_AUTO_MEMORY',
+        '1',
+      );
+      expect(given(call.options).sandbox?.filesystem?.denyRead).toContain(credential);
+      expect(given(call.options).sandbox?.filesystem?.denyRead).not.toContain('/repo');
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1955,7 +2008,7 @@ it.each(['/repo/secure-storage', ''])(
     await runModelWorker(job, options());
     const call = vi.mocked(query).mock.calls[0]![0];
     const credential = join(secure || join(homedir(), '.claude'), '.credentials.json');
-    expect(call.options?.settings).toHaveProperty(
+    expect(given(call.options).settings).toHaveProperty(
       'permissions.deny',
       expect.arrayContaining([
         `Read(/${credential})`,
@@ -1963,7 +2016,7 @@ it.each(['/repo/secure-storage', ''])(
         `Write(/${credential})`,
       ]),
     );
-    expect(call.options?.sandbox?.filesystem?.denyRead).toContain(credential);
+    expect(given(call.options).sandbox?.filesystem?.denyRead).toContain(credential);
   },
 );
 
@@ -2059,7 +2112,7 @@ it("gives each job a private temp folder that its commands and file tools use by
   });
   await runModelWorker(job, options());
   const { directory, scratchpad } = made!;
-  const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+  const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
   const settings = sent.settings as {
     env: Record<string, string>;
     permissions: { workingDirectoriesAsGiven: string[] };
@@ -2205,6 +2258,7 @@ it("runs with the native subagent's prompt, context and tools as Claude Code bui
     prompt: ['You are a file search specialist.'],
     context: ['<system-reminder>\n# gitStatus\nmain\n</system-reminder>'],
     withheldTools: ['ScheduleWakeup'],
+    withheldInstructions: [],
   };
   vi.mocked(readNativeAgentPrompt).mockResolvedValueOnce(read).mockResolvedValueOnce(read);
   const explore = { ...job, native: { subagent_type: 'Explore' } } as unknown as ModelJob;
@@ -2243,6 +2297,38 @@ it("runs with the native subagent's prompt, context and tools as Claude Code bui
   expect(native.promptMessages.at(-1)).toMatchObject({
     message: { content: [{ type: 'text', text: 'Continue.' }] },
   });
+});
+
+it('starts without the CLAUDE.md files its native subagent starts without, and keeps the ones it gets', async () => {
+  // Failure caught: the worker runs as Claude Code's main thread, which puts the person's
+  // CLAUDE.md files in its first request whatever its agent, where a native Explore
+  // subagent gets none of them; a general-purpose one gets them all.
+  native.worktrees = ['/repo-feature'];
+  const files = [
+    '/home/me/.claude/CLAUDE.md',
+    '/home/me/.claude/rules/style.md',
+    '/repo/CLAUDE.md',
+  ];
+  const read = { prompt: ['You are a file search specialist.'], context: [], withheldTools: [] };
+  vi.mocked(readNativeAgentPrompt)
+    .mockResolvedValueOnce({ ...read, withheldInstructions: files })
+    .mockResolvedValueOnce({ ...read, withheldInstructions: [] });
+  sdkResult({ subtype: 'success', result: 'explore fixture' });
+  await runModelWorker({ ...job, native: { subagent_type: 'Explore' } } as unknown as ModelJob, {
+    ...options(),
+  });
+  // Read with the worker's own working directories, whose CLAUDE.md files it may start with.
+  expect(vi.mocked(readNativeAgentPrompt).mock.calls[0]![0]).toMatchObject({
+    additionalDirectories: ['/repo-feature'],
+  });
+  expect(given(vi.mocked(query).mock.calls[0]![0].options).settings).toMatchObject({
+    claudeMdExcludes: files,
+  });
+  sdkResult({ subtype: 'success', result: 'general fixture' });
+  await runModelWorker(job, options());
+  expect(given(vi.mocked(query).mock.calls[1]![0].options).settings).not.toHaveProperty(
+    'claudeMdExcludes',
+  );
 });
 
 it('still starts, with the main prompt and the note, and says why when the native prompt cannot be read', async () => {
@@ -2298,7 +2384,7 @@ it("gives a parent's text no permission: the same mode, rules, sandbox and ask w
   const engine = async (task: string) => {
     sdkResult({ subtype: 'success', result: 'ruling fixture' });
     await runModelWorker({ ...job, task }, { ...options(), permission });
-    const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+    const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
     const answer = await sent.canUseTool!('Bash', { command: 'git push origin main' }, {
       signal: new AbortController().signal,
       toolUseID: 't',
@@ -2308,7 +2394,7 @@ it("gives a parent's text no permission: the same mode, rules, sandbox and ask w
       answer,
       permissionMode: sent.permissionMode,
       allowDangerouslySkipPermissions: sent.allowDangerouslySkipPermissions,
-      permissions: sent.settings && typeof sent.settings === 'object' && sent.settings.permissions,
+      permissions: sent.settings?.permissions,
       sandbox: sent.sandbox,
       additionalDirectories: sent.additionalDirectories,
       disallowedTools: sent.disallowedTools,

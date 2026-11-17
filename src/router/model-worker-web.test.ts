@@ -19,6 +19,7 @@ import {
   type WorkerRequest,
   type WorkerWebDeps,
 } from './model-worker-web';
+import type { Identities } from './identities';
 import { runRequestTool } from './tool';
 
 /**
@@ -77,7 +78,14 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-async function configure(options: { cap?: string; maxAutoSpend?: string } = {}) {
+/** The router's identities read, as the rules are checked against it. */
+const IDENTITIES = JSON.parse(
+  readFileSync(new URL('./fixtures/wire-identities.json', import.meta.url), 'utf8'),
+) as Identities;
+
+async function configure(
+  options: { cap?: string; maxAutoSpend?: string; policy?: Record<string, unknown> } = {},
+) {
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({
@@ -89,11 +97,12 @@ async function configure(options: { cap?: string; maxAutoSpend?: string } = {}) 
           version: 2,
           instructions: 'applicable',
           reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek'],
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
           repositories: [repo],
           maxJobAtomic: options.cap ?? '1000000',
           routerOrigin: ROUTER,
         },
+        ...(options.policy ? { policy: { version: 1, ...options.policy } } : {}),
       },
     }),
   );
@@ -149,9 +158,12 @@ function network(
       if (options.routerAnswer)
         return Response.json(options.routerAnswer.body, { status: options.routerAnswer.status });
       const id = randomUUID();
+      const settings = body.settings as { hash?: unknown } | undefined;
       return Response.json({
         schemaVersion: 1,
         routerVersion: 'test',
+        // Decided under the rules the request carried, as the router echoes them.
+        ...(typeof settings?.hash === 'string' ? { settingsHash: settings.hash } : {}),
         decision: {
           action: 'spec',
           id,
@@ -397,6 +409,134 @@ it('answers the native error when Exa fails after the payment was signed, and ke
   expect(reads.errors).toEqual(['unavailable']);
   expect(reads.text).toMatch(/it did not run/);
   expect((await transport.summary(job)).actualAtomic).toBe((ROUTING_FEE + 4000n).toString());
+});
+
+const EXA = { kind: 'provider', id: 'exa' } as const;
+it.each([
+  ['blocks Exa', { block: [EXA] }],
+  ["turns off Tenjin's own tools", { block: [{ kind: 'source', id: 'tenjin' }] }],
+  ['blocks the lookups category', { block: [{ kind: 'category', id: 'lookups' }] }],
+  [
+    'lets Tenjin offer only images on its own',
+    {
+      only: [
+        {
+          scope: { kind: 'global' },
+          dimension: 'capability',
+          targets: [{ kind: 'category', id: 'images' }],
+        },
+      ],
+    },
+  ],
+  [
+    'names another provider as the only one for web research',
+    {
+      only: [
+        {
+          scope: { kind: 'task', id: 'web research' },
+          dimension: 'provider',
+          targets: [{ kind: 'provider', id: 'coinmarketcap' }],
+        },
+      ],
+    },
+  ],
+])(
+  "refuses a worker's search, unpaid, when the person's rules leave Exa out: %s",
+  async (_rule, policy) => {
+    // The failure: a worker's searches went to Exa and were paid while the person had told
+    // Tenjin not to use Exa, or anything for web research, on its own.
+    await configure({ policy });
+    const { fetchImpl, seen } = network();
+    const { job, transport, deps, auth } = setup(fetchImpl);
+    const reads = asWebSearchReads(
+      await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => IDENTITIES }),
+    );
+    expect(reads.errors).toEqual(['unavailable']);
+    expect(reads.text).toMatch(
+      /^Web search is not available to this worker right now: the person's Tenjin settings keep Tenjin from using Exa search on its own/,
+    );
+    // Nothing asked of the router, nothing sent to Exa, nothing authorized or counted.
+    expect(seen).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
+  },
+);
+
+it("reads no page through Exa, and pays nothing, when the person's rules block Exa", async () => {
+  // The failure: a worker's failed WebFetch was read through Exa, and paid, against a block.
+  await configure({ policy: { block: [EXA] } });
+  const { fetchImpl, seen } = network();
+  const { deps, auth } = setup(fetchImpl);
+  const read = await workerFetchFallback(
+    {
+      input: { url: 'https://x402.org', prompt: 'Summarize' },
+      error: 'getaddrinfo ENOTFOUND x402.org',
+    },
+    { ...deps, identities: async () => IDENTITIES, redact: (text) => text },
+  );
+  expect(read).toContain('keep Tenjin from using Exa contents on its own');
+  expect(read).not.toContain('The whole page.');
+  expect(seen).toEqual([]);
+  expect(auth.authorize).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['blocks another provider', { block: [{ kind: 'provider', id: 'coinmarketcap' }] }],
+  [
+    'lets Tenjin offer only lookups on its own',
+    {
+      only: [
+        {
+          scope: { kind: 'global' },
+          dimension: 'capability',
+          targets: [{ kind: 'category', id: 'lookups' }],
+        },
+      ],
+    },
+  ],
+  [
+    'names Exa as the only provider for web research',
+    {
+      only: [
+        { scope: { kind: 'task', id: 'web research' }, dimension: 'provider', targets: [EXA] },
+      ],
+    },
+  ],
+  [
+    'prefers another provider for web research',
+    {
+      prefer: [
+        {
+          scope: { kind: 'task', id: 'web research' },
+          targets: [{ kind: 'provider', id: 'coinmarketcap' }],
+        },
+      ],
+    },
+  ],
+])("still searches with Exa when the person's rules leave it in: %s", async (_rule, policy) => {
+  // The failure: a rule about something else, or a preference, which never forbids a
+  // service, cost the worker its searches.
+  await configure({ policy });
+  const { fetchImpl, seen } = network();
+  const { deps } = setup(fetchImpl);
+  const reads = asWebSearchReads(
+    await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => IDENTITIES }),
+  );
+  expect(reads.errors).toEqual([]);
+  expect(seen.filter((call) => call.url === EXA_SEARCH && call.paid)).toHaveLength(1);
+});
+
+it('refuses a search, unpaid, when a block rule cannot be checked because no identities read is known', async () => {
+  // The failure: with the router unreachable and no kept copy, a provider block was taken
+  // to leave Exa in.
+  await configure({ policy: { block: [{ kind: 'provider', id: 'coinmarketcap' }] } });
+  const { fetchImpl, seen } = network();
+  const { deps } = setup(fetchImpl);
+  const reads = asWebSearchReads(
+    await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => undefined }),
+  );
+  expect(reads.errors).toEqual(['unavailable']);
+  expect(seen).toEqual([]);
 });
 
 it('answers that search is not available when no request executor runs for the worker', async () => {

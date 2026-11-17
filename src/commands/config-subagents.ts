@@ -18,7 +18,7 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   host_unqualified: 'the host cannot show a worker permission prompt',
   no_consent: 'no DeepSeek consent covers this directory at this router',
   consent_outdated:
-    'your DeepSeek consent predates what a worker can read now; read the current terms and renew it with tenjin config subagents on --repository <path> --max-job <USD>',
+    'your DeepSeek consent predates what a worker can read now, or does not name Exa as a recipient; read the current terms and renew it with tenjin config subagents on --repository <path> --max-job <USD>',
   permission_mode: 'the session was in plan mode, or its mode was not seen',
   worker_unqualified:
     'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
@@ -107,9 +107,9 @@ export async function runConfigSubagents(
       'The job ceiling must be at least $0.044611 for the current minimum Messages reservation and routing fee. Actual input can require more.',
     );
   const disclosure = [
-    'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results.',
+    'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results, and Exa receives the worker’s web search queries and the address of a public page its WebFetch could not fetch. Your Tenjin block and only rules apply to those Exa calls as they do to what Tenjin picks on its own.',
     'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. It loads your global Claude Code configuration as a native subagent does: your personal CLAUDE.md is in its instructions, and it can read the skills, plugins, agents, commands and rules under ~/.claude, every session transcript and memory folder there, your prompt history and your settings files, so what it reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders you did not name stay unreadable; known secrets are masked, not guaranteed anonymous.',
-    'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. Claude’s usual 32K-output request reserves at least $0.041611 at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling, and the search query or the page’s address goes to Exa.',
+    'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. Claude’s usual 32K-output request reserves at least $0.041611 at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.',
   ].join('\n\n');
   let repositories = [repository];
   let githubRepositories: string[] = [];
@@ -129,7 +129,7 @@ export async function runConfigSubagents(
           version: 2,
           instructions: 'applicable',
           reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek'],
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
           repositories,
           githubRepositories,
           maxJobAtomic: maxJob.toString(),

@@ -48,7 +48,7 @@ async function fixture(
         version: 2,
         instructions: 'applicable',
         reads: 'claude-home',
-        recipients: ['Tenjin', 'DeepSeek'],
+        recipients: ['Tenjin', 'DeepSeek', 'Exa'],
         repositories: [repo],
         maxJobAtomic: options.cap ?? '1000000',
         routerOrigin: BASE,

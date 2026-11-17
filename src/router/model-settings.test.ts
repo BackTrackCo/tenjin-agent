@@ -75,6 +75,25 @@ it('stops qualifying a consent given before a worker could read the global Claud
   expect(outdatedModelConsent({ ...earlier, recipients: ['Tenjin'] })).toBeNull();
 });
 
+it('stops qualifying a consent that names Tenjin and DeepSeek but not Exa, until it is renewed', async () => {
+  // The failure: a consent given before a worker's web searches went to Exa kept
+  // qualifying, so Exa received queries under terms that never named it.
+  const withoutExa: Record<string, unknown> = {
+    ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+    recipients: ['Tenjin', 'DeepSeek'],
+  };
+  const { data, repo } = await fixture({ subagents: true, subagentConsent: withoutExa });
+  expect(await modelSettings(data, repo)).toBeNull();
+  expect(await modelConsentOutdated(data)).toBe(true);
+  // The earliest record, from before ~/.claude was named as well, is renewed the same way.
+  const earliest = { ...withoutExa };
+  delete earliest.reads;
+  expect(outdatedModelConsent(earliest)).toMatchObject({
+    reads: 'claude-home',
+    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+  });
+});
+
 it('a repository cannot create native-workspace disclosure, or override a global/project stop', async () => {
   const consent = nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' });
   const { data, repo } = await fixture({});
@@ -140,7 +159,7 @@ it('keeps the actual cwd beneath an explicitly selected workspace and lets a pro
           version: 2,
           instructions: 'applicable',
           reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek'],
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
           repositories: [repo],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost:3939',

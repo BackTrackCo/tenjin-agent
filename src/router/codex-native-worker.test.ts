@@ -83,7 +83,7 @@ beforeEach(async () => {
           version: 2,
           instructions: 'applicable',
           reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek'],
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
           repositories: [root, join(home, '.codex', 'AGENTS.md')],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost',

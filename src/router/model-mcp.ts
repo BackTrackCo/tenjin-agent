@@ -8,6 +8,7 @@ import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import type { WorkerRequest } from './model-worker-web';
+import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
 import { WORKER_ENDS, WORKER_WALL_MS, workerEnd, workerStop } from './model-worker-control';
@@ -73,6 +74,8 @@ export function registerModelTool(
     transport: () => Promise<ModelTransport>;
     /** `tenjin mcp`'s request executor, which pays for a Claude worker's web searches. */
     web?: WorkerRequest;
+    /** The router's identities read, which the person's rules for those searches are checked against. */
+    webIdentities?: () => Promise<Identities | undefined>;
   },
 ) {
   const lifecycle = new ModelLifecycle();
@@ -733,6 +736,7 @@ export function registerModelTool(
                 ...(options.harness === 'claude'
                   ? {
                       ...(options.web ? { web: options.web } : {}),
+                      ...(options.webIdentities ? { webIdentities: options.webIdentities } : {}),
                       claudePermissionMode: acceptedClaudeMode ?? undefined,
                       currentClaudePermissionMode: jobClaudeMode,
                       claudeSession: {

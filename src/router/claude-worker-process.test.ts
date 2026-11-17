@@ -103,21 +103,20 @@ it('refuses an unconfirmed close and handles spawn failure without hanging', asy
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it('moves the settings off the command line into a file only this user can read, removed once the child closed', async () => {
-  // The failure: the SDK's `--settings {...}` argument put the job's GitHub token and
-  // bridge token in the process table, where other processes read them.
+it('writes the settings to a file only this user can read, removed once the child closed', async () => {
+  // The failure: settings given to the SDK as an object put the job's GitHub token and
+  // bridge token in a `--settings {...}` argument, which the process table shows and the
+  // SDK's debug log records.
   const child = new Child();
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   const token = `gho_${'Z9y8'.repeat(9)}`;
-  const settings = JSON.stringify({ env: { GH_TOKEN: token, ANTHROPIC_API_KEY: 'bridge-0x5f' } });
+  const settings = { env: { GH_TOKEN: token, ANTHROPIC_API_KEY: 'bridge-0x5f' } };
   const process = claudeWorkerProcess({ secrets: () => [token, 'bridge-0x5f'] });
-  process.spawn({ ...options(), args: ['--input-format', 'stream-json', '--settings', settings] });
-  const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-  expect(args.join(' ')).not.toContain(token);
-  const file = args[args.indexOf('--settings') + 1]!;
-  expect(readFileSync(file, 'utf8')).toBe(settings);
+  const file = process.settingsFile(settings);
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(settings);
   expect(statSync(file).mode & 0o777).toBe(0o600);
   expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+  process.spawn({ ...options(), args: ['--input-format', 'stream-json', '--settings', file] });
   child.exitCode = 0;
   child.emit('close', 0, null);
   await process.drain();
@@ -125,7 +124,7 @@ it('moves the settings off the command line into a file only this user can read,
 });
 
 it('starts no child whose command line would still carry a secret', () => {
-  // A form the move does not know (here a value given inline) fails closed.
+  // Settings given inline, never through a file, fail closed.
   const process = claudeWorkerProcess({ secrets: () => ['bridge-0x5f'] });
   expect(() =>
     process.spawn({ ...options(), args: ['--settings={"env":{"K":"bridge-0x5f"}}'] }),

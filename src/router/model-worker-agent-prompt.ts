@@ -20,6 +20,13 @@ export type NativeAgentPrompt = {
   context: string[];
   /** Built-in tools a main thread has and that subagent does not. */
   withheldTools: string[];
+  /**
+   * The CLAUDE.md and rules files a main thread starts with and that subagent does not
+   * (every one of them for `Explore`), by the path Claude Code names each with. One in a
+   * folder below the working directory still reaches either of them when they read a file
+   * there.
+   */
+  withheldInstructions: string[];
 };
 
 /** Why the prompt could not be read. The worker then starts with Claude Code's main prompt. */
@@ -34,6 +41,20 @@ const BILLING_BLOCK = 'x-anthropic-billing-header:';
 const MAX_BODY = 8 * 1024 * 1024;
 
 type Request = { system: string[]; firstMessage: string[]; tools: string[] };
+
+// How Claude Code heads each CLAUDE.md or rules file it puts in a request, with its path.
+const INSTRUCTION_FILE = /^Contents of (.+) \([^()\n]*\):$/gm;
+const instructionFiles = (blocks: string[]): Set<string> =>
+  new Set(blocks.flatMap((text) => [...text.matchAll(INSTRUCTION_FILE)].map((match) => match[1]!)));
+
+/**
+ * `claudeMdExcludes` patterns that match exactly these paths. Claude Code reads each as a
+ * picomatch glob and turns every backslash into a slash, so a glob character cannot be
+ * escaped with one: it is put in a class of its own instead.
+ */
+export function instructionExcludes(paths: readonly string[]): string[] {
+  return paths.map((path) => path.replace(/[*?[\]{}()!+@|]/g, (char) => `[${char}]`));
+}
 
 const texts = (value: unknown): string[] =>
   typeof value === 'string'
@@ -69,6 +90,8 @@ function read(body: Record<string, unknown>): Request {
 export async function readNativeAgentPrompt(input: {
   binary: string;
   cwd: string;
+  /** The worker's other working directories, so the instruction files it starts with are read here too. */
+  additionalDirectories?: readonly string[];
   agentType: string;
   customAgent?: WorkerAgent;
   signal: AbortSignal;
@@ -151,7 +174,7 @@ export async function readNativeAgentPrompt(input: {
   const controller = new AbortController();
   const abort = () => controller.abort(input.signal.reason);
   input.signal.addEventListener('abort', abort, { once: true });
-  const nativeProcess = claudeWorkerProcess();
+  const nativeProcess = claudeWorkerProcess({ secrets: () => [token] });
   let worker: ReturnType<typeof query> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -171,6 +194,9 @@ export async function readNativeAgentPrompt(input: {
         pathToClaudeCodeExecutable: input.binary,
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: input.cwd,
+        ...(input.additionalDirectories?.length
+          ? { additionalDirectories: [...input.additionalDirectories] }
+          : {}),
         env: { ...claudeDeepSeekWorkerEnv(process.env, url, token), ...listAll },
         // An empty prompt of its own: the main thread's blocks are then only those Claude
         // Code adds to every request, and are told apart from the subagent's prompt.
@@ -182,12 +208,13 @@ export async function readNativeAgentPrompt(input: {
         maxTurns: 2,
         settingSources: ['user', 'project', 'local'],
         strictMcpConfig: true,
-        settings: {
+        // In a private file, as the worker's: they hold this read's token.
+        settings: nativeProcess.settingsFile({
           disableAllHooks: true,
           autoMemoryEnabled: false,
           apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
           env: { ...claudeDeepSeekWorkerSettingsEnv(url, token), ...listAll },
-        },
+        }),
         permissionMode: 'default',
         canUseTool: async (tool, toolInput) =>
           tool === 'Agent'
@@ -228,10 +255,14 @@ export async function readNativeAgentPrompt(input: {
     );
     if (!main || !prompt.length) throw new NativeAgentPromptUnavailable('no_agent_prompt');
     const mainContext = new Set(main.firstMessage);
+    const subInstructions = instructionFiles(sub.firstMessage);
     return {
       prompt,
       context: sub.firstMessage.filter((text) => text !== task && !mainContext.has(text)),
       withheldTools: main.tools.filter((tool) => !sub.tools.includes(tool)),
+      withheldInstructions: [...instructionFiles(main.firstMessage)].filter(
+        (path) => !subInstructions.has(path),
+      ),
     };
   } finally {
     clearTimeout(timer);

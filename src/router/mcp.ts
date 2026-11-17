@@ -45,6 +45,7 @@ import {
   type RoutingPayerDeps,
 } from './routing-payer';
 import { routerSettings } from './settings';
+import { cachedIdentities, fetchIdentities } from './identities';
 import { handBack, runSwap } from './swap';
 import {
   fail,
@@ -365,6 +366,18 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             }
           : {}),
       });
+    },
+    // The identities a worker's searches are checked against when the person saved a block
+    // or only rule: read now, free, else the copy the last read kept.
+    webIdentities: async () => {
+      const settings = await resolveContextSettings(ctx);
+      const read = await fetchIdentities(ctx, {
+        baseUrl: settings.baseUrl,
+        ...(opts.handlerDeps?.fetchImpl !== undefined
+          ? { fetchImpl: opts.handlerDeps.fetchImpl }
+          : {}),
+      });
+      return read.ok ? read.identities : cachedIdentities(ctx.dataDir);
     },
   });
   const rememberSession = (raw: Record<string, unknown>): void => {

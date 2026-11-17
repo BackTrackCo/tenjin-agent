@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { query } from '@anthropic-ai/claude-agent-sdk/core';
 import { NativeAgentPromptUnavailable, readNativeAgentPrompt } from './model-worker-agent-prompt';
@@ -17,14 +18,26 @@ const GIT_STATUS = {
   text: '<system-reminder>\n# gitStatus\nmain\n</system-reminder>',
 };
 const ENVIRONMENT = { role: 'system', content: [{ type: 'text', text: '# Environment\n...' }] };
+// The person's CLAUDE.md files, in one block of the first message, each under its path.
+const CLAUDE_MD = {
+  type: 'text',
+  text: "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions.\n\nContents of /home/me/.claude/CLAUDE.md (user's private global instructions for all projects):\n\nBe brief.\n\nContents of /repo/CLAUDE.md (project instructions, checked into the codebase):\n\nUse pnpm.\n</system-reminder>\n",
+};
 const AGENT_PROMPT = 'You are a file search specialist.\n\nNotes:\n- Use absolute paths.';
 const tool = (name: string) => ({ name, input_schema: { type: 'object' } });
 
-/** Plays Claude Code: its main thread's request, then, if `launch`, the subagent's. */
-function claudeCode(launch: boolean) {
+/**
+ * Plays Claude Code: its main thread's request, then, if `launch`, the subagent's, which
+ * gets the person's CLAUDE.md files as the main thread does only with `instructions`
+ * (general-purpose does; Explore does not).
+ */
+function claudeCode(launch: boolean, { instructions = false } = {}) {
   const asked: unknown[] = [];
+  settingsRead.length = 0;
   vi.mocked(query).mockImplementation((call) => {
     const env = call.options!.env!;
+    // Read while it is there: the file is removed when the read ends.
+    settingsRead.push(JSON.parse(readFileSync(String(call.options!.settings), 'utf8')));
     const post = async (body: unknown) =>
       (
         await fetch(`${env.ANTHROPIC_BASE_URL}/v1/messages`, {
@@ -42,7 +55,7 @@ function claudeCode(launch: boolean) {
         ],
         tools: [tool('Agent'), tool('Bash'), tool('ScheduleWakeup')],
         messages: [
-          { role: 'user', content: [ATTRIBUTION, { type: 'text', text: 'Start.' }] },
+          { role: 'user', content: [CLAUDE_MD, ATTRIBUTION, { type: 'text', text: 'Start.' }] },
           ENVIRONMENT,
         ],
       });
@@ -63,7 +76,12 @@ function claudeCode(launch: boolean) {
           messages: [
             {
               role: 'user',
-              content: [GIT_STATUS, ATTRIBUTION, { type: 'text', text: agent.input.prompt }],
+              content: [
+                GIT_STATUS,
+                ...(instructions ? [CLAUDE_MD] : []),
+                ATTRIBUTION,
+                { type: 'text', text: agent.input.prompt },
+              ],
             },
             ENVIRONMENT,
           ],
@@ -74,6 +92,7 @@ function claudeCode(launch: boolean) {
   });
   return asked;
 }
+const settingsRead: unknown[] = [];
 
 it("reads a native subagent's prompt, context and tools from the Claude Code that runs the worker", async () => {
   // Failure caught: a worker running with the main thread's prompt and tools, not its agent's.
@@ -90,12 +109,36 @@ it("reads a native subagent's prompt, context and tools from the Claude Code tha
     prompt: [AGENT_PROMPT],
     context: [GIT_STATUS.text],
     withheldTools: ['ScheduleWakeup'],
+    // A native Explore subagent starts without the person's CLAUDE.md files.
+    withheldInstructions: ['/home/me/.claude/CLAUDE.md', '/repo/CLAUDE.md'],
   });
-  // The read runs none of the person's hooks or MCP servers.
-  expect(vi.mocked(query).mock.calls[0]![0].options).toMatchObject({
-    strictMcpConfig: true,
-    settings: { disableAllHooks: true },
+  // The read runs none of the person's hooks or MCP servers, and its settings, which hold
+  // its token, reach the SDK as a file.
+  const options = vi.mocked(query).mock.calls[0]![0].options!;
+  expect(options.strictMcpConfig).toBe(true);
+  expect(settingsRead).toEqual([expect.objectContaining({ disableAllHooks: true })]);
+  expect(JSON.stringify({ ...options, env: undefined })).not.toContain(
+    options.env!.ANTHROPIC_API_KEY!,
+  );
+});
+
+it('withholds no CLAUDE.md file from a worker whose native subagent gets them all', async () => {
+  // Failure caught: a general-purpose worker losing the person's instructions that a
+  // native general-purpose subagent is given.
+  claudeCode(true, { instructions: true });
+  const native = await readNativeAgentPrompt({
+    binary: '/native/claude',
+    cwd: '/repo',
+    additionalDirectories: ['/repo-feature'],
+    agentType: 'general-purpose',
+    signal: new AbortController().signal,
   });
+  expect(native.withheldInstructions).toEqual([]);
+  expect(native.context).toEqual([GIT_STATUS.text]);
+  // Read with the worker's working directories, whose CLAUDE.md files it may start with.
+  expect(vi.mocked(query).mock.calls[0]![0].options!.additionalDirectories).toEqual([
+    '/repo-feature',
+  ]);
 });
 
 it('says why when Claude Code never starts the subagent, so the worker starts without it', async () => {

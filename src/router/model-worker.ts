@@ -1,4 +1,5 @@
 import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
+import type { Identities } from './identities';
 import {
   answerWorkerWebSearch,
   workerFetchFallback,
@@ -66,6 +67,7 @@ import {
 } from './worker-unattended';
 import {
   NativeAgentPromptUnavailable,
+  instructionExcludes,
   readNativeAgentPrompt,
   type NativeAgentPrompt,
 } from './model-worker-agent-prompt';
@@ -177,6 +179,9 @@ export async function runModelWorker(
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
      *  each search answers that it is not available. */
     web?: WorkerRequest;
+    /** The router's identities read, which the person's rules for those searches are
+     *  checked against. Absent, the copy the last read kept. */
+    webIdentities?: () => Promise<Identities | undefined>;
     /** Where a worker that starts without its native agent prompt says why. Default: stderr. */
     warn?: (line: string) => void;
     activity?: {
@@ -422,6 +427,7 @@ async function runQualifiedWorker(
     transport: options.transport,
     dataDir: options.dataDir,
     ...(options.web ? { request: options.web } : {}),
+    ...(options.webIdentities ? { identities: options.webIdentities } : {}),
     signal: controller.signal,
   };
   const fetchFallback = async (event: WorkerFetchEvent) =>
@@ -591,10 +597,17 @@ async function runQualifiedWorker(
     )
       throw new Error('Managed Claude worker policy changed; keep native');
     const agentType = String(job.native.subagent_type ?? 'general-purpose');
+    // The temp folder is a working directory, so the file tools take its literal paths.
+    const additionalDirectories = [
+      ...workspace.workingDirectories.slice(1),
+      ...worktrees,
+      ...(temp ? [temp.directory] : []),
+    ];
     try {
       nativeAgent = await readNativeAgentPrompt({
         binary: binary.path,
         cwd: job.root,
+        additionalDirectories,
         agentType,
         ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
         signal: controller.signal,
@@ -614,12 +627,7 @@ async function runQualifiedWorker(
         pathToClaudeCodeExecutable: binary.path,
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
-        // The temp folder is a working directory, so the file tools take its literal paths.
-        additionalDirectories: [
-          ...workspace.workingDirectories.slice(1),
-          ...worktrees,
-          ...(temp ? [temp.directory] : []),
-        ],
+        additionalDirectories,
         env: {
           ...env,
           // Sandboxed commands reach the network only through the sandbox proxy; Node's
@@ -655,10 +663,18 @@ async function runQualifiedWorker(
         permissionMode,
         ...session?.query,
         settingSources: ['user', 'project', 'local'],
-        settings: {
+        // The flag settings hold the bridge token and the job's GitHub env: written first to
+        // a private file, so the SDK's arguments and its debug log name only the file.
+        settings: nativeProcess.settingsFile({
           // Auto memory is undeclared input outside this job's disclosure scope.
           // Native settings, instruction files and owned session history still load.
           autoMemoryEnabled: false,
+          // The CLAUDE.md files a native subagent of this type starts without (all of them
+          // for `Explore`). Claude Code puts them in a main thread's first request, which
+          // the worker is, whatever its agent says.
+          ...(nativeAgent?.withheldInstructions.length
+            ? { claudeMdExcludes: instructionExcludes(nativeAgent.withheldInstructions) }
+            : {}),
           apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
           env: {
             ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
@@ -747,43 +763,45 @@ async function runQualifiedWorker(
               }),
             ],
           },
-        },
-        sandbox: {
-          enabled: true,
-          allowUnsandboxedCommands: false,
-          failIfUnavailable: true,
-          // Other hosts ask in default mode and are denied where no one answers.
-          network: { allowedDomains: [...WORKER_ALLOWED_DOMAINS] },
-          // gh is a Go program: on macOS it verifies TLS through the trust service only.
-          ...(github?.authenticated && process.platform === 'darwin'
-            ? { enableWeakerNetworkIsolation: true }
-            : {}),
-          filesystem: {
-            allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
-            ...(github ? { allowWrite: [github.directory] } : {}),
-            denyRead: [
-              ...privatePaths.paths,
-              ...protectedRoots.flatMap((root) => [
-                ...(envDenied.has(root)
-                  ? [
-                      `${root}/.env*`,
-                      `${root}/**/.env*`,
-                      ...(basename(root).startsWith('.env') ? [root] : []),
-                    ]
-                  : []),
-                ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
-                ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
-              ]),
-              ...envFiles.withheld,
-              // Commands cannot read inside a folder the scan could not list.
-              ...envFiles.unlisted,
-              ...dropped,
-              // Other sessions' temp files; this job's own are in its temp folder.
-              ...(temp?.shared ?? []),
-            ],
-            denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
+          // Here, as the SDK would merge its own `sandbox` option, which it refuses beside a
+          // settings file.
+          sandbox: {
+            enabled: true,
+            allowUnsandboxedCommands: false,
+            failIfUnavailable: true,
+            // Other hosts ask in default mode and are denied where no one answers.
+            network: { allowedDomains: [...WORKER_ALLOWED_DOMAINS] },
+            // gh is a Go program: on macOS it verifies TLS through the trust service only.
+            ...(github?.authenticated && process.platform === 'darwin'
+              ? { enableWeakerNetworkIsolation: true }
+              : {}),
+            filesystem: {
+              allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
+              ...(github ? { allowWrite: [github.directory] } : {}),
+              denyRead: [
+                ...privatePaths.paths,
+                ...protectedRoots.flatMap((root) => [
+                  ...(envDenied.has(root)
+                    ? [
+                        `${root}/.env*`,
+                        `${root}/**/.env*`,
+                        ...(basename(root).startsWith('.env') ? [root] : []),
+                      ]
+                    : []),
+                  ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
+                  ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
+                ]),
+                ...envFiles.withheld,
+                // Commands cannot read inside a folder the scan could not list.
+                ...envFiles.unlisted,
+                ...dropped,
+                // Other sessions' temp files; this job's own are in its temp folder.
+                ...(temp?.shared ?? []),
+              ],
+              denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
+            },
           },
-        },
+        }),
         // Direct callers remain ephemeral; only the owned controller may retain
         // and reopen a session. Native retention/config discovery are unchanged.
         persistSession: session !== undefined,

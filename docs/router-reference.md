@@ -72,7 +72,7 @@ Each write merges under the config lock and answers with the changed rule, its s
 
 "Turn off all of Tenjin's tools" is `block --source tenjin`. The rules and automatic use are personal settings in the global config; `config set` cannot write them and a project file cannot carry them.
 
-The rules govern only what Tenjin picks on its own: its hook offers and the service it picks for a `{query}`. A tool the agent asks for by name (`{browse}`, `{tool}`, `{tool, query}`, a spec by its id) runs whatever they say, and when they leave nothing to pick, the answer is the ordinary `native` one, with nothing said about them.
+The rules govern only what Tenjin picks on its own: its hook offers, the service it picks for a `{query}`, and a DeepSeek worker's Exa searches and page reads ([DeepSeek subagents](./subagents.md#charges-and-limits)). A tool the agent asks for by name (`{browse}`, `{tool}`, `{tool, query}`, a spec by its id) runs whatever they say, and when they leave nothing to pick, the answer is the ordinary `native` one, with nothing said about them.
 
 ### Values
 

@@ -5,9 +5,12 @@ import { isPublicAddress } from '../lib/destination';
 import { isRecord } from '../lib/guards';
 import type { SpendAuthorizer } from '../lib/wallet';
 import { CLAUDE_DEEPSEEK_MODEL } from './claude-model-policy';
+import { cachedIdentities, type Identities } from './identities';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { ModelCallFailed } from './model-worker-control';
+import { rulesNow } from './settings-check';
+import { BUILT_IN_SOURCE, type Target, type WirePolicy } from './settings-wire';
 import { readSpec } from './specs';
 import type { RequestToolArgs, RequestToolResult } from './tool';
 
@@ -54,6 +57,9 @@ export interface WorkerWebDeps {
   dataDir: string;
   /** Absent where no request executor runs (a test, another host): every search refused. */
   request?: WorkerRequest;
+  /** The router's identities read, to check the person's rules against; absent, the copy
+   *  the last read kept. Read only when a block or only rule is saved. */
+  identities?: () => Promise<Identities | undefined>;
   /** The job's own abort: a stopped worker buys nothing it had not started paying for. */
   signal?: AbortSignal;
   /** Resolver seam for a fallback page's host; production uses `dns.lookup`. */
@@ -260,6 +266,8 @@ async function paidWorkerTool(
   // outlast a stop. Once the paid request is sent it runs to its answer, as a model call does.
   const stopped = () => signal?.aborted === true;
   if (stopped()) throw new WorkerToolRefused('the worker was stopped');
+  const ruled = await rulesRefusal(deps, tool);
+  if (ruled !== null) throw new WorkerToolRefused(ruled);
   const gate = spendWatch();
   const call = { cwd: deps.job.root, watch: gate.wrap };
   const read = await request({ tool }, call);
@@ -294,6 +302,89 @@ async function paidWorkerTool(
       ? "it would pass the person's spending limits"
       : `it did not run (${reasonOf(ran)})`,
   );
+}
+
+/**
+ * THE PERSON'S ROUTING RULES (`tenjin config block|only`) bind a worker's search and page
+ * read as they bind what Tenjin picks on its own: the worker never named Exa, Tenjin did.
+ * The router applies the rules to its picks, and this call is never routed, so they are
+ * read here, from the global file now, against the router's identities read. Why they
+ * leave `service` out, or null. A preference never forbids a service, so it changes
+ * nothing here. Settings that cannot be read refuse, as they refuse every call.
+ */
+async function rulesRefusal(deps: WorkerWebDeps, service: string): Promise<string | null> {
+  const now = await rulesNow(deps.dataDir);
+  if ('problem' in now) return "the person's Tenjin settings could not be read";
+  const { policy } = now.wire.settings;
+  if (!policy.block?.length && !policy.only?.length) return null;
+  const identities = await (deps.identities ?? (() => cachedIdentities(deps.dataDir)))().catch(
+    () => undefined,
+  );
+  return ruledOut(service, policy, identities);
+}
+
+/**
+ * Whether a block or only rule leaves `service` out of Tenjin's own picks, as the
+ * reference states them: a block of the service, its provider (and, under any provider
+ * block, a service with no confirmed provider), its seller, its task, its category or
+ * Tenjin's own tools; or an only rule for every task, or for its task, that names none of
+ * them. A rule that needs the identities read when none can be had leaves it out.
+ */
+function ruledOut(
+  service: string,
+  policy: WirePolicy,
+  identities: Identities | undefined,
+): string | null {
+  const blocks = policy.block ?? [];
+  const only = policy.only ?? [];
+  const entry = identities?.services.find(({ id }) => id === service);
+  const refused = `the person's Tenjin settings keep Tenjin from using ${entry?.label ?? service} on its own`;
+  if (
+    blocks.some(
+      (block) =>
+        (block.kind === 'source' && block.id === BUILT_IN_SOURCE) ||
+        (block.kind === 'service' && block.id === service),
+    )
+  )
+    return refused;
+  if (blocks.length === 0 && only.length === 0) return null;
+  if (identities === undefined || entry === undefined) return refused;
+  const { task } = entry;
+  const categories = new Set([
+    ...identities.categories
+      .filter(({ tasks }) => task !== undefined && tasks.includes(task))
+      .map(({ id }) => id),
+    ...identities.tasks.flatMap(({ id, category }) =>
+      id === task && category !== undefined ? [category] : [],
+    ),
+  ]);
+  const names = (target: Target): boolean => {
+    switch (target.kind) {
+      case 'category':
+        return categories.has(target.id);
+      case 'task':
+        return target.id === task;
+      case 'provider':
+        return entry.providers.includes(target.id);
+      case 'seller':
+        return target.id === entry.seller;
+      case 'service':
+        return target.id === service;
+      case 'source':
+        return target.id === BUILT_IN_SOURCE;
+    }
+  };
+  if (
+    blocks.some(
+      (block) => names(block) || (block.kind === 'provider' && entry.providers.length === 0),
+    )
+  )
+    return refused;
+  const binds = (rule: (typeof only)[number]) =>
+    rule.scope.kind === 'global' ||
+    (rule.scope.kind === 'task' && rule.scope.id === task) ||
+    (rule.scope.kind === 'category' && categories.has(rule.scope.id));
+  return only.some((rule) => binds(rule) && !rule.targets.some(names)) ? refused : null;
 }
 
 /**
