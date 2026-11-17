@@ -1,4 +1,5 @@
 import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
+import { WorkerDiagnosticsRecord } from './model-worker-diagnostics';
 import type { Identities } from './identities';
 import {
   answerWorkerWebSearch,
@@ -47,6 +48,7 @@ import {
   claudeManagedProviderCompatible,
   claudeMcpProviderCompatible,
   claudeWorkerAuthCompatible,
+  CLAUDE_DEEPSEEK_COMPACT_WINDOW,
   CLAUDE_DEEPSEEK_WORKER_MODEL,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
@@ -518,6 +520,7 @@ async function runQualifiedWorker(
         let messages: ReturnType<typeof workerMessages>;
         try {
           messages = workerMessages(raw);
+          diagnostics.request(raw);
         } catch (error) {
           // The router would refuse it, and every call after it that offers as many.
           if (error instanceof TooManyTools)
@@ -587,6 +590,12 @@ async function runQualifiedWorker(
   // Auto and bypass workers never wait on a person; the sandbox and the secrets boundary still apply.
   const nobodyAsked = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
   const repeats = new WorkerRepeatReminder();
+  const diagnostics = new WorkerDiagnosticsRecord(job.root, CLAUDE_DEEPSEEK_COMPACT_WINDOW);
+  const repeated = (tool: string, input: unknown) => {
+    const reminder = repeats.observe(tool, input);
+    diagnostics.repeat(tool, reminder);
+    return reminder;
+  };
   // Calls a person allowed for the rest of this job; never persisted.
   const allowedForJob = new Set<string>();
   try {
@@ -908,7 +917,7 @@ async function runQualifiedWorker(
                   if (input.tool_name === 'WebSearch')
                     served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
-                    repeats.observe(input.tool_name, input.tool_input),
+                    repeated(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch'
                       ? await fetchFallback(
                           { input: input.tool_input, response: input.tool_response },
@@ -936,7 +945,7 @@ async function runQualifiedWorker(
                   if (input.tool_name === 'WebSearch')
                     served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
-                    repeats.observe(input.tool_name, input.tool_input),
+                    repeated(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch' && input.is_interrupt !== true
                       ? await fetchFallback(
                           { input: input.tool_input, error: input.error },
@@ -1038,6 +1047,7 @@ async function runQualifiedWorker(
     let activityReady = false;
     for await (const message of worker) {
       if (message.type === 'system' && message.subtype === 'init') {
+        diagnostics.init(message);
         const matches = message.permissionMode === permissionMode;
         if (session) {
           if ((await realpath(message.cwd)) !== (await realpath(job.root)))
@@ -1072,6 +1082,7 @@ async function runQualifiedWorker(
         }
       }
       if (message.type === 'result') {
+        diagnostics.stop(message);
         session?.assert(message.session_id);
         if (message.subtype !== 'success') throw workerResultError(message);
         result = message.result;
@@ -1084,6 +1095,7 @@ async function runQualifiedWorker(
   } catch (error) {
     executionFailure = proxyFailure ?? { error };
   } finally {
+    await diagnostics.write(options.dataDir, job.id);
     authorizePrompt(false);
     clearTimeout(initTimer);
     initialized(false);

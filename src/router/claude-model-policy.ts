@@ -117,6 +117,9 @@ export function claudeDeepSeekWorkerEnv(
 
 /** The SDK flag layer outranks user/project/local settings, but never managed policy.
  * Empty values must survive JSON serialization to clear lower-tier credentials. */
+/** DeepSeek's recommended compaction window for its 1M context. */
+export const CLAUDE_DEEPSEEK_COMPACT_WINDOW = 786_432;
+
 export function claudeDeepSeekWorkerSettingsEnv(
   baseUrl: string,
   token: string,
@@ -134,7 +137,7 @@ export function claudeDeepSeekWorkerSettingsEnv(
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(CLAUDE_DEEPSEEK_COMPACT_WINDOW),
     // Native's explicit false disable flag otherwise forces memory on ahead of settings.
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     TENJIN_MODEL_WORKER: '1',

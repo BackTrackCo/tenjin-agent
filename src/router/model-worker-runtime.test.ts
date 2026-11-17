@@ -15,7 +15,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -2610,6 +2610,7 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
     );
   });
   const activity = { running: vi.fn(), observe: vi.fn(), served: vi.fn() };
+  let diagnostics: unknown;
   try {
     await runModelWorker(job, {
       ...options(),
@@ -2618,10 +2619,19 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
       web: web as never,
       activity,
     });
+    // The run's bounded diagnostic record is kept beside the job's own.
+    diagnostics = JSON.parse(
+      await readFile(join(dataDir, 'model-jobs', `${job.id}.diagnostics.json`), 'utf8'),
+    );
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
   expect(toolCall).toHaveBeenCalledWith(job, 'exa-contents', 1000n, expect.any(Function));
+  expect(diagnostics).toMatchObject({
+    root: job.root,
+    settings: { compactWindow: 786_432, maxTurns: null },
+    stop: { subtype: 'success' },
+  });
   // The viewer names the fetch by the router tool that read the page, with its size.
   expect(activity.served).toHaveBeenCalledWith('fetch-1', 'Exa page read', {
     bytes: Buffer.byteLength('Read through Exa.'),
