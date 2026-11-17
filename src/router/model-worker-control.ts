@@ -14,6 +14,7 @@ export type WorkerStop = {
     | 'structured_output_guard'
     | 'output_limit'
     | 'context_limit'
+    | 'env_file_unscanned'
     | 'worker_execution';
   turns?: number;
 };

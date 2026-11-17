@@ -5,6 +5,7 @@ import { readClaudeCode, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { modelSettings } from './model-settings';
 import { workerStop } from './model-worker-control';
+import { MAX_ENV_FILE_BYTES } from './worker-env-secrets';
 import { prepareWorkerGithub } from './worker-github';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -808,6 +809,83 @@ it("reads its working directories' env files natively, and only their placeholde
       expect(text).toContain('listening on localhost:3000 in development');
     }
     expect(handedBack).toBe('connected with [env:POSTGRES_URL]');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('forwards and shows nothing more once an env file appears that is too large to read in full', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
+  try {
+    await writeFile(join(root, '.env'), 'KEPT=kept-value-0x05');
+    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+    const workspace = {
+      version: 1,
+      root,
+      workingDirectories: [root],
+      workingDirectorySpellings: [root],
+      readExceptions: [],
+      writeExceptions: [],
+    };
+    const result = { type: 'tool_result', tool_use_id: 'tail', content: 'TAIL=unscanned-0x77' };
+    const messages = vi.fn(async () => ({ fixture: true }));
+    vi.mocked(query).mockImplementation(
+      (call) =>
+        ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: root };
+            // A setup command writes it after the worker's denies were fixed.
+            await writeFile(join(root, '.env.dump'), Buffer.alloc(MAX_ENV_FILE_BYTES + 1, 'a'));
+            yield { type: 'user', uuid: 'tail', message: { role: 'user', content: [result] } };
+            const handle = native.createServer.mock.calls[0]![0] as (
+              request: unknown,
+              response: unknown,
+            ) => void;
+            await new Promise<void>((complete) =>
+              handle(
+                {
+                  method: 'POST',
+                  url: '/v1/messages',
+                  headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+                  async *[Symbol.asyncIterator]() {
+                    yield Buffer.from(
+                      JSON.stringify({
+                        model: 'deepseek-flash',
+                        max_tokens: 32000,
+                        messages: [{ role: 'user', content: [result] }],
+                      }),
+                    );
+                  },
+                },
+                {
+                  headersSent: false,
+                  destroyed: false,
+                  writeHead() {
+                    return this;
+                  },
+                  end(_body: string, done?: () => void) {
+                    done?.();
+                    complete();
+                    return this;
+                  },
+                },
+              ),
+            );
+            yield { type: 'result', subtype: 'success', result: 'done' };
+          },
+          accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+          mcpServerStatus: async () => [],
+          close: native.close,
+        }) as unknown as ReturnType<typeof query>,
+    );
+    const activity = { running: vi.fn(), observe: vi.fn() };
+    const error = await runModelWorker(
+      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
+      { ...options(), transport: { messages } as unknown as ModelTransport, activity },
+    ).catch((caught: unknown) => caught);
+    expect(workerStop(error)).toEqual({ kind: 'execution_failure', reason: 'env_file_unscanned' });
+    expect(messages).not.toHaveBeenCalled();
+    expect(JSON.stringify(activity.observe.mock.calls)).not.toContain('unscanned-0x77');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

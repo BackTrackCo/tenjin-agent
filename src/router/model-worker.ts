@@ -349,6 +349,10 @@ async function runQualifiedWorker(
         }
         // An env file a command just wrote is read before this request leaves.
         await refreshEnv();
+        // One that cannot be read in full cannot be replaced, and the worker's denies
+        // are fixed at start: nothing more leaves this job.
+        if (envFiles.uncovered.size)
+          throw new ModelWorkerStopped({ kind: 'execution_failure', reason: 'env_file_unscanned' });
         // Env values may need JSON escapes, so they are replaced in the parsed strings.
         const raw = redactWorkerMessage(
           JSON.parse(
@@ -755,7 +759,8 @@ async function runQualifiedWorker(
           // Rows reach the progress file, the viewer and a partial handback: drop the job's
           // token and env values first, including an env file a tool just wrote.
           if (message.type === 'user') await refreshEnv();
-          options.activity?.observe(redactWorkerMessage(message, redactAll));
+          if (!envFiles.uncovered.size)
+            options.activity?.observe(redactWorkerMessage(message, redactAll));
         } catch {
           // The SDK remains the owner of complete worker history.
         }

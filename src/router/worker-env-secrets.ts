@@ -6,9 +6,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
  * A DEEPSEEK WORKER'S ENV FILES. The worker and its commands read `.env*` files
  * in its working directories as a native subagent does, and their values never
  * reach Tenjin, DeepSeek, the parent or the local display: each value becomes
- * `[env:NAME]` wherever it appears. The set lives in this process's memory
- * only, is never logged or saved, and only grows during a job, because a value
- * already in the conversation stays there after its file changes.
+ * `[env:NAME]` wherever it appears. A file is read and parsed whole, whatever
+ * its size up to `MAX_ENV_FILE_BYTES`, each time it changes. The set lives in
+ * this process's memory only, is never logged or saved, and only grows during a
+ * job, because a value already in the conversation stays there after its file
+ * changes.
  *
  * Builtins only: this module must load without the bundle.
  */
@@ -17,7 +19,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 export const MIN_SECRET_LENGTH = 8;
 /** A bare word or number shorter than this is a setting: `development`, `localhost`. */
 const PLAIN_BELOW = 16;
-const MAX_FILE_BYTES = 1024 * 1024;
+/**
+ * The one hard limit: every replaced value is held in memory, in several forms,
+ * so memory grows with the file. A larger env file cannot be covered at all.
+ */
+export const MAX_ENV_FILE_BYTES = 16 * 1024 * 1024;
+/** A file this user may not read is closed to the worker's commands as well. */
+const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
 const SKIP = new Set(['node_modules', '.git']);
 const WITHHELD_LINE = '[env:withheld line]';
 /** How long a check waits for file events still in flight (macOS coalesces at 50 ms). */
@@ -86,16 +94,18 @@ export function parseEnvFile(text: string): ParsedEnv {
       assignments.push(unquoted(key, rest));
       continue;
     }
-    let body = rest.slice(1);
-    let end = closing(body, quote);
+    // Each added line is scanned once: a value of many lines stays linear in its size.
+    const parts = [rest.slice(1)];
+    let end = closing(parts[0]!, quote);
     while (end < 0 && at + 1 < lines.length) {
-      body += '\n' + lines[++at];
-      end = closing(body, quote);
+      parts.push(lines[++at]!);
+      end = closing(parts.at(-1)!, quote);
     }
     if (end < 0) return failed();
-    const after = body.slice(end + 1).trim();
+    const last = parts.pop()!;
+    const after = last.slice(end + 1).trim();
     if (after && !after.startsWith('#')) return failed();
-    const written = body.slice(0, end);
+    const written = [...parts, last.slice(0, end)].join('\n');
     assignments.push({
       key,
       value: quote === '"' ? written.replace(/\\n/g, '\n').replace(/\\r/g, '\r') : written,
@@ -223,13 +233,20 @@ export class WorkerEnvSecrets {
   scanned = false;
   /** Env files found at start that could not be read in full: denied to the worker. */
   readonly withheld: string[] = [];
+  /**
+   * Env files that appeared or changed after start and cannot be read in full.
+   * The worker's denies are fixed at start, so while one is here nothing more
+   * may be forwarded or shown.
+   */
+  readonly uncovered = new Set<string>();
   private readonly roots: string[];
   private readonly files = new Map<string, string>();
   private readonly hot = new Set<string>();
   private readonly dirty = new Set<string>();
   private readonly placeholders = new Map<string, string>();
   private readonly derived = new Set<string>();
-  private readonly index = new Map<number, string[]>();
+  /** By the hash of a piece's first characters: the lengths of the pieces that start so, longest first. */
+  private readonly index = new Map<number, number[]>();
   private readonly watchers: FSWatcher[] = [];
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
@@ -266,8 +283,16 @@ export class WorkerEnvSecrets {
     let last = 0;
     let hash = window(text, 0);
     for (let at = 0; at + MIN_SECRET_LENGTH <= text.length;) {
-      const hit = this.index.get(hash & 0x3fffffff)?.find((piece) => text.startsWith(piece, at));
-      if (hit) {
+      let hit: string | undefined;
+      for (const length of this.index.get(hash & 0x3fffffff) ?? []) {
+        if (at + length > text.length) continue;
+        const piece = text.slice(at, at + length);
+        if (this.placeholders.has(piece)) {
+          hit = piece;
+          break;
+        }
+      }
+      if (hit !== undefined) {
         out += text.slice(last, at) + this.placeholders.get(hit)!;
         at += hit.length;
         last = at;
@@ -401,40 +426,55 @@ export class WorkerEnvSecrets {
   private async load(path: string, atStart = false): Promise<void> {
     const info = await stat(path).catch(() => null);
     // Deleted or not a file: the values already seen stay replaced.
-    if (!info?.isFile()) return;
-    const signature = `${info.ino}:${info.size}:${info.mtimeMs}`;
-    if (this.files.get(path) === signature) return;
-    this.files.set(path, signature);
-    this.hot.add(dirname(path));
-    let bytes: Buffer;
-    try {
-      bytes = await readFile(path);
-    } catch {
-      if (atStart) this.withheld.push(path);
+    if (!info?.isFile()) {
+      this.uncovered.delete(path);
       return;
     }
-    if (bytes.length > MAX_FILE_BYTES && atStart) this.withheld.push(path);
-    const parsed =
-      bytes.length > MAX_FILE_BYTES
-        ? ({ ok: false, lines: [] } as ParsedEnv)
-        : parseEnvFile(bytes.toString('utf8'));
-    if (parsed.ok) {
+    const signature = `${info.ino}:${info.size}:${info.mtimeMs}`;
+    // A file denied at start stays denied: the worker cannot read it, whatever it holds now.
+    if (this.files.get(path) === signature || (!atStart && this.withheld.includes(path))) return;
+    this.hot.add(dirname(path));
+    let bytes: Buffer | undefined;
+    let readable = info.size <= MAX_ENV_FILE_BYTES;
+    if (readable)
+      try {
+        bytes = await readFile(path);
+        // It may have grown since the size was read.
+        readable = bytes.length <= MAX_ENV_FILE_BYTES;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return;
+        // After start, a file this user may not read is closed to the worker too.
+        if (!atStart && UNREADABLE_BY_ANYONE.has(code ?? '')) return;
+        readable = false;
+      }
+    if (!readable || !bytes) {
+      // Not remembered as seen: the next check reads it again.
+      if (atStart) this.withheld.push(path);
+      else this.uncovered.add(path);
+      return;
+    }
+    const parsed = parseEnvFile(bytes.toString('utf8'));
+    let learned = 0;
+    // A large file must not hold the process: other work runs between batches.
+    const pause = async () => {
+      if (++learned % 2_000 === 0) await new Promise<void>((next) => setImmediate(next));
+    };
+    if (parsed.ok)
       for (const assignment of parsed.assignments) {
         const name = `[env:${assignment.key}]`;
         for (const piece of envPieces(assignment)) this.remember(piece, name);
         for (const piece of urlPasswordPieces(assignment.value)) this.remember(piece, name, true);
+        await pause();
       }
-      return;
-    }
-    const lines = parsed.lines.length
-      ? parsed.lines
-      : bytes
-          .subarray(0, MAX_FILE_BYTES)
-          .toString('utf8')
-          .split(/\r?\n/)
-          .map((line) => line.trim());
-    for (const line of lines)
-      if (line.length >= MIN_SECRET_LENGTH) this.remember(line, WITHHELD_LINE);
+    else
+      for (const line of parsed.lines) {
+        if (line.length >= MIN_SECRET_LENGTH) this.remember(line, WITHHELD_LINE);
+        await pause();
+      }
+    // Only now is this version of the file covered in full.
+    this.files.set(path, signature);
+    this.uncovered.delete(path);
   }
 
   private remember(piece: string, placeholder: string, derived = false): void {
@@ -446,9 +486,12 @@ export class WorkerEnvSecrets {
     if (derived) this.derived.add(piece);
     this.placeholders.set(piece, placeholder);
     const key = window(piece, 0) & 0x3fffffff;
-    const bucket = this.index.get(key) ?? [];
-    bucket.push(piece);
-    bucket.sort((a, b) => b.length - a.length);
-    this.index.set(key, bucket);
+    // A file of many values that start alike costs one entry per length, not per value.
+    const lengths = this.index.get(key) ?? [];
+    if (lengths.includes(piece.length)) return;
+    let at = lengths.findIndex((other) => other < piece.length);
+    if (at < 0) at = lengths.length;
+    lengths.splice(at, 0, piece.length);
+    this.index.set(key, lengths);
   }
 }

@@ -5,6 +5,7 @@ import { afterEach, expect, it } from 'vitest';
 import {
   envDeniedRoots,
   envPieces,
+  MAX_ENV_FILE_BYTES,
   parseEnvFile,
   secretLike,
   WorkerEnvSecrets,
@@ -163,6 +164,48 @@ it('picks up a changed or new env file before the next check, and keeps old valu
   await env.add(join(root, 'deep/new/.env.test'));
   await env.add('/etc/.env.outside');
   expect(env.redact('deep-value-0x04')).toBe('[env:DEEP]');
+});
+
+it('replaces every value of an env file that grows past 1 MiB during the job, at its end and on its own', async () => {
+  const root = await workspace({ '.env.local': 'SMALL=small-value-0x01\n' });
+  const env = await WorkerEnvSecrets.start([root], { watch: false });
+  const filler = Array.from({ length: 40_000 }, (_, i) => `FILL_${i}=filler-value-${i}-xxxxxxxx`);
+  const key = [
+    '"-----BEGIN PRIVATE KEY-----',
+    'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC',
+    '-----END KEY-----"',
+  ];
+  const grown = [...filler, `PEM=${key.join('\n')}`, 'TAIL_SECRET=tail-secret-value-0x99'];
+  await writeFile(join(root, '.env.local'), grown.join('\n'));
+  expect(Buffer.byteLength(grown.join('\n'))).toBeGreaterThan(1024 * 1024);
+  await env.refresh();
+  expect(env.withheld).toEqual([]);
+  expect([...env.uncovered]).toEqual([]);
+  // Past the old 1 MiB cut, whole and alone; and the head's values alone, not only its lines.
+  expect(env.redact('tail-secret-value-0x99 small-value-0x01')).toBe(
+    '[env:TAIL_SECRET] [env:SMALL]',
+  );
+  expect(env.redact('TAIL_SECRET=tail-secret-value-0x99')).toBe('TAIL_SECRET=[env:TAIL_SECRET]');
+  expect(env.redact('got filler-value-1-xxxxxxxx')).toBe('got [env:FILL_1]');
+  expect(env.redact('MIIEvQIBADANBgkqhkiG9w0BAQEFAASC')).toBe('[env:PEM]');
+});
+
+it('denies an env file over the hard limit at start, and counts one that appears later as uncovered', async () => {
+  const over = Buffer.alloc(MAX_ENV_FILE_BYTES + 1, 'a');
+  const root = await workspace({ '.env': 'KEPT=kept-value-0x05' });
+  await writeFile(join(root, '.env.dump'), over);
+  const env = await WorkerEnvSecrets.start([root], { watch: false });
+  expect(env.withheld).toEqual([join(root, '.env.dump')]);
+  expect([...env.uncovered]).toEqual([]);
+  // After start the denies are fixed: a new file that cannot be covered stops forwarding.
+  await writeFile(join(root, '.env.later'), over);
+  await env.refresh();
+  expect([...env.uncovered]).toEqual([join(root, '.env.later')]);
+  // It is read again at each check, and covered once it can be.
+  await writeFile(join(root, '.env.later'), 'LATER=later-value-0x06');
+  await env.refresh();
+  expect([...env.uncovered]).toEqual([]);
+  expect(env.redact('later-value-0x06 kept-value-0x05')).toBe('[env:LATER] [env:KEPT]');
 });
 
 it('lists the forms of a value it replaces, never a plain one', () => {
