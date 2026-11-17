@@ -1165,6 +1165,13 @@ async function runQualifiedWorker(
         diagnostics.mark('earlyReady');
         const accept = await Promise.race([early.accept, stoppedBeforeAssignment]);
         assertCurrentMode();
+        // Without a recursive watcher, refresh() cannot discover a new env file in a
+        // previously empty nested directory. Start fresh if its fixed denies need to change.
+        if (
+          !envFiles.watching &&
+          !(await Promise.race([envFiles.refreshBeforeAssignment(), stoppedBeforeAssignment]))
+        )
+          throw new Error("The warm Claude worker's env file restrictions changed");
         const current = await assertCurrentWorkspace();
         const selected = await readClaudeCodeCached(process.env, job.root);
         const custom = WORKER_BUILTIN_AGENTS.has(agentType)

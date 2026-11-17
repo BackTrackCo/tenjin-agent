@@ -335,6 +335,25 @@ export class WorkerEnvSecrets {
     return env;
   }
 
+  /** Refreshes a warm child's scan without weakening the read denies it started with. */
+  async refreshBeforeAssignment(): Promise<boolean> {
+    const current = await WorkerEnvSecrets.start(this.roots, { watch: false });
+    if (
+      current.scanned !== this.scanned ||
+      current.withheld.some((path) => !this.withheld.includes(path)) ||
+      current.unlisted.some((path) => !this.unlisted.includes(path))
+    )
+      return false;
+
+    // An MCP server can still hold a value it read during startup. Keep both versions
+    // covered and learn the locations of new files for later, incremental refreshes.
+    for (const [value, name] of current.placeholders)
+      this.remember(value, name, current.derived.has(value));
+    for (const [path, signature] of current.files) this.files.set(path, signature);
+    for (const directory of current.hot) this.hot.add(directory);
+    return true;
+  }
+
   /** How many distinct strings are replaced; never the strings. */
   get size(): number {
     return this.placeholders.size;

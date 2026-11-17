@@ -1386,6 +1386,99 @@ it('keeps the initialized worker input and its model and Exa bridge closed befor
   expect(query).toHaveBeenCalledOnce();
 });
 
+it.each(['readable', 'unscannable'] as const)(
+  'rechecks a %s nested env file created while warming without a recursive watcher',
+  async (state) => {
+    const root = await mkdtemp(join(tmpdir(), 'warm-worker-env-'));
+    const start = WorkerEnvSecrets.start.bind(WorkerEnvSecrets);
+    const scan = vi
+      .spyOn(WorkerEnvSecrets, 'start')
+      .mockImplementation((roots, limits) => start(roots, { ...limits, watch: false }));
+    try {
+      const original = 'fixture-original-value-41';
+      const added = 'fixture-synthetic-added-value-42';
+      const nested = join(root, 'services', 'api');
+      await mkdir(nested, { recursive: true });
+      await writeFile(join(root, '.env'), `ORIGINAL=${original}`);
+      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+      const ownedJob = {
+        ...job,
+        root,
+        decision: {
+          ...job.decision,
+          claudeWorkspace: {
+            version: 1,
+            root,
+            workingDirectories: [root],
+            workingDirectorySpellings: [root],
+            readExceptions: [],
+            writeExceptions: [],
+          },
+        },
+      };
+      const messages = vi.fn(async () => ({ type: 'message', content: [] }));
+      sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+        const result = await oneBridgeRequest(
+          JSON.stringify({
+            model: 'deepseek-flash',
+            messages: [{ role: 'user', content: `${original} ${added}` }],
+            max_tokens: 32_000,
+          }),
+        );
+        expect(result.status).toBe(200);
+      });
+      const sdk = vi.mocked(query).getMockImplementation()!;
+      let markReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        markReady = resolve;
+      });
+      vi.mocked(query).mockImplementation((call) => {
+        const worker = sdk(call);
+        const accountInfo = worker.accountInfo;
+        worker.accountInfo = () => {
+          markReady();
+          return accountInfo();
+        };
+        return worker;
+      });
+      let accept!: (value: EarlyWorkerAccept) => void;
+      const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+        accept = resolve;
+      });
+      const runOptions = { ...options(), transport: { messages } as unknown as ModelTransport };
+      const onRelease = vi.fn();
+      const run = runModelWorker(ownedJob, {
+        ...runOptions,
+        early: { accept: accepted, onRelease },
+      });
+      await Promise.race([ready, run]);
+      await writeFile(join(root, '.env'), 'ORIGINAL=fixture-replaced-value-43');
+      await writeFile(
+        join(nested, '.env.local'),
+        state === 'readable' ? `ADDED=${added}` : Buffer.alloc(MAX_ENV_FILE_BYTES + 1, 'x'),
+      );
+      accept({ ...runOptions, job: ownedJob });
+
+      if (state === 'unscannable') {
+        await expect(run).rejects.toThrow(/env file restrictions changed/);
+        expect(onRelease).not.toHaveBeenCalled();
+        expect(messages).not.toHaveBeenCalled();
+        return;
+      }
+      await expect(run).resolves.toBe('done');
+      expect(onRelease).toHaveBeenCalledOnce();
+      expect(messages).toHaveBeenCalledOnce();
+      const sent = JSON.stringify(messages.mock.calls);
+      expect(sent).toContain('[env:ORIGINAL] [env:ADDED]');
+      expect(sent).not.toContain(original);
+      expect(sent).not.toContain(added);
+    } finally {
+      scan.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it('reports a warm child that exits without ever releasing an assignment', async () => {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
