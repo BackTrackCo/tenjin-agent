@@ -520,12 +520,13 @@ it('cancels an unresolved authentication check and closes its pending task itera
   expect(native.bridgeClose).toHaveBeenCalled();
 });
 
-it('uses the native emergency guard beyond the old forty-turn cutoff while retaining its evaluated model profile', async () => {
+it('sets no turn cap, so a long job runs on, while retaining its evaluated model profile', async () => {
   sdkResult({ subtype: 'success', result: 'finished after 114 turns', num_turns: 114 });
   expect(await runModelWorker(job, options())).toBe('finished after 114 turns');
   const call = vi.mocked(query).mock.calls[0]![0];
+  // Operator ruling 2026-11-17: no turn cap, as the DeepSeek harness has none.
+  expect(call.options).not.toHaveProperty('maxTurns');
   expect(call.options).toMatchObject({
-    maxTurns: 500,
     effort: 'high',
     model: 'deepseek-flash[1m]',
     cwd: '/repo',
@@ -1692,7 +1693,8 @@ it('persists and resumes an exact owned SDK identity without changing the string
     parent_tool_use_id: null,
     message: { role: 'user', content: [{ type: 'text', text: 'Continue the selected check.' }] },
   });
-  expect(resumed.options).toMatchObject({ persistSession: true, resume: sessionId, maxTurns: 500 });
+  expect(resumed.options).toMatchObject({ persistSession: true, resume: sessionId });
+  expect(resumed.options).not.toHaveProperty('maxTurns');
   expect(resumed.options).not.toHaveProperty('sessionId');
 });
 

@@ -34,6 +34,16 @@ it('warns softly at three, five and eight identical calls, independent of argume
   expect(repeats.observe('Write', { path: 'a', offset: 1 })).toBeUndefined();
 });
 
+// As in the DeepSeek harness: a to-do list update neither counts nor breaks a streak.
+it('lets a to-do list update between repeats neither count nor reset them', () => {
+  const repeats = new WorkerRepeatReminder();
+  repeats.observe('Bash', { command: 'pnpm test' });
+  repeats.observe('TodoWrite', { todos: [] });
+  repeats.observe('Bash', { command: 'pnpm test' });
+  expect(repeats.observe('TodoWrite', { todos: [] })).toBeUndefined();
+  expect(repeats.observe('Bash', { command: 'pnpm test' })).toContain('repeated 3 times');
+});
+
 it('does not fail execution or keep a repeat streak for an unhashable input', () => {
   const repeats = new WorkerRepeatReminder();
   const cycle: unknown[] = [];

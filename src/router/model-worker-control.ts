@@ -2,7 +2,6 @@ import { canonicalHash } from '../lib/request-schema';
 
 /** Resource bounds, not a model-fit decision or an ordinary task turn budget. */
 export const WORKER_WALL_MS = 40 * 60 * 1000;
-export const WORKER_EMERGENCY_TURNS = 500;
 
 export type WorkerStop = {
   kind: 'harness_limit' | 'provider_limit' | 'execution_failure' | 'not_started';
@@ -210,12 +209,16 @@ export async function withWorkerDeadline<T>(
   }
 }
 
-/** Evaluated 3/5/8 reminder cadence; native tools still execute normally. */
+/**
+ * Evaluated 3/5/8 reminder cadence; native tools still execute normally. A to-do list
+ * update neither counts nor breaks a run of repeats, as in the DeepSeek harness.
+ */
 export class WorkerRepeatReminder {
   private previous: string | undefined;
   private count = 0;
 
   observe(tool: string, input: unknown): string | undefined {
+    if (tool === 'TodoWrite') return;
     let identity: string;
     try {
       identity = canonicalHash({ tool, input });

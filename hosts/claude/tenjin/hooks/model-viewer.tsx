@@ -76,8 +76,8 @@ const SPAWN_WAIT_MS = 10_000;
 const STEP_MS = 5 * 60_000;
 /** Claude Code ends a turn whose stop was held more than 8 times in a row. */
 const MAX_HOLDS = 8;
-/** Each step is one worker reply: up to the worker's 500 turns, and the holds between. */
-const VIEWER_TURNS = 600;
+/** Steps one viewer turn may take: one a worker reply, the holds between; past it the viewer ends, the worker runs on. */
+const VIEWER_TURNS = 2000;
 /** Viewer agents whose step ended at its bound, for their stop to be held once. */
 const handedOver = new Set<string>();
 type Row = TenjinModelActivity['rows'][number];

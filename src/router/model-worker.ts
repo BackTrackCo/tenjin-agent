@@ -105,7 +105,6 @@ import {
   WorkerRepeatReminder,
   workerResultError,
   workerStop,
-  WORKER_EMERGENCY_TURNS,
 } from './model-worker-control';
 
 type QualifiedWorker = {
@@ -832,8 +831,8 @@ async function runQualifiedWorker(
         // Direct callers remain ephemeral; only the owned controller may retain
         // and reopen a session. Native retention/config discovery are unchanged.
         persistSession: session !== undefined,
-        // Emergency runaway guard; ordinary jobs may continue until completion.
-        maxTurns: WORKER_EMERGENCY_TURNS,
+        // No turn cap (operator ruling 2026-11-17, as the DeepSeek harness has none): the
+        // job's wall time and money ceiling bound a run.
         disallowedTools: [
           'Agent',
           'Task',
