@@ -305,6 +305,13 @@ export class WorkerEnvSecrets {
   /** By the hash of a piece's first characters: the lengths of the pieces that start so, longest first. */
   private readonly index = new Map<number, number[]>();
   private readonly watchers: FSWatcher[] = [];
+  /**
+   * Whether a recursive watcher learns files made during the job (macOS, Windows). Without
+   * one, a settings file made in a new folder is found by no check before output leaves.
+   */
+  get watching(): boolean {
+    return this.watchers.length > 0;
+  }
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
 

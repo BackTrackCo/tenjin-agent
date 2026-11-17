@@ -327,6 +327,9 @@ async function runQualifiedWorker(
       envFiles.scanned,
     ),
   );
+  // A repository's `.claude/settings.json` stays closed to reads where the scan did not
+  // cover its root, or where no recursive watcher would learn one made during the job.
+  const settingsClosed = (root: string) => envDenied.has(root) || !envFiles.watching;
   const redactEnv = (text: string) => envFiles.redact(settingsEnv.redact(text));
   const redactAll = (text: string) => redactEnv(redactWorkerSecrets(text, secrets));
   // The user's settings files the worker may read, set at start.
@@ -712,9 +715,10 @@ async function runQualifiedWorker(
                     patterns.map((pattern) => `${tool}(${pattern})`),
                   ),
                   // A repository's `.claude/settings.json` is read as a native subagent reads
-                  // it where the env scan covered it: its env values are known, and one that
-                  // could not be parsed is denied by its path below. It is never written.
-                  ...(envDenied.has(root) ? ['Read', 'Edit', 'Write'] : ['Edit', 'Write']).map(
+                  // it where the env scan covered it and a watcher learns one made during the
+                  // job (no recursive watcher on Linux): its env values are known, and one
+                  // that could not be parsed is denied by its path below. It is never written.
+                  ...(settingsClosed(root) ? ['Read', 'Edit', 'Write'] : ['Edit', 'Write']).map(
                     (tool) => `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
                   ),
                 ];
@@ -768,7 +772,7 @@ async function runQualifiedWorker(
                     ]
                   : []),
                 ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
-                ...(envDenied.has(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
+                ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
               ]),
               ...envFiles.withheld,
               // Commands cannot read inside a folder the scan could not list.
