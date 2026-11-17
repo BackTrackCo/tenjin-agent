@@ -1696,24 +1696,89 @@ test('an accept call the host moved to the background stays one live DeepSeek ro
       '```\n⏺ Read(src/example.ts)\n```\n\nDone (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
   );
   await f.clock.settle();
-  // The task's own notification reads as the worker finishing, by the task id or the call's.
-  for (const task of [{ id: 'k854rfv5w' }, { toolUseId: 'parent_accept' }]) {
+  // The task's own notification, by the task id or the call's, reads as a native
+  // subagent's return does: one line naming the sender, and in full who finished.
+  for (const task of [{ id: 'k854rfv5w' }, { toolUseId: 'parent_accept' }])
+    for (const isExpanded of [false, true]) {
+      const before = shown.length;
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface: 'terminal',
+        component: 'UserMessage',
+        props: {
+          text: 'MCP task k854rfv5w (plugin:tenjin:router/subagent) completed.',
+          origin: { kind: 'task-notification' },
+          isExpanded,
+          task: { ...task, status: 'completed' },
+        },
+      });
+      const lines = await shownLines(ui);
+      await ui.unmount();
+      if (isExpanded)
+        expect(shown.at(-1)).toBe(
+          'DeepSeek "Read selected source" finished · Done (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
+        );
+      else {
+        expect(lines).toEqual(['› Message from @DeepSeek (ctrl+o to expand)']);
+        // The host's own text, which names the server and the tool, is not drawn.
+        expect(shown.length).toBe(before);
+      }
+    }
+});
+
+test("an accept call still being written draws nothing of the host's, and its group unfolds", async ($, on) => {
+  const f = setup($, on);
+  f.state.work = () => ({ result: 'unused' });
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['plugin:tenjin:router - subagent (MCP)'] }),
+  );
+  let unfolded: boolean | undefined;
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    unfolded = e.props.isExpanded;
+    return $.ui.resolve(e).Text({ children: ['Calling plugin:tenjin:router…'] });
+  });
+  const row = async (input: unknown, more: Record<string, unknown> = {}) => {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
       surface: 'terminal',
-      component: 'UserMessage',
+      component: 'ToolUse',
+      props: { ...toolRow('writing_accept', ACCEPT, input), isRunning: true, ...more },
+    });
+    const lines = (await shownLines(ui)).join('');
+    await ui.unmount();
+    return lines;
+  };
+  // No offer id yet: the host's own row would name the server for that moment.
+  expect(await row({})).toBe('');
+  expect(await row(undefined)).toBe('');
+  // Whole: the DeepSeek row, from the first frame it can be told from a cancel. The
+  // accept hook has not run yet, so the offer's own record names the task.
+  await remember($);
+  expect(await row({ offer_id: OFFER })).toBe('⏺DeepSeek(Read selected source) · starting');
+  // A cancel, and a call that already has its answer, keep the host's row.
+  expect(await row({ cancel: OFFER })).toBe('plugin:tenjin:router - subagent (MCP)');
+  expect(await row({}, { isRunning: false, output: 'Invalid input' })).toBe(
+    'plugin:tenjin:router - subagent (MCP)',
+  );
+  expect(await row({}, { isExpanded: true })).toBe('plugin:tenjin:router - subagent (MCP)');
+  const group = async (input: unknown) => {
+    unfolded = undefined;
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
       props: {
-        text: 'MCP task k854rfv5w (plugin:tenjin:router/subagent) completed.',
-        origin: { kind: 'task-notification' },
+        calls: [{ tool_use_id: 'writing_accept', tool: ACCEPT, input } as never],
+        isActive: true,
         isExpanded: false,
-        task: { ...task, status: 'completed' },
       },
     });
     await ui.unmount();
-    expect(shown.at(-1)).toBe(
-      'DeepSeek "Read selected source" finished · Done (1 tool use · 41.2k tokens · 2m 2s · $0.0043)',
-    );
-  }
+    return unfolded;
+  };
+  expect(await group({})).toBe(true);
+  expect(await group({ offer_id: OFFER })).toBe(true);
+  expect(await group({ cancel: OFFER })).toBe(false);
 });
 
 test("the parent model cannot poll a worker with the viewer's own activity read, and the viewer still can", async ($, on) => {

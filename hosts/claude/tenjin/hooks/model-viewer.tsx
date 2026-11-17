@@ -925,6 +925,17 @@ function displayState(item: TenjinModelViewerRecord): string {
     : (item.activity?.state ?? 'activity unavailable');
 }
 
+/**
+ * An accept call whose input does not yet say what it is: the model is still writing
+ * it. A cancel, a capture and a Codex delegation name themselves by their own field.
+ */
+function undecided(input: unknown): boolean {
+  const given = record(input) ?? {};
+  return !['offer_id', 'cancel', 'capture', 'delegation_id', 'task'].some(
+    (key) => given[key] !== undefined,
+  );
+}
+
 /** Whether a call of the activity read is this plugin's own, by who raised it. */
 export function ownActivityRead(origin: { plugin?: string } | undefined): boolean {
   return origin?.plugin === 'tenjin';
@@ -1378,9 +1389,29 @@ export function registerModelViewer(on: On): void {
     const { tool, input, output, isInterrupted, isErrored } = e.props;
     if (tool === ACCEPT) {
       const offerId = record(input)?.offer_id;
-      if (!short(offerId) || !UUID.test(offerId)) return next(e);
-      const live = (await $.state.get({ ...WORKERS, id: offerId })).value;
-      const head = { name: 'DeepSeek', argument: live?.title ?? 'subagent' };
+      if (!short(offerId) || !UUID.test(offerId)) {
+        // THE CALL AS THE MODEL IS STILL WRITING IT: no offer id to read yet, so the host's
+        // own row would stand here for that moment as `plugin:tenjin:router - subagent`,
+        // between the offer row and the DeepSeek row. Nothing is drawn until the input
+        // says which call it is. A cancel, a capture and a call with an answer keep the
+        // host's row.
+        if (undecided(input) && output === undefined && !isErrored && !isInterrupted) {
+          if (e.props.isExpanded === true) return next(e);
+          const { Box } = $.ui.resolve(e);
+          return <Box display="none" />;
+        }
+        return next(e);
+      }
+      const [held, known] = await Promise.all([
+        $.state.get({ ...WORKERS, id: offerId }),
+        $.state.get(STATE),
+      ]);
+      const live = held.value;
+      // Before the accept hook has run (the host is still checking the call), the offer's
+      // own record names the task.
+      const title =
+        live?.title ?? known.value?.records.find((r) => r.offerId === offerId)?.title ?? 'subagent';
+      const head = { name: 'DeepSeek', argument: title };
       const ui = $.ui.resolve(e);
       const said = textOf(output);
       const ended = json(said);
@@ -1477,9 +1508,13 @@ export function registerModelViewer(on: On): void {
   // accept reads `Calling plugin:tenjin:router…` and draws no row at all. A
   // group that holds an accept unfolds, so its DeepSeek row draws.
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    // A call still being written counts: folded, it reads `Calling plugin:tenjin:router…`
+    // for the moment before its offer id is there.
     const accepts = e.props.calls.some((call) => {
       const offerId = record(call.input)?.offer_id;
-      return call.tool === ACCEPT && short(offerId) && UUID.test(offerId);
+      return (
+        call.tool === ACCEPT && ((short(offerId) && UUID.test(offerId)) || undecided(call.input))
+      );
     });
     return next(
       accepts && !e.props.isExpanded ? { ...e, props: { ...e.props, isExpanded: true } } : e,
@@ -1529,7 +1564,16 @@ export function registerModelViewer(on: On): void {
                 ? 'ended'
                 : 'stopped') +
         (live.ended ? ' · ' + endLine(live) : '');
-      return next({ ...e, props: { ...e.props, text } });
+      // AS A NATIVE SUBAGENT'S RETURN READS in the compact view: one dim line naming the
+      // sender. The row's sender (`from`) is the host's alone to set, so the line is
+      // drawn here; in full (ctrl+o) the row says who finished and its counts.
+      if (e.props.isExpanded) return next({ ...e, props: { ...e.props, text } });
+      const { Box, Text } = $.ui.resolve(e);
+      return (
+        <Box marginTop={1}>
+          <Text dimColor>{'› Message from @DeepSeek (ctrl+o to expand)'}</Text>
+        </Box>
+      );
     }
     if (!told.startsWith(VIEWER_PROMPT + ' ')) return next(e);
     const description = told.slice(VIEWER_PROMPT.length + 1);
