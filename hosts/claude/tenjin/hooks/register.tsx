@@ -968,7 +968,7 @@ function heldOfferContext(offer: Json, continuation = false): string[] | undefin
   // Never promote the router's reason or other model/provider text into context.
   return [
     continuation
-      ? "This local Tenjin hook held the continuation; no continuation started. The user has installed Tenjin and enabled DeepSeek routing. Run it with the subagent tool and this offer_id, or cancel it with that id: there is nothing to judge. It reuses the worker's history and the original job's budget, with no routing fee."
+      ? "This local Tenjin hook held the continuation; no continuation started. The user has installed Tenjin and enabled DeepSeek routing. Run it with the subagent tool and this offer_id, or cancel it with that id. Its suitability is not judged again; the binding model, privacy and planning restrictions in the offer's parentPolicy still apply to its text. It reuses the worker's history and the original job's budget, with no routing fee."
       : "This local Tenjin hook held the Agent call; no worker started. The user has installed Tenjin and enabled DeepSeek routing. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.",
   ];
 }

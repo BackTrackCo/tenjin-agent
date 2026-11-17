@@ -322,7 +322,21 @@ it('holds an across-day continuation to run or cancel, with nothing to judge, th
       'instruction' in result && 'parentPolicy' in result
         ? result.instruction + ' ' + result.parentPolicy
         : '';
-    expect(said).not.toMatch(/veto|Assess|suitable|recommendation/i);
+    expect(said).not.toMatch(/veto|Assess|recommendation/i);
+    // The text still goes to another model: what binds an assignment binds a follow-up,
+    // so a plan or a restricted disclosure cannot reach DeepSeek through a worker
+    // that was accepted for something else.
+    expect(result).toHaveProperty(
+      'parentPolicy',
+      expect.stringMatching(
+        /restricts this worker's model, privacy, disclosure or paid inference still binds/,
+      ),
+    );
+    expect(result).toHaveProperty(
+      'parentPolicy',
+      expect.stringContaining('plan authoring and substantive plan review stay native'),
+    );
+    expect(result).toHaveProperty('instruction', expect.stringContaining('binding restrictions'));
     expect(said).toContain('no routing fee');
     const selected = await f.model.store.pending('root', 'later-turn');
     expect(selected).toMatchObject({

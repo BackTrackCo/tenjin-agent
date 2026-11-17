@@ -210,7 +210,9 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
   // A native SendMessage resumes its subagent with no confirmation: run it or cancel it.
   expect(result.context?.join(' ')).toContain('subagent tool and this offer_id');
-  expect(result.context?.join(' ')).not.toMatch(/veto|risk rules|parentPolicy/);
+  expect(result.context?.join(' ')).not.toMatch(/veto|risk rules/);
+  // What binds an assignment binds a follow-up: it goes to another model.
+  expect(result.context?.join(' ')).toContain('binding model, privacy and planning restrictions');
 });
 
 test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {
