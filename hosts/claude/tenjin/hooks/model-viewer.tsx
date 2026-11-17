@@ -101,6 +101,8 @@ const views = new Map<string, View>();
 const viewerCalls = new Map<string, { row: Row; input: Json }>();
 /** A viewer call a router tool served, by its id: its row names that tool (`Exa search`). */
 const servedCalls = new Map<string, string>();
+/** Offers whose accept row has drawn: their held Agent row gives way at once (one row a task). */
+const drawnAccepts = new Set<string>();
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -1874,6 +1876,12 @@ export function registerModelViewer(on: On): void {
         }
         return next(e);
       }
+      // The held Agent row reads this, so it never draws beside the DeepSeek row.
+      if (!drawnAccepts.has(offerId)) {
+        drawnAccepts.add(offerId);
+        if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
+        $.ui.invalidate('ui.render');
+      }
       const [held, known] = await Promise.all([
         $.state.get({ ...WORKERS, id: offerId }),
         $.state.get(STATE),
@@ -1964,6 +1972,7 @@ export function registerModelViewer(on: On): void {
         // ctrl+o still shows the held call and its offer.
         if (
           worker.value ||
+          drawnAccepts.has(offerId) ||
           (offer.value && (offer.value.state !== 'offered' || now - offer.value.at > OFFER_MS))
         ) {
           if (e.props.isExpanded === true) return next(e);

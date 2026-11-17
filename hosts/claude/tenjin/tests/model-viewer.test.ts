@@ -2766,3 +2766,15 @@ test("the accept and cancel of an offer are allowed by the mod, and every other 
       .decision,
   ).toBe('ask');
 });
+
+// Live on alpha.68: for a split second the held Agent row and the DeepSeek row both drew,
+// between the accept row's first frame and the accept hook writing the worker's record.
+test('the held Agent row gives way the moment its accept row draws', async ($, on) => {
+  setup($, on);
+  const held = (await remember($)).result;
+  expect(await heldRow($, 'held_a', INPUT, held)).toContain('Tenjin offered DeepSeek');
+  expect((await acceptRow($, 'parent_accept', OFFER))[0]).toContain(
+    'DeepSeek(Read selected source)',
+  );
+  expect(await heldRow($, 'held_a', INPUT, held)).toBe('');
+});
