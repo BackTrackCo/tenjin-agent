@@ -493,3 +493,30 @@ it("binds a worker that runs as a custom agent, never one named like a plugin's 
   expect(() => bind('tenjin:deepseek-viewer')).toThrow();
   expect(() => bind('loop worker')).toThrow();
 });
+
+// The viewer draws each worker reply as one step: its text and its calls, and a read's line count.
+it('marks the reply each row belongs to, and a read’s line count from its own record', () => {
+  const f = fixture();
+  f.activity.running();
+  f.activity.observe(
+    f.assistant(
+      [
+        { type: 'text', text: 'Reading it.' },
+        { type: 'tool_use', id: 'read-one', name: 'Read', input: { file_path: '/repo/a.ts' } },
+      ],
+      'msg-one',
+    ),
+  );
+  f.activity.observe(f.assistant([{ type: 'text', text: 'Done.' }], 'msg-two'));
+  const token = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8';
+  f.activity.observe({
+    ...f.result('read-one', [{ type: 'text', text: '1\tconst a = ' + token }]),
+    tool_use_result: { type: 'text', file: { filePath: '/repo/a.ts', numLines: 120 } },
+  });
+  const [text, read, done] = f.activity.snapshot().rows;
+  expect(text?.message).toBe(read?.message);
+  expect(done?.message).not.toBe(read?.message);
+  expect(read?.lines).toBe(120);
+  // The viewer's result lines come from this preview, which never holds a token.
+  expect(read?.outputPreview).not.toContain(token);
+});

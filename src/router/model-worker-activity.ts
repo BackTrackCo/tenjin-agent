@@ -46,6 +46,10 @@ export type ModelWorkerActivityRow = {
   command?: string;
   outputPreview?: string;
   elapsedSeconds?: number;
+  /** Which worker reply the row belongs to, so the viewer draws each reply as one step. */
+  message?: string;
+  /** A file read's line count, as Claude Code reports it: the viewer's `Read N lines`. */
+  lines?: number;
 };
 const spendSchema = z
   .object({
@@ -439,6 +443,7 @@ export class ModelWorkerActivity {
         const msg = object(event.message);
         if (!msg || !Array.isArray(msg.content)) return;
         const messageId = typeof msg.id === 'string' ? msg.id.slice(0, 200) : event.uuid;
+        const message = canonicalHash(messageId ?? null).slice(0, 16);
         const tokens = usageTokens(msg.usage);
         if (tokens !== undefined && tokens !== this.value.tokens) {
           this.value.tokens = tokens;
@@ -464,17 +469,20 @@ export class ModelWorkerActivity {
               name: preview(block.name).slice(0, 120),
               inputSummary: inputSummary(block.input),
               ...shellCommand(block.input),
+              message,
             });
           } else if (block.type === 'text' && typeof block.text === 'string') {
             const text = preview(block.text);
             const key = 'text:' + canonicalHash([messageId, text]);
             if (text && this.remember('block:' + key))
-              this.add({ id: key, kind: 'text', state: 'completed', text });
+              this.add({ id: key, kind: 'text', state: 'completed', text, message });
           }
         }
       } else if (event.type === 'user') {
         const msg = object(event.message);
         if (!msg || !Array.isArray(msg.content)) return;
+        // Claude Code sends one tool result a message, with its own record beside it.
+        const lines = object(object(event.tool_use_result)?.file)?.numLines;
         for (const raw of msg.content.slice(0, 64)) {
           const block = object(raw);
           if (
@@ -492,6 +500,14 @@ export class ModelWorkerActivity {
             block.is_error === true
               ? 'Tool reported an error; inspect its native history for details.'
               : toolPreview(block.content);
+          if (
+            row.name === 'Read' &&
+            msg.content.length === 1 &&
+            typeof lines === 'number' &&
+            Number.isSafeInteger(lines) &&
+            lines >= 0
+          )
+            row.lines = lines;
           row.sequence = ++this.value.sequence;
           this.boundSnapshot();
         }
