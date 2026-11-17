@@ -131,7 +131,8 @@ describe('one decision, on the paid route', () => {
       'schemaVersion',
     ]);
     expect((calls[0]!.body as { budgetMs: number }).budgetMs).toBe(5_000);
-    // The catalog is on by default; the open Bazaar is not.
+    // The catalog is on by default; the open Bazaar is not. The hook alone
+    // asks for `unfunded`, for its funding reminder.
     expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
       'catalog',
       'spec',
@@ -141,6 +142,7 @@ describe('one decision, on the paid route', () => {
       'headers',
       'note',
       'tolerant',
+      'funding',
     ]);
   });
 
@@ -176,19 +178,21 @@ describe('one decision, on the paid route', () => {
       { query: 'BTC and ETH price' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl, acceptsBazaar: true },
     );
-    for (const call of calls) {
-      expect((call.body as { accepts: unknown }).accepts).toEqual([
-        'catalog',
-        'spec',
-        'label',
-        'fields',
-        'jobs',
-        'headers',
-        'note',
-        'tolerant',
-        'bazaar',
-      ]);
-    }
+    const withBazaar = [
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'note',
+      'tolerant',
+      'bazaar',
+    ];
+    expect(calls.map((call) => (call.body as { accepts: unknown }).accepts)).toEqual([
+      [...withBazaar, 'funding'],
+      withBazaar,
+    ]);
   });
 
   it('adds the harness session id to the hook body when it has one', async () => {
