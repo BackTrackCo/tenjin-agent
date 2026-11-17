@@ -224,6 +224,10 @@ export class ModelHandoff {
     this.store = new ModelJobStore(options.dataDir);
     this.conversations = new ModelConversationStore(options.dataDir);
   }
+  /** Why no consent applies: one given under an earlier disclosure, or none. */
+  private async absentConsent(): Promise<'consent_outdated' | 'no_consent'> {
+    return (await modelConsentOutdated(this.options.dataDir)) ? 'consent_outdated' : 'no_consent';
+  }
   private async currentConsent(cwd: string) {
     const settings = await modelSettings(this.options.dataDir, cwd);
     return settings?.routerOrigin === this.options.transport.origin ? settings : null;
@@ -381,8 +385,7 @@ export class ModelHandoff {
     const stay = (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) =>
       this.stay(session, nativeTool, code, { ...more, ...(caller ? { from: 'subagent' } : {}) });
     const { dataDir, transport } = this.options;
-    if (!settings)
-      return stay((await modelConsentOutdated(dataDir)) ? 'consent_outdated' : 'no_consent');
+    if (!settings) return stay(await this.absentConsent());
     if (!claudeWorkerPermissionMode(session.claudePermissionMode))
       return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();
@@ -569,7 +572,7 @@ export class ModelHandoff {
       });
     };
     const settings = await this.currentConsent(session.cwd);
-    if (!settings) return native('no_consent');
+    if (!settings) return native(await this.absentConsent());
     if (settings.root !== job.root) return native('scope_not_covered');
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
@@ -655,7 +658,7 @@ export class ModelHandoff {
       consent.maxJobAtomic < BigInt(job.capAtomic) ||
       (claudeWorkspace && !modelClaudeWorkspaceCovered(claudeWorkspace, consent))
     )
-      return native(consent ? 'scope_not_covered' : 'no_consent');
+      return native(consent ? 'scope_not_covered' : await this.absentConsent());
     await this.store.decided(job.id, {
       ...parsed.data,
       routerOrigin: transport.origin,

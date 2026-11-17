@@ -1129,6 +1129,17 @@ it('records one code for each reason a held call gets no offer, and never its te
   delete config.router.subagentConsent.reads;
   await writeFile(join(dir, 'config.json'), JSON.stringify(config));
   expect(await reason(other)).toMatchObject({ code: 'consent_outdated' });
+  // The same when the consent goes out of date while the router is asked: the record
+  // said `no_consent`, which sent the person to a consent they already gave.
+  config.router.subagentConsent.reads = 'claude-home';
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  f.route.mockImplementationOnce(async (body: { jobId: string }) => {
+    const earlier = structuredClone(config);
+    delete earlier.router.subagentConsent.reads;
+    await writeFile(join(dir, 'config.json'), JSON.stringify(earlier));
+    return { ...offer, jobId: body.jobId };
+  });
+  expect(await reason(other)).toMatchObject({ code: 'consent_outdated' });
   expect(await readFile(join(dir, 'model-jobs', 'no-offers.json'), 'utf8')).not.toContain(
     'PRIVATE-ASSIGNMENT',
   );
