@@ -11,6 +11,7 @@ import type {
   ServerNotification,
   ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
@@ -314,7 +315,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const sessions = new Map<string, { transcript_path?: unknown; cwd?: unknown }>();
   let modelSession: ModelSession | undefined;
   const seenModelTurns = new Set<string>();
-  let modelTurn = 0;
   const modelTool = registerModelTool(server, {
     dataDir: ctx.dataDir,
     harness: opts.harness ?? 'claude',
@@ -350,7 +350,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     ) {
       modelSession = {
         sessionId: id,
-        turnId: String(++modelTurn),
+        // Unique across processes: a counter restarts with `tenjin mcp`, and the
+        // first turn of a resumed session would then name an earlier turn's records.
+        turnId: randomUUID(),
         cwd: raw['cwd'],
         transcript: raw['transcript_path'],
         harness: 'claude',
