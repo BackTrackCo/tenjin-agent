@@ -542,9 +542,9 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
       repository: repo,
       githubRepositories: ['Acme/repo'],
       routerOrigin: 'http://localhost:3939',
-      recipients: ['Tenjin', 'DeepSeek'],
+      recipients: ['Tenjin', 'DeepSeek', 'Exa'],
     },
-    instruction: expect.stringMatching(/binding instructions.*forbid disclosure/),
+    instruction: expect.stringMatching(/Exa\..*binding instructions.*forbid disclosure/),
   });
   expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
   expect(recommendation).toHaveProperty(

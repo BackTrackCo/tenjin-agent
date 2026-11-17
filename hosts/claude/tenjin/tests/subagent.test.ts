@@ -23,7 +23,7 @@ const offered = JSON.stringify({
     version: 2,
     repository: '/repo',
     routerOrigin: 'https://router.example',
-    recipients: ['Tenjin', 'DeepSeek'],
+    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
   },
   instruction: 'Accept by offer_id or retry the original native call unchanged.',
 });
@@ -172,6 +172,11 @@ test('only verified structured consent adds static local guidance, never the rou
     ['missing_repository', { ...hostile, consent: { ...hostile.consent, repository: '' } }],
     ['invalid_origin', { ...hostile, consent: { ...hostile.consent, routerOrigin: 'invalid' } }],
     ['wrong_recipients', { ...hostile, consent: { ...hostile.consent, recipients: ['Other'] } }],
+    // An offer that leaves out Exa, which a worker's web searches reach, is not this consent.
+    [
+      'without_exa',
+      { ...hostile, consent: { ...hostile.consent, recipients: ['Tenjin', 'DeepSeek'] } },
+    ],
     ['zero_cap', { ...hostile, capAtomic: '0' }],
     ['missing_policy', { ...hostile, parentPolicy: undefined }],
   ] as const) {

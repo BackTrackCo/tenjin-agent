@@ -1005,9 +1005,10 @@ function heldOfferContext(offer: Json, continuation = false): string[] | undefin
     typeof consent.routerOrigin !== 'string' ||
     !/^https?:\/\/\S+$/.test(consent.routerOrigin) ||
     !Array.isArray(consent.recipients) ||
-    consent.recipients.length !== 2 ||
+    consent.recipients.length !== 3 ||
     consent.recipients[0] !== 'Tenjin' ||
     consent.recipients[1] !== 'DeepSeek' ||
+    consent.recipients[2] !== 'Exa' ||
     typeof offer.capAtomic !== 'string' ||
     !/^[1-9][0-9]*$/.test(offer.capAtomic) ||
     typeof offer.parentPolicy !== 'string' ||
