@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir } from 'node:fs/promises';
+import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { withFileLock } from '../lib/lock';
+import { pidAlive, withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
-import { readJsonFile, writePrivate } from './store-files';
+import { WORKER_WALL_MS } from './model-worker-control';
+import { readJsonFile, sweep, writePrivate } from './store-files';
 
 const jobSchema = z.object({
   id: z.uuid(),
@@ -30,9 +31,39 @@ const jobSchema = z.object({
   ]),
   expiresAt: z.number(),
   result: z.string().optional(),
+  /** The process that accepted the job and runs its worker, and when. */
+  runner: z.object({ pid: z.number().int(), acceptedAt: z.number() }).optional(),
 });
 export type ModelJob = z.infer<typeof jobSchema>;
 export const modelJobSchema = jobSchema;
+
+/**
+ * A model store's lock. Its holder can be killed with the session mid-update,
+ * and a lock nothing takes over would then time out every later operation.
+ */
+export const modelLock = <T>(path: string, fn: () => Promise<T>): Promise<T> =>
+  withFileLock(path, fn, { takeOverDead: true });
+
+/** Local job, conversation and budget records are removed this long after their last write. */
+export const MODEL_RECORD_TTL_MS = 7 * 24 * 60 * 60_000;
+/** No run is still going this long after its accept: the wall limit, and time to drain. */
+const RUN_OVER_MS = WORKER_WALL_MS + 5 * 60_000;
+
+/** What a later accept of a worker that died with its process answers. */
+export const STRANDED_HANDBACK = {
+  status: 'unknown',
+  stopReason: { kind: 'interrupted', reason: 'session_ended' },
+  nextStep:
+    'This worker stopped when its session or Tenjin process ended, as a native subagent does. It cannot be continued. If the work is still needed, start a fresh assignment with the needed context.',
+} as const;
+
+/** Removes every model record file not written for {@link MODEL_RECORD_TTL_MS}. Never throws. */
+export async function sweepModelRecords(dataDir: string, now = Date.now()): Promise<void> {
+  const old = async (_name: string, path: string) =>
+    now - (await lstat(path)).mtimeMs > MODEL_RECORD_TTL_MS;
+  for (const store of ['model-jobs', 'model-conversations'])
+    await sweep(join(dataDir, store), old, { limit: 50_000 });
+}
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 /** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
 const REPEATABLE: readonly ModelJob['state'][] = ['offered', 'cancelled', 'unknown'];
@@ -83,7 +114,7 @@ export class ModelJobStore {
   }
   private async locked<T>(fn: () => Promise<T>) {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    return withFileLock(join(this.dir, 'lock'), fn);
+    return modelLock(join(this.dir, 'lock'), fn);
   }
   private async read(id: string) {
     const raw = await readJsonFile(this.path(id), 1_000_000);
@@ -140,6 +171,15 @@ export class ModelJobStore {
     const job = await this.read(window.id);
     return job?.sessionId === session && job.turnId === turn ? job : null;
   }
+  /**
+   * A job by its own id, in any turn and from any process, for the session
+   * that owns it. Another session gets nothing, as for an id that never was.
+   */
+  async owned(id: string, session: string): Promise<ModelJob | null> {
+    if (!z.uuid().safeParse(id).success) return null;
+    const job = await this.read(id);
+    return job?.sessionId === session ? job : null;
+  }
   /** Bind the one plaintext resubmission before paying. Replays must be exact. */
   async submit(id: string, session: string, turn: string, task: string): Promise<ModelJob | null> {
     return this.locked(async () => {
@@ -186,20 +226,65 @@ export class ModelJobStore {
       );
     });
   }
-  async accept(id: string, session: string, turn: string): Promise<ModelJob | null> {
+  /** Every record still `running` or `cancelling`, whichever session owns it. Never throws. */
+  async unfinished(): Promise<ModelJob[]> {
+    const found: ModelJob[] = [];
+    try {
+      let seen = 0;
+      for await (const entry of await opendir(this.dir)) {
+        if (++seen > 50_000) break;
+        const id = /^(.+)\.json$/.exec(entry.name)?.[1];
+        if (!entry.isFile() || !id || !z.uuid().safeParse(id).success) continue;
+        const job = await this.read(id);
+        if (job && ['running', 'cancelling'].includes(job.state)) found.push(job);
+      }
+    } catch {
+      // No store yet, or not readable: nothing to repair.
+    }
+    return found;
+  }
+  /** Once, on disk. Without `turn` the offer is accepted from any turn of its session. */
+  async accept(id: string, session: string, turn?: string): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.read(id);
       if (
         !job ||
         job.sessionId !== session ||
-        job.turnId !== turn ||
+        (turn !== undefined && job.turnId !== turn) ||
         job.expiresAt <= Date.now() ||
         job.state !== 'offered'
       )
         return null;
       job.state = 'running';
+      job.runner = { pid: process.pid, acceptedAt: Date.now() };
       await writePrivate(this.path(id), JSON.stringify(job));
       return job;
+    });
+  }
+  /**
+   * Ends a record its process left `running`: that process is gone, it is this
+   * process (which the caller knows runs no such worker), or the accept is
+   * older than any run. The record becomes `unknown` and is returned. Null
+   * while another live process may still be running the worker.
+   */
+  async strand(
+    id: string,
+    o: { isAlive?: (pid: number) => boolean; now?: number } = {},
+  ): Promise<ModelJob | null> {
+    return this.locked(async () => {
+      const job = await this.read(id);
+      if (!job || !['running', 'cancelling'].includes(job.state)) return job;
+      const { runner } = job;
+      const over = (o.now ?? Date.now()) - (runner?.acceptedAt ?? job.expiresAt) > RUN_OVER_MS;
+      const gone = runner && (runner.pid === process.pid || !(o.isAlive ?? pidAlive)(runner.pid));
+      if (!over && !gone) return null;
+      const ended: ModelJob = {
+        ...job,
+        state: 'unknown',
+        result: JSON.stringify(STRANDED_HANDBACK),
+      };
+      await writePrivate(this.path(id), JSON.stringify(ended));
+      return ended;
     });
   }
   /** Codex: the held call retried unchanged in its own turn passes the hold once. */

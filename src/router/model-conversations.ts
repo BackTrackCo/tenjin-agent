@@ -2,9 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
-import { modelJobSchema, type ModelJob } from './model-job';
+import { modelJobSchema, modelLock, type ModelJob } from './model-job';
 import { readJsonFile, writePrivate } from './store-files';
 
 export const MODEL_WORKER_HANDLE_PREFIX = 'tenjin-worker-';
@@ -74,7 +73,7 @@ export class ModelConversationStore {
   }
   private async locked<T>(fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    return withFileLock(join(this.dir, 'lock'), fn);
+    return modelLock(join(this.dir, 'lock'), fn);
   }
   private async owner(input: ModelConversationOwner): Promise<ModelConversationOwner | null> {
     if (!identity.safeParse(input.parentSessionId).success) return null;
@@ -238,11 +237,8 @@ export class ModelConversationStore {
       const conversation = await this.owned(handle, owner);
       const continuation = await this.continuation(handle, id);
       if (!conversation || !continuation) return null;
-      if (continuation.state === 'completed' && continuation.result) {
-        if (conversation.state === 'running' && conversation.currentContinuationId === id)
-          await this.writeConversation({ ...conversation, state: 'idle' });
-        return { action: 'replay', result: continuation.result };
-      }
+      const result = await this.completed(conversation, continuation);
+      if (result !== null) return { action: 'replay', result };
       if (
         conversation.state !== 'offered' ||
         conversation.currentContinuationId !== id ||
@@ -255,6 +251,34 @@ export class ModelConversationStore {
       const activated: ModelContinuation = { ...continuation, state: 'running' };
       await this.writeContinuation(activated);
       return { action: 'start', conversation: running, continuation: activated };
+    });
+  }
+  /**
+   * A completed activation's stored result, else null. It reopens selection
+   * only for a completion that was recorded just before a crash.
+   */
+  private async completed(
+    conversation: ModelConversation,
+    continuation: ModelContinuation,
+  ): Promise<string | null> {
+    if (continuation.state !== 'completed' || !continuation.result) return null;
+    if (conversation.state === 'running' && conversation.currentContinuationId === continuation.id)
+      await this.writeConversation({ ...conversation, state: 'idle' });
+    return continuation.result;
+  }
+  /**
+   * A finished activation's stored handback, for its owner, whichever
+   * activation the conversation has moved on to. It starts nothing.
+   */
+  async handback(
+    handle: string,
+    owner: ModelConversationOwner,
+    id: string,
+  ): Promise<string | null> {
+    return this.locked(async () => {
+      const conversation = await this.owned(handle, owner);
+      const continuation = await this.continuation(handle, id);
+      return conversation && continuation ? this.completed(conversation, continuation) : null;
     });
   }
   async finish(
