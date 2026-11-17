@@ -327,6 +327,7 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
     nativeProfile: a.nativeProfile,
     sequence: Number(a.sequence),
     state: a.state as TenjinModelActivity['state'],
+    ...(typeof a.started === 'boolean' ? { started: a.started } : {}),
     droppedRows:
       (Number.isSafeInteger(a.droppedRows) && Number(a.droppedRows) >= 0
         ? Number(a.droppedRows)
@@ -915,13 +916,13 @@ export function registerModelViewer(on: On): void {
           follow: true,
         });
         const value = body(response);
+        const ended = record(value?.activity);
         if (
           !response.isError &&
           value?.status === 'activity' &&
-          record(value.activity)?.offerId === owned.item.offerId
+          ended?.offerId === owned.item.offerId
         )
-          tail =
-            'Activity observation finished. The worker result is returned separately to the parent.';
+          tail = endingOf(ended);
       } catch {
         /* An observer error never cancels, retries or replaces the actual worker. */
       }
@@ -1136,6 +1137,19 @@ export function registerModelViewer(on: On): void {
     const step = live?.current ?? (live?.state === 'running' ? 'working' : 'starting');
     return next({ ...e, props: { ...e.props, message: clean('DeepSeek · ' + step, 120) } });
   });
+}
+
+/** How the viewer's transcript ends: what happened to the worker, never a run that did not happen. */
+function endingOf(activity: Json): string {
+  if (activity.state === 'completed')
+    return 'Activity observation finished. The worker result is returned separately to the parent.';
+  if (activity.started === false)
+    return activity.state === 'cancelled'
+      ? 'Not started: the start was interrupted, so no work ran.'
+      : 'Not started: Claude Code did not start, so no work ran. The parent keeps this task native.';
+  return activity.state === 'cancelled'
+    ? 'Interrupted: the worker was stopped before it finished. What it had done is returned to the parent.'
+    : 'Stopped: the worker ended before it finished. What it had done is returned to the parent.';
 }
 
 type Elements = ReturnType<Dollar['ui']['resolve']>;

@@ -39,6 +39,7 @@ function setup(_$: Engine, on: On) {
     registrations: [] as unknown[],
     nativeSteps: 0,
     phase: 'running',
+    started: true,
     inspections: 0,
     reads: 0,
     aliasReads: 0,
@@ -125,6 +126,7 @@ function setup(_$: Engine, on: On) {
       nativeProfile: state.nativeProfile,
       sequence: state.phase === 'running' ? 2 : 3,
       state: state.phase,
+      started: state.started,
       droppedRows: 8,
       toolUses: 1,
       tokens: 41_234,
@@ -1331,3 +1333,46 @@ test('a folded run that holds an accept unfolds, so the DeepSeek row draws in pl
     await group.unmount();
   }
 });
+
+for (const [phase, started, ending] of [
+  [
+    'completed',
+    true,
+    'Activity observation finished. The worker result is returned separately to the parent.',
+  ],
+  [
+    'unknown',
+    false,
+    'Not started: Claude Code did not start, so no work ran. The parent keeps this task native.',
+  ],
+  ['cancelled', false, 'Not started: the start was interrupted, so no work ran.'],
+  [
+    'cancelled',
+    true,
+    'Interrupted: the worker was stopped before it finished. What it had done is returned to the parent.',
+  ],
+] as const)
+  test(
+    'the viewer transcript ends by saying what happened to a worker that is ' +
+      phase +
+      (started ? '' : ' before it started'),
+    async ($, on) => {
+      const f = setup($, on);
+      let release: () => void = () => undefined;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      f.state.work = async () => {
+        await blocked;
+        return { result: 'handback' };
+      };
+      await remember($);
+      const { running, firstStep } = await startWithViewer($, f);
+      f.state.phase = phase;
+      f.state.started = started;
+      release();
+      await running;
+      expect((await firstStep).answer).toBe(LIVE_MESSAGE + ending);
+      await f.clock.settle();
+    },
+  );

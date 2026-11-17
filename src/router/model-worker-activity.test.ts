@@ -188,7 +188,13 @@ it('refuses foreign sessions and stale generations without consuming legitimate 
   f.activity.observe(tool, 'old-generation');
   f.activity.running('old-generation');
   f.activity.finish('completed', undefined, 'old-generation');
-  expect(f.activity.snapshot()).toMatchObject({ sequence: 0, state: 'starting', rows: [] });
+  // Never started: an ended job in this state ran nothing, and the viewer says so.
+  expect(f.activity.snapshot()).toMatchObject({
+    sequence: 0,
+    state: 'starting',
+    started: false,
+    rows: [],
+  });
   f.activity.observe(tool);
   expect(f.activity.snapshot().rows).toHaveLength(1);
 });

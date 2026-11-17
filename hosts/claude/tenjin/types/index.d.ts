@@ -43,6 +43,8 @@ export type TenjinModelActivity = {
   nativeProfile: 'general-purpose' | 'Explore';
   sequence: number;
   state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
+  /** False when the worker's Claude Code never started; absent from an older CLI. */
+  started?: boolean;
   droppedRows: number;
   rows: {
     id: string;

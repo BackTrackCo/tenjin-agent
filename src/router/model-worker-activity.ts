@@ -55,6 +55,8 @@ export type ModelWorkerActivitySnapshot = {
   binding: ModelWorkerActivityBinding;
   sequence: number;
   state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
+  /** Whether the worker's Claude Code ever started: an ended job that never did ran nothing. */
+  started: boolean;
   droppedRows: number;
   rows: ModelWorkerActivityRow[];
   /** Tool calls the worker made, counted past the bounded rows. */
@@ -86,6 +88,7 @@ export function activityAnswer(
       generation: snapshot.binding.generation,
       sequence: snapshot.sequence,
       state: snapshot.state,
+      started: snapshot.started,
       toolUses: snapshot.toolUses,
       tokens: snapshot.tokens,
       ...(rows
@@ -238,6 +241,7 @@ export class ModelWorkerActivity {
       binding: validBinding(options.binding),
       sequence: 0,
       state: 'starting',
+      started: false,
       droppedRows: 0,
       rows: [],
       toolUses: 0,
@@ -264,6 +268,7 @@ export class ModelWorkerActivity {
   running(generation = this.value.binding.generation): void {
     if (!this.current(generation) || this.value.state !== 'starting') return;
     this.value.state = 'running';
+    this.value.started = true;
     this.value.sequence++;
     this.boundSnapshot();
   }
