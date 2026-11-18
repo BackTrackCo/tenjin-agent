@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hasCode } from './errno';
 
 export interface FileLockOptions {
@@ -9,6 +10,8 @@ export interface FileLockOptions {
   timeoutMs?: number;
   /** Poll interval between acquisition attempts (ms). */
   retryMs?: number;
+  /** Stops waiting to acquire. Once running, the callback owns cancellation. */
+  signal?: AbortSignal;
   /**
    * Called when the lock could not be removed on release. The work succeeded,
    * but the leftover blocks later runs, and only the caller can say so.
@@ -52,9 +55,11 @@ async function acquire(
     retryMs: number;
     now: () => number;
     onBusy?: () => boolean;
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   for (;;) {
+    o.signal?.throwIfAborted();
     try {
       mkdirSync(lockPath);
       return;
@@ -62,7 +67,10 @@ async function acquire(
       if (!hasCode(err, 'EEXIST')) throw err;
       if (o.onBusy?.() === true) continue;
       if (o.now() >= o.deadline) throw new LockTimeoutError(lockPath, o.timeoutMs);
-      await delay(o.retryMs);
+      await delay(o.retryMs, undefined, { signal: o.signal }).catch((error) => {
+        o.signal?.throwIfAborted();
+        throw error;
+      });
     }
   }
 }
@@ -88,12 +96,14 @@ export async function withFileLock<T>(
     timeoutMs,
     retryMs,
     now: () => Date.now(),
+    signal: opts.signal,
     ...(opts.takeOverDead ? { onBusy: () => takeOverDeadHolder(lockPath) } : {}),
   });
   await writeFile(metaPath, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() })).catch(
     () => undefined,
   );
   try {
+    opts.signal?.throwIfAborted();
     return await fn();
   } finally {
     // Only a dead holder's lock is ever taken over, so it is still ours and the plain rm is safe.
@@ -104,10 +114,6 @@ export async function withFileLock<T>(
       opts.onReleaseError?.(lockPath, err);
     }
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

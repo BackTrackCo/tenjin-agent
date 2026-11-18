@@ -11,14 +11,15 @@ import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import { modelLock, type ModelJob } from './model-job';
-import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
+import { MODEL_ROUTING_FEE_CEILING_ATOMIC, modelChannelScope } from './model-channel';
+import { withFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import {
   MODEL_MESSAGES_RESULT_BYTES,
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
-import { ModelCallFailed, retryAfterMs, timedOut } from './model-worker-control';
+import { ModelCallFailed, retryAfterMs, timedOut, WORKER_WALL_MS } from './model-worker-control';
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
@@ -542,17 +543,40 @@ export class ModelTransport {
       modelLane: { path: endpoint, ceilingAtomic: quote, origin: this.origin },
       fetchImpl: cachedFetch,
     });
+    // Each payer is specific to an invocation, but both model endpoints
+    // share an inference channel. Take turns across local transports and processes.
+    const scope = modelChannelScope(this.origin, 'model-inference');
+    const paymentLock = join(dataDir, 'model-jobs', `${scope.id}.payment.lock`);
+    let paymentTurn = false;
     let result;
     let failure: unknown;
     try {
-      result = await payer
-        .routeFor(baseUrl)
-        .send(url, { method: 'POST', jsonBody: body, timeoutMs: 360_000, blockRedirects: true });
+      result = await withFileLock(
+        paymentLock,
+        async () => {
+          await beforeSend?.();
+          await consent();
+          signal.throwIfAborted();
+          paymentTurn = true;
+          try {
+            return await payer.routeFor(baseUrl).send(url, {
+              method: 'POST',
+              jsonBody: body,
+              timeoutMs: 360_000,
+              blockRedirects: true,
+            });
+          } finally {
+            // Hold the channel until SDK accounting drains, including detached work.
+            await payer.idle();
+          }
+        },
+        { signal, takeOverDead: true, timeoutMs: WORKER_WALL_MS, retryMs: 100 },
+      );
     } catch (cause) {
       failure = cause;
+      if (!paymentTurn) localBlock = new LocalSendBlocked(cause);
     } finally {
-      // Drain SDK accounting before either releasing or reporting uncertainty.
-      await payer.idle();
+      if (first) await challenge.body?.cancel().catch(() => undefined);
     }
     if (failure !== undefined) {
       // A refusal before signing or a proven local guard failure can release

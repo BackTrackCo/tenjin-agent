@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
+import * as locks from '../lib/lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
@@ -23,6 +24,16 @@ function deferred() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function watchPaymentLock() {
+  const waiting = deferred();
+  const withFileLock = locks.withFileLock;
+  const spy = vi.spyOn(locks, 'withFileLock').mockImplementation((path, run, opts) => {
+    if (path.endsWith('.payment.lock')) waiting.resolve();
+    return withFileLock(path, run, opts);
+  });
+  return { waiting: waiting.promise, restore: () => spy.mockRestore() };
 }
 
 async function fixture(
@@ -235,6 +246,65 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
     uncertain: [],
   });
 });
+
+it.each(['settles', 'cancels'] as const)(
+  '%s a second inference job queued on the same funded channel',
+  async (outcome) => {
+    const f = await fixture();
+    const firstTransport = f.make();
+    const otherTransport = f.make();
+    const signal = new AbortController().signal;
+    const message = (content: string) => ({ messages: [{ role: 'user', content }] });
+    await firstTransport.messages(f.job, message('Fund the inference channel'), signal);
+
+    const held = deferred();
+    const entered = deferred();
+    f.router.hold = held.promise;
+    f.router.onDelayArmed = entered.resolve;
+    const first = firstTransport.messages(f.job, message('First held call'), signal);
+    await entered.promise;
+
+    const channel = watchPaymentLock();
+    const secondJob = {
+      ...f.job,
+      id: randomUUID(),
+      decision: { ...f.job.decision, jobId: randomUUID() },
+    };
+    const abort = new AbortController();
+    const second = otherTransport.messages(secondJob, message('Second held call'), abort.signal);
+    const pending = Promise.allSettled([first, second]);
+    const reason = new Error('Second worker stopped');
+    try {
+      await Promise.race([channel.waiting, second]);
+      // The first paid call still holds the channel. The second has only a local quote.
+      expect(f.router.paidRequests()).toBe(2);
+      expect(await otherTransport.summary(secondJob)).toMatchObject({ reservedAtomic: '503000' });
+      if (outcome === 'cancels') {
+        abort.abort(reason);
+        await expect(second).rejects.toBe(reason);
+        expect(await otherTransport.summary(secondJob)).toMatchObject({
+          reservedAtomic: '3000',
+          uncertain: [],
+        });
+      }
+    } finally {
+      held.resolve();
+      channel.restore();
+    }
+    const [completed, waiting] = await pending;
+    expect(completed).toEqual({ status: 'fulfilled', value: f.message });
+    if (outcome === 'settles') {
+      expect(waiting).toEqual({ status: 'fulfilled', value: f.message });
+      expect(await otherTransport.summary(secondJob)).toMatchObject({
+        reservedAtomic: '4000',
+        uncertain: [],
+      });
+    } else expect(waiting).toEqual({ status: 'rejected', reason });
+    expect(f.router.paidRequests()).toBe(outcome === 'settles' ? 3 : 2);
+    expect(f.router.channels.size).toBe(1);
+    expect(f.router.deposits).toBe(1);
+  },
+);
 
 it.each(['messages', 'responses'] as const)(
   'shares one live identical %s request instead of recovering an invocation still in flight',
@@ -949,7 +1019,7 @@ it('retains exposure when signing starts but fails before a paid request is sent
   });
 });
 
-it('preserves a second in-flight reservation when the first call settles', async () => {
+it('preserves a second queued reservation when the first call settles', async () => {
   const f = await fixture({ cap: '1100000' });
   f.job.capAtomic = '1100000';
   let finishFirst!: () => void;
@@ -986,6 +1056,7 @@ it('preserves a second in-flight reservation when the first call settles', async
       new AbortController().signal,
     );
   await firstStarted;
+  const channel = watchPaymentLock();
   const second = f
     .make()
     .messages(
@@ -994,14 +1065,16 @@ it('preserves a second in-flight reservation when the first call settles', async
       new AbortController().signal,
     );
   try {
-    await secondReserved;
+    await Promise.race([channel.waiting, second]);
     expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '1003000' });
     finishFirst();
     await expect(first).resolves.toEqual(f.message);
+    await secondReserved;
     expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '504000' });
   } finally {
     finishFirst();
     releaseSecond();
+    channel.restore();
   }
   await expect(second).resolves.toEqual(f.message);
   expect(await f.make().summary(f.job)).toEqual({
