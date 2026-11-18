@@ -323,7 +323,7 @@ it.each(['daily', 'creator'] as const)(
 );
 
 it('uses the real SDK inference lane for multiple turns, reusing credit and replaying locally', async () => {
-  const f = await fixture();
+  const f = await fixture({ quote: '120000' });
   const transport = f.make();
   const first = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'first' }] };
   expect(await transport.messages(f.job, first, new AbortController().signal)).toEqual(f.message);
@@ -339,8 +339,11 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
   });
 });
 
-it('settles overlapping inference on two reusable funded channels', async ({ onTestFinished }) => {
-  const f = await fixture();
+it('settles overlapping inference on two reusable channels with a $0.50 funding budget', async ({
+  onTestFinished,
+}) => {
+  const f = await fixture({ quote: '120000' });
+  f.deps.policy = async () => ({ ...TEST_POLICY, sessionBudgetAtomic: 500000n });
   const primary = f.make();
   const secondary = primary.forInferenceSlot(1);
   const stop = new AbortController();
@@ -403,9 +406,40 @@ it('settles overlapping inference on two reusable funded channels', async ({ onT
   ).resolves.toEqual(f.message);
   expect(f.router.channels.size).toBe(2);
   expect(f.router.channels.get(originalChannel!)?.charged).toBe(2000n);
+  expect([...f.router.channels.values()].map((channel) => channel.balance)).toEqual([
+    250000n,
+    250000n,
+  ]);
+  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('500000');
   expect(f.router.deposits).toBe(2);
   expect(f.router.settledFees).toBe(4);
   expect(f.router.paidRequests()).toBe(4);
+});
+
+it('refills a worker channel in $0.25 deposits as inference consumes its credit', async () => {
+  const f = await fixture({ quote: '120000', charge: '100000', refundCapability: 'enabled' });
+  const signal = new AbortController().signal;
+  const transport = f.make();
+  await transport.withInferenceRun(f.job.id, signal, async (worker) => {
+    for (const turn of [1, 2, 3]) {
+      await worker.messages(
+        f.job,
+        { messages: [{ role: 'user', content: `Turn ${turn}` }] },
+        signal,
+      );
+      expect(f.router.deposits).toBe(turn === 3 ? 2 : 1);
+    }
+  });
+  expect([...f.router.channels.values()]).toMatchObject([{ balance: 500000n, charged: 300000n }]);
+  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('500000');
+  expect(await transport.summary(f.job)).toMatchObject({ actualAtomic: '303000' });
+});
+
+it('funds only the deficit for an inference quote that needs more than $0.25', async () => {
+  const f = await fixture({ quote: '400000', charge: '1000' });
+  await f.make().messages(f.job, { messages: [] }, new AbortController().signal);
+  expect([...f.router.channels.values()]).toMatchObject([{ balance: 400000n, charged: 1000n }]);
+  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('400000');
 });
 
 it('applies the same rolling deposit budget to both inference channels', async () => {
@@ -437,7 +471,7 @@ it('applies the same rolling deposit budget to both inference channels', async (
 it.each(['settles', 'cancels'] as const)(
   '%s a second inference job queued on the same funded channel',
   async (outcome) => {
-    const f = await fixture();
+    const f = await fixture({ quote: '120000' });
     const firstTransport = f.make();
     const otherTransport = f.make();
     const signal = new AbortController().signal;
@@ -465,7 +499,7 @@ it.each(['settles', 'cancels'] as const)(
       await Promise.race([channel.waiting, second]);
       // The first paid call still holds the channel. The second has only a local quote.
       expect(f.router.paidRequests()).toBe(2);
-      expect(await otherTransport.summary(secondJob)).toMatchObject({ reservedAtomic: '503000' });
+      expect(await otherTransport.summary(secondJob)).toMatchObject({ reservedAtomic: '123000' });
       if (outcome === 'cancels') {
         abort.abort(reason);
         await expect(second).rejects.toBe(reason);

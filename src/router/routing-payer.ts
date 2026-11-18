@@ -1303,10 +1303,11 @@ export class RoutingPayer {
     }
     const policy = await this.deps.policy();
     const needed = BigInt(ctx.minimumDepositAmount);
+    const inference =
+      this.deps.modelLane && modelChannelLane(this.deps.modelLane.path) === 'model-inference';
+    // A larger inference quote needs its entire shortfall in a single deposit.
     const laneMax =
-      this.deps.modelLane && modelChannelLane(this.deps.modelLane.path) === 'model-inference'
-        ? policy.maxAutoSpendAtomic
-        : MAX_CHANNEL_DEPOSIT_ATOMIC;
+      inference && needed > MAX_CHANNEL_DEPOSIT_ATOMIC ? needed : MAX_CHANNEL_DEPOSIT_ATOMIC;
     const sdkMax = ctx.maxDeposit === undefined ? laneMax : BigInt(ctx.maxDeposit);
     const max = sdkMax < laneMax ? sdkMax : laneMax;
     if (needed > max || needed > policy.maxAutoSpendAtomic) this.refuse('limit_below_deposit');
