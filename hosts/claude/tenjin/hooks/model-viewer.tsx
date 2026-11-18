@@ -103,6 +103,24 @@ const viewerCalls = new Map<string, { row: Row; input: Json }>();
 const servedCalls = new Map<string, string>();
 /** Offers whose accept row has drawn: their held Agent row gives way at once (one row a task). */
 const drawnAccepts = new Set<string>();
+/**
+ * THE LINE FOR A PARALLEL AGENT SUMMARY'S HELD CALLS waits for what the parent does with
+ * their offers. Claude Code draws that summary itself (`2 Explore agents finished`), with
+ * no render hook, and a logged line stays for good. An accept draws the DeepSeek rows,
+ * which say it all, so the line is dropped; anything else the parent does writes it.
+ */
+const heldNotice: { pending?: { text: string; offers: Set<string> } } = {};
+function sayHeld($: Dollar, accepted?: string[]): void {
+  const notice = heldNotice.pending;
+  if (!notice) return;
+  heldNotice.pending = undefined;
+  if (accepted?.some((id) => notice.offers.has(id.toLowerCase()))) return;
+  try {
+    $.ui.log(notice.text);
+  } catch {
+    /* Display only. */
+  }
+}
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -1717,6 +1735,7 @@ export function registerModelViewer(on: On): void {
     e.agentId !== undefined && liveViewerGuards.has(e.agentId) ? refused : next(e),
   );
 
+  heldNotice.pending = undefined;
   on('tool.call', { tool: ACCEPT }, async ($, e, next) => {
     // ONLY A HELD CALL ASKS FOR AN OFFER. `capture` is this mod's own transport,
     // sent for an Agent, Task or SendMessage call it holds. Sent by the model it
@@ -1730,6 +1749,9 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
+    // The parent's answer to a held batch: an accept drops its line, a cancel writes it.
+    // The plugin's own capture is no answer.
+    if (e.capture === undefined) sayHeld($, acceptedIds(e, true));
     // A cancelled offer is settled too: its row has nothing left to offer. A native
     // subagent's cancel of the offer it got settles it as the main loop's does.
     if (short(e.cancel) && UUID.test(e.cancel)) {
@@ -1837,6 +1859,7 @@ export function registerModelViewer(on: On): void {
     return yield* next(e);
   });
   on('turn.complete', async ($, e, next) => {
+    sayHeld($);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
@@ -1956,30 +1979,51 @@ export function registerModelViewer(on: On): void {
 
   // Claude Code's parallel Agent summary bypasses the tool render hooks. A
   // transcript notice identifies the held calls alongside that native summary.
-  const heldCalls = new Set<string>();
-  on('tool.call', { tool: ['Agent', 'Task'] }, async (_$, e, next) => {
+  // By call: the offer it got, or none where Tenjin held it with no offer.
+  const heldCalls = new Map<string, string | undefined>();
+  on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
+    // Any other Agent call is the parent's answer to the batch before it.
+    sayHeld($);
     const answer = await next(e);
     // PostToolBatch sees model-facing text. Claude omits the agent id from
     // Explore and Plan handbacks, so identify holds before it formats them.
-    if (heldOffer(answer.result)) {
-      heldCalls.add(e.tool_use_id);
-      if (heldCalls.size > 512) heldCalls.delete(heldCalls.values().next().value!);
+    const held = heldOffer(answer.result);
+    if (held) {
+      heldCalls.set(
+        e.tool_use_id,
+        held === 'unavailable'
+          ? undefined
+          : String(record(answer.result)?.agentId).slice(13).toLowerCase(),
+      );
+      if (heldCalls.size > 512) heldCalls.delete(heldCalls.keys().next().value!);
     }
     return answer;
   });
   on('classic.PostToolBatch', ($, e, next) => {
     if (heldCalls.size === 0) return next(e);
+    const offers = new Set<string>();
+    let offered = true;
     const heldGroups = ['Agent', 'Task'].flatMap((tool) => {
       const calls = e.tool_calls.filter((call) => call.tool_name === tool);
-      const held = calls.filter((call) => heldCalls.delete(call.tool_use_id)).length;
-      return held > 0 && calls.length > 1 ? [`${held} of ${calls.length} ${tool} calls`] : [];
+      const held = calls.filter((call) => heldCalls.has(call.tool_use_id));
+      for (const call of held) {
+        const offer = heldCalls.get(call.tool_use_id);
+        heldCalls.delete(call.tool_use_id);
+        if (offer) offers.add(offer);
+        else offered = false;
+      }
+      return held.length > 0 && calls.length > 1
+        ? [`${held.length} of ${calls.length} ${tool} calls`]
+        : [];
     });
     if (heldGroups.length > 0) {
-      try {
-        $.ui.log(`Held ${heldGroups.join(' and ')} before native execution.`);
-      } catch {
-        /* Display only. */
-      }
+      sayHeld($);
+      heldNotice.pending = {
+        text: `Held ${heldGroups.join(' and ')} before native execution.`,
+        offers,
+      };
+      // A call held with no offer gets no DeepSeek row: its line is written now.
+      if (!offered) sayHeld($);
     }
     return next(e);
   });

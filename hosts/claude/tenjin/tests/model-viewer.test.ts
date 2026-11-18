@@ -3089,7 +3089,9 @@ test('the held Agent row gives way the moment its accept row draws', async ($, o
   expect(await heldRow($, 'held_a', INPUT, held)).toBe('');
 });
 
-test('the transcript notice counts only held Agent calls in the batch', async ($, on) => {
+// Live on alpha.70: two held Explore calls were accepted together, and the line stayed as a
+// row of its own between Claude Code's `2 Explore agents finished` and the DeepSeek group.
+test('the held notice of a parallel Agent summary is dropped by an accept and written for any other answer', async ($, on) => {
   const f = setup($, on);
   const notices: string[] = [];
   on('ui.log', (_$, e) => {
@@ -3105,12 +3107,74 @@ test('the transcript notice counts only held Agent calls in the batch', async ($
         tool_use_id: id,
       })),
     });
+  const hold = async (first: string, second: string) => {
+    f.state.offer = OFFER;
+    await remember($, { ...INPUT, tool_use_id: first });
+    f.state.offer = SECOND_OFFER;
+    await remember($, { ...INPUT, tool_use_id: second });
+    f.state.offer = OFFER;
+    await batch(first, second);
+  };
+  const HELD = 'Held 2 of 2 Agent calls before native execution.';
+  // Accepted together: the DeepSeek group is the batch's display, and no line is written,
+  // then or when the turn ends.
+  await hold('held_a', 'held_b');
+  expect(notices).toEqual([]);
+  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
+  await $.turn.complete({
+    reason: 'answer',
+    turnId: 'parent-turn',
+    isAborted: false,
+    answer: '',
+    durationMs: 1,
+  } as never);
+  expect(notices).toEqual([]);
+  // Kept native: the line is written before the repeated call runs.
+  await hold('held_c', 'held_d');
+  f.state.keepNative = true;
+  await remember($, { ...INPUT, tool_use_id: 'native_c' });
+  expect(notices).toEqual([HELD]);
+  f.state.keepNative = false;
+  // Cancelled: the line is written.
+  await hold('held_e', 'held_f');
+  await $.tool.call({ tool: ACCEPT, cancel: OFFER });
+  expect(notices).toEqual([HELD, HELD]);
+  // Neither: the line is written when the turn ends.
+  await hold('held_g', 'held_h');
+  expect(notices).toEqual([HELD, HELD]);
+  await $.turn.complete({
+    reason: 'answer',
+    turnId: 'parent-turn',
+    isAborted: false,
+    answer: '',
+    durationMs: 1,
+  } as never);
+  expect(notices).toEqual([HELD, HELD, HELD]);
+});
+
+test('the held notice counts only held Agent calls in the batch', async ($, on) => {
+  const f = setup($, on);
+  const notices: string[] = [];
+  on('ui.log', (_$, e) => {
+    notices.push(e.text);
+    return { value: undefined };
+  });
+  on('classic.PostToolBatch', () => ({}));
+  const batch = (...ids: string[]) =>
+    $.classic.PostToolBatch({
+      tool_calls: ids.map((id) => ({
+        tool_name: 'Agent',
+        tool_input: INPUT,
+        tool_use_id: id,
+      })),
+    });
+  // Each line is written when the next Agent call says the offers were not accepted.
   await remember($, { ...INPUT, tool_use_id: 'held_a' });
   await remember($, { ...INPUT, tool_use_id: 'held_b' });
   await batch('held_a', 'held_b');
+  await remember($, { ...INPUT, tool_use_id: 'held_c' });
   expect(notices).toEqual(['Held 2 of 2 Agent calls before native execution.']);
 
-  await remember($, { ...INPUT, tool_use_id: 'held_c' });
   f.state.keepNative = true;
   await remember($, { ...INPUT, tool_use_id: 'native_a' });
   await batch('held_c', 'native_a');
@@ -3119,6 +3183,7 @@ test('the transcript notice counts only held Agent calls in the batch', async ($
   await remember($, { ...INPUT, tool_use_id: 'held_d' });
   await batch('held_d');
   await batch('held_d', 'native_a');
+  await remember($, { ...INPUT, tool_use_id: 'held_e' });
   expect(notices).toEqual([
     'Held 2 of 2 Agent calls before native execution.',
     'Held 1 of 2 Agent calls before native execution.',
