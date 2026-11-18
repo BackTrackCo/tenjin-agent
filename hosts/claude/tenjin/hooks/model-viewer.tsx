@@ -122,9 +122,9 @@ const adopted = new Set<string>();
  */
 const HOST_MOVED = /still running after[\s\S]{0,80}moved to the background/;
 /** Those tasks, by the id the notice names, so the task's own lines can name their worker. */
-const movedTasks = new Map<string, string>();
+const movedTasks = new Map<string, readonly string[]>();
 /** Accept calls by their tool use id, for the same. */
-const acceptCalls = new Map<string, string>();
+const acceptCalls = new Map<string, readonly string[]>();
 const ENDED = ['completed', 'cancelled', 'unknown'];
 /** Past the job's own 40-minute wall time: nothing can still be running. */
 const RUN_LIMIT_MS = 45 * 60_000;
@@ -187,8 +187,8 @@ function plain(value: string, chars: number): string {
     .trim();
   return text.length <= chars ? text : text.slice(0, chars - 1) + '…';
 }
-function json(value: unknown): Json | undefined {
-  if (typeof value !== 'string' || value.length > 300_000) return undefined;
+function json(value: unknown, max = 300_000): Json | undefined {
+  if (typeof value !== 'string' || value.length > max) return undefined;
   try {
     return record(JSON.parse(value));
   } catch {
@@ -1343,7 +1343,7 @@ function displayState(item: TenjinModelViewerRecord): string {
 function undecided(input: unknown): boolean {
   const given = record(input) ?? {};
   if (
-    !['offer_id', 'cancel', 'capture', 'delegation_id', 'task'].some(
+    !['offer_id', 'offer_ids', 'cancel', 'capture', 'delegation_id', 'task'].some(
       (key) => given[key] !== undefined,
     )
   )
@@ -1351,13 +1351,55 @@ function undecided(input: unknown): boolean {
   // ITS OFFER ID STILL STREAMING: the host draws the input as it arrives, so for that
   // moment the call holds part of an id (live on alpha.64: the host's own
   // `plugin:tenjin:router` row stood between the offer row and the DeepSeek row).
-  const id = given.offer_id;
+  const partial = (id: unknown): boolean =>
+    typeof id === 'string' && !UUID.test(id) && /^[0-9a-f-]{0,35}$/i.test(id);
+  if (Object.keys(given).length !== 1) return false;
+  if (partial(given.offer_id)) return true;
+  const ids = given.offer_ids;
   return (
-    typeof id === 'string' &&
-    !UUID.test(id) &&
-    /^[0-9a-f-]{0,35}$/i.test(id) &&
-    Object.keys(given).every((key) => key === 'offer_id')
+    Array.isArray(ids) &&
+    (ids.length < 2 || ids.some(partial)) &&
+    ids.every((id) => (short(id) && UUID.test(id)) || partial(id))
   );
+}
+
+function acceptedIds(input: unknown, withMetadata = false): string[] | undefined {
+  const given = record(input);
+  if (!given) return undefined;
+  const keys = Object.keys(given).filter(
+    (key) => !withMetadata || !['tool', 'tool_use_id', 'agentId', 'requestMeta'].includes(key),
+  );
+  if (keys.length !== 1) return undefined;
+  if (keys[0] === 'offer_id' && short(given.offer_id) && UUID.test(given.offer_id))
+    return [given.offer_id];
+  const ids = given.offer_ids;
+  if (
+    keys[0] === 'offer_ids' &&
+    Array.isArray(ids) &&
+    ids.length >= 2 &&
+    ids.every((id): id is string => short(id) && UUID.test(id)) &&
+    new Set(ids.map((id) => id.toLowerCase())).size === ids.length
+  )
+    return ids;
+}
+
+function acceptResponse(text: string | undefined): Json | undefined {
+  // A combined handback can exceed a single report. The router writes this envelope
+  // as compact JSON. Keep any host result-file notice visible as received.
+  return json(text, text?.startsWith('{"results":[') ? text.length : undefined);
+}
+
+function batchOutcomes(answer: Json | undefined): Map<string, Json> | undefined {
+  if (!Array.isArray(answer?.results) || answer.results.length < 2) return undefined;
+  const outcomes = new Map<string, Json>();
+  for (const entry of answer.results) {
+    const item = record(entry);
+    const id = item?.offer_id;
+    const outcome = record(item?.outcome);
+    if (!short(id) || !UUID.test(id) || !outcome || outcomes.has(id)) return undefined;
+    outcomes.set(id, outcome);
+  }
+  return outcomes;
 }
 /**
  * The accept calls a person's permission settings never ask about, as the plugin's
@@ -1371,7 +1413,182 @@ function allowedAccept(input: unknown, ownCall: boolean): boolean {
   const keys = given ? Object.keys(given) : [];
   if (ownCall) return keys.length === 1 && record(given?.capture) !== undefined;
   const id = keys.length === 1 ? given?.[keys[0]!] : undefined;
-  return (keys[0] === 'offer_id' || keys[0] === 'cancel') && short(id) && UUID.test(id);
+  return !!acceptedIds(input) || (keys[0] === 'cancel' && short(id) && UUID.test(id));
+}
+
+async function watchAccept(
+  $: Dollar,
+  offerId: string,
+  caller: string | undefined,
+  batched: boolean,
+) {
+  let timer: { cancel(): void } | undefined;
+  let binding: ViewerBinding | undefined;
+  let spawned: Promise<void> | undefined;
+  let polling = false,
+    closed = false,
+    prepared = false,
+    viewerStarted = false,
+    background = false,
+    stopped = false,
+    observed = false,
+    startedAt = 0;
+  // THE END OF THE LIVE DISPLAY, once: with the accept call's own answer, or,
+  // for a call the host moved to the background, when the CLI says the worker ended.
+  const stop = (ended?: Partial<TenjinModelWorker>) => {
+    if (stopped) return;
+    stopped = true;
+    closed = true;
+    try {
+      timer?.cancel();
+    } catch {
+      /* Timer failures do not rewrite the handback. */
+    }
+    try {
+      // UI I/O cannot delay or replace the original worker result, even when inspect hangs.
+      $.clock.after(0, async () => {
+        try {
+          if (ended) {
+            const ref = { ...WORKERS, id: offerId };
+            const held = (await $.state.get(ref)).value;
+            if (held) await $.state.set(ref, { ...held, ...ended });
+          }
+        } catch {
+          /* The row then ends from the call's own answer. */
+        }
+        // Followed here no more once its end is written, so no drawing takes it for a
+        // row that a reload left behind.
+        if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
+        try {
+          if (!prepared) return;
+          // A viewer still starting binds to its running record before it retires.
+          if (spawned && !viewerStarted)
+            await Promise.race([spawned, $.clock.sleep(SPAWN_WAIT_MS)]);
+          if (binding) await retireViewer($, binding);
+          await refresh($, offerId);
+        } catch {
+          /* The last confirmed rows remain visibly marked unavailable. */
+        }
+      });
+    } catch {
+      /* Preserve the exact original acceptance outcome. */
+      liveWorkers.delete(offerId);
+    }
+  };
+  if (await enabled($).catch(() => false)) {
+    // THE LIVE ROW comes first and stands alone: it reads the CLI's own activity
+    // file, so it needs neither the viewer, nor its bookkeeping below, nor a
+    // second call on this connection. Followed here before its record is written.
+    liveWorkers.delete(offerId);
+    liveWorkers.add(offerId);
+    try {
+      const known = (await $.state.get(STATE)).value?.records.find((r) => r.offerId === offerId);
+      await $.state.set(
+        { ...WORKERS, id: offerId },
+        {
+          offerId,
+          title: known?.title ?? 'subagent',
+          startedAt: (startedAt = await $.clock.now()),
+          elapsedMs: 0,
+          state: 'starting',
+        },
+      );
+    } catch {
+      /* The row then draws without its title or clock. */
+    }
+    try {
+      $.ui.invalidate('ui.render');
+      const [path, cwd] = await Promise.all([progressPath($, offerId), $.session.cwd()]);
+      if (path)
+        timer = $.clock.every(POLL_MS, async () => {
+          if (closed || polling) return;
+          polling = true;
+          try {
+            const seen = await pollWorker($, offerId, path, cwd);
+            observed ||= seen !== 'missing';
+            if (stopped || (!background && !(batched && observed))) return;
+            const ended = await endedNow($, offerId, seen, startedAt);
+            if (ended) stop(ended);
+          } catch {
+            /* Display only. */
+          } finally {
+            polling = false;
+          }
+        });
+    } catch {
+      /* Display only. */
+    }
+    try {
+      const current = await change($, (state) => {
+        prepared = false;
+        const item = state.records.find((r) => r.offerId === offerId);
+        if (
+          !item ||
+          item.active ||
+          item.nativeId ||
+          state.priorStops?.some((r) => r.offerId === offerId) ||
+          (state.priorStops?.length ?? 0) + state.records.filter((r) => r.active).length >= 16
+        )
+          return;
+        item.active = true;
+        // The viewer is listed under the agent that accepted, as its own subagent is.
+        if (caller !== undefined) item.parentId = caller;
+        else delete item.parentId;
+        prepared = true;
+      });
+      const item = current?.records.find((r) => r.offerId === offerId);
+      if (current && item && prepared)
+        binding = {
+          parentSessionId: current.parentSessionId,
+          cwd: current.cwd,
+          offerId: item.offerId,
+        };
+      if (current && item && prepared && liveViewerGuards.size + pendingViewerSpawns < 16) {
+        // Count the pending spawn until it returns, even after classic-start tags its id.
+        pendingViewerSpawns++;
+        // NOT AWAITED: the worker never waits for its viewer to start.
+        spawned = (async () => {
+          try {
+            const viewer = await $.agent.spawn({
+              subagentType: TYPE,
+              ...(caller !== undefined ? { parentAgentId: caller } : {}),
+              description: item.description,
+              prompt: VIEWER_PROMPT + ' ' + offerId + ' ' + item.description,
+              cwd: current.cwd,
+            });
+            if (viewer.agentId) {
+              const nativeId = viewer.agentId;
+              if ((await $.session.id()) !== current.parentSessionId) return;
+              await update($, STATE, (held) => {
+                if (!held) throw new Error('Activity binding unavailable');
+                if (held.parentSessionId !== current.parentSessionId) return held;
+                const state = structuredClone(held);
+                const r =
+                  state.records.find((record) => record.offerId === offerId && record.active) ??
+                  state.priorStops?.find((record) => record.offerId === offerId);
+                if (r && (!r.nativeId || r.nativeId === nativeId)) r.nativeId = nativeId;
+                return state;
+              });
+            }
+          } catch {
+            /* Failed observation cannot start, duplicate or cancel the real worker. */
+          } finally {
+            pendingViewerSpawns--;
+            viewerStarted = true;
+          }
+        })();
+      }
+    } catch {
+      /* All observation setup is optional. */
+    }
+  }
+  return {
+    stop,
+    move: () => {
+      if (timer) background = true;
+      else stop();
+    },
+  };
 }
 
 /** Whether a call is this plugin's own (its activity read, its viewer agent), by who raised it. */
@@ -1525,202 +1742,40 @@ export function registerModelViewer(on: On): void {
     // Capture/cancel calls are never execution accepts. A NATIVE SUBAGENT'S ACCEPT is one:
     // its worker gets the same row, viewer and end line, the viewer under that subagent.
     // A viewer's own loop and a DeepSeek worker's process start none (neither has the tool).
+    const offerIds = acceptedIds(e, true);
     if (
-      !short(e.offer_id) ||
-      !UUID.test(e.offer_id) ||
-      Object.keys(e).some(
-        (key) => !['tool', 'tool_use_id', 'agentId', 'requestMeta', 'offer_id'].includes(key),
-      ) ||
+      !offerIds ||
       (e.agentId !== undefined &&
         (liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => true)))) ||
       (await $.env.get('TENJIN_MODEL_WORKER').catch(() => undefined)) === '1'
     )
       return next(e);
-    const caller = e.agentId;
-    const offerId = e.offer_id;
-    // An accept sent again while its worker runs starts nothing: the row that is
-    // already live keeps its clock and counts, and ends when that worker does.
-    if (liveWorkers.has(offerId)) return next(e);
-    let timer: { cancel(): void } | undefined;
-    let binding: ViewerBinding | undefined;
-    let spawned: Promise<void> | undefined;
-    let polling = false,
-      closed = false,
-      prepared = false,
-      viewerStarted = false,
-      background = false,
-      stopped = false,
-      startedAt = 0;
-    // THE END OF THE LIVE DISPLAY, once: with the accept call's own answer, or,
-    // for a call the host moved to the background, when the CLI says the worker ended.
-    const stop = (ended?: Partial<TenjinModelWorker>) => {
-      if (stopped) return;
-      stopped = true;
-      closed = true;
-      try {
-        timer?.cancel();
-      } catch {
-        /* Timer failures do not rewrite the handback. */
-      }
-      try {
-        // UI I/O cannot delay or replace the original worker result, even when inspect hangs.
-        $.clock.after(0, async () => {
-          try {
-            if (ended) {
-              const ref = { ...WORKERS, id: offerId };
-              const held = (await $.state.get(ref)).value;
-              if (held) await $.state.set(ref, { ...held, ...ended });
-            }
-          } catch {
-            /* The row then ends from the call's own answer. */
-          }
-          // Followed here no more once its end is written, so no drawing takes it for a
-          // row that a reload left behind.
-          if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
-          try {
-            if (!prepared) return;
-            // A viewer still starting binds to its running record before it retires.
-            if (spawned && !viewerStarted)
-              await Promise.race([spawned, $.clock.sleep(SPAWN_WAIT_MS)]);
-            if (binding) await retireViewer($, binding);
-            await refresh($, offerId);
-          } catch {
-            /* The last confirmed rows remain visibly marked unavailable. */
-          }
-        });
-      } catch {
-        /* Preserve the exact original acceptance outcome. */
-        liveWorkers.delete(offerId);
-      }
-    };
-    if (await enabled($).catch(() => false)) {
-      // THE LIVE ROW comes first and stands alone: it reads the CLI's own activity
-      // file, so it needs neither the viewer, nor its bookkeeping below, nor a
-      // second call on this connection. Followed here before its record is written.
-      liveWorkers.delete(offerId);
-      liveWorkers.add(offerId);
-      try {
-        const known = (await $.state.get(STATE)).value?.records.find((r) => r.offerId === offerId);
-        await $.state.set(
-          { ...WORKERS, id: offerId },
-          {
-            offerId,
-            title: known?.title ?? 'subagent',
-            startedAt: (startedAt = await $.clock.now()),
-            elapsedMs: 0,
-            state: 'starting',
-          },
-        );
-      } catch {
-        /* The row then draws without its title or clock. */
-      }
-      if (short(e.tool_use_id)) acceptCalls.set(e.tool_use_id, offerId);
-      try {
-        $.ui.invalidate('ui.render');
-        const [path, cwd] = await Promise.all([progressPath($, offerId), $.session.cwd()]);
-        if (path)
-          timer = $.clock.every(POLL_MS, async () => {
-            if (closed || polling) return;
-            polling = true;
-            try {
-              const seen = await pollWorker($, offerId, path, cwd);
-              if (!background || stopped) return;
-              const ended = await endedNow($, offerId, seen, startedAt);
-              if (ended) stop(ended);
-            } catch {
-              /* Display only. */
-            } finally {
-              polling = false;
-            }
-          });
-      } catch {
-        /* Display only. */
-      }
-      try {
-        const current = await change($, (state) => {
-          prepared = false;
-          const item = state.records.find((r) => r.offerId === offerId);
-          if (
-            !item ||
-            item.active ||
-            item.nativeId ||
-            state.priorStops?.some((r) => r.offerId === offerId) ||
-            (state.priorStops?.length ?? 0) + state.records.filter((r) => r.active).length >= 16
-          )
-            return;
-          item.active = true;
-          // The viewer is listed under the agent that accepted, as its own subagent is.
-          if (caller !== undefined) item.parentId = caller;
-          else delete item.parentId;
-          prepared = true;
-        });
-        const item = current?.records.find((r) => r.offerId === offerId);
-        if (current && item && prepared)
-          binding = {
-            parentSessionId: current.parentSessionId,
-            cwd: current.cwd,
-            offerId: item.offerId,
-          };
-        if (current && item && prepared && liveViewerGuards.size + pendingViewerSpawns < 16) {
-          // Count the pending spawn until it returns, even after classic-start tags its id.
-          pendingViewerSpawns++;
-          // NOT AWAITED: the worker never waits for its viewer to start.
-          spawned = (async () => {
-            try {
-              const viewer = await $.agent.spawn({
-                subagentType: TYPE,
-                ...(caller !== undefined ? { parentAgentId: caller } : {}),
-                description: item.description,
-                prompt: VIEWER_PROMPT + ' ' + offerId + ' ' + item.description,
-                cwd: current.cwd,
-              });
-              if (viewer.agentId) {
-                const nativeId = viewer.agentId;
-                if ((await $.session.id()) !== current.parentSessionId) return;
-                await update($, STATE, (held) => {
-                  if (!held) throw new Error('Activity binding unavailable');
-                  if (held.parentSessionId !== current.parentSessionId) return held;
-                  const state = structuredClone(held);
-                  const r =
-                    state.records.find((record) => record.offerId === offerId && record.active) ??
-                    state.priorStops?.find((record) => record.offerId === offerId);
-                  if (r && (!r.nativeId || r.nativeId === nativeId)) r.nativeId = nativeId;
-                  return state;
-                });
-              }
-            } catch {
-              /* Failed observation cannot start, duplicate or cancel the real worker. */
-            } finally {
-              pendingViewerSpawns--;
-              viewerStarted = true;
-            }
-          })();
-        }
-      } catch {
-        /* All observation setup is optional. */
-      }
+    const batched = offerIds.length > 1;
+    // A repeat keeps the existing worker's observer and its clock.
+    const watchers = new Map<string, Awaited<ReturnType<typeof watchAccept>>>();
+    for (const id of offerIds) {
+      if (!liveWorkers.has(id)) watchers.set(id, await watchAccept($, id, e.agentId, batched));
     }
+    if (watchers.size && short(e.tool_use_id)) acceptCalls.set(e.tool_use_id, offerIds);
     let outcome: Awaited<ReturnType<typeof next>>;
     try {
       outcome = await next(e);
     } catch (error) {
-      stop();
+      for (const watcher of watchers.values()) watcher.stop();
       throw error;
     }
     const said = typeof outcome.text === 'string' ? outcome.text : '';
-    const answer = json(said);
-    if (acceptAnswer(answer) || !timer || !HOST_MOVED.test(said)) {
-      stop(endedFrom(answer));
-      return outcome;
+    const answer = acceptResponse(said);
+    if (!answer && HOST_MOVED.test(said)) {
+      // The host owns this single outstanding request and its completion notice.
+      // The worker displays follow their own jobs until each ends.
+      for (const watcher of watchers.values()) watcher.move();
+      const task = /\btask ([A-Za-z0-9_-]{1,64})\b/.exec(said)?.[1];
+      if (task && watchers.size) movedTasks.set(task, offerIds);
+    } else {
+      const results = batched ? batchOutcomes(answer) : undefined;
+      for (const [id, watcher] of watchers) watcher.stop(endedFrom(results?.get(id) ?? answer));
     }
-    // THE HOST MOVED THE CALL TO THE BACKGROUND, as it does for any tool call
-    // still running after two minutes: the parent got the host's notice, and
-    // the worker runs on. Most workers run longer than that, so this is the
-    // usual path. The row and the viewer go on from the CLI's display file,
-    // and end when the CLI says the worker did.
-    background = true;
-    const task = /\btask ([A-Za-z0-9_-]{1,64})\b/.exec(said)?.[1];
-    if (task) movedTasks.set(task, offerId);
     return outcome;
   });
   on('turn.step', async function* ($, e, next) {
@@ -1894,10 +1949,38 @@ export function registerModelViewer(on: On): void {
     );
   });
 
-  // THE ROWS. An accept call is one live DeepSeek row that ends in a native
-  // `Done (…)` line; a held Agent call reads as the offer it is, never as a
-  // subagent that finished. Both keep their own row in every view, and the
-  // engine's result block shows only where rows show in full (ctrl+o).
+  // Claude Code's parallel Agent summary bypasses the tool render hooks. A
+  // transcript notice identifies the held calls alongside that native summary.
+  const heldCalls = new Set<string>();
+  on('tool.call', { tool: ['Agent', 'Task'] }, async (_$, e, next) => {
+    const answer = await next(e);
+    // PostToolBatch sees model-facing text. Claude omits the agent id from
+    // Explore and Plan handbacks, so identify holds before it formats them.
+    if (heldOffer(answer.result)) {
+      heldCalls.add(e.tool_use_id);
+      if (heldCalls.size > 512) heldCalls.delete(heldCalls.values().next().value!);
+    }
+    return answer;
+  });
+  on('classic.PostToolBatch', ($, e, next) => {
+    if (heldCalls.size === 0) return next(e);
+    const heldGroups = ['Agent', 'Task'].flatMap((tool) => {
+      const calls = e.tool_calls.filter((call) => call.tool_name === tool);
+      const held = calls.filter((call) => heldCalls.delete(call.tool_use_id)).length;
+      return held > 0 && calls.length > 1 ? [`${held} of ${calls.length} ${tool} calls`] : [];
+    });
+    if (heldGroups.length > 0) {
+      try {
+        $.ui.log(`Held ${heldGroups.join(' and ')} before native execution.`);
+      } catch {
+        /* Display only. */
+      }
+    }
+    return next(e);
+  });
+
+  // Individual accepts show a live DeepSeek row. Individual held Agent calls
+  // show their offer until settled, with the result available in ctrl+o.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const { tool, input, output, isInterrupted, isErrored } = e.props;
     // A WORKER'S CALL A ROUTER TOOL SERVED names that tool, as the router's own rows do
@@ -1915,8 +1998,8 @@ export function registerModelViewer(on: On): void {
       });
     }
     if (tool === ACCEPT) {
-      const offerId = record(input)?.offer_id;
-      if (!short(offerId) || !UUID.test(offerId)) {
+      const offerIds = acceptedIds(input);
+      if (!offerIds) {
         // THE CALL AS THE MODEL IS STILL WRITING IT: no offer id to read yet, so the host's
         // own row would stand here for that moment as `plugin:tenjin:router - subagent`,
         // between the offer row and the DeepSeek row. Nothing is drawn until the input
@@ -1930,85 +2013,102 @@ export function registerModelViewer(on: On): void {
         }
         return next(e);
       }
-      // The held Agent row reads this, so it never draws beside the DeepSeek row.
-      if (!drawnAccepts.has(offerId)) {
-        drawnAccepts.add(offerId);
-        if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
-        $.ui.invalidate('ui.render');
-      }
-      const [held, known] = await Promise.all([
-        $.state.get({ ...WORKERS, id: offerId }),
-        $.state.get(STATE),
-      ]);
-      const live = held.value;
-      // Before the accept hook has run (the host is still checking the call), the offer's
-      // own record names the task.
-      const title =
-        live?.title ?? known.value?.records.find((r) => r.offerId === offerId)?.title ?? 'subagent';
-      const head = { name: 'DeepSeek', argument: title };
       const ui = $.ui.resolve(e);
       const said = textOf(output);
-      const ended = json(said);
-      const status = ended?.status;
-      if (
-        status === 'completed' ||
-        status === 'cancelled' ||
-        status === 'unknown' ||
-        status === 'stopped'
-      ) {
-        const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
+      const answer = acceptResponse(said);
+      const results = offerIds.length > 1 ? batchOutcomes(answer) : undefined;
+      const draw = async (offerId: string) => {
+        const ended = results?.get(offerId) ?? answer;
+        // The held Agent row reads this, so it never draws beside the DeepSeek row.
+        if (!drawnAccepts.has(offerId)) {
+          drawnAccepts.add(offerId);
+          if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
+          $.ui.invalidate('ui.render');
+        }
+        const [held, known] = await Promise.all([
+          $.state.get({ ...WORKERS, id: offerId }),
+          $.state.get(STATE),
+        ]);
+        const live = held.value;
+        // Before the accept hook has run (the host is still checking the call), the offer's
+        // own record names the task.
+        const title =
+          live?.title ??
+          known.value?.records.find((r) => r.offerId === offerId)?.title ??
+          'subagent';
+        const head = { name: 'DeepSeek', argument: title };
+        const status = ended?.status;
+        if (
+          status === 'completed' ||
+          status === 'cancelled' ||
+          status === 'unknown' ||
+          status === 'stopped'
+        ) {
+          const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
+          return workerRow(ui, {
+            ...head,
+            state: status === 'completed' ? 'done' : 'error',
+            under: word + ' (' + doneParts(ended!, live).join(' · ') + ')',
+          });
+        }
+        // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
+        if (status === 'not_started' || typeof ended?.action === 'string')
+          return workerRow(ui, {
+            ...head,
+            state: isErrored || status === 'not_started' ? 'error' : 'held',
+            under:
+              'Not started' +
+              (typeof ended?.elapsedMs === 'number' ? ' (' + duration(ended.elapsedMs) + ')' : ''),
+          });
+        // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
+        // for a call it moved to the background after two minutes. The worker's
+        // record says where it stands; a missing answer never reads as an end.
+        if (live?.ended)
+          return workerRow(ui, {
+            ...head,
+            state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
+            under: endLine(live),
+          });
+        if (isInterrupted)
+          return workerRow(ui, {
+            ...head,
+            state: 'error',
+            under:
+              'Interrupted' +
+              (live?.elapsedMs !== undefined ? ' (' + duration(live.elapsedMs) + ')' : ''),
+          });
+        const moved = output !== undefined && HOST_MOVED.test(said ?? '');
+        if (output !== undefined && !live && !moved) return undefined;
+        // A running row nothing here follows, after a reload or a resume: the CLI is asked.
+        if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
+        // From the moment of accept: Claude Code is still starting until the first tick says more.
+        const starting = live ? live.state !== 'running' : !moved;
+        const parts = [
+          starting ? 'starting' : undefined,
+          !live && moved ? 'running in the background' : undefined,
+          live?.toolUses ? toolUses(live.toolUses) : undefined,
+          live?.tokens ? tokens(live.tokens) : undefined,
+          live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
+          live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
+        ].filter((part): part is string => part !== undefined);
         return workerRow(ui, {
           ...head,
-          state: status === 'completed' ? 'done' : 'error',
-          under: word + ' (' + doneParts(ended!, live).join(' · ') + ')',
+          state: 'running',
+          tail: ' · ' + parts.join(' · '),
+          ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
         });
-      }
-      // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
-      if (status === 'not_started' || typeof ended?.action === 'string')
-        return workerRow(ui, {
-          ...head,
-          state: isErrored || status === 'not_started' ? 'error' : 'held',
-          under:
-            'Not started' +
-            (typeof ended?.elapsedMs === 'number' ? ' (' + duration(ended.elapsedMs) + ')' : ''),
-        });
-      // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
-      // for a call it moved to the background after two minutes. The worker's
-      // record says where it stands; a missing answer never reads as an end.
-      if (live?.ended)
-        return workerRow(ui, {
-          ...head,
-          state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
-          under: endLine(live),
-        });
-      if (isInterrupted)
-        return workerRow(ui, {
-          ...head,
-          state: 'error',
-          under:
-            'Interrupted' +
-            (live?.elapsedMs !== undefined ? ' (' + duration(live.elapsedMs) + ')' : ''),
-        });
-      const moved = output !== undefined && HOST_MOVED.test(said ?? '');
-      if (output !== undefined && !live && !moved) return next(e);
-      // A running row nothing here follows, after a reload or a resume: the CLI is asked.
-      if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
-      // From the moment of accept: Claude Code is still starting until the first tick says more.
-      const starting = live ? live.state !== 'running' : !moved;
-      const parts = [
-        starting ? 'starting' : undefined,
-        !live && moved ? 'running in the background' : undefined,
-        live?.toolUses ? toolUses(live.toolUses) : undefined,
-        live?.tokens ? tokens(live.tokens) : undefined,
-        live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
-        live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
-      ].filter((part): part is string => part !== undefined);
-      return workerRow(ui, {
-        ...head,
-        state: 'running',
-        tail: ' · ' + parts.join(' · '),
-        ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
-      });
+      };
+      if (offerIds.length === 1) return (await draw(offerIds[0]!)) ?? next(e);
+      const rows = await Promise.all(offerIds.map(draw));
+      if (rows.some((row) => row === undefined)) return next(e);
+      const { Box } = ui;
+      return (
+        <Box flexDirection="column">
+          {rows.map((row, index) => (
+            <Box key={offerIds[index]}>{row}</Box>
+          ))}
+        </Box>
+      );
     }
     if (tool === 'Agent' || tool === 'Task') {
       const held = heldOffer(output);
@@ -2053,12 +2153,9 @@ export function registerModelViewer(on: On): void {
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
     // A call still being written counts: folded, it reads `Calling plugin:tenjin:router…`
     // for the moment before its offer id is there.
-    const accepts = e.props.calls.some((call) => {
-      const offerId = record(call.input)?.offer_id;
-      return (
-        call.tool === ACCEPT && ((short(offerId) && UUID.test(offerId)) || undecided(call.input))
-      );
-    });
+    const accepts = e.props.calls.some(
+      (call) => call.tool === ACCEPT && (acceptedIds(call.input) || undecided(call.input)),
+    );
     return next(
       accepts && !e.props.isExpanded ? { ...e, props: { ...e.props, isExpanded: true } } : e,
     );
@@ -2068,9 +2165,11 @@ export function registerModelViewer(on: On): void {
     if (isExpanded === true) return next(e);
     // The host's notice for a call it moved to the background names the server and
     // the tool: the row above already says the worker runs on.
+    const said = textOf(output);
+    const answer = tool === ACCEPT ? acceptResponse(said) : undefined;
     const ours =
       tool === ACCEPT
-        ? acceptAnswer(json(textOf(output))) || HOST_MOVED.test(textOf(output) ?? '')
+        ? acceptAnswer(answer) || !!batchOutcomes(answer) || HOST_MOVED.test(said ?? '')
         : (tool === 'Agent' || tool === 'Task') && heldOffer(output) !== undefined;
     if (!ours) return next(e);
     const { Box } = $.ui.resolve(e);
@@ -2089,8 +2188,36 @@ export function registerModelViewer(on: On): void {
       (task?.toolUseId !== undefined ? acceptCalls.get(task.toolUseId) : undefined) ??
       (task?.id !== undefined ? movedTasks.get(task.id) : undefined) ??
       movedTasks.get(/^MCP task (\S+) \(/.exec(told)?.[1] ?? '');
-    if (moved !== undefined) {
-      const live = (await $.state.get({ ...WORKERS, id: moved })).value;
+    if (moved !== undefined && moved.length > 1) {
+      // Completing the host task says nothing about how any one worker ended.
+      const workers = await Promise.all(
+        moved.map(async (id) => (await $.state.get({ ...WORKERS, id })).value),
+      );
+      if (workers.every((worker) => worker === undefined)) return next(e);
+      const statuses = workers.map((worker) => worker?.ended);
+      const finished = statuses.filter((status) => status === 'completed').length;
+      const unconfirmed = statuses.filter(
+        (status) => !status || status === 'unseen' || status === 'unknown',
+      ).length;
+      const other = moved.length - finished - unconfirmed;
+      const summary = [
+        finished ? finished + ' finished' : undefined,
+        other ? other + ' ended without completing' : undefined,
+        unconfirmed ? unconfirmed + ' unconfirmed' : undefined,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      if (e.props.isExpanded)
+        return next({ ...e, props: { ...e.props, text: 'DeepSeek workers · ' + summary } });
+      const { Box, Text } = $.ui.resolve(e);
+      return (
+        <Box marginTop={1}>
+          <Text dimColor>{'› Message from @DeepSeek (ctrl+o to expand)'}</Text>
+        </Box>
+      );
+    }
+    if (moved?.[0] !== undefined) {
+      const live = (await $.state.get({ ...WORKERS, id: moved[0] })).value;
       if (!live) return next(e);
       const how =
         live.ended === 'unseen'

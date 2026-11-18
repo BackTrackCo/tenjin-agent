@@ -6,6 +6,7 @@ import { DATA, NOW, OFFER, SESSION, SURFACES, sha256Hex, shownLines, toolRow } f
 
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const TYPE = 'tenjin:deepseek-viewer';
+const SECOND_OFFER = 'b446d2eb-1bf8-4cf0-aa19-bc5df4aa668f';
 const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
 const INPUT = {
   prompt: 'Read src/example.ts. Preserve exactly this final line: DONE.',
@@ -84,6 +85,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     readsRefused: false,
     work: (() => ({ result: 'actual worker result' })) as (e: {
       offer_id?: unknown;
+      offer_ids?: unknown;
     }) => ToolCallResult | Promise<ToolCallResult>,
   };
   on('session.cwd', () => ({ value: state.cwd }));
@@ -1715,10 +1717,12 @@ test('a folded run that holds an accept unfolds, so the DeepSeek row draws in pl
     return $.ui.resolve(e).Text({ children: ['Calling plugin:tenjin:router…'] });
   });
   const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  const batch = toolRow('batch', ACCEPT, { offer_ids: [OFFER, SECOND_OFFER] });
   const read = toolRow('read_1', 'Read', { file_path: '/repo/a.ts' });
   for (const [calls, unfolds] of [
     [[accept], true],
     [[read, accept], true],
+    [[read, batch], true],
     [[read], false],
     // A cancel is not an accept: its row stays the engine's.
     [[toolRow('parent_cancel', ACCEPT, { cancel: OFFER })], false],
@@ -2254,6 +2258,161 @@ async function acceptRow($: Engine, toolUseId: string, offerId: string, output?:
   await ui.unmount();
   return [lines, dot?.props.color] as const;
 }
+test('one accept batch binds both viewers to the nested caller and draws one independent result per offer', async ($, on) => {
+  const f = setup($, on);
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
+  f.state.agents.push({
+    id: 'lead-agent',
+    type: 'general-purpose',
+    status: 'running',
+    description: 'Review the fixtures',
+  });
+  await remember($);
+  f.state.offer = SECOND_OFFER;
+  await remember($, { ...INPUT, prompt: 'Read the other fixture.' });
+  const input = { offer_ids: [OFFER, SECOND_OFFER] };
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const answer = JSON.stringify({
+    results: [
+      {
+        offer_id: OFFER,
+        outcome: { status: 'completed', elapsedMs: 5000, toolUses: 3, result: 'a'.repeat(160_000) },
+      },
+      {
+        offer_id: SECOND_OFFER,
+        outcome: {
+          status: 'cancelled',
+          elapsedMs: 2000,
+          endedBy: 'agent_stopped',
+          partial: 'b'.repeat(160_000),
+        },
+      },
+    ],
+  });
+  f.state.work = async (call) => {
+    expect(call.offer_ids).toEqual(input.offer_ids);
+    await finished;
+    return { result: answer, text: answer };
+  };
+  const run = $.tool.call({
+    tool: ACCEPT,
+    tool_use_id: 'nested_batch',
+    agentId: 'lead-agent',
+    ...input,
+  });
+  await f.clock.settle();
+  expect(f.state.accepted).toBe(1);
+  const viewers = f.state.agents.slice(1);
+  expect(viewers.map(({ description }) => description)).toEqual([
+    'Read selected source',
+    'Read selected source (2)',
+  ]);
+  // Older Claude builds display plugin-owned viewers under the main loop.
+  expect([
+    ['lead-agent', 'lead-agent'],
+    [undefined, undefined],
+  ]).toContainEqual(viewers.map(({ parentId }) => parentId));
+  for (const child of f.state.agents.slice(1)) {
+    await $.classic.SubagentStart({ agent_id: child.id, agent_type: TYPE });
+  }
+  expect(
+    f.state.snapshot?.records.map(({ offerId, nativeId, parentId }) => [
+      offerId,
+      nativeId,
+      parentId,
+    ]),
+  ).toEqual([
+    [OFFER, 'native-viewer-1', 'lead-agent'],
+    [SECOND_OFFER, 'native-viewer-2', 'lead-agent'],
+  ]);
+  f.state.agents[2]!.status = 'killed';
+  await complete($, 'native-viewer-2');
+  expect(f.state.cancellations).toEqual([{ cancel: SECOND_OFFER, reason: 'agent_stopped' }]);
+  finish();
+  expect((await run).text).toBe(answer);
+  await f.clock.settle();
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('nested_batch', ACCEPT, input, answer),
+  });
+  const lines = (await shownLines(ui)).join('');
+  await ui.unmount();
+  expect(lines).toContain('Done (3 tool uses · 5s)');
+  expect(lines).toContain('Stopped by you');
+  // Both full reports can reach the caller even when their combined length exceeds
+  // the usual single-response reader. Only the compact transcript hides them.
+  for (const isExpanded of [false, true]) {
+    const result = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolResult',
+      props: {
+        tool_use_id: 'nested_batch',
+        tool: ACCEPT,
+        output: answer,
+        isErrored: false,
+        isExpanded,
+      },
+    });
+    expect(await shownLines(result)).toEqual(isExpanded ? ['engine result'] : []);
+    await result.unmount();
+  }
+});
+
+test('a background batch reports each confirmed outcome and leaves another worker unconfirmed', async ($, on) => {
+  const f = setup($, on);
+  const shown: string[] = [];
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    shown.push(e.props.text);
+    return $.ui.resolve(e).Text({ children: [e.props.text] });
+  });
+  await remember($);
+  f.state.offer = SECOND_OFFER;
+  await remember($, { ...INPUT, description: 'Read another file' });
+  f.state.per[OFFER] = { phase: 'completed' };
+  f.state.work = () => ({ result: MOVED, text: MOVED });
+  const input = { offer_ids: [OFFER, SECOND_OFFER] };
+  const move = await $.tool.call({ tool: ACCEPT, tool_use_id: 'background_batch', ...input });
+  expect(move.text).toBe(MOVED);
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('background_batch', ACCEPT, input, MOVED),
+  });
+  const lines = (await shownLines(ui)).join('');
+  await ui.unmount();
+  expect(lines).toContain('DeepSeek(Read selected source)  ⎿  Done');
+  expect(lines).toContain('DeepSeek(Read another file) · 1 tool use');
+  for (const task of [{ id: 'k2vf9xspk' }, { toolUseId: 'background_batch' }]) {
+    const message = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'UserMessage',
+      props: {
+        text: 'MCP task k2vf9xspk (plugin:tenjin:router/subagent) completed.',
+        origin: { kind: 'task-notification' },
+        isExpanded: true,
+        task: { ...task, status: 'completed' },
+      },
+    });
+    await message.unmount();
+    expect(shown.at(-1)).toBe('DeepSeek workers · 1 finished · 1 unconfirmed');
+  }
+  f.state.phase = 'cancelled';
+  await f.clock.advance(1000);
+  await f.clock.settle();
+});
+
 /** Accepts the offer; the host moves the call to the background at two minutes. */
 async function acceptMoved($: Engine, f: ReturnType<typeof setup>) {
   let move: () => void = () => undefined;
@@ -2809,9 +2968,15 @@ test("the accept and cancel of an offer are allowed by the mod, and every other 
   const check = (input: unknown) =>
     $.tool.check({ tool: ACCEPT, input } as never).then((verdict) => verdict.decision);
   expect(await check({ offer_id: OFFER })).toBe('allow');
+  expect(await check({ offer_ids: [OFFER, SECOND_OFFER] })).toBe('allow');
   expect(await check({ cancel: OFFER })).toBe('allow');
   for (const input of [
     { offer_id: 'not-an-offer' },
+    { offer_ids: [OFFER] },
+    { offer_ids: [OFFER, 'not-an-offer'] },
+    { offer_ids: [OFFER, OFFER.toUpperCase()] },
+    { offer_ids: [OFFER, SECOND_OFFER], offer_id: OFFER },
+    { offer_ids: [OFFER, SECOND_OFFER], cancel: OFFER },
     { offer_id: OFFER, reason: 'agent_stopped' },
     { capture: { tool: 'Agent' } },
     { delegation_id: OFFER, task: 'do it' },
@@ -2835,4 +3000,40 @@ test('the held Agent row gives way the moment its accept row draws', async ($, o
     'DeepSeek(Read selected source)',
   );
   expect(await heldRow($, 'held_a', INPUT, held)).toBe('');
+});
+
+test('the transcript notice counts only held Agent calls in the batch', async ($, on) => {
+  const f = setup($, on);
+  const notices: string[] = [];
+  on('ui.log', (_$, e) => {
+    notices.push(e.text);
+    return { value: undefined };
+  });
+  on('classic.PostToolBatch', () => ({}));
+  const batch = (...ids: string[]) =>
+    $.classic.PostToolBatch({
+      tool_calls: ids.map((id) => ({
+        tool_name: 'Agent',
+        tool_input: INPUT,
+        tool_use_id: id,
+      })),
+    });
+  await remember($, { ...INPUT, tool_use_id: 'held_a' });
+  await remember($, { ...INPUT, tool_use_id: 'held_b' });
+  await batch('held_a', 'held_b');
+  expect(notices).toEqual(['Held 2 of 2 Agent calls before native execution.']);
+
+  await remember($, { ...INPUT, tool_use_id: 'held_c' });
+  f.state.keepNative = true;
+  await remember($, { ...INPUT, tool_use_id: 'native_a' });
+  await batch('held_c', 'native_a');
+  await batch('native_a', 'native_b');
+  f.state.keepNative = false;
+  await remember($, { ...INPUT, tool_use_id: 'held_d' });
+  await batch('held_d');
+  await batch('held_d', 'native_a');
+  expect(notices).toEqual([
+    'Held 2 of 2 Agent calls before native execution.',
+    'Held 1 of 2 Agent calls before native execution.',
+  ]);
 });

@@ -739,7 +739,11 @@ export class ModelHandoff {
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
-      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap. Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No assignment has been sent to a worker.`,
+      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap.${
+        session.harness === 'claude'
+          ? ' When accepting several offers together, put only the chosen ids into one subagent({offer_ids: [id1, id2, ...]}) call so their workers run in parallel. Claude Code runs separate acceptance calls in order.'
+          : ''
+      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No assignment has been sent to a worker.`,
     };
   }
 }

@@ -168,6 +168,7 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   expect(first).toMatchObject({ action: 'offer', parentPolicy });
   const instruction = 'instruction' in first ? String(first.instruction) : '';
   expect(instruction).toContain('with subagent({offer_id})');
+  expect(instruction).toContain('subagent({offer_ids: [id1, id2, ...]})');
   expect(instruction).toContain(
     'To keep it native, send the original Agent call again unchanged; that repeat costs no second routing fee.',
   );

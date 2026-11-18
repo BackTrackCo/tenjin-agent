@@ -839,7 +839,7 @@ it.each(['startup failed', 'cleanup unconfirmed', 'already released'] as const)(
   },
 );
 
-it('advertises display activity as read-only without changing the original subagent wire contract', async () => {
+it('advertises read-only display activity and write-capable single and batch acceptance', async () => {
   const f = await ownedClaudeFixture();
   try {
     const tools = (await f.client.listTools()).tools;
@@ -852,9 +852,7 @@ it('advertises display activity as read-only without changing the original subag
     ]);
     expect(activity?.inputSchema.required).toEqual(['offer_id']);
     const subagent = tools.find((tool) => tool.name === 'subagent');
-    expect(subagent?.description).toBe(
-      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
-    );
+    expect(subagent?.description).toContain('accept selected offers together with offer_ids');
     expect(subagent?.annotations?.readOnlyHint).toBe(false);
     // No field carries a permission, a mode or an answer to a worker: a parent's text
     // reaches a worker only as its assignment or a held follow-up.
@@ -863,6 +861,7 @@ it('advertises display activity as read-only without changing the original subag
       'capture',
       'delegation_id',
       'offer_id',
+      'offer_ids',
       // With cancel: a label for the job's record of who ended it, one fixed value.
       'reason',
       'task',
@@ -1860,7 +1859,7 @@ it("keeps a worker's permission dialog open past the MCP SDK's 60 seconds, as a 
   }
 });
 
-it('runs two offers of one turn as two workers, each with its own result, and a cancel ends only its own', async () => {
+it('runs two batched offers concurrently and returns separate results after cancelling one', async () => {
   const f = await ownedClaudeFixture();
   const second = await f.store.offer({
     sessionId: 'root',
@@ -1889,13 +1888,22 @@ it('runs two offers of one turn as two workers, each with its own result, and a 
   );
   f.route.mockImplementation(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
   try {
-    const first = f.call({ offer_id: f.job.id });
-    const other = f.call({ offer_id: second.id });
+    expect(await f.call({ offer_ids: [f.job.id, f.job.id.toUpperCase()] })).toMatchObject({
+      action: 'native',
+      reason: 'Use distinct offer ids',
+    });
+    expect(await f.call({ offer_id: f.job.id, offer_ids: [f.job.id, second.id] })).toMatchObject({
+      action: 'native',
+      reason: 'Use one subagent operation',
+    });
+    expect(worker.run).not.toHaveBeenCalled();
+    const missing = randomUUID();
+    const batch = f.call({ offer_ids: [second.id, missing, f.job.id] });
     await started;
     // A repeated accept of a running offer starts no third worker.
     expect((await f.call({ offer_id: second.id })).reason).toContain('still running');
     expect(await f.call({ cancel: second.id })).toEqual({ status: 'cancelled' });
-    expect((await other).status).toBe('cancelled');
+    expect((await f.store.owned(second.id, 'root'))?.state).toBe('cancelled');
     expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
     // A cancel used to close its whole turn: the next held call of the turn is still offered.
     const held = await f.call({
@@ -1909,11 +1917,20 @@ it('runs two offers of one turn as two workers, each with its own result, and a 
     expect(held).toMatchObject({ action: 'offer', routingFeeAtomic: offer.routingFeeAtomic });
     expect(f.route).toHaveBeenCalledTimes(1);
     finish.get(f.job.id)!('result of the first');
-    const done = await first;
-    expect(done).toMatchObject({ status: 'completed', result: 'result of the first' });
+    const done = await batch;
+    expect(done).toMatchObject({
+      results: [
+        { offer_id: second.id, outcome: { status: 'cancelled' } },
+        {
+          offer_id: missing,
+          outcome: { action: 'native', reason: 'No such offer in this session' },
+        },
+        { offer_id: f.job.id, outcome: { status: 'completed', result: 'result of the first' } },
+      ],
+    });
     // Each offer answers with its own stored result afterwards, and nothing ran twice.
-    expect(await f.call({ offer_id: f.job.id })).toEqual(done);
-    expect((await f.call({ offer_id: second.id })).status).toBe('cancelled');
+    expect(await f.call({ offer_ids: [second.id, missing, f.job.id] })).toEqual(done);
+    expect(await f.call({ offer_id: f.job.id })).toEqual(done.results[2].outcome);
     expect(worker.run).toHaveBeenCalledTimes(2);
   } finally {
     await f.close();

@@ -1,5 +1,5 @@
 import { isModelWorkerProcess } from './model-worker-context';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
@@ -444,47 +444,82 @@ export function registerModelTool(
         return answer(end ? { ...shown, ended: end } : shown);
       },
     );
+  const subagentInput = {
+    offer_id: z.string().uuid().optional(),
+    cancel: z.string().uuid().optional(),
+    // Mod transport only. The same MCP process has already seen the owned root hook.
+    capture: z
+      .object({
+        session_id: z.string(),
+        tool_use_id: z.string(),
+        tool: z.enum(['Agent', 'Task', 'SendMessage']).optional(),
+        input: z.record(z.string(), z.unknown()),
+        // The parent's model request that made the held call, as the host numbers it.
+        step: z.string().max(200).optional(),
+        // The native subagent whose loop made the call, as the host lists it; absent
+        // for the main loop. It receives the offer and accepts it or keeps it native.
+        agent: z
+          .object({
+            id: z.string().min(1).max(200),
+            type: z.string().max(200).optional(),
+            // The types of the agents above it, nearest first.
+            parents: z.array(z.string().max(200)).max(32).optional(),
+            cwd: z.string().max(4096).optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    delegation_id: z.string().uuid().optional(),
+    task: z.string().optional(),
+    // With cancel, from the plugin alone: the person stopped the worker's agent. A
+    // label for the job's record, never a permission.
+    reason: z.enum(['agent_stopped']).optional(),
+    ...(options.harness === 'claude'
+      ? { offer_ids: z.array(z.string().uuid()).min(2).optional() }
+      : {}),
+  };
+  type SubagentOperation = Parameters<ToolCallback<typeof subagentInput>>;
+  const withBatchAccepts =
+    (
+      run: (
+        args: Omit<SubagentOperation[0], 'offer_ids'>,
+        extra: SubagentOperation[1],
+      ) => Promise<ReturnType<typeof answer>>,
+    ): ToolCallback<typeof subagentInput> =>
+    async ({ offer_ids, ...args }, extra) => {
+      if (offer_ids === undefined) return run(args, extra);
+      if (Object.values(args).some((value) => value !== undefined))
+        return answer({ action: 'native', reason: 'Use one subagent operation' });
+      if (new Set(offer_ids.map((id) => id.toLowerCase())).size !== offer_ids.length)
+        return answer({ action: 'native', reason: 'Use distinct offer ids' });
+      // Keep one live host request for permission prompts and interruption. Each
+      // offer still goes through its own claim, worker, budget and handback.
+      const outcomes = await Promise.allSettled(
+        offer_ids.map((offer_id) =>
+          run({ ...args, offer_id }, { ...extra, signal: AbortSignal.any([extra.signal]) }),
+        ),
+      );
+      return answer({
+        results: outcomes.map((outcome, index) => ({
+          offer_id: offer_ids[index],
+          outcome:
+            outcome.status === 'fulfilled'
+              ? JSON.parse(outcome.value.content[0]!.text)
+              : { status: 'unknown', reason: 'Could not confirm the result of this offer' },
+        })),
+      });
+    };
   server.registerTool(
     'subagent',
     {
       title: 'Tenjin subagent',
       description:
-        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended it returns the stored result, in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or on Claude accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
-      inputSchema: {
-        offer_id: z.string().uuid().optional(),
-        cancel: z.string().uuid().optional(),
-        // Mod transport only. The same MCP process has already seen the owned root hook.
-        capture: z
-          .object({
-            session_id: z.string(),
-            tool_use_id: z.string(),
-            tool: z.enum(['Agent', 'Task', 'SendMessage']).optional(),
-            input: z.record(z.string(), z.unknown()),
-            // The parent's model request that made the held call, as the host numbers it.
-            step: z.string().max(200).optional(),
-            // The native subagent whose loop made the call, as the host lists it; absent
-            // for the main loop. It receives the offer and accepts it or keeps it native.
-            agent: z
-              .object({
-                id: z.string().min(1).max(200),
-                type: z.string().max(200).optional(),
-                // The types of the agents above it, nearest first.
-                parents: z.array(z.string().max(200)).max(32).optional(),
-                cwd: z.string().max(4096).optional(),
-              })
-              .optional(),
-          })
-          .optional(),
-        delegation_id: z.string().uuid().optional(),
-        task: z.string().optional(),
-        // With cancel, from the plugin alone: the person stopped the worker's agent. A
-        // label for the job's record, never a permission.
-        reason: z.enum(['agent_stopped']).optional(),
-      },
+      inputSchema: subagentInput,
     },
-    async (args, extra) => {
+    withBatchAccepts(async (args, extra) => {
       // The start phases of an accept, timed from here for the worker's diagnostic record.
       const acceptedAt = Date.now();
       const startMarks: Record<string, number> = { cliProcess: Math.round(performance.timeOrigin) };
@@ -1032,7 +1067,7 @@ export function registerModelTool(
           if (left > 0) accepting.set(offered, left);
           else accepting.delete(offered);
         });
-    },
+    }),
   );
   const shutdown = async () => {
     await repaired;
