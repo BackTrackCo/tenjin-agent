@@ -247,6 +247,101 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
   });
 });
 
+it('settles overlapping inference on two reusable funded channels', async ({ onTestFinished }) => {
+  const f = await fixture();
+  const primary = f.make();
+  const secondary = primary.forInferenceSlot(1);
+  const stop = new AbortController();
+  const message = (content: string) => ({ messages: [{ role: 'user', content }] });
+  const anotherJob = () => ({
+    ...f.job,
+    id: randomUUID(),
+    decision: { ...f.job.decision, jobId: randomUUID() },
+  });
+  await primary.messages(f.job, message('Fund the original channel'), stop.signal);
+  const [originalChannel] = f.router.channels.keys();
+  expect(f.router.deposits).toBe(1);
+
+  const held = deferred();
+  const firstEntered = deferred();
+  const secondEntered = deferred();
+  let entered = 0;
+  f.router.hold = held.promise;
+  f.router.onDelayArmed = () => {
+    if (++entered === 1) firstEntered.resolve();
+    else secondEntered.resolve();
+  };
+  onTestFinished(() => {
+    held.resolve();
+    stop.abort();
+  });
+  const first = primary.messages(f.job, message('First worker'), stop.signal);
+  await Promise.race([firstEntered.promise, first]);
+  const secondJob = anotherJob();
+  const second = secondary.messages(secondJob, message('Second worker'), stop.signal);
+  const results = Promise.allSettled([first, second]);
+  try {
+    // The fake provider keeps both requests pending until the test releases it.
+    await Promise.race([secondEntered.promise, first, second]);
+    expect([...f.router.channels.values()].filter((channel) => channel.pending)).toHaveLength(2);
+    expect(f.router.settledFees).toBe(1);
+    expect(f.router.paidRequests()).toBe(3);
+  } finally {
+    held.resolve();
+  }
+  expect(await results).toEqual([
+    { status: 'fulfilled', value: f.message },
+    { status: 'fulfilled', value: f.message },
+  ]);
+  expect(await primary.summary(f.job)).toMatchObject({
+    actualAtomic: '5000',
+    reservedAtomic: '5000',
+    uncertain: [],
+  });
+  expect(await secondary.summary(secondJob)).toMatchObject({
+    actualAtomic: '4000',
+    reservedAtomic: '4000',
+    uncertain: [],
+  });
+  expect(f.router.deposits).toBe(2);
+  expect(f.router.settledFees).toBe(3);
+
+  await expect(
+    f.make().forInferenceSlot(1).messages(anotherJob(), message('Next batch'), stop.signal),
+  ).resolves.toEqual(f.message);
+  expect(f.router.channels.size).toBe(2);
+  expect(f.router.channels.get(originalChannel!)?.charged).toBe(2000n);
+  expect(f.router.deposits).toBe(2);
+  expect(f.router.settledFees).toBe(4);
+  expect(f.router.paidRequests()).toBe(4);
+});
+
+it('applies the same rolling deposit budget to both inference channels', async () => {
+  const f = await fixture({ quote: '50000', minDeposit: '50000' });
+  f.deps.policy = async () => ({ ...TEST_POLICY, sessionBudgetAtomic: 50000n });
+  const transport = f.make();
+  const signal = new AbortController().signal;
+  await transport.messages(f.job, { messages: [] }, signal);
+  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('50000');
+
+  const secondJob = {
+    ...f.job,
+    id: randomUUID(),
+    decision: { ...f.job.decision, jobId: randomUUID() },
+  };
+  const secondary = transport.forInferenceSlot(1);
+  await expect(secondary.messages(secondJob, { messages: [] }, signal)).rejects.toMatchObject({
+    detail: { cause: 'payment_refused' },
+  });
+  expect(await secondary.summary(secondJob)).toMatchObject({
+    actualAtomic: '3000',
+    reservedAtomic: '3000',
+    uncertain: [],
+  });
+  expect(f.router.deposits).toBe(1);
+  expect(f.router.paidRequests()).toBe(1);
+});
+
 it.each(['settles', 'cancels'] as const)(
   '%s a second inference job queued on the same funded channel',
   async (outcome) => {

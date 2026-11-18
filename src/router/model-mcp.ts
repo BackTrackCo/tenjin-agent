@@ -12,6 +12,7 @@ import {
   type EarlyWorkerAccept,
 } from './model-worker';
 import type { ModelTransport } from './model-transport';
+import type { ModelInferenceSlot } from './model-channel';
 import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
@@ -42,6 +43,8 @@ type ActiveConversation = {
   owner: ModelConversationOwner;
   continuationId: string;
 };
+
+type InferenceLease = { slot: ModelInferenceSlot; release: () => void };
 
 type WarmWorker = {
   sdkSessionId: string;
@@ -484,6 +487,7 @@ export function registerModelTool(
       run: (
         args: Omit<SubagentOperation[0], 'offer_ids'>,
         extra: SubagentOperation[1],
+        leaseInferenceSlot?: () => InferenceLease,
       ) => Promise<ReturnType<typeof answer>>,
     ): ToolCallback<typeof subagentInput> =>
     async ({ offer_ids, ...args }, extra) => {
@@ -494,9 +498,26 @@ export function registerModelTool(
         return answer({ action: 'native', reason: 'Use distinct offer ids' });
       // Keep one live host request for permission prompts and interruption. Each
       // offer still goes through its own claim, worker, budget and handback.
+      // Allocate only when a freshly accepted job is ready to run. A refused
+      // offer or a stored handback should never make the batch fund another channel.
+      const occupied: [number, number] = [0, 0];
+      const leaseInferenceSlot = (): InferenceLease => {
+        const slot = occupied[0] <= occupied[1] ? 0 : 1;
+        occupied[slot]++;
+        return {
+          slot,
+          release: () => {
+            occupied[slot]--;
+          },
+        };
+      };
       const outcomes = await Promise.allSettled(
         offer_ids.map((offer_id) =>
-          run({ ...args, offer_id }, { ...extra, signal: AbortSignal.any([extra.signal]) }),
+          run(
+            { ...args, offer_id },
+            { ...extra, signal: AbortSignal.any([extra.signal]) },
+            leaseInferenceSlot,
+          ),
         ),
       );
       return answer({
@@ -519,7 +540,7 @@ export function registerModelTool(
       ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
       inputSchema: subagentInput,
     },
-    withBatchAccepts(async (args, extra) => {
+    withBatchAccepts(async (args, extra, leaseInferenceSlot) => {
       // The start phases of an accept, timed from here for the worker's diagnostic record.
       const acceptedAt = Date.now();
       const startMarks: Record<string, number> = { cliProcess: Math.round(performance.timeOrigin) };
@@ -893,12 +914,14 @@ export function registerModelTool(
             }
           };
           const done = (async () => {
+            let inference: InferenceLease | undefined;
             try {
               signal.throwIfAborted();
+              inference = leaseInferenceSlot?.();
               const runOptions: Parameters<typeof runModelWorker>[1] = {
                 dataDir: options.dataDir,
                 accepted: { at: acceptedAt, marks: startMarks },
-                transport,
+                transport: inference?.slot ? transport.forInferenceSlot(inference.slot) : transport,
                 signal: abort.signal,
                 ...(activity ? { activity } : {}),
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
@@ -1041,6 +1064,7 @@ export function registerModelTool(
                 .catch(() => undefined);
               return answer({ ...stopped, spend });
             } finally {
+              inference?.release();
               // Not awaited: removing a display file never delays the handback.
               void progress?.stop().catch(() => undefined);
               await warm?.stop();

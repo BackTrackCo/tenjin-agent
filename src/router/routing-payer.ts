@@ -22,6 +22,7 @@ import {
   modelChannelLane,
   modelChannelScope,
   MODEL_ROUTING_FEE_CEILING_ATOMIC,
+  type ModelInferenceSlot,
   type ModelPaymentPath,
 } from './model-channel';
 import {
@@ -258,7 +259,12 @@ export function chainReader(rpcUrl: string, fetchFn?: typeof fetch): ChainRead {
 export interface RoutingPayerDeps {
   dataDir: string;
   /** Separate inference lane; never widens the routing-fee instance. */
-  modelLane?: { path: ModelPaymentPath; ceilingAtomic: bigint; origin: string };
+  modelLane?: {
+    path: ModelPaymentPath;
+    ceilingAtomic: bigint;
+    origin: string;
+    inferenceSlot?: ModelInferenceSlot;
+  };
   /** The wallet signer, unlocked without a prompt; it signs deposits and vouchers. */
   getSigner: () => Promise<TenjinSigner>;
   /** The spend policy, read fresh per deposit. */
@@ -1535,20 +1541,31 @@ export class RoutingPayer {
   }
 
   /**
-   * THE WALLET'S ONE CHANNEL: the stock client over the SDK's file storage in
-   * the wallet's folder, built once per wallet. A replaced wallet gets its own
-   * folder, and its old channel stays in the old one.
+   * The stock client uses the wallet's channel for this lane and inference
+   * slot. A replaced wallet gets its own folder, and the old channel stays
+   * in the old one.
    */
   private channelFor(signer: ClientEvmSigner): Channel {
     const payer = signer.address.toLowerCase() as `0x${string}`;
     if (this.channel !== null && this.channel.payer === payer) return this.channel;
     const lane = this.deps.modelLane;
     const dir = lane
-      ? modelChannelDir(this.deps.dataDir, payer, modelChannelLane(lane.path), lane.origin)
+      ? modelChannelDir(
+          this.deps.dataDir,
+          payer,
+          modelChannelLane(lane.path),
+          lane.origin,
+          lane.inferenceSlot,
+        )
       : payerDir(this.deps.dataDir, payer);
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),
-      ...(lane ? { salt: modelChannelScope(lane.origin, modelChannelLane(lane.path)).salt } : {}),
+      ...(lane
+        ? {
+            salt: modelChannelScope(lane.origin, modelChannelLane(lane.path), lane.inferenceSlot)
+              .salt,
+          }
+        : {}),
       depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
       depositStrategy: (ctx) => this.deposit(ctx),
     });

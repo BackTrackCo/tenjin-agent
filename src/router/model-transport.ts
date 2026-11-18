@@ -11,7 +11,11 @@ import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import { modelLock, type ModelJob } from './model-job';
-import { MODEL_ROUTING_FEE_CEILING_ATOMIC, modelChannelScope } from './model-channel';
+import {
+  MODEL_ROUTING_FEE_CEILING_ATOMIC,
+  modelChannelScope,
+  type ModelInferenceSlot,
+} from './model-channel';
 import { withFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import {
@@ -123,6 +127,7 @@ export class ModelTransport {
       dataDir: string;
       baseUrl: string;
       payerDeps: RoutingPayerDeps;
+      inferenceSlot?: ModelInferenceSlot;
     },
   ) {
     this.routing = new Payer({
@@ -136,6 +141,11 @@ export class ModelTransport {
   }
   get origin() {
     return new URL(this.options.baseUrl).origin;
+  }
+  forInferenceSlot(inferenceSlot: ModelInferenceSlot): ModelTransport {
+    return (this.options.inferenceSlot ?? 0) === inferenceSlot
+      ? this
+      : new ModelTransport({ ...this.options, inferenceSlot });
   }
   /** A continuation must retain every old charge and uncertain reservation. */
   async requireResumeBudget(job: ModelJob) {
@@ -540,12 +550,17 @@ export class ModelTransport {
           },
         };
       },
-      modelLane: { path: endpoint, ceilingAtomic: quote, origin: this.origin },
+      modelLane: {
+        path: endpoint,
+        ceilingAtomic: quote,
+        origin: this.origin,
+        inferenceSlot: this.options.inferenceSlot,
+      },
       fetchImpl: cachedFetch,
     });
-    // Each payer is specific to an invocation, but both model endpoints
-    // share an inference channel. Take turns across local transports and processes.
-    const scope = modelChannelScope(this.origin, 'model-inference');
+    // The model endpoints share the same two inference channels. Take turns
+    // within each channel across local transports and processes.
+    const scope = modelChannelScope(this.origin, 'model-inference', this.options.inferenceSlot);
     const paymentLock = join(dataDir, 'model-jobs', `${scope.id}.payment.lock`);
     let paymentTurn = false;
     let result;

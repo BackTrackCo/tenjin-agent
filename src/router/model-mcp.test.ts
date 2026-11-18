@@ -504,13 +504,16 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     uncertain: [],
   }));
   const reconcile = vi.fn(async (_job: ModelJob) => {});
-  const transport = {
+  const inference = {
     origin: 'http://localhost:3939',
     route,
     requireResumeBudget,
     reconcile,
     summary,
-  } as unknown as ModelTransport;
+  };
+  const secondaryTransport = inference as unknown as ModelTransport;
+  const forInferenceSlot = vi.fn((_slot: 0 | 1) => secondaryTransport);
+  const transport = { ...inference, forInferenceSlot } as unknown as ModelTransport;
   const getTransport = vi.fn(async () => transport);
   // One `tenjin mcp` process: its own server, tool registration and host connection.
   const start = async () => {
@@ -616,6 +619,8 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
     reconcile,
     summary,
     getTransport,
+    forInferenceSlot,
+    secondaryTransport,
   };
 }
 
@@ -1900,6 +1905,11 @@ it('runs two batched offers concurrently and returns separate results after canc
     const missing = randomUUID();
     const batch = f.call({ offer_ids: [second.id, missing, f.job.id] });
     await started;
+    expect(worker.run.mock.calls.map(([, options]) => options.transport)).toEqual([
+      await f.getTransport(),
+      f.secondaryTransport,
+    ]);
+    expect(f.forInferenceSlot.mock.calls).toEqual([[1]]);
     // A repeated accept of a running offer starts no third worker.
     expect((await f.call({ offer_id: second.id })).reason).toContain('still running');
     expect(await f.call({ cancel: second.id })).toEqual({ status: 'cancelled' });
@@ -1932,6 +1942,16 @@ it('runs two batched offers concurrently and returns separate results after canc
     expect(await f.call({ offer_ids: [second.id, missing, f.job.id] })).toEqual(done);
     expect(await f.call({ offer_id: f.job.id })).toEqual(done.results[2].outcome);
     expect(worker.run).toHaveBeenCalledTimes(2);
+    // Only one new job in a batch still uses the original channel.
+    worker.run.mockResolvedValueOnce('remaining assignment');
+    expect(await f.call({ offer_ids: [missing, held.offer_id] })).toMatchObject({
+      results: [
+        { offer_id: missing, outcome: { action: 'native' } },
+        { offer_id: held.offer_id, outcome: { status: 'completed' } },
+      ],
+    });
+    expect(worker.run.mock.calls[2]?.[1].transport).toBe(await f.getTransport());
+    expect(f.forInferenceSlot.mock.calls).toEqual([[1]]);
   } finally {
     await f.close();
   }
