@@ -151,6 +151,8 @@ export type TenjinModelViewerState = {
   records: TenjinModelViewerRecord[];
   /** Type guards only, never offer/execution authority. */
   knownIds: string[];
+  /** Active viewers from a prior cwd. These bindings authorize only cancellation. */
+  priorStops?: Pick<TenjinModelViewerRecord, 'offerId' | 'nativeId' | 'turnId'>[];
 };
 
 declare module 'claude-code' {

@@ -953,6 +953,34 @@ test('TaskStop still requests the owned cancellation after canonical cwd access 
   await f.clock.settle();
 });
 
+test('a new offer in another cwd preserves the earlier viewer cancellation binding', async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'first worker handback' };
+  };
+  await remember($);
+  const { running, firstStep } = await startWithViewer($, f);
+  f.state.cwd = '/another-repository';
+  f.state.offer = OFFER2;
+  await remember($, INPUT2);
+  expect(f.state.snapshot?.records.map((r) => r.offerId)).toEqual([OFFER2]);
+  f.state.agents[0]!.status = 'killed';
+  await complete($, 'native-viewer-1', 'aborted', 'foreign-turn');
+  expect(f.state.cancellations).toEqual([]);
+  await complete($, 'native-viewer-1');
+  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
+  expect(f.state.snapshot?.priorStops).toEqual([]);
+  release();
+  expect((await running).result).toBe('first worker handback');
+  await firstStep;
+  await f.clock.settle();
+});
+
 // Job 8f2d28ff: Claude Code's stall watchdog ended the viewer's one long step at 600 s,
 // its turn completed `aborted`, and the mod cancelled a healthy worker.
 test('a viewer turn the host ends never cancels its worker, and the row stays live', async ($, on) => {

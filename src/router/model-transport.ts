@@ -144,13 +144,14 @@ export class ModelTransport {
         throw new Error('Original model budget is unavailable; refusing continuation');
     });
   }
-  async route(body: unknown, signal?: AbortSignal) {
+  async route(body: unknown, signal?: AbortSignal, beforeSend?: () => Promise<void>) {
     signal?.throwIfAborted();
     const route = this.routing.routeFor(this.options.baseUrl);
     let result;
     try {
       const fetchFn = this.options.payerDeps.fetchImpl ?? fetch;
       const guardedFetch: typeof fetch = async (input, init) => {
+        await beforeSend?.();
         signal?.throwIfAborted();
         return fetchFn(input, {
           ...init,
@@ -167,7 +168,7 @@ export class ModelTransport {
           jsonBody: body,
           timeoutMs: 5000,
           blockRedirects: true,
-          ...(signal ? { fetchImpl: guardedFetch } : {}),
+          ...(signal || beforeSend ? { fetchImpl: guardedFetch } : {}),
         },
       );
       signal?.throwIfAborted();
@@ -179,8 +180,13 @@ export class ModelTransport {
       throw new Error('Model router unavailable; keep native');
     return result.json;
   }
-  async messages(job: ModelJob, messages: Record<string, unknown>, signal: AbortSignal) {
-    return this.invoke(job, messages, signal, 'messages');
+  async messages(
+    job: ModelJob,
+    messages: Record<string, unknown>,
+    signal: AbortSignal,
+    beforeSend?: () => Promise<void>,
+  ) {
+    return this.invoke(job, messages, signal, 'messages', beforeSend);
   }
   async responses(
     job: ModelJob,
@@ -196,6 +202,7 @@ export class ModelTransport {
     messages: Record<string, unknown>,
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
+    beforeSend?: () => Promise<void>,
   ): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     // Do not share across changed job authority, even when the provider body is identical.
@@ -208,6 +215,7 @@ export class ModelTransport {
         structuredClone(messages),
         abort.signal,
         protocol,
+        beforeSend,
       ).finally(() => {
         if (this.invocations.get(key)?.abort === abort) this.invocations.delete(key);
       });
@@ -260,6 +268,7 @@ export class ModelTransport {
     messages: Record<string, unknown>,
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
+    beforeSend?: () => Promise<void>,
   ) {
     signal.throwIfAborted();
     const endpoint =
@@ -275,6 +284,13 @@ export class ModelTransport {
     const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
     const load = () => this.loadBudget(job, path);
     const consent = () => this.jobConsent(job, signal);
+    const assertCanTransmit = async () => {
+      if (beforeSend) {
+        await beforeSend();
+        await consent();
+      }
+      signal.throwIfAborted();
+    };
     type Call = Budget['calls'][string];
     const keptResult = async () => {
       const kept = await readJsonFile(resultFile, resultLimit);
@@ -367,6 +383,7 @@ export class ModelTransport {
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;
     // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
+    await assertCanTransmit();
     const challenge = await fetchFn(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -442,6 +459,7 @@ export class ModelTransport {
         first = false;
         return challenge;
       }
+      await assertCanTransmit();
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : undefined),
       );
@@ -478,6 +496,7 @@ export class ModelTransport {
         };
       },
       getSigner: async () => {
+        await assertCanTransmit();
         const signer = await payerDeps.getSigner();
         return {
           address: signer.address,

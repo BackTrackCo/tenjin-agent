@@ -130,6 +130,7 @@ type QualifiedWorker = {
   disclosureRepositories?: string[];
   claudeWorkspace?: ClaudeWorkspace;
   windows?: WindowsWorkerLaunch;
+  customAgent?: WorkerAgent;
 };
 
 function readWorkerClaudeCode(cwd: string, windows?: WindowsWorkerLaunch) {
@@ -157,14 +158,8 @@ export async function qualifiedModelWorker(
   // Read at every offer and again at its accept: once per binary file, not per call.
   const state = await readWorkerClaudeCode(cwd, windows ?? undefined);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
-  // A built-in a file redefines, a plugin's agent and the host's other built-ins run
-  // natively. A custom type's own definition is read where it is offered and where it runs.
-  if (
-    WORKER_BUILTIN_AGENTS.has(agentType)
-      ? (await findDefinition(agentType, { cwd, homeDir: homedir() })) !== null
-      : !isCustomAgentType(agentType)
-  )
-    return null;
+  const builtin = WORKER_BUILTIN_AGENTS.has(agentType);
+  if (!builtin && !isCustomAgentType(agentType)) return null;
   const resolved = await resolveWorkerSettings({
     cwd,
     settingSources: ['user', 'project', 'local'],
@@ -186,12 +181,34 @@ export async function qualifiedModelWorker(
       effective,
       disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
     ));
-  return claudeWorkspace &&
-    (windows
+  if (
+    !claudeWorkspace ||
+    !(windows
       ? disclosure?.routerOrigin === windows.routerOrigin && nativeWindowsShellPolicy(resolved)
       : claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved))
-    ? { ...state.binary, claudeWorkspace, ...(windows ? { windows } : {}) }
-    : null;
+  )
+    return null;
+  const lookup = {
+    root: claudeWorkspace.root,
+    cwd,
+    homeDir: homedir(),
+    additionalDirectories: [
+      ...(effective.permissions?.additionalDirectories ?? []),
+      ...claudeWorkspace.workingDirectories.slice(1),
+      ...(await claudeWorkspaceWorktrees(claudeWorkspace)),
+    ],
+  };
+  // A definition that could override a built-in's permissions leaves it native.
+  if (builtin && (await findDefinition(agentType, lookup).catch(() => undefined)) !== null)
+    return null;
+  const custom = builtin ? null : await workerAgent(agentType, lookup);
+  if (custom && 'unmatched' in custom) return null;
+  return {
+    ...state.binary,
+    claudeWorkspace,
+    ...(windows ? { windows } : {}),
+    ...(custom ? { customAgent: custom.agent } : {}),
+  };
 }
 
 /** State supplied only after a Claude offer has been accepted and recorded. */
@@ -288,13 +305,6 @@ export async function runModelWorker(
       signal,
       current.claudePermissionMode,
     );
-    // A custom agent runs from its definition as read here, never from a name alone.
-    const custom = WORKER_BUILTIN_AGENTS.has(agentType)
-      ? null
-      : await workerAgent(agentType, { root: job.root, homeDir: homedir() });
-    if (custom && !('agent' in custom))
-      throw new Error('Custom agent definition is unavailable or changed; keep native');
-    const customAgent = custom?.agent;
     signal.throwIfAborted();
     assertClaudeWorkerMode(
       job.decision.claudePermissionMode,
@@ -306,7 +316,7 @@ export async function runModelWorker(
     const saved = savedClaudeWorkspace(job.decision.claudeWorkspace);
     if (!saved || !binary.claudeWorkspace || !sameClaudeWorkspace(saved, binary.claudeWorkspace))
       throw new Error('Owned Claude workspace scope changed or is unavailable');
-    return runQualifiedWorker(job, current, { ...binary, customAgent }, options.early);
+    return runQualifiedWorker(job, current, binary, options.early);
   };
   return withWorkerDeadline(options.signal, run, options.early?.accept);
 }
@@ -529,14 +539,26 @@ async function runQualifiedWorker(
       // Display only.
     }
   };
-  const fetchFallback = async (event: WorkerFetchEvent, id: unknown) =>
-    !released || controller.signal.aborted
-      ? null
-      : workerFetchFallback(event, {
-          ...web,
-          redact: redactAll,
-          onRead: (bytes) => served(id, WORKER_PAGE_READ_LABEL, bytes),
-        });
+  const assertCurrentSend = async () => {
+    await assertCurrentWorkspace();
+    assertCurrentMode();
+    controller.signal.throwIfAborted();
+  };
+  const refreshForwardingEnv = async () => {
+    await refreshEnv();
+    if (envFiles.uncovered.size)
+      throw new ModelWorkerStopped({ kind: 'execution_failure', reason: 'env_file_unscanned' });
+  };
+  const fetchFallback = async (event: WorkerFetchEvent, id: unknown) => {
+    if (!released || controller.signal.aborted) return null;
+    await refreshForwardingEnv();
+    await assertCurrentSend();
+    return workerFetchFallback(event, {
+      ...web,
+      redact: redactAll,
+      onRead: (bytes) => served(id, WORKER_PAGE_READ_LABEL, bytes),
+    });
+  };
   const bridge = createServer((req, res) => {
     const handle = async () => {
       try {
@@ -558,9 +580,7 @@ async function runQualifiedWorker(
           );
           return;
         }
-        await assertCurrentWorkspace();
-        assertCurrentMode();
-        if (controller.signal.aborted) throw new Error('Model consent revoked or job cancelled');
+        await assertCurrentSend();
         if (!(await nativeModeReady))
           throw new Error('Native Claude did not preserve the owned permission mode');
         assertCurrentMode();
@@ -572,19 +592,12 @@ async function runQualifiedWorker(
           chunks.push(chunk);
         }
         const body = Buffer.concat(chunks).toString('utf8');
-        // What leaves for the model: built for the request, and built again before each retry
-        // with the checks every request passes (the workspace and mode checks are above).
+        // Build what leaves only after reading the body, under current scope and redaction.
         const outgoing = async () => {
           // An env file a command just wrote, or a settings file the person just changed, is
           // read before this request leaves.
-          await refreshEnv();
-          // One that cannot be read in full cannot be replaced, and the worker's denies
-          // are fixed at start: nothing more leaves this job.
-          if (envFiles.uncovered.size)
-            throw new ModelWorkerStopped({
-              kind: 'execution_failure',
-              reason: 'env_file_unscanned',
-            });
+          await refreshForwardingEnv();
+          await assertCurrentSend();
           // Env values may need JSON escapes, so they are replaced in the parsed strings.
           const text = withholdDroppedDirectories(
             redactWorkerSecrets(body, [token, ...secrets]),
@@ -636,14 +649,8 @@ async function runQualifiedWorker(
         let attempts = 0;
         const message = await withModelRetry(
           async () => {
-            if (attempts++ > 0) {
-              await assertCurrentWorkspace();
-              assertCurrentMode();
-              if (controller.signal.aborted)
-                throw new Error('Model consent revoked or job cancelled');
-              messages = workerMessages(await outgoing());
-            }
-            return options.transport.messages(job, messages, controller.signal);
+            if (attempts++ > 0) messages = workerMessages(await outgoing());
+            return options.transport.messages(job, messages, controller.signal, assertCurrentSend);
           },
           controller.signal,
           (attempt, failure) => diagnostics.retry(attempt, failure.detail),
@@ -1216,13 +1223,21 @@ async function runQualifiedWorker(
           throw new Error("The warm Claude worker's env file restrictions changed");
         const current = await assertCurrentWorkspace();
         const selected = await readWorkerClaudeCode(job.root, binary.windows);
-        const custom = WORKER_BUILTIN_AGENTS.has(agentType)
-          ? null
-          : await workerAgent(agentType, { root: job.root, homeDir: homedir() });
         const directories = [
           ...workspace.workingDirectories.slice(1),
           ...(await claudeWorkspaceWorktrees(workspace)),
         ];
+        const lookup = {
+          root: job.root,
+          cwd: job.root,
+          homeDir: homedir(),
+          additionalDirectories: [
+            ...(current.resolved.effective.permissions?.additionalDirectories ?? []),
+            ...directories,
+          ],
+        };
+        const builtin = WORKER_BUILTIN_AGENTS.has(agentType);
+        const custom = builtin ? null : await workerAgent(agentType, lookup);
         const agent =
           selected.binary && (!custom || 'agent' in custom)
             ? await nativeAgentStartKey({
@@ -1236,8 +1251,7 @@ async function runQualifiedWorker(
           !offeredAgent ||
           agent !== offeredAgent ||
           startSettings(current) !== offeredSettings ||
-          (WORKER_BUILTIN_AGENTS.has(agentType) &&
-            (await findDefinition(agentType, { cwd: job.root, homeDir: homedir() })) !== null)
+          (builtin && (await findDefinition(agentType, lookup).catch(() => undefined)) !== null)
         )
           throw new Error('The warm Claude worker no longer matches the accepted job');
         controller.signal.throwIfAborted();

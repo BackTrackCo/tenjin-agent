@@ -236,11 +236,22 @@ async function change($: Dollar, edit: (state: TenjinModelViewerState) => void) 
   if (!owner) return;
   // The public helper retries CAS conflicts and reapplies the ownership checks to fresh state.
   return update($, STATE, (old) => {
-    const same =
-      old?.version === 1 && old.parentSessionId === owner.parentSessionId && old.cwd === owner.cwd;
-    const state: TenjinModelViewerState = same
-      ? structuredClone(old)
-      : { version: 1, ...owner, serial: old?.serial ?? 0, records: [], knownIds: [] };
+    const previous =
+      old?.version === 1 && old.parentSessionId === owner.parentSessionId ? old : undefined;
+    const state: TenjinModelViewerState =
+      previous?.cwd === owner.cwd
+        ? structuredClone(previous)
+        : { version: 1, ...owner, serial: old?.serial ?? 0, records: [], knownIds: [] };
+    if (previous && previous.cwd !== owner.cwd) {
+      // A worker can outlive the directory that started it. Retain only the
+      // identity needed to stop it. Its former display scope no longer applies.
+      state.priorStops = [
+        ...(previous.priorStops ?? []),
+        ...previous.records
+          .filter((r) => r.active)
+          .map(({ offerId, nativeId, turnId }) => ({ offerId, nativeId, turnId })),
+      ];
+    }
     edit(state);
     return state;
   });
@@ -248,25 +259,28 @@ async function change($: Dollar, edit: (state: TenjinModelViewerState) => void) 
 async function retireViewer($: Dollar, binding: ViewerBinding): Promise<void> {
   const [parentSessionId, held] = await Promise.all([$.session.id(), $.state.get(STATE)]);
   const previous = held.value;
-  const item = previous?.records.find((r) => r.offerId === binding.offerId);
+  const item =
+    (previous?.cwd === binding.cwd
+      ? previous.records.find((r) => r.offerId === binding.offerId)
+      : undefined) ?? previous?.priorStops?.find((r) => r.offerId === binding.offerId);
   if (
     !previous ||
     !item ||
     parentSessionId !== binding.parentSessionId ||
-    previous.parentSessionId !== binding.parentSessionId ||
-    previous.cwd !== binding.cwd
+    previous.parentSessionId !== binding.parentSessionId
   )
     return;
   const nativeId = item.nativeId;
   // Display retirement uses the accepted binding, not current filesystem access.
   await update($, STATE, (current) => {
     if (!current) throw new Error('Activity binding unavailable');
-    if (current.parentSessionId !== binding.parentSessionId || current.cwd !== binding.cwd)
-      return current;
+    if (current.parentSessionId !== binding.parentSessionId) return current;
     const state = structuredClone(current);
-    const owned = state.records.find(
-      (r) => r.offerId === binding.offerId && r.nativeId === nativeId,
-    );
+    state.priorStops = state.priorStops?.filter((r) => r.offerId !== binding.offerId);
+    const owned =
+      state.cwd === binding.cwd
+        ? state.records.find((r) => r.offerId === binding.offerId && r.nativeId === nativeId)
+        : undefined;
     if (owned) {
       owned.active = false;
       owned.inspectionUnavailable = true;
@@ -1172,7 +1186,9 @@ async function knownViewer($: Dollar, agentId: string): Promise<boolean> {
   const state = (await $.state.get(STATE)).value;
   return (
     !!state &&
-    (state.knownIds.includes(agentId) || state.records.some((r) => r.nativeId === agentId))
+    (state.knownIds.includes(agentId) ||
+      state.records.some((r) => r.nativeId === agentId) ||
+      !!state.priorStops?.some((r) => r.nativeId === agentId))
   );
 }
 async function* finish(
@@ -1622,7 +1638,14 @@ export function registerModelViewer(on: On): void {
         const current = await change($, (state) => {
           prepared = false;
           const item = state.records.find((r) => r.offerId === offerId);
-          if (!item || item.active || item.nativeId) return;
+          if (
+            !item ||
+            item.active ||
+            item.nativeId ||
+            state.priorStops?.some((r) => r.offerId === offerId) ||
+            (state.priorStops?.length ?? 0) + state.records.filter((r) => r.active).length >= 16
+          )
+            return;
           item.active = true;
           // The viewer is listed under the agent that accepted, as its own subagent is.
           if (caller !== undefined) item.parentId = caller;
@@ -1650,10 +1673,17 @@ export function registerModelViewer(on: On): void {
                 cwd: current.cwd,
               });
               if (viewer.agentId) {
-                await change($, (state) => {
-                  const r = state.records.find((r) => r.offerId === offerId);
-                  if (r?.active && (!r.nativeId || r.nativeId === viewer.agentId))
-                    r.nativeId = viewer.agentId;
+                const nativeId = viewer.agentId;
+                if ((await $.session.id()) !== current.parentSessionId) return;
+                await update($, STATE, (held) => {
+                  if (!held) throw new Error('Activity binding unavailable');
+                  if (held.parentSessionId !== current.parentSessionId) return held;
+                  const state = structuredClone(held);
+                  const r =
+                    state.records.find((record) => record.offerId === offerId && record.active) ??
+                    state.priorStops?.find((record) => record.offerId === offerId);
+                  if (r && (!r.nativeId || r.nativeId === nativeId)) r.nativeId = nativeId;
+                  return state;
                 });
               }
             } catch {
@@ -1768,24 +1798,46 @@ export function registerModelViewer(on: On): void {
           const state = held.value;
           const item =
             state?.version === 1 && state.parentSessionId === parentSessionId
-              ? state.records.find((r) => r.nativeId === agentId)
+              ? (state.records.find((r) => r.active && r.nativeId === agentId) ??
+                state.priorStops?.find((r) => r.nativeId === agentId))
               : undefined;
-          return item?.active && (!item.turnId || item.turnId === e.turnId) ? item : undefined;
+          return item && (!item.turnId || item.turnId === e.turnId)
+            ? { offerId: item.offerId, parentSessionId }
+            : undefined;
         };
         const stopped = async () =>
           (await $.agent.list()).some(
-            (a) => a.id === agentId && (a.status === 'killed' || a.taskStatus === 'killed'),
+            (a) =>
+              a.id === agentId &&
+              a.type === TYPE &&
+              a.spawnedBy === 'tenjin' &&
+              (a.status === 'killed' || a.taskStatus === 'killed'),
           );
-        const cancel = (offerId: string) =>
-          $.mcp.call(SERVER, 'subagent', { cancel: offerId, reason: 'agent_stopped' });
+        const cancel = async (item: { offerId: string; parentSessionId: string }) => {
+          const response = await $.mcp.call(SERVER, 'subagent', {
+            cancel: item.offerId,
+            reason: 'agent_stopped',
+          });
+          if (body(response)?.status !== 'cancelled') return;
+          await update($, STATE, (state) => {
+            if (!state) throw new Error('Activity binding unavailable');
+            if (state.parentSessionId !== item.parentSessionId || !state.priorStops) return state;
+            return {
+              ...state,
+              priorStops: state.priorStops.filter(
+                (r) => !(r.offerId === item.offerId && r.nativeId === agentId),
+              ),
+            };
+          });
+        };
         const item = await bound();
-        if (item && (await stopped())) await cancel(item.offerId);
+        if (item && (await stopped())) await cancel(item);
         else if (item)
           // A stop may mark the agent a moment after its turn ends: read it once more.
           $.clock.after(RECHECK_MS, async () => {
             try {
               const still = await bound();
-              if (still && !sessionEnding && (await stopped())) await cancel(still.offerId);
+              if (still && !sessionEnding && (await stopped())) await cancel(still);
             } catch {
               /* Not a stop that can be told: the worker runs on. */
             }

@@ -218,6 +218,8 @@ export interface RequestToolDeps {
   fetchImpl?: typeof fetch;
   /** Test seam forwarded to the provider leg. */
   payDeps?: PayDeps;
+  /** Host-owned cancellation until the provider payment is transmitted. */
+  paymentSignal?: AbortSignal;
   /** The directory `router.*` resolves from; defaults to `process.cwd()`, which
    *  Claude Code sets to the project directory for an MCP server. */
   cwd?: string;
@@ -1578,6 +1580,7 @@ async function payAndDeliver(
       {
         ...(deps.payDeps ?? {}),
         ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
+        ...(deps.paymentSignal !== undefined ? { signal: deps.paymentSignal } : {}),
         authorizer: signing.authorizer,
         confirm: async () => false,
       },

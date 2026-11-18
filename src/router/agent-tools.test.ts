@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { accessOf, agentsWithoutRequestTool, requestToolAccess, workerAgent } from './agent-tools';
 
 let root: string;
@@ -13,8 +13,10 @@ beforeEach(async () => {
   project = join(root, 'work', 'repo');
   await mkdir(join(home, '.claude', 'agents'), { recursive: true });
   await mkdir(join(project, 'src'), { recursive: true });
+  vi.stubEnv('CLAUDE_CONFIG_DIR', join(home, '.claude'));
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -172,7 +174,11 @@ describe('finding the definition an agent type names', () => {
   });
 
   it('lets a definition file override a built-in of the same name', async () => {
-    await define(join(home, '.claude', 'agents'), 'Explore.md', agent('Explore', 'tools: Read\n'));
+    await define(
+      join(home, '.claude', 'agents', 'review'),
+      'reader.md',
+      agent('Explore', 'tools: Read\n'),
+    );
     expect(await requestToolAccess('Explore', { homeDir: home })).toBe('excluded');
   });
 });
@@ -203,6 +209,35 @@ describe('the custom agents a DeepSeek worker can run as', () => {
   ])('keeps a definition with %j native, naming the key', async (frontmatter, unmatched) => {
     await defined(frontmatter);
     expect(await workerAgent('worker', lookup())).toEqual({ unmatched });
+  });
+
+  it('uses a nested project definition before a less restricted user agent', async () => {
+    await define(join(home, '.claude', 'agents'), 'worker.md', agent('worker', ''));
+    await define(
+      join(project, '.claude', 'agents', 'review'),
+      'reviewer.md',
+      agent('worker', 'model: opus\ntools: Read\n'),
+    );
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched: 'definition:model' });
+  });
+
+  it('keeps a name defined twice in the same tree native', async () => {
+    await defined('tools: Bash\n');
+    await define(
+      join(project, '.claude', 'agents', 'review'),
+      'second.md',
+      agent('worker', 'tools: Read\n'),
+    );
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched: 'definition:ambiguous' });
+  });
+
+  it('keeps an additional-directory shadow native when precedence is uncertain', async () => {
+    const extra = join(root, 'extra');
+    await defined('tools: Bash\n');
+    await define(join(extra, '.claude', 'agents'), 'reader.md', agent('worker', 'tools: Read\n'));
+    expect(await workerAgent('worker', { ...lookup(), additionalDirectories: [extra] })).toEqual({
+      unmatched: 'definition:ambiguous',
+    });
   });
 
   it('reads a block list of tools, and text that runs on under a plain key', async () => {

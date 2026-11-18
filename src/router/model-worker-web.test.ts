@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { buildPaymentRequired, testSigner, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { completedMessageSse } from './model-messages';
@@ -227,19 +227,24 @@ function ctx(): CommandContext {
 }
 
 /** The executor `tenjin mcp` hands a worker, over the scripted network. */
-function executor(fetchImpl: typeof fetch, auth: SpendAuthorizer): WorkerRequest {
-  return (args, { cwd, watch }) => {
+function executor(
+  fetchImpl: typeof fetch,
+  auth: SpendAuthorizer,
+  provider = testWalletProvider(),
+): WorkerRequest {
+  return (args, { cwd, watch, signal }) => {
     const authorizer = watch(auth);
     return runRequestTool(args, {
       ctx: ctx(),
       cwd,
       authorizer,
+      ...(signal === undefined ? {} : { paymentSignal: signal }),
       approves: false,
       fetchImpl,
       payDeps: {
         readBalance: async () => 100_000_000n,
         fetchImpl,
-        provider: testWalletProvider(),
+        provider,
         authorizer,
         destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
       },
@@ -700,6 +705,135 @@ it('buys nothing for a worker stopped while its search waited, and releases what
   const before = seen.length;
   await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal });
   expect(seen.length).toBe(before);
+});
+
+it.each([
+  {
+    service: 'search',
+    url: EXA_SEARCH,
+    run: (deps: WorkerWebDeps) => answerWorkerWebSearch(SEARCH, deps),
+  },
+  {
+    service: 'page read',
+    url: EXA_CONTENTS,
+    run: (deps: WorkerWebDeps) =>
+      workerFetchFallback(
+        { input: { url: 'https://x402.org' }, error: 'getaddrinfo ENOTFOUND x402.org' },
+        { ...deps, redact: (text) => text },
+      ),
+  },
+])(
+  'refuses to authorize a $service stopped during its unsigned Exa probe',
+  async ({ url, run }) => {
+    await configure();
+    const stop = new AbortController();
+    const { fetchImpl, seen } = network();
+    let probeSignal: AbortSignal | null | undefined;
+    const stoppedProbe: typeof fetch = (input, init) => {
+      if (String(input) === url && !new Headers(init?.headers).has('payment-signature')) {
+        probeSignal = init?.signal;
+        stop.abort();
+      }
+      // The provider still answers 402 even if the request was cancelled.
+      return fetchImpl(input, init);
+    };
+    const { job, transport, deps, auth } = setup(stoppedProbe);
+    await run({ ...deps, signal: stop.signal });
+    expect(probeSignal?.aborted).toBe(true);
+    expect(seen.filter((call) => call.url === url)).toMatchObject([{ paid: false }]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(auth.commit).not.toHaveBeenCalled();
+    expect(await transport.summary(job)).toEqual({
+      reservedAtomic: ROUTING_FEE.toString(),
+      actualAtomic: ROUTING_FEE.toString(),
+      uncertain: [],
+    });
+  },
+);
+
+it('releases the reservation and skips signing when a worker stops during spend authorization', async () => {
+  await configure();
+  const stop = new AbortController();
+  const { fetchImpl, seen } = network();
+  const { job, transport, deps, auth } = setup(fetchImpl);
+  const stoppedAuthorizer: SpendAuthorizer = {
+    ...auth,
+    authorize: async (input) => {
+      const grant = await auth.authorize(input);
+      stop.abort();
+      return grant;
+    },
+  };
+  const signer = testSigner();
+  const signTypedData = vi.fn(signer.signTypedData);
+  const request = executor(
+    fetchImpl,
+    stoppedAuthorizer,
+    testWalletProvider({ ...signer, signTypedData }),
+  );
+  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal, request });
+  expect(auth.authorize).toHaveBeenCalledOnce();
+  expect(signTypedData).not.toHaveBeenCalled();
+  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([{ paid: false }]);
+  expect(auth.release).toHaveBeenCalledWith('rsv');
+  expect(auth.commit).not.toHaveBeenCalled();
+  expect(await transport.summary(job)).toMatchObject({
+    reservedAtomic: ROUTING_FEE.toString(),
+    uncertain: [],
+  });
+});
+
+it('releases an Exa payment that was signed locally when the worker stopped before transmission', async () => {
+  await configure();
+  const stop = new AbortController();
+  const { fetchImpl, seen } = network();
+  const { job, transport, deps, auth } = setup(fetchImpl);
+  const signer = testSigner();
+  const signTypedData = vi.fn<typeof signer.signTypedData>(async (args) => {
+    const signature = await signer.signTypedData(args);
+    stop.abort();
+    return signature;
+  });
+  const request = executor(fetchImpl, auth, testWalletProvider({ ...signer, signTypedData }));
+  const result = await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal, request });
+  expect(asWebSearchReads(result).errors).toEqual(['unavailable']);
+  expect(signTypedData).toHaveBeenCalledOnce();
+  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([{ paid: false }]);
+  expect(auth.release).toHaveBeenCalledWith('rsv');
+  expect(auth.commit).not.toHaveBeenCalled();
+  expect(await transport.summary(job)).toEqual({
+    reservedAtomic: ROUTING_FEE.toString(),
+    actualAtomic: ROUTING_FEE.toString(),
+    uncertain: [],
+  });
+});
+
+it('settles an already transmitted Exa payment when the worker stops while it waits', async () => {
+  await configure();
+  const stop = new AbortController();
+  const { fetchImpl, seen } = network();
+  let paidSignal: AbortSignal | null | undefined;
+  const stoppedResponse: typeof fetch = (input, init) => {
+    if (String(input) === EXA_SEARCH && new Headers(init?.headers).has('payment-signature')) {
+      paidSignal = init?.signal;
+      stop.abort();
+    }
+    return fetchImpl(input, init);
+  };
+  const { job, transport, deps, auth } = setup(stoppedResponse);
+  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal });
+  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([
+    { paid: false },
+    { paid: true },
+  ]);
+  expect(paidSignal?.aborted).toBe(false);
+  expect(auth.commit).toHaveBeenCalledWith('rsv', 4000n, expect.anything());
+  expect(auth.release).not.toHaveBeenCalled();
+  expect(await transport.summary(job)).toEqual({
+    reservedAtomic: (ROUTING_FEE + 4000n).toString(),
+    actualAtomic: (ROUTING_FEE + 4000n).toString(),
+    uncertain: [],
+  });
 });
 
 /** The hash of the routing rules saved now, as a spec read under them keeps it. */

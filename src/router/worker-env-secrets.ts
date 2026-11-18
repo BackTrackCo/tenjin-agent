@@ -30,12 +30,10 @@ const MAX_UNLISTED = 64;
 /** A file this user may not read is closed to the worker's commands as well. */
 const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
 const SKIP = new Set(['node_modules', '.git']);
-const WITHHELD_LINE = '[env:withheld line]';
 /** How long a check waits for file events still in flight (macOS coalesces at 50 ms). */
 const SETTLE_MS = 120;
 
 export type EnvAssignment = { key: string; value: string; written: string };
-export type ParsedEnv = { ok: true; assignments: EnvAssignment[] } | { ok: false; lines: string[] };
 
 /**
  * A repository's Claude Code settings file, `.claude/settings.json`, at any depth. The
@@ -74,14 +72,13 @@ export function parseSettingsEnv(text: string): Record<string, unknown> | undefi
  * A settings file's `env` values as Claude Code hands them to commands (strings, numbers,
  * booleans), or undefined when the file cannot be parsed.
  */
-function parseSettingsFile(text: string): ParsedEnv | undefined {
+function parseSettingsFile(text: string): EnvAssignment[] | undefined {
   const env = parseSettingsEnv(text);
   if (!env) return undefined;
-  const assignments = Object.entries(env).flatMap(([key, raw]) => {
+  return Object.entries(env).flatMap(([key, raw]) => {
     const value = typeof raw === 'number' || typeof raw === 'boolean' ? String(raw) : raw;
     return typeof value === 'string' ? [{ key, value, written: value }] : [];
   });
-  return { ok: true, assignments };
 }
 
 const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:(?=\s))[ \t]*(.*)$/;
@@ -107,16 +104,12 @@ function unquoted(key: string, rest: string): EnvAssignment {
  * dotenv's rules: `export `, `KEY=value` or `KEY: value`, single, double and
  * backtick quotes that may span lines, `\n` and `\r` expanded in double quotes,
  * `#` comments. A commented-out assignment counts as one, since it often holds
- * an old secret. Any other line, an unclosed quote or a NUL byte makes the file
- * unparseable, and then every line is withheld.
+ * an old secret. Any other line, an unclosed quote or a NUL byte leaves the
+ * file's values uncovered.
  */
-export function parseEnvFile(text: string): ParsedEnv {
+export function parseEnvFile(text: string): EnvAssignment[] | undefined {
+  if (text.includes('\0')) return undefined;
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const failed = (): ParsedEnv => ({
-    ok: false,
-    lines: lines.map((line) => line.trim()).filter(Boolean),
-  });
-  if (text.includes('\0')) return failed();
   const assignments: EnvAssignment[] = [];
   for (let at = 0; at < lines.length; at++) {
     const line = lines[at]!;
@@ -136,7 +129,7 @@ export function parseEnvFile(text: string): ParsedEnv {
       continue;
     }
     const match = ASSIGNMENT.exec(line);
-    if (!match) return failed();
+    if (!match) return undefined;
     const key = match[1]!;
     const rest = match[2]!;
     const quote = rest[0];
@@ -151,10 +144,10 @@ export function parseEnvFile(text: string): ParsedEnv {
       parts.push(lines[++at]!);
       end = closing(parts.at(-1)!, quote);
     }
-    if (end < 0) return failed();
+    if (end < 0) return undefined;
     const last = parts.pop()!;
     const after = last.slice(end + 1).trim();
-    if (after && !after.startsWith('#')) return failed();
+    if (after && !after.startsWith('#')) return undefined;
     const written = [...parts, last.slice(0, end)].join('\n');
     assignments.push({
       key,
@@ -162,7 +155,7 @@ export function parseEnvFile(text: string): ParsedEnv {
       written,
     });
   }
-  return { ok: true, assignments };
+  return assignments;
 }
 
 function parseUrl(value: string): URL | undefined {
@@ -281,7 +274,7 @@ export type EnvScanLimits = {
 export class WorkerEnvSecrets {
   /** False when the start scan stopped short: the env denies then stay. */
   scanned = false;
-  /** Env files found at start that could not be read in full: denied to the worker. */
+  /** Files found at start whose values could not be covered: denied to the worker. */
   readonly withheld: string[] = [];
   /**
    * Folders the start scan could not list. One that may be entered but not
@@ -290,7 +283,7 @@ export class WorkerEnvSecrets {
    */
   readonly unlisted: string[] = [];
   /**
-   * Env files that appeared or changed after start and cannot be read in full,
+   * Files that appeared or changed after start and whose values cannot be covered,
    * and folders that held one and can no longer be listed. The worker's denies
    * are fixed at start, so while one is here nothing more may be forwarded or
    * shown.
@@ -553,16 +546,14 @@ export class WorkerEnvSecrets {
         readable = false;
       }
     const text = readable && bytes ? bytes.toString('utf8') : undefined;
-    // A settings file is JSON: one that does not parse has no lines to withhold, so it is
-    // denied by its path at start, and after start it stops forwarding until it parses.
-    const parsed =
+    const assignments =
       text === undefined
         ? undefined
         : isClaudeSettingsFile(path)
           ? parseSettingsFile(text)
           : parseEnvFile(text);
-    if (!parsed) {
-      // Not remembered as seen: the next check reads it again.
+    if (!assignments) {
+      // Redacting whole lines would miss values printed on their own.
       if (atStart) this.withheld.push(path);
       else this.uncovered.add(path);
       return;
@@ -572,18 +563,12 @@ export class WorkerEnvSecrets {
     const pause = async () => {
       if (++learned % 2_000 === 0) await new Promise<void>((next) => setImmediate(next));
     };
-    if (parsed.ok)
-      for (const assignment of parsed.assignments) {
-        const name = `[env:${assignment.key}]`;
-        for (const piece of envPieces(assignment)) this.remember(piece, name);
-        for (const piece of urlPasswordPieces(assignment.value)) this.remember(piece, name, true);
-        await pause();
-      }
-    else
-      for (const line of parsed.lines) {
-        if (line.length >= MIN_SECRET_LENGTH) this.remember(line, WITHHELD_LINE);
-        await pause();
-      }
+    for (const assignment of assignments) {
+      const name = `[env:${assignment.key}]`;
+      for (const piece of envPieces(assignment)) this.remember(piece, name);
+      for (const piece of urlPasswordPieces(assignment.value)) this.remember(piece, name, true);
+      await pause();
+    }
     // Only now is this version of the file covered in full.
     this.files.set(path, signature);
     this.uncovered.delete(path);

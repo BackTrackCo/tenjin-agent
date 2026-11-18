@@ -10,7 +10,12 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, type NoOffer } from './model-job';
-import { modelConsentOutdated, modelSettings, type ModelSettings } from './model-settings';
+import {
+  disclosureCovers,
+  modelConsentOutdated,
+  modelSettings,
+  type ModelSettings,
+} from './model-settings';
 import { currentModelGithubRepositories, modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
@@ -413,7 +418,11 @@ export class ModelHandoff {
     const agentType = String(native.subagent_type ?? 'general-purpose');
     const custom = WORKER_BUILTIN_AGENTS.has(agentType)
       ? null
-      : await workerAgent(agentType, { root: settings.root, homeDir: homedir() });
+      : await workerAgent(agentType, {
+          root: settings.root,
+          cwd: session.cwd,
+          homeDir: homedir(),
+        });
     if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
     const worker = await qualifiedModelWorker(
       session.cwd,
@@ -619,6 +628,16 @@ export class ModelHandoff {
       return native('over_size_limit', { bytes, limit: MODEL_ROUTE_BODY_BYTES });
     if (settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC) return native('job_cap_too_low');
     const input = { ...admission, jobId: job.id };
+    const coversAdmission = (consent: ModelSettings) =>
+      consent.root === job.root &&
+      consent.context === settings.context &&
+      consent.maxJobAtomic >= BigInt(job.capAtomic) &&
+      (claudeWorkspace
+        ? modelClaudeWorkspaceCovered(claudeWorkspace, consent)
+        : consent.scope === 'native-workspace' ||
+          (disclosureRepositories ?? []).every((path) =>
+            disclosureCovers(consent.repositories, path),
+          ));
     let raw: unknown;
     try {
       signal?.throwIfAborted();
@@ -631,8 +650,34 @@ export class ModelHandoff {
       if (pending?.id !== job.id || !['routing', 'offered'].includes(pending.state))
         return native('superseded');
       if (instructions) await assertInstructionMetadataCurrent(instructions);
+      const consent = await this.currentConsent(session.cwd);
+      if (!consent) return native(await this.absentConsent());
+      if (!coversAdmission(consent)) return native('scope_not_covered');
       signal?.throwIfAborted();
-      raw = job.state === 'offered' ? job.decision : await transport.route(input, signal);
+      raw =
+        job.state === 'offered'
+          ? job.decision
+          : await transport.route(input, signal, async () => {
+              if (claudeWorkspace) {
+                const worker = await qualifiedModelWorker(
+                  session.cwd,
+                  String(job.native.subagent_type ?? 'general-purpose'),
+                  undefined,
+                  this.options.dataDir,
+                  signal,
+                  session.claudePermissionMode,
+                );
+                if (
+                  !worker?.claudeWorkspace ||
+                  !sameClaudeWorkspace(claudeWorkspace, worker.claudeWorkspace) ||
+                  worker.windows?.fingerprint !== job.decision.windowsWorker
+                )
+                  throw new Error('Native Claude workspace scope changed');
+              } else if (instructions) await assertInstructionMetadataCurrent(instructions);
+              const current = await this.currentConsent(session.cwd);
+              if (!current || !coversAdmission(current))
+                throw new Error('Model routing consent or workspace scope changed');
+            });
       signal?.throwIfAborted();
     } catch {
       await native(signal?.aborted ? 'interrupted' : 'route_error');
@@ -655,12 +700,7 @@ export class ModelHandoff {
         : native('invalid_offer');
     }
     const consent = await this.currentConsent(session.cwd);
-    if (
-      !consent ||
-      consent.root !== job.root ||
-      consent.maxJobAtomic < BigInt(job.capAtomic) ||
-      (claudeWorkspace && !modelClaudeWorkspaceCovered(claudeWorkspace, consent))
-    )
+    if (!consent || !coversAdmission(consent))
       return native(consent ? 'scope_not_covered' : await this.absentConsent());
     await this.store.decided(job.id, {
       ...parsed.data,

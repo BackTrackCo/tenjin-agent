@@ -554,6 +554,30 @@ it('does not transmit a routing authorization after cancellation while the signe
   expect(router.settledFees).toBe(0);
 });
 
+it('keeps a signed inference request local when workspace scope changes during signing', async () => {
+  const f = await fixture();
+  let currentScope = true;
+  const getSigner = f.deps.getSigner;
+  f.deps.getSigner = async () => {
+    const signer = await getSigner();
+    return {
+      ...signer,
+      signTypedData: async (input) => {
+        const signature = await signer.signTypedData(input);
+        currentScope = false;
+        return signature;
+      },
+    };
+  };
+  await expect(
+    f.make().messages(f.job, { messages: [] }, new AbortController().signal, async () => {
+      if (!currentScope) throw new Error('Workspace scope changed');
+    }),
+  ).rejects.toThrow();
+  expect(currentScope).toBe(false);
+  expect(f.router.paidRequests()).toBe(0);
+});
+
 it('keeps native Responses opaque fields intact and budgets worker plus Guardian in the same job', async () => {
   const wire = 'event: response.completed\ndata: {"response":{"opaque":"unchanged"}}\n\n';
   const f = await fixture({ protocol: 'responses', wire });

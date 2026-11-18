@@ -1677,7 +1677,7 @@ it('finishes GitHub setup before a start-up window starts', async () => {
 });
 
 it.each(['additional directory', 'read exception', 'write exception'] as const)(
-  'native-workspace consent still stops inference when its frozen %s is revoked',
+  'stops the first inference when its frozen %s is revoked during upload',
   async (change) => {
     vi.mocked(modelSettings).mockResolvedValue({
       scope: 'native-workspace',
@@ -1703,7 +1703,6 @@ it.each(['additional directory', 'read exception', 'write exception'] as const)(
       if (change === 'additional directory') changed.permissions.additionalDirectories = [];
       else if (change === 'read exception') changed.sandbox.filesystem.allowRead = [];
       else changed.sandbox.filesystem.allowWrite = [];
-      vi.mocked(resolveSettings).mockResolvedValue({ effective: changed } as never);
       const call = vi.mocked(query).mock.calls[0]![0];
       const handle = native.createServer.mock.calls[0]![0] as (
         request: unknown,
@@ -1716,9 +1715,9 @@ it.each(['additional directory', 'read exception', 'write exception'] as const)(
             url: '/v1/messages',
             headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
             async *[Symbol.asyncIterator]() {
-              yield Buffer.from(
-                JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
-              );
+              yield Buffer.from('{"model":"deepseek-flash",');
+              vi.mocked(resolveSettings).mockResolvedValue({ effective: changed } as never);
+              yield Buffer.from('"messages":[],"max_tokens":32000}');
             },
           },
           {
@@ -2678,6 +2677,9 @@ it("qualifies a custom type and the two built-ins, never a plugin's agent or a b
   const qualifies = async (type: string) =>
     (await qualifiedModelWorker('/repo', type, undefined, '/data', undefined, 'default')) !== null;
   expect(await qualifies('general-purpose')).toBe(true);
+  vi.mocked(workerAgent).mockResolvedValueOnce({
+    agent: { description: 'loop-worker', prompt: 'You are a worker.', tools: ['Read'] },
+  });
   expect(await qualifies('loop-worker')).toBe(true);
   // The loops' Codex lane and every other plugin agent: no worker stands in for one.
   for (const type of [

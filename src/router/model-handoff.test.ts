@@ -309,6 +309,32 @@ it('refuses sibling disclosure revoked during qualification before routing or of
   expect(f.route).not.toHaveBeenCalled();
 });
 
+it('keeps the assignment and transcript local when consent is revoked during the last job read', async () => {
+  const f = await continuationFixture();
+  const transcript = join(dir, 'fresh.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: f.session.sessionId,
+      message: { role: 'user', content: 'Read the synthetic workspace fixture.' },
+    }),
+  );
+  const owned = f.model.store.owned.bind(f.model.store);
+  vi.spyOn(f.model.store, 'owned').mockImplementation(async (id, owner) => {
+    const pending = await owned(id, owner);
+    if (pending?.state === 'routing')
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ router: { subagents: false } }));
+    return pending;
+  });
+  expect(
+    await f.model.capture({ ...f.session, transcript }, 'revoke-before-send', {
+      prompt: 'Check the fixture and report what you find.',
+    }),
+  ).toMatchObject({ action: 'native' });
+  expect(f.route).not.toHaveBeenCalled();
+});
+
 it('holds an across-day continuation to run or cancel, with nothing to judge, the same job ceiling and no routing fee', async () => {
   const f = await continuationFixture();
   const now = Date.now();
@@ -568,6 +594,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
       ],
     }),
     undefined,
+    expect.any(Function),
   );
   expect(await model.submitCodex(session, pending!.id, 'changed')).toMatchObject({
     action: 'native',

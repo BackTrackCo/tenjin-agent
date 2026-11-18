@@ -37,10 +37,11 @@ import type { RequestToolArgs, RequestToolResult } from './tool';
 
 /** `tenjin mcp`'s request executor for a worker's call: the person's wallet, limits and
  *  settings, in the job's root, with no route and no approval. `watch` wraps the spend
- *  gate, so what the call committed is known to the job. */
+ *  gate, so what the call committed is known to the job. The worker signal
+ *  stops provider work before payment leaves the executor. */
 export type WorkerRequest = (
   args: RequestToolArgs,
-  call: { cwd: string; watch: (inner: SpendAuthorizer) => SpendAuthorizer },
+  call: { cwd: string; watch: (inner: SpendAuthorizer) => SpendAuthorizer; signal?: AbortSignal },
 ) => Promise<RequestToolResult>;
 
 /** What a worker's WebSearch asked for: the query and its domain filters. */
@@ -277,14 +278,14 @@ async function paidWorkerTool(
   const { request, signal } = deps;
   if (request === undefined) throw new WorkerToolRefused('no Tenjin router runs it here');
   // A STOPPED WORKER BUYS NOTHING: checked before the free spec read, before the job's
-  // budget is reserved, and again just before the paid request, since each await can
-  // outlast a stop. Once the paid request is sent it runs to its answer, as a model call does.
+  // budget is reserved, and again before calling the executor. Its provider leg
+  // keeps checking until transmission starts, then settles the payment.
   const stopped = () => signal?.aborted === true;
   if (stopped()) throw new WorkerToolRefused('the worker was stopped');
   const ruled = await rulesRefusal(deps, tool);
   if ('refused' in ruled) throw new WorkerToolRefused(ruled.refused);
   const gate = spendWatch();
-  const call = { cwd: deps.job.root, watch: gate.wrap };
+  const call = { cwd: deps.job.root, watch: gate.wrap, ...(signal ? { signal } : {}) };
   const read = await request({ tool }, call);
   const id = read.envelope.status === 'spec' ? read.envelope.id : undefined;
   if (typeof id !== 'string')

@@ -1,5 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import type { Dir } from 'node:fs';
+import { opendir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './names';
 
 /**
@@ -17,12 +18,9 @@ import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './
  * gets no router call: `claude-code-guide` ships with Bash, Read, WebFetch and
  * WebSearch and no MCP tools, and denying its WebFetch would strand it.
  *
- * WHERE A DEFINITION LIVES, in the harness's own precedence: the project's
- * `.claude/agents` (from `cwd` up to the filesystem root, nearest first), then
- * `~/.claude/agents`, then an installed plugin's `agents/` for a `plugin:agent`
- * type. A file is found by its name first and by its frontmatter `name:`
- * second, because the type is the `name:` and the file name only usually
- * matches it.
+ * Claude Code names project and user agents by frontmatter and scans each
+ * agents directory recursively. Managed agents take precedence. Within one
+ * tree Claude Code does not specify which of two matching definitions wins.
  */
 
 export type RequestToolAccess = 'allowed' | 'excluded' | 'unknown';
@@ -44,10 +42,27 @@ export const MCP_INHERITING_BUILTINS: ReadonlySet<string> = new Set([
 export interface AgentLookup {
   cwd?: string;
   homeDir: string;
+  additionalDirectories?: readonly string[];
 }
 
 const MAX_AGENT_FILE_BYTES = 256 * 1024;
+const MAX_AGENT_ENTRIES = 200;
 const TYPE_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
+const MANAGED_AGENTS = join(
+  process.platform === 'darwin'
+    ? '/Library/Application Support/ClaudeCode'
+    : process.platform === 'win32'
+      ? 'C:\\Program Files\\ClaudeCode'
+      : '/etc/claude-code',
+  '.claude',
+  'agents',
+);
+
+class UncertainAgentDefinition extends Error {
+  constructor(readonly reason: string) {
+    super('Claude Code agent definition could not be established');
+  }
+}
 
 export async function requestToolAccess(
   agentType: string | undefined,
@@ -117,8 +132,7 @@ export async function agentsWithoutRequestTool(
   const found: string[] = [];
   const seen = new Set<string>();
   for (const directory of agentDirs(lookup)) {
-    for (const { name, text } of await definitionsIn(directory)) {
-      const type = nameOf(text) ?? name;
+    for (const { name: type, text } of await definitionsIn(directory).catch(() => [])) {
       if (seen.has(type)) continue;
       seen.add(type);
       if (accessOf(text, tool) === 'excluded') found.push(type);
@@ -295,27 +309,32 @@ export const isCustomAgentType = (agentType: string): boolean =>
  * missed, and it then runs with every tool and no agent prompt, seen on
  * 2.1.326), so the worker never looks one up by name.
  *
- * ONLY A DEFINITION THE PROJECT OR THE PERSON WROTE: the job root's own
- * `.claude/agents`, then `~/.claude/agents`. No folder above the root is read,
- * since it is outside what the job's consent names, and no plugin's. `unmatched`
+ * Only the job root's own project definition or the user's may be shared.
+ * Definitions in other native scopes can shadow those definitions. `unmatched`
  * says why a type has no worker form: no such file (a plugin's agent and the
  * host's other built-ins included), or the definition's first key a worker
  * cannot match.
  */
 export async function workerAgent(
   agentType: string,
-  lookup: { root: string; homeDir: string },
+  lookup: AgentLookup & { root: string },
 ): Promise<{ agent: WorkerAgent } | { unmatched: string }> {
-  let text: string | null = null;
-  if (isCustomAgentType(agentType))
-    for (const base of [lookup.root, lookup.homeDir]) {
-      text = await definitionIn(join(resolve(base), '.claude', 'agents'), agentType).catch(
-        () => null,
-      );
-      if (text !== null) break;
-    }
-  const frontmatter = text === null ? null : frontmatterOf(text);
-  if (text === null || frontmatter === null) return { unmatched: 'subagent_type' };
+  if (!isCustomAgentType(agentType)) return { unmatched: 'subagent_type' };
+  const native = { ...lookup, cwd: lookup.cwd ?? lookup.root };
+  let definition: Awaited<ReturnType<typeof localDefinition>>;
+  try {
+    definition = await localDefinition(agentType, native);
+  } catch (error) {
+    return {
+      unmatched:
+        error instanceof UncertainAgentDefinition ? error.reason : 'definition:unavailable',
+    };
+  }
+  const allowed = [join(resolve(lookup.root), '.claude', 'agents'), userAgentDir(native)];
+  if (!definition || !allowed.includes(definition.directory)) return { unmatched: 'subagent_type' };
+  const { text } = definition;
+  const frontmatter = frontmatterOf(text);
+  if (frontmatter === null) return { unmatched: 'subagent_type' };
   const read = readFrontmatter(frontmatter);
   if ('unmatched' in read) return { unmatched: `definition:${read.unmatched}` };
   const lines = text.split(/\r?\n/);
@@ -340,20 +359,24 @@ export async function findDefinition(
   agentType: string,
   lookup: AgentLookup,
 ): Promise<string | null> {
-  for (const directory of agentDirs(lookup)) {
-    const text = await definitionIn(directory, agentType);
-    if (text !== null) return text;
-  }
   const colon = agentType.indexOf(':');
+  if (colon < 0) return (await localDefinition(agentType, lookup))?.text ?? null;
   if (colon > 0) {
     const plugin = agentType.slice(0, colon);
     const agent = agentType.slice(colon + 1);
     for (const root of await pluginRoots(plugin, lookup.homeDir)) {
-      const text = await definitionIn(join(root, 'agents'), agent);
+      const text = await pluginDefinitionIn(join(root, 'agents'), agent);
       if (text !== null) return text;
     }
   }
   return null;
+}
+
+function userAgentDir(lookup: AgentLookup): string {
+  return join(
+    resolve(lookup.cwd || '.', process.env.CLAUDE_CONFIG_DIR ?? join(lookup.homeDir, '.claude')),
+    'agents',
+  );
 }
 
 function agentDirs(lookup: AgentLookup): string[] {
@@ -367,34 +390,100 @@ function agentDirs(lookup: AgentLookup): string[] {
       current = parent;
     }
   }
-  const user = join(resolve(lookup.homeDir), '.claude', 'agents');
+  const user = userAgentDir(lookup);
   // The user's directory is also an ancestor of most projects; it counts once,
   // in its own place in the order.
   return [...dirs.filter((d) => d !== user), user];
 }
 
-async function definitionIn(directory: string, agentType: string): Promise<string | null> {
+async function localDefinition(agentType: string, lookup: AgentLookup) {
+  const user = userAgentDir(lookup);
+  const directories = agentDirs(lookup).filter((directory) => directory !== user);
+  const extra = [
+    ...new Set(
+      (lookup.additionalDirectories ?? []).map((dir) =>
+        resolve(lookup.cwd || '.', dir, '.claude', 'agents'),
+      ),
+    ),
+  ].filter((directory) => directory !== user && !directories.includes(directory));
+  let project: { directory: string; text: string } | undefined;
+  for (const directory of [MANAGED_AGENTS, ...directories, ...extra, user]) {
+    if (project && directory === user) break;
+    if (project && directories.includes(directory)) continue;
+    const matches = (await definitionsIn(directory)).filter(
+      (candidate) => candidate.name === agentType,
+    );
+    if (matches.length > 1 || (project && matches.length > 0))
+      throw new UncertainAgentDefinition('definition:ambiguous');
+    if (!matches[0]) continue;
+    project = { directory, text: matches[0].text };
+    if (directory === MANAGED_AGENTS) break;
+  }
+  return project;
+}
+
+async function pluginDefinitionIn(directory: string, agentType: string): Promise<string | null> {
   const direct = await readBounded(join(directory, `${agentType}.md`));
   if (direct !== null && (nameOf(direct) ?? agentType) === agentType) return direct;
-  for (const { text } of await definitionsIn(directory)) {
-    if (nameOf(text) === agentType) return text;
-  }
-  return null;
+  return (
+    (await definitionsIn(directory).catch(() => [])).find((def) => def.name === agentType)?.text ??
+    null
+  );
 }
 
 async function definitionsIn(directory: string): Promise<{ name: string; text: string }[]> {
-  let names: string[];
+  let opened: Dir;
   try {
-    names = (await readdir(directory)).filter((n) => n.endsWith('.md')).slice(0, 200);
-  } catch {
-    return [];
+    // Require the agents tree itself to stay below its canonical config root.
+    const canonical = await realpath(directory);
+    const base = await realpath(dirname(dirname(directory)));
+    if (canonical !== join(base, basename(dirname(directory)), 'agents'))
+      throw new UncertainAgentDefinition('definition:unavailable');
+    opened = await opendir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
   const out: { name: string; text: string }[] = [];
-  for (const file of names) {
-    const text = await readBounded(join(directory, file));
-    if (text !== null) out.push({ name: file.slice(0, -3), text });
+  let entries = 0;
+  async function walk(current: Dir) {
+    for await (const file of current) {
+      if (++entries > MAX_AGENT_ENTRIES || file.isSymbolicLink())
+        throw new UncertainAgentDefinition('definition:unavailable');
+      const path = join(current.path, file.name);
+      if (file.isDirectory()) await walk(await opendir(path));
+      else if (file.isFile() && file.name.endsWith('.md')) {
+        if ((await stat(path)).size > MAX_AGENT_FILE_BYTES)
+          throw new UncertainAgentDefinition('definition:unavailable');
+        const text = await readFile(path, 'utf8');
+        const name = lookupNameOf(text);
+        if (name) out.push({ name, text });
+      }
+    }
   }
+  await walk(opened);
   return out;
+}
+
+/** A name the local tree scanner can compare without guessing about YAML keys or aliases. */
+function lookupNameOf(text: string): string | undefined {
+  const lines = frontmatterOf(text);
+  if (!lines) return undefined;
+  let name: string | undefined;
+  let fieldSeen = false;
+  for (const line of lines) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    if (fieldSeen && /^(\s|-\s)/.test(line)) continue;
+    const field = /^(?:([A-Za-z][\w-]*)|'([A-Za-z][\w-]*)'|"([A-Za-z][\w-]*)")\s*:(.*)$/.exec(line);
+    if (!field) throw new UncertainAgentDefinition('definition:frontmatter');
+    fieldSeen = true;
+    if ((field[1] ?? field[2] ?? field[3]) !== 'name') continue;
+    const value = scalar(field[4]!);
+    if (name !== undefined || value === null || !TYPE_RE.test(value))
+      throw new UncertainAgentDefinition('definition:frontmatter');
+    name = value;
+  }
+  return name;
 }
 
 /** Install paths `installed_plugins.json` records for `<plugin>@<marketplace>`. */

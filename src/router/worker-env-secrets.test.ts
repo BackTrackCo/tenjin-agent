@@ -41,33 +41,27 @@ it('parses env files by dotenv rules, including old commented-out values', () =>
         'EMPTY=',
       ].join('\r\n'),
     ),
-  ).toEqual({
-    ok: true,
-    assignments: [
-      { key: 'API_KEY', value: 'sk_live_51Hx9QaZ', written: 'sk_live_51Hx9QaZ' },
-      { key: 'SINGLE', value: 'a b # not a comment', written: 'a b # not a comment' },
-      { key: 'DOUBLE', value: 'line one\nline two', written: 'line one\\nline two' },
-      {
-        key: 'PEM',
-        value:
-          '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----',
-        written:
-          '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----',
-      },
-      { key: 'COLON', value: 'value-with-colon', written: 'value-with-colon' },
-      { key: 'OLD_PASSWORD', value: 'Retired-P4ssw0rd!', written: 'Retired-P4ssw0rd!' },
-      { key: 'EMPTY', value: '', written: '' },
-    ],
-  });
+  ).toEqual([
+    { key: 'API_KEY', value: 'sk_live_51Hx9QaZ', written: 'sk_live_51Hx9QaZ' },
+    { key: 'SINGLE', value: 'a b # not a comment', written: 'a b # not a comment' },
+    { key: 'DOUBLE', value: 'line one\nline two', written: 'line one\\nline two' },
+    {
+      key: 'PEM',
+      value:
+        '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----',
+      written:
+        '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----',
+    },
+    { key: 'COLON', value: 'value-with-colon', written: 'value-with-colon' },
+    { key: 'OLD_PASSWORD', value: 'Retired-P4ssw0rd!', written: 'Retired-P4ssw0rd!' },
+    { key: 'EMPTY', value: '', written: '' },
+  ]);
 });
 
-it('treats a file it cannot parse as lines to withhold, never as raw text to forward', () => {
-  expect(parseEnvFile('use flake\nsecret-without-a-key-0x9f\n')).toEqual({
-    ok: false,
-    lines: ['use flake', 'secret-without-a-key-0x9f'],
-  });
-  expect(parseEnvFile('KEY="never closed\nmore')).toMatchObject({ ok: false });
-  expect(parseEnvFile('KEY=a\0b')).toMatchObject({ ok: false });
+it('recognizes malformed or unsupported dotenv syntax', () => {
+  expect(parseEnvFile('use flake\nsecret-without-a-key-0x9f\n')).toBeUndefined();
+  expect(parseEnvFile('KEY="never closed\nmore')).toBeUndefined();
+  expect(parseEnvFile('KEY=a\0b')).toBeUndefined();
 });
 
 it('leaves short and common values alone, and treats URLs with credentials as secrets whole', () => {
@@ -132,10 +126,33 @@ it('replaces each value by its name, in the forms a command prints it, longest f
   expect(env.redact('nothing here')).toBe('nothing here');
 });
 
-it('withholds every line of a file it cannot parse, keeping lines too short to matter', async () => {
-  const root = await workspace({ '.envrc': 'use nix\nlayout-secret-a9f3e1\n' });
+it('withholds shell-form env files at startup while covering valid neighboring files', async () => {
+  const root = await workspace({
+    '.envrc': 'export WORKER_TEST_VALUE=fixture-value-0x10\nexport PATH\n',
+    '.env.local': 'OTHER=other-value-0x11',
+  });
   const env = await WorkerEnvSecrets.start([root], { watch: false });
-  expect(env.redact('use nix; layout-secret-a9f3e1')).toBe('use nix; [env:withheld line]');
+  expect(env.scanned).toBe(true);
+  expect(env.withheld).toEqual([join(root, '.envrc')]);
+  expect(env.uncovered.size).toBe(0);
+  expect(env.redact('other-value-0x11')).toBe('[env:OTHER]');
+});
+
+it('rejects a warmed worker when an env file needs a new deny and marks it uncovered during a run', async () => {
+  const root = await workspace({ '.envrc': 'export OLD=previous-value-0x12' });
+  const path = join(root, '.envrc');
+  const env = await WorkerEnvSecrets.start([root], { watch: false });
+  await writeFile(path, 'export NEXT=next-value-0x13\nexport PATH\n');
+
+  expect(await env.refreshBeforeAssignment()).toBe(false);
+  await env.refresh();
+  expect([...env.uncovered]).toEqual([path]);
+  expect(env.redact('previous-value-0x12')).toBe('[env:OLD]');
+
+  await writeFile(path, 'export NEXT=next-value-0x13');
+  await env.refresh();
+  expect(env.uncovered.size).toBe(0);
+  expect(env.redact('previous-value-0x12 next-value-0x13')).toBe('[env:OLD] [env:NEXT]');
 });
 
 it('keeps env files denied when the scan stops short, and outside the working directories', async () => {
@@ -267,7 +284,7 @@ it("replaces the env values of a repository's .claude/settings.json at any depth
   expect(env.redact('own-value-0x0a nested-value-0x0b other-value-0x0d')).toBe(
     '[env:OWN_TOKEN] [env:NESTED_KEY] other-value-0x0d',
   );
-  // No line of it is known as an env file's would be: the whole file is denied by its path.
+  // The whole file is denied by its path.
   expect(env.withheld).toEqual([join(root, 'apps/old/.claude/settings.json')]);
   // One that stops parsing during the job stops forwarding, as an unreadable env file does.
   await writeFile(join(root, 'apps/web/.claude/settings.json'), '{ "env": ');

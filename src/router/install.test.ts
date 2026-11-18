@@ -148,7 +148,7 @@ describe('tenjin install', () => {
               recommended: false,
               ask: [
                 'Daily budget shared across chats, in USD, or none for no limit',
-                'The most it may pay for one call, in USD; 0 blocks positive automatic payments',
+                'Ordinary-tool per-call limit in USD. DeepSeek inference uses its separate job ceiling. Zero blocks positive automatic payments.',
               ],
               command: 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
             },
