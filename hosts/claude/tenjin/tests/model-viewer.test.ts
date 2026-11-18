@@ -35,6 +35,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     stateFails: false,
     spawnFails: false,
     spawnBlocked: undefined as Promise<void> | undefined,
+    viewerSpawned: undefined as ((agentId: string) => void) | undefined,
     calls: 0,
     registrations: [] as unknown[],
     nativeSteps: 0,
@@ -58,6 +59,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     followArgs: [] as Record<string, unknown>[],
     followWait: undefined as Promise<void> | undefined,
     finishFollow: (() => undefined) as () => void,
+    viewerFollowing: undefined as ((offerId: string) => void) | undefined,
     coreToolUses: 0,
     cancellations: [] as unknown[],
     captures: [] as { input: Record<string, unknown>; tool: string }[],
@@ -133,6 +135,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
       spawnedBy: 'tenjin',
       ...(e.parentAgentId ? { parentId: e.parentAgentId } : {}),
     });
+    state.viewerSpawned?.(id);
     await state.spawnBlocked;
     // No core child starts in this virtual engine; the public contract strips hook-minted ids.
     return { model: 'inherit' };
@@ -187,7 +190,11 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
   });
   on('mcp.call', async (_$, e) => {
-    if (e.args.follow === true) state.followArgs.push(e.args);
+    const offer = typeof e.args.offer_id === 'string' ? e.args.offer_id : state.offer;
+    if (e.args.follow === true) {
+      state.followArgs.push(e.args);
+      state.viewerFollowing?.(offer);
+    }
     if (e.args.follow === true && state.followGate && state.phase === 'running') {
       state.follows++;
       await new Promise<void>((resolve) => state.followGate!.push(resolve));
@@ -218,7 +225,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
           },
         };
       // As the CLI's: at once when the activity moved past `after`, else once it ends.
-      const now = activity();
+      const now = activity(offer);
       const after = e.args.after;
       if (typeof after === 'number' && now.activity.sequence > after)
         return {
@@ -228,7 +235,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
           },
         };
       await state.followWait;
-      const ended = activity();
+      const ended = activity(offer);
       if (ended.activity.state === 'running') ended.activity.state = 'completed';
       return {
         value: {
@@ -250,7 +257,6 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
       return said(
         state.ended ? { status: 'ended', ended: state.ended } : { status: 'unavailable' },
       );
-    const offer = typeof e.args.offer_id === 'string' ? e.args.offer_id : state.offer;
     return said({ ...activity(offer), ...(state.ended ? { ended: state.ended } : {}) });
   });
   on('tool.call', { tool: ACCEPT }, async (_$, e) => {
@@ -963,22 +969,46 @@ test('a new offer in another cwd preserves the earlier viewer cancellation bindi
     await blocked;
     return { result: 'first worker handback' };
   };
+  f.state.followWait = blocked;
+  const spawned = new Promise<string>((resolve) => {
+    f.state.viewerSpawned = resolve;
+  });
+  const observing = new Promise<void>((resolve) => {
+    f.state.viewerFollowing = (offerId) => {
+      if (offerId === OFFER) resolve();
+    };
+  });
   await remember($);
-  const { running, firstStep } = await startWithViewer($, f);
-  f.state.cwd = '/another-repository';
-  f.state.offer = OFFER2;
-  await remember($, INPUT2);
-  expect(f.state.snapshot?.records.map((r) => r.offerId)).toEqual([OFFER2]);
-  f.state.agents[0]!.status = 'killed';
-  await complete($, 'native-viewer-1', 'aborted', 'foreign-turn');
-  expect(f.state.cancellations).toEqual([]);
-  await complete($, 'native-viewer-1');
-  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
-  expect(f.state.snapshot?.priorStops).toEqual([]);
-  release();
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  let firstStep: ReturnType<typeof step> | undefined;
+  try {
+    const nativeId = await spawned;
+    await $.classic.SubagentStart({ agent_id: nativeId, agent_type: TYPE });
+    expect(f.state.snapshot?.records[0]).toMatchObject({ offerId: OFFER, active: true, nativeId });
+    firstStep = step($, nativeId);
+    // The follow starts after the viewer's turn id has been written to state.
+    await Promise.race([
+      observing,
+      firstStep.then(() => {
+        throw new Error('The viewer ended before following its worker');
+      }),
+    ]);
+    f.state.cwd = '/another-repository';
+    f.state.offer = OFFER2;
+    await remember($, INPUT2);
+    expect(f.state.snapshot?.records.map((r) => r.offerId)).toEqual([OFFER2]);
+    f.state.agents[0]!.status = 'killed';
+    await complete($, nativeId, 'aborted', 'foreign-turn');
+    expect(f.state.cancellations).toEqual([]);
+    await complete($, nativeId);
+    expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
+    expect(f.state.snapshot?.priorStops).toEqual([]);
+  } finally {
+    release();
+    await Promise.allSettled([running, firstStep]);
+    await f.clock.settle();
+  }
   expect((await running).result).toBe('first worker handback');
-  await firstStep;
-  await f.clock.settle();
 });
 
 // Job 8f2d28ff: Claude Code's stall watchdog ended the viewer's one long step at 600 s,

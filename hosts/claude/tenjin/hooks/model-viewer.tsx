@@ -1412,6 +1412,8 @@ export function registerModelViewer(on: On): void {
       // Tag before any fallible host call; the native event pins this type and id.
       guardViewer(e.agent_id);
       try {
+        // A listed viewer may be stopped before its first step supplies a turn id.
+        await identify($, e.agent_id).catch(() => undefined);
         await change($, (state) => {
           if (state.knownIds.includes(e.agent_id)) return;
           const live = state.records.filter((r) => r.active).map((r) => r.nativeId);
