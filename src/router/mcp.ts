@@ -317,7 +317,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const sessions = new Map<string, { transcript_path?: unknown; cwd?: unknown }>();
   let modelSession: ModelSession | undefined;
   const seenModelTurns = new Set<string>();
+  // A `tenjin mcp` STARTED INSIDE A MODEL WORKER, under whatever name the worker's host
+  // registered it, lists and runs one tool: `hook`, which the host's hook legs call and
+  // which answers nothing there. A worker pays for nothing outside its job's budget and
+  // starts no DeepSeek worker (operator ruling 2026-11-17).
+  const inWorker = isModelWorkerProcess(opts.env);
   const modelTool = registerModelTool(server, {
+    modelWorker: inWorker,
     dataDir: ctx.dataDir,
     harness: opts.harness ?? 'claude',
     session: () => modelSession,
@@ -450,7 +456,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       return handBack('Tenjin could not decide in time');
     }
   };
-  server.registerTool(
+  const request = server.registerTool(
     'request',
     {
       title: 'Request external information or a computation, paid per call',
@@ -680,10 +686,11 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     },
   );
   approve.disable();
+  if (inWorker) request.disable();
   // Known only once the client has said who it is: listed then, and only to
   // the host whose prompt is the yes.
   server.server.oninitialized = () => {
-    if (promptsBeforeApprove(server.server.getClientVersion())) approve.enable();
+    if (!inWorker && promptsBeforeApprove(server.server.getClientVersion())) approve.enable();
   };
   // THE HOOK LEGS' TOOL. The plugin's hooks call it once per routing leg as an
   // `mcp_tool` hook, so the leg runs in this process, which holds the wallet

@@ -105,6 +105,8 @@ export function registerModelTool(
     harness: 'claude' | 'codex';
     session: () => ModelSession | undefined;
     transport: () => Promise<ModelTransport>;
+    /** This process was started inside a model worker. Default: read from the environment. */
+    modelWorker?: boolean;
     /** `tenjin mcp`'s request executor, which pays for a Claude worker's web searches. */
     web?: WorkerRequest;
     /** The router's identities read, which the person's rules for those searches are checked against. */
@@ -379,7 +381,11 @@ export function registerModelTool(
       ),
       warming.get(job.id)?.stop(),
     ]);
-  if (options.harness === 'claude')
+  // A `tenjin mcp` STARTED INSIDE A MODEL WORKER has neither tool, under whatever name the
+  // worker's host registered it: a worker starts no DeepSeek worker and reads none (operator
+  // ruling 2026-11-17). It once listed both under a second registration's name.
+  const inWorker = options.modelWorker ?? isModelWorkerProcess();
+  if (options.harness === 'claude' && !inWorker)
     server.registerTool(
       'subagent_activity',
       {
@@ -509,6 +515,9 @@ export function registerModelTool(
       : {}),
   };
   type SubagentOperation = Parameters<ToolCallback<typeof subagentInput>>;
+  const registerSubagent = (
+    inWorker ? () => undefined : server.registerTool.bind(server)
+  ) as typeof server.registerTool;
   const withBatchAccepts =
     (
       run: (
@@ -557,7 +566,7 @@ export function registerModelTool(
         })),
       });
     };
-  server.registerTool(
+  registerSubagent(
     'subagent',
     {
       title: 'Tenjin subagent',

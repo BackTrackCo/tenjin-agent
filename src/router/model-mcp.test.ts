@@ -903,6 +903,27 @@ it('keeps activity unavailable inside a model worker without claiming or startin
   }
 });
 
+// Operator ruling 2026-11-17: a DeepSeek worker starts no DeepSeek worker. A worker's
+// Claude Code once listed this tool from a second registration of the same server.
+it('registers neither the subagent tool nor the activity read in a process started inside a model worker', async () => {
+  vi.stubEnv('TENJIN_MODEL_WORKER', '1');
+  const f = await ownedClaudeFixture();
+  try {
+    // A server with no tool at all answers the listing with an error.
+    const listed = await f.client.listTools().then(
+      (answer) => answer.tools.map((tool) => tool.name),
+      () => [],
+    );
+    expect(listed).toEqual([]);
+    await expect(f.call({ offer_id: f.job.id })).rejects.toThrow();
+    expect((await jobOf('first-turn'))?.state).toBe('offered');
+    expect(worker.run).not.toHaveBeenCalled();
+    expect(worker.warm).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
 it('rejects an unrelated activity follow without initializing transport or mutating the job store', async () => {
   const f = await ownedClaudeFixture();
   const jobFiles = async () => {

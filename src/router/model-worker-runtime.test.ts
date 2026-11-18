@@ -567,12 +567,17 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
     apiKeyHelper: expect.any(String),
     env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   });
+  // No subagent tool, native or Tenjin's, and no Tenjin tool under either name Tenjin
+  // registers its server by: the plugin's, and the settings install's `x402`, which once
+  // left `mcp__x402__subagent` in a worker's reach.
   expect(call.options?.disallowedTools).toEqual([
     'Agent',
     'Task',
-    'mcp__plugin_tenjin_router__subagent',
-    'mcp__plugin_tenjin_router__request',
-    'mcp__plugin_tenjin_router__approve',
+    ...['mcp__plugin_tenjin_router', 'mcp__x402'].flatMap((server) =>
+      ['subagent', 'subagent_activity', 'request', 'approve', 'hook'].map(
+        (tool) => `${server}__${tool}`,
+      ),
+    ),
     'AskUserQuestion',
   ]);
   expect(call.options?.settingSources).toEqual(['user', 'project', 'local']);

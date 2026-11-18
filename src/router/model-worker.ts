@@ -38,6 +38,7 @@ import {
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { markSessionServed } from './alive';
 import { modelSettings } from './model-settings';
+import { CLAUDE_TENJIN_TOOLS } from './names';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
   MODEL_NATIVE_TEXT_BYTES,
@@ -993,11 +994,11 @@ async function runQualifiedWorker(
         // No turn cap (operator ruling 2026-11-17, as the DeepSeek harness has none): the
         // job's wall time and money ceiling bound a run.
         disallowedTools: [
+          // A worker starts no subagent, native or DeepSeek, and none of its calls is
+          // held or offered (operator ruling 2026-11-17).
           'Agent',
           'Task',
-          'mcp__plugin_tenjin_router__subagent',
-          'mcp__plugin_tenjin_router__request',
-          'mcp__plugin_tenjin_router__approve',
+          ...CLAUDE_TENJIN_TOOLS,
           // A native subagent has no question tool in any mode; it ends with its report.
           'AskUserQuestion',
           // Nor the main thread's own tools, such as scheduling a wake-up.

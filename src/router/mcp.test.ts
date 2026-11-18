@@ -1472,8 +1472,10 @@ describe('the top-up at the start of tenjin mcp', () => {
   });
 });
 
+// Live on alpha.70: a worker's Claude Code listed `mcp__x402__subagent` and
+// `mcp__x402__request`, from the settings install's registration of this same server.
 it.each(['claude', 'codex'] as const)(
-  'refuses nested Tenjin request/decide/approval in a %s worker without unlocking or fetching',
+  'a server started inside a %s worker has no tool but the hook legs, under any registration name, and unlocks and fetches nothing',
   async (harness) => {
     const fetchImpl = vi.fn<typeof fetch>();
     const provider = testWalletProvider();
@@ -1488,30 +1490,30 @@ it.each(['claude', 'codex'] as const)(
     const client = new Client({ name: 'claude-code', version: '2.1.325' });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      for (const args of [
-        { query: 'ETH price' },
-        { id: 'fixture', input: { symbol: 'ETH' } },
-        {
-          decide: {
-            tool: 'WebSearch',
-            input: { query: 'ETH' },
-            tool_use_id: 'worker-call',
-            session_id: 'worker',
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(['hook']);
+      for (const [name, args] of [
+        ['request', { query: 'ETH price' }],
+        ['request', { id: 'fixture', input: { symbol: 'ETH' } }],
+        [
+          'request',
+          {
+            decide: {
+              tool: 'WebSearch',
+              input: { query: 'ETH' },
+              tool_use_id: 'worker-call',
+              session_id: 'worker',
+            },
           },
-        },
-      ]) {
-        expect(
-          envelopeOf(await client.callTool({ name: 'request', arguments: args })),
-        ).toMatchObject({
-          status: 'failed',
-          reason: expect.stringContaining('inside a model worker'),
-        });
+        ],
+        ['approve', { quote: 'fixture-quote' }],
+        ['subagent', { offer_id: '53a6f54e-9106-45d1-9719-7ef41ab8a6e2' }],
+        ['subagent_activity', { offer_id: '53a6f54e-9106-45d1-9719-7ef41ab8a6e2' }],
+      ] as const) {
+        const called = await client
+          .callTool({ name, arguments: args })
+          .catch(() => ({ isError: true }));
+        expect(called.isError).toBe(true);
       }
-      expect(
-        envelopeOf(
-          await client.callTool({ name: 'approve', arguments: { quote: 'fixture-quote' } }),
-        ),
-      ).toMatchObject({ status: 'failed' });
       expect(fetchImpl).not.toHaveBeenCalled();
       expect(getSigner).not.toHaveBeenCalled();
     } finally {
