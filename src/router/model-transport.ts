@@ -23,8 +23,23 @@ import {
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
-import { ModelCallFailed, retryAfterMs, timedOut, WORKER_WALL_MS } from './model-worker-control';
-import { ModelRefundJournal, modelRefundRunLock } from './model-refund';
+import {
+  ModelCallFailed,
+  ModelWorkerStopped,
+  retryAfterMs,
+  sleepFor,
+  timedOut,
+  WORKER_WALL_MS,
+} from './model-worker-control';
+import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
+
+/**
+ * How long each try of a run's refund-support question may take. A first accept once got
+ * no answer inside 3 s on a loaded machine, and the job ended with no cause: the question
+ * is asked again before the run gives up.
+ */
+const SUPPORT_PROBE_MS = [3_000, 10_000, 10_000];
+const SUPPORT_PROBE_WAIT_MS = 500;
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
@@ -161,7 +176,7 @@ export class ModelTransport {
   ): Promise<T> {
     const journal = this.refundJournal();
     const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
-    if (!(await journal.requireSupport(endpoint, signal))) return run(this);
+    if (!(await this.refundSupport(journal, endpoint, signal))) return run(this);
     const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
     await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
     const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
@@ -180,6 +195,32 @@ export class ModelTransport {
       // A failed attempt leaves the durable record for recovery rather than changing the result.
       if (entered) await journal.close(runId, AbortSignal.timeout(8_000)).catch(() => undefined);
     }
+  }
+
+  /**
+   * Asked before the worker is released, so nothing was bought when it fails. No answer in
+   * every try ends the run as not started, with the router as the cause; any other
+   * failure is the journal's own refusal.
+   */
+  private async refundSupport(journal: ModelRefundJournal, endpoint: string, signal: AbortSignal) {
+    let unanswered: RefundProbeUnanswered | undefined;
+    for (const [attempt, timeoutMs] of SUPPORT_PROBE_MS.entries()) {
+      if (attempt > 0) await sleepFor(SUPPORT_PROBE_WAIT_MS * attempt, signal);
+      try {
+        return await journal.requireSupport(endpoint, signal, timeoutMs);
+      } catch (error) {
+        if (signal.aborted || !(error instanceof RefundProbeUnanswered)) throw error;
+        unanswered = error;
+      }
+    }
+    throw new ModelWorkerStopped(
+      {
+        kind: 'not_started',
+        reason: 'router_unreachable',
+        ...(unanswered?.status !== undefined ? { status: unanswered.status } : {}),
+      },
+      { cause: unanswered },
+    );
   }
 
   async recoverInferenceRefunds(signal: AbortSignal) {
@@ -456,12 +497,15 @@ export class ModelTransport {
       );
     });
     if (challenge.status !== 402) {
-      await challenge.body?.cancel();
       const wait = retryAfterMs(challenge.headers.get('retry-after'));
+      // Its fixed code says what the router refused, such as `invalid_model_request`.
+      const refused = await errorCode(boundedResponse(challenge, 65_536));
+      await challenge.body?.cancel().catch(() => undefined);
       throw new ModelCallFailed('Model proxy did not return a payment quote', {
         cause: 'failed',
         status: challenge.status,
         uncharged: true,
+        ...refused,
         ...(wait !== undefined ? { retryAfterMs: wait } : {}),
       });
     }
@@ -677,6 +721,7 @@ export class ModelTransport {
           cause: timedOut(failure) ? 'timeout' : 'failed',
           ...(failure instanceof RouteSkipped ? { payer: failure.why } : {}),
           ...(paidError ? { status: paidError.status } : {}),
+          ...(paidError?.code !== undefined ? { code: paidError.code } : {}),
         },
         { cause: failure },
       );

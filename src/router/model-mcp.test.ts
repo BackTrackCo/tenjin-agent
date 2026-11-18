@@ -1500,6 +1500,68 @@ it('hands back a worker that never started as not started, with the free native 
   }
 });
 
+// Live case (job 77f41059): a job ended `unknown` after 3.0 s with nothing to say what failed.
+it('ends a job whose router did not answer at its start as not started, and keeps the error in its record', async () => {
+  const f = await ownedClaudeFixture('general-purpose', true);
+  const transport = await f.getTransport();
+  const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  transport.withInferenceRun = async () => {
+    throw new ModelWorkerStopped(
+      { kind: 'not_started', reason: 'router_unreachable' },
+      {
+        cause: new Error('The router did not answer the inference refund probe', {
+          cause: timeout,
+        }),
+      },
+    );
+  };
+  try {
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      status: 'not_started',
+      endedBy: 'router_unreachable',
+      ended: WORKER_ENDS.router_unreachable,
+      stopReason: { kind: 'not_started', reason: 'router_unreachable' },
+      nextStep:
+        'No worker started: the Tenjin router did not answer when the job started. Keep it native: send the original Agent call again unchanged; that repeat costs no second routing fee.',
+    });
+    expect(worker.run).not.toHaveBeenCalled();
+    const record = JSON.parse(
+      await readFile(join(dir, 'model-jobs', `${f.job.id}.diagnostics.json`), 'utf8'),
+    );
+    expect(record.failure).toEqual({
+      endedBy: 'router_unreachable',
+      errors: [
+        { name: 'ModelWorkerStopped', code: 'router_unreachable', message: expect.any(String) },
+        { name: 'Error', message: 'The router did not answer the inference refund probe' },
+        { name: 'TimeoutError', message: 'The operation was aborted due to timeout' },
+      ],
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+it('keeps the error of a worker that failed with no known cause, with secret-shaped text masked', async () => {
+  const f = await ownedClaudeFixture();
+  worker.run.mockRejectedValue(
+    new Error('The warm Claude worker exited: GITHUB_TOKEN=ghp_' + 'a1B2'.repeat(9)),
+  );
+  try {
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      status: 'unknown',
+      endedBy: 'worker_error',
+    });
+    const record = JSON.parse(
+      await readFile(join(dir, 'model-jobs', `${f.job.id}.diagnostics.json`), 'utf8'),
+    );
+    expect(record.failure.endedBy).toBe('worker_error');
+    expect(record.failure.errors[0].message).toContain('The warm Claude worker exited');
+    expect(JSON.stringify(record)).not.toContain('a1B2a1B2');
+  } finally {
+    await f.close();
+  }
+});
+
 it('promises no free native repeat when a continuation never started', async () => {
   const f = await ownedClaudeFixture('general-purpose', true);
   try {

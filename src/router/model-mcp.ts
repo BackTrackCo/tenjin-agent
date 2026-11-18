@@ -39,6 +39,7 @@ import {
 import { startWorkerProgress, workerProgressPath } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
+import { workerFailure, writeWorkerFailure } from './model-worker-diagnostics';
 
 type ActiveConversation = {
   handle: string;
@@ -1067,6 +1068,9 @@ export function registerModelTool(
               // and the unchanged repeat of the offered call runs native with no second fee.
               const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
               const endedBy = abort.signal.aborted ? abortedBy : workerEnd(stop);
+              // The error itself, for the person: the handback carries fixed codes only.
+              if (!abort.signal.aborted)
+                await writeWorkerFailure(options.dataDir, job.id, workerFailure(endedBy, error));
               const stopped = {
                 // `stopped` with its cause in `endedBy`; `unknown` only when nothing said why.
                 status: abort.signal.aborted
@@ -1090,7 +1094,7 @@ export function registerModelTool(
                 // though it runs with the original job's fields.
                 nextStep:
                   notStarted && !resumed && job.nativeTool
-                    ? `No worker started: Claude Code did not start within its start-up window. Keep it native: send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
+                    ? `No worker started: ${stop?.reason === 'router_unreachable' ? 'the Tenjin router did not answer when the job started' : 'Claude Code did not start within its start-up window'}. Keep it native: send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
                     : activeConversation
                       ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                       : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',

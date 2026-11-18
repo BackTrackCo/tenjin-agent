@@ -199,9 +199,32 @@ it('turns a failed model call into a stop of fixed codes, and leaves every other
     status: 502,
     payer: 'payment_failed',
   });
+  // The router's fixed code for a request it refused reaches the stop reason.
+  expect(
+    workerStop(
+      modelCallStop(
+        new ModelCallFailed('refused', {
+          cause: 'failed',
+          status: 400,
+          uncharged: true,
+          code: 'invalid_model_request',
+        }),
+      ),
+    ),
+  ).toEqual({
+    kind: 'execution_failure',
+    reason: 'model_call_failed',
+    status: 400,
+    code: 'invalid_model_request',
+  });
   // What is not an HTTP status or a code is left out; no message text is carried.
   const odd = modelCallStop(
-    new ModelCallFailed('x', { cause: 'failed', status: 7, payer: 'Not a code: secret' }),
+    new ModelCallFailed('x', {
+      cause: 'failed',
+      status: 7,
+      payer: 'Not a code: secret',
+      code: 'Not a code: secret',
+    }),
   );
   expect(workerStop(odd)).toEqual({ kind: 'execution_failure', reason: 'model_call_failed' });
   expect(workerStop(modelCallStop(failed))).not.toHaveProperty('message');

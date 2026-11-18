@@ -2,6 +2,9 @@ import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { isRecord } from '../lib/guards';
+import { mask } from '../lib/redact';
+import { readJsonFile } from './store-files';
 
 const run = promisify(execFile);
 const MAX_NAMES = 256;
@@ -12,8 +15,9 @@ const MAX_REPEATS = 32;
  * its tools and MCP servers, its root and commit, the output and context settings its
  * requests carried, whether its earlier reasoning went back on each turn, its repeat
  * reminders and how it ended. Names, numbers and codes only: no assignment, no tool
- * input or result, no model text. Written next to the job's record, readable by its
- * user alone, swept with it after 7 days, and sent nowhere.
+ * input or result, no model text. A run that failed also keeps its error (`failure`).
+ * Written next to the job's record, readable by its user alone, swept with it after 7
+ * days, and sent nowhere.
  */
 export type WorkerDiagnostics = {
   version: 1;
@@ -48,7 +52,74 @@ export type WorkerDiagnostics = {
   /** Model calls tried again after a failure the router confirmed cost nothing. */
   retries: { attempt: number; cause: string; status?: number }[];
   stop?: { subtype: string; turns?: number; stopReason?: string };
+  failure?: WorkerFailure;
 };
+
+/**
+ * WHY A RUN THAT DID NOT COMPLETE FAILED: the job's end code, and the error with its
+ * causes, outermost first. Each has its class name, its code when it has one (a system
+ * code such as `ETIMEDOUT`, the router's status or fixed error code) and the start of its
+ * message with secret-shaped values masked. A job once ended `unknown` after 3 s with
+ * nothing anywhere to say what had failed.
+ */
+export type WorkerFailure = {
+  endedBy: string;
+  errors: { name: string; code?: string; status?: number; message: string }[];
+};
+const MAX_CAUSES = 5;
+const MAX_MESSAGE = 300;
+
+export function workerFailure(endedBy: string, error: unknown): WorkerFailure {
+  const errors: WorkerFailure['errors'] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSES && current !== undefined && current !== null; depth++) {
+    const value = isRecord(current) ? current : {};
+    // A model call's own fixed codes, and a worker stop's.
+    const detail = [value.detail, value.stop].find(isRecord) ?? {};
+    const code = [value.code, detail.code, detail.reason, detail.cause].find(
+      (v): v is string => typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v),
+    );
+    const status = [value.status, detail.status].find(
+      (v): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 100 && v <= 599,
+    );
+    errors.push({
+      name: (typeof value.name === 'string' ? value.name : typeof current).slice(0, 80),
+      ...(code ? { code } : {}),
+      ...(status !== undefined ? { status } : {}),
+      message: mask(typeof value.message === 'string' ? value.message : String(current)).slice(
+        0,
+        MAX_MESSAGE,
+      ),
+    });
+    current = value.cause;
+  }
+  return { endedBy: endedBy.slice(0, 80), errors };
+}
+
+/**
+ * Adds a failed run's error to the job's record, or starts the record for a run that
+ * ended before its worker wrote one. Never throws: diagnostics change nothing.
+ */
+export async function writeWorkerFailure(
+  dataDir: string,
+  jobId: string,
+  failure: WorkerFailure,
+): Promise<void> {
+  try {
+    const path = join(dataDir, 'model-jobs', `${jobId}.diagnostics.json`);
+    const kept = await readJsonFile(path, 1_000_000).catch(() => null);
+    await writeFileAtomic(
+      path,
+      JSON.stringify({
+        ...(isRecord(kept) && kept.version === 1 ? kept : { version: 1 }),
+        failure,
+      }),
+      { mode: 0o600, dirMode: 0o700 },
+    );
+  } catch {
+    // A record that cannot be written leaves the job as it is.
+  }
+}
 
 const names = (value: unknown): string[] =>
   Array.isArray(value)

@@ -11,7 +11,7 @@ import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
-import { ModelCallFailed } from './model-worker-control';
+import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import type { ModelJob } from './model-job';
 
 const made: string[] = [];
@@ -263,6 +263,54 @@ it('continues to use shared inference credit on a legacy router', async () => {
   await expect(
     transport.withInferenceRun('legacy', new AbortController().signal, async (shared) => shared),
   ).resolves.toBe(transport);
+});
+
+// Live case (job 77f41059, 2026-11-18): of two workers accepted together, one got no answer
+// to this question inside 3 s. Its job ended `unknown` after 3.0 s with no cause and no record.
+it('asks again when the refund-support question gets no answer, then runs the worker', async () => {
+  const f = await fixture({ refundCapability: 'legacy' });
+  const real = f.deps.fetchImpl!;
+  let asked = 0;
+  f.deps.fetchImpl = async (input, init) => {
+    if (new Request(input, init).method === 'GET' && ++asked === 1)
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    return real(input, init);
+  };
+  vi.useFakeTimers();
+  const transport = f.make();
+  const run = transport.withInferenceRun(
+    'slow-answer',
+    new AbortController().signal,
+    async (shared) => shared,
+  );
+  await vi.advanceTimersByTimeAsync(1_000);
+  await expect(run).resolves.toBe(transport);
+  expect(asked).toBe(2);
+});
+
+it('ends a run as not started, with the router as the cause, when that question is never answered', async () => {
+  const f = await fixture();
+  let asked = 0;
+  f.deps.fetchImpl = async () => {
+    asked++;
+    return new Response('busy', { status: 503 });
+  };
+  const worker = vi.fn(async () => 'ran');
+  vi.useFakeTimers();
+  const run = f
+    .make()
+    .withInferenceRun('no-router', new AbortController().signal, worker)
+    .catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(5_000);
+  const stopped = await run;
+  expect(stopped).toBeInstanceOf(ModelWorkerStopped);
+  expect((stopped as ModelWorkerStopped).stop).toEqual({
+    kind: 'not_started',
+    reason: 'router_unreachable',
+    status: 503,
+  });
+  expect(asked).toBe(3);
+  expect(worker).not.toHaveBeenCalled();
 });
 
 it('funds a Messages quote from saved job consent while preserving an explicit smaller tool limit', async () => {
@@ -1174,6 +1222,18 @@ it('says how a model call failed: the status of an answer that is not a result, 
     uncharged: true,
     retryAfterMs: 3000,
   });
+  // A request the router refuses says so in its fixed code; its message is not carried.
+  f.deps.fetchImpl = async () =>
+    Response.json(
+      { error: { code: 'invalid_model_request', message: 'Unsupported model request' } },
+      { status: 400 },
+    );
+  expect((await failure())?.detail).toEqual({
+    cause: 'failed',
+    status: 400,
+    uncharged: true,
+    code: 'invalid_model_request',
+  });
   expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [] });
   // The paid request answered with an error: its reservation stays until its receipt is read.
   f.deps.fetchImpl = async (input, init) =>
@@ -1184,7 +1244,12 @@ it('says how a model call failed: the status of an answer that is not a result, 
   expect(paid).toBeInstanceOf(ModelCallFailed);
   // The payer's code says the router answered the signed request with an error. The
   // router's record here says the call completed, so it stays reserved for reconciling.
-  expect(paid?.detail).toEqual({ cause: 'failed', payer: 'payment_failed', status: 500 });
+  expect(paid?.detail).toEqual({
+    cause: 'failed',
+    payer: 'payment_failed',
+    status: 500,
+    code: 'model_inference_failed',
+  });
   expect(paid?.message).toMatch(/uncertain/);
   expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
   // A quote over what is left of the ceiling is the job's budget.

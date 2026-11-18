@@ -286,6 +286,23 @@ function boundedSignal(ms: number, signal?: AbortSignal) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+/** The router gave no answer on refund support: the request failed or timed out, or it
+ *  answered a rate limit or a server error (`status`). Nothing was signed or sent for it. */
+export class RefundProbeUnanswered extends Error {
+  constructor(
+    readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(
+      status === undefined
+        ? 'The router did not answer the inference refund probe'
+        : `The router answered the inference refund probe with ${status}`,
+      options,
+    );
+    this.name = 'RefundProbeUnanswered';
+  }
+}
+
 export class ModelRefundJournal {
   private readonly origin: string;
   private readonly fetchImpl: typeof fetch;
@@ -299,14 +316,28 @@ export class ModelRefundJournal {
     this.fetchImpl = deps.fetchImpl ?? fetch;
   }
 
-  async requireSupport(url: string, signal?: AbortSignal) {
-    const response = await this.fetchImpl(exactEndpoint(this.origin, url), {
-      method: 'GET',
-      redirect: 'error',
-      signal: boundedSignal(PROBE_TIMEOUT_MS, signal),
-    });
+  /**
+   * Whether the router refunds a run's own channel. A request that failed or timed out, a
+   * rate limit and a server error are no answer (`RefundProbeUnanswered`): the caller asks
+   * again. Any other answer that is not a zero-quote challenge is refused.
+   */
+  async requireSupport(url: string, signal?: AbortSignal, timeoutMs = PROBE_TIMEOUT_MS) {
+    const endpoint = exactEndpoint(this.origin, url);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: 'GET',
+        redirect: 'error',
+        signal: boundedSignal(timeoutMs, signal),
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new RefundProbeUnanswered(undefined, { cause: error });
+    }
     try {
       if (response.status === 404 || response.status === 405) return false;
+      if (response.status === 429 || response.status >= 500)
+        throw new RefundProbeUnanswered(response.status);
       verifyChallenge(response);
       return response.headers.get('tenjin-inference-refunds') === 'worker-v1';
     } finally {

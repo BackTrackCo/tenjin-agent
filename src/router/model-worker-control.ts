@@ -7,6 +7,7 @@ export type WorkerStop = {
   kind: 'harness_limit' | 'provider_limit' | 'execution_failure' | 'not_started';
   reason:
     | 'startup_timeout'
+    | 'router_unreachable'
     | 'turn_guard'
     | 'wall_time'
     | 'budget_guard'
@@ -24,6 +25,8 @@ export type WorkerStop = {
   status?: number;
   /** The payer's own code for a paid call it could not complete, such as `payment_failed`. */
   payer?: string;
+  /** The router's fixed error code for that answer, such as `invalid_model_request`. */
+  code?: string;
 };
 
 /**
@@ -44,6 +47,8 @@ export class ModelCallFailed extends Error {
       uncharged?: true;
       /** The router's `Retry-After`, in milliseconds, when it sent one. */
       retryAfterMs?: number;
+      /** The router's fixed error code (`{error: {code}}`), never its message. */
+      code?: string;
     },
     options?: ErrorOptions,
   ) {
@@ -89,7 +94,7 @@ export async function withModelRetry<T>(
     }
   }
 }
-function sleepFor(ms: number, signal: AbortSignal): Promise<void> {
+export function sleepFor(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason);
     const timer = setTimeout(resolve, ms);
@@ -126,7 +131,7 @@ export function timedOut(error: unknown): boolean {
 /** The worker's stop for a model call that failed, else the error as it was. */
 export function modelCallStop(error: unknown): unknown {
   if (!(error instanceof ModelCallFailed)) return error;
-  const { cause, status, payer } = error.detail;
+  const { cause, status, payer, code } = error.detail;
   return new ModelWorkerStopped({
     kind: cause === 'budget' ? 'harness_limit' : 'execution_failure',
     reason:
@@ -143,13 +148,17 @@ export function modelCallStop(error: unknown): unknown {
       ? { status }
       : {}),
     ...(payer !== undefined && /^[a-z][a-z_]{0,47}$/.test(payer) ? { payer } : {}),
+    ...(code !== undefined && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? { code } : {}),
   });
 }
 
 /** Only bounded machine-readable diagnostics cross the worker boundary. */
 export class ModelWorkerStopped extends Error {
-  constructor(readonly stop: WorkerStop) {
-    super(`Worker stopped: ${stop.reason}`);
+  constructor(
+    readonly stop: WorkerStop,
+    options?: ErrorOptions,
+  ) {
+    super(`Worker stopped: ${stop.reason}`, options);
     this.name = 'ModelWorkerStopped';
   }
 }
@@ -170,6 +179,8 @@ export const WORKER_ENDS = {
   output_limit: "It reached the model's output limit.",
   context_limit: "It reached the model's context limit.",
   not_started: 'Its Claude Code did not start.',
+  router_unreachable:
+    'The Tenjin router did not answer when the job started, so no worker ran and no inference was bought.',
   env_file_unscanned:
     'An env file appeared that could not be read in full, so nothing more could be forwarded.',
   model_call_failed:
@@ -197,6 +208,7 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
     case 'model_call_failed':
     case 'model_call_timeout':
     case 'payment_refused':
+    case 'router_unreachable':
       return stop.reason;
     case 'provider_failed':
       return 'provider';
