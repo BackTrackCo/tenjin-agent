@@ -20,10 +20,12 @@ import { withFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import {
   MODEL_MESSAGES_RESULT_BYTES,
+  MODEL_MESSAGES_RESULT_BYTES_MAX,
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
 import {
+  MODEL_CUT_REPLY_CODES,
   ModelCallFailed,
   ModelWorkerStopped,
   retryAfterMs,
@@ -43,14 +45,32 @@ const SUPPORT_PROBE_WAIT_MS = 500;
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
- * `incomplete_model_response` and `model_response_too_large`): it marks that call's record
- * with no charge and settles nothing on the error answer.
+ * `incomplete_model_response` and `model_response_too_large`) or whose reply the router
+ * cut (`model_stream_idle`, `model_deadline_exceeded`): it marks that call's record with
+ * no charge and settles nothing on the error answer.
  */
 const PROVIDER_FAILURES = new Set([
   'model_inference_failed',
   'incomplete_model_response',
   'model_response_too_large',
+  ...MODEL_CUT_REPLY_CODES,
 ]);
+
+/**
+ * THE RESULT SIZE A MESSAGES CALL STATES (`maxResultBytes`), for a job whose router said
+ * in its offer that it honours one: that size, up to what this CLI reads. The router then
+ * fails a larger reply before it charges for it. Undefined for a router that said nothing,
+ * such as one that refuses the field: nothing is stated, and a reply is read through
+ * 2,000,000 bytes, the most such a router delivers.
+ */
+function statedResultBytes(job: ModelJob): number | undefined {
+  const honoured = job.decision.maxResultBytes;
+  return typeof honoured === 'number' &&
+    Number.isSafeInteger(honoured) &&
+    honoured >= MODEL_MESSAGES_RESULT_BYTES
+    ? Math.min(honoured, MODEL_MESSAGES_RESULT_BYTES_MAX)
+    : undefined;
+}
 
 /** An error answer's fixed code (`{error: {code}}`), never its message. */
 async function errorCode(response: Response): Promise<{ code?: string }> {
@@ -370,6 +390,9 @@ export class ModelTransport {
     const endpoint =
       protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
     const resultLimit = MODEL_RESPONSE_ENVELOPE_BYTES;
+    // Messages alone: the Responses contract refuses the field.
+    const stated = protocol === 'messages' ? statedResultBytes(job) : undefined;
+    const readable = stated ?? MODEL_MESSAGES_RESULT_BYTES;
     const { dataDir, baseUrl, payerDeps, inferenceRun } = this.options;
     const journal = inferenceRun ? this.refundJournal() : undefined;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
@@ -425,6 +448,7 @@ export class ModelTransport {
           call.invocationId,
           BigInt(call.quote),
           protocol,
+          readable,
         );
         if (recovered.actualAtomic !== value.actual)
           throw new Error('Conflicting invocation receipt; exposure remains reserved');
@@ -473,6 +497,7 @@ export class ModelTransport {
       consent: true,
       jobId: job.decision.jobId,
       invocationId: randomUUID(),
+      ...(stated !== undefined ? { maxResultBytes: stated } : {}),
       ...(protocol === 'responses'
         ? { protocol, responses: scrub(messages) }
         : { messages: scrub(messages) }),
@@ -708,7 +733,7 @@ export class ModelTransport {
           await release();
           throw new ModelCallFailed(
             'The model provider failed the call; nothing was charged for it',
-            { cause: 'provider', status: paidError.status, uncharged: true },
+            { cause: 'provider', status: paidError.status, uncharged: true, code: paidError.code },
             { cause: failure },
           );
         }
@@ -734,7 +759,10 @@ export class ModelTransport {
           ...(typeof result?.status === 'number' ? { status: result.status } : {}),
         },
       );
-    return settle(reservation, this.receipt(result.json, body.invocationId, quote, protocol));
+    return settle(
+      reservation,
+      this.receipt(result.json, body.invocationId, quote, protocol, readable),
+    );
   }
 
   /** The job's budget as kept, or the routing fee alone for a job with no file yet. */
@@ -814,6 +842,7 @@ export class ModelTransport {
     invocationId: string,
     quote: bigint,
     protocol: 'messages' | 'responses',
+    messageBytes = MODEL_MESSAGES_RESULT_BYTES,
   ) {
     const value = z
       .object({
@@ -826,10 +855,7 @@ export class ModelTransport {
           : {
               message: z
                 .record(z.string(), z.unknown())
-                .refine(
-                  (message) =>
-                    Buffer.byteLength(JSON.stringify(message)) <= MODEL_MESSAGES_RESULT_BYTES,
-                ),
+                .refine((message) => Buffer.byteLength(JSON.stringify(message)) <= messageBytes),
             }),
         receipt: z.object({
           invocationId: z.literal(invocationId),

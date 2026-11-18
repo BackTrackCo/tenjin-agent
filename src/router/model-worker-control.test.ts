@@ -291,6 +291,12 @@ describe('a model call tried again', () => {
       new ModelCallFailed('charged', { cause: 'failed', status: 502 }),
       // Refused as malformed: trying again cannot help.
       new ModelCallFailed('bad', { cause: 'failed', status: 400, uncharged: true }),
+      // A reply the router cut after its idle limit or its deadline: released at no
+      // charge, and the same request would run for minutes again.
+      ...['model_stream_idle', 'model_deadline_exceeded'].map(
+        (code) =>
+          new ModelCallFailed('cut', { cause: 'provider', status: 504, uncharged: true, code }),
+      ),
       new ModelCallFailed('ceiling', { cause: 'budget' }),
       new Error('Unsupported request'),
     ]) {

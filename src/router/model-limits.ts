@@ -29,7 +29,11 @@ export const MODEL_MINIMUM_JOB_ATOMIC =
 export const usdOfAtomic = (atomic: bigint): string => '$' + (Number(atomic) / 1e6).toFixed(6);
 /** Full hosted POST receipt or owner-GET JSON envelope, including escaped wire and metadata. */
 export const MODEL_RESPONSE_ENVELOPE_BYTES = 4_500_000;
+/** The largest completed Messages `message` a router delivers to a client that states no
+ *  size, and the largest this CLI reads from one. */
 export const MODEL_MESSAGES_RESULT_BYTES = 2_000_000;
+/** The largest this CLI reads from a router whose offer says it honours a stated size. */
+export const MODEL_MESSAGES_RESULT_BYTES_MAX = 4_000_000;
 /** Raw wire has this upper bound; its complete JSON envelope must also fit above. */
 export const MODEL_RESPONSES_WIRE_BYTES = MODEL_RESPONSE_ENVELOPE_BYTES;
 /** The router refuses a Messages request that offers more tools than this. */

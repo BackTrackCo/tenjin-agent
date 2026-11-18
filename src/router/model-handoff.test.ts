@@ -765,6 +765,15 @@ it('consumes the server canonical offer contract without enabling an alias or pr
   expect(
     modelOfferSchema.safeParse({ ...offer, endpoint: 'https://elsewhere.test/messages' }).success,
   ).toBe(false);
+  // The result size a router honours is kept with the job; an offer with none, or with a
+  // value that is no size, is still an offer.
+  expect(modelOfferSchema.parse({ ...offer, maxResultBytes: 4_000_000 }).maxResultBytes).toBe(
+    4_000_000,
+  );
+  expect(modelOfferSchema.parse(offer)).not.toHaveProperty('maxResultBytes');
+  expect(modelOfferSchema.parse({ ...offer, maxResultBytes: '4MB' }).maxResultBytes).toBe(
+    undefined,
+  );
 });
 
 it('keeps a legacy undersized job native before purchasing model routing', async () => {

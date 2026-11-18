@@ -65,9 +65,19 @@ export class ModelCallFailed extends Error {
  * the bridge or the router refused as malformed.
  */
 export const MODEL_RETRY = { tries: 5, baseMs: 500, maxMs: 10_000, jitter: 0.1, hintMs: 60_000 };
+/**
+ * The router's codes for a reply it cut: no byte from the provider for its idle limit, or
+ * the call's total deadline. It records such a call with no charge. Never tried again:
+ * the same request has just run for minutes without an answer.
+ */
+export const MODEL_CUT_REPLY_CODES: ReadonlySet<string> = new Set([
+  'model_stream_idle',
+  'model_deadline_exceeded',
+]);
 export function retryableModelCall(error: unknown): error is ModelCallFailed {
   if (!(error instanceof ModelCallFailed) || error.detail.uncharged !== true) return false;
-  const { cause, status } = error.detail;
+  const { cause, status, code } = error.detail;
+  if (code !== undefined && MODEL_CUT_REPLY_CODES.has(code)) return false;
   if (cause === 'provider' || cause === 'timeout') return true;
   return cause === 'failed' && (status === undefined || status === 429 || status >= 500);
 }

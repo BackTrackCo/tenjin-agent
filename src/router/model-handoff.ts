@@ -68,6 +68,9 @@ export const modelOfferSchema = z.object({
   routingFeeAtomic: z.string().regex(/^\d+$/),
   proxyFeePercent: z.literal(5),
   started: z.literal(false),
+  /** The largest `maxResultBytes` this router honours on a Messages call. A router that
+   *  does not say so refuses the field, so none is sent to it. */
+  maxResultBytes: z.number().int().positive().optional().catch(undefined),
 });
 export interface ModelSession {
   sessionId: string;

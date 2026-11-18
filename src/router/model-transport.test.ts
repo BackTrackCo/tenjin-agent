@@ -1044,6 +1044,41 @@ it('bounds escaped Responses envelopes on both paid results and owner recovery w
   });
 });
 
+// tenjin#1153 review: its server settled a reply through 4,000,000 bytes while this parser
+// refused one above 2,000,000 on the paid reply and on recovery, after the charge. That
+// server now settles only up to the size a call states, and refuses a larger reply unpaid.
+it('states the result size it reads only to a router whose offer says it honours one, and then reads that much', async () => {
+  const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'long' }] };
+  const signal = new AbortController().signal;
+  // Production today: its strict schema refuses the field, so none is sent.
+  const today = await fixture();
+  await today.make().messages(today.job, request, signal);
+  expect(today.last()).not.toHaveProperty('maxResultBytes');
+  // A router whose offer names the size it honours: stated, up to what this CLI reads.
+  const f = await fixture({ drop: true });
+  f.job.decision.maxResultBytes = 8_000_000;
+  f.message.content[0]!.text = 'x'.repeat(2_100_000);
+  await expect(f.make().messages(f.job, request, signal)).rejects.toThrow(/uncertain/);
+  expect(f.last()).toMatchObject({ maxResultBytes: 4_000_000, messages: request });
+  // The same reply is read on receipt recovery, and on a paid reply that arrives.
+  expect(await f.make().messages(f.job, request, signal)).toEqual(f.message);
+  expect(f.router.paidRequests()).toBe(1);
+  const paid = await fixture();
+  paid.job.decision.maxResultBytes = 4_000_000;
+  paid.message.content[0]!.text = 'x'.repeat(2_100_000);
+  expect(await paid.make().messages(paid.job, request, signal)).toEqual(paid.message);
+  // An offer that names less than a router delivers unasked is no statement at all.
+  const odd = await fixture();
+  odd.job.decision.maxResultBytes = 1_000;
+  await odd.make().messages(odd.job, request, signal);
+  expect(odd.last()).not.toHaveProperty('maxResultBytes');
+  // Responses has no such field: its contract refuses it.
+  const responses = await fixture({ protocol: 'responses' });
+  responses.job.decision.maxResultBytes = 4_000_000;
+  await responses.make().responses(responses.job, { model: 'deepseek-flash', input: [] }, signal);
+  expect(responses.last()).not.toHaveProperty('maxResultBytes');
+});
+
 it('rejects a Messages result above the server message ceiling even when the receipt envelope fits', async () => {
   const f = await fixture();
   f.message.content[0]!.text = 'x'.repeat(2_000_000);
@@ -1263,27 +1298,54 @@ it('says how a model call failed: the status of an answer that is not a result, 
 
 // Live case: the provider's account was empty, so the router failed every paid call; the
 // worker's job ended `unknown` and each call stayed reserved as uncertain.
-it('releases at once a call the provider failed when the router record says it cost nothing', async () => {
+// Also a reply the router cut (504 `model_stream_idle`, `model_deadline_exceeded`): the
+// worker skipped the receipt read for those, and the full quote stayed reserved.
+it.each([
+  ['model_inference_failed', 500],
+  ['model_stream_idle', 504],
+  ['model_deadline_exceeded', 504],
+] as const)(
+  'releases at once a call the router failed with %s when its record says it cost nothing',
+  async (code, status) => {
+    const f = await fixture();
+    const real = f.deps.fetchImpl!;
+    f.setRecoveryState('unknown');
+    f.setVoucher('cancelled');
+    f.deps.fetchImpl = async (input, init) =>
+      new Request(input, init).headers.has('payment-signature')
+        ? Response.json({ error: { code, message: 'Model invocation failed' } }, { status })
+        : real(input, init);
+    const failed = await f
+      .make()
+      .messages(f.job, { messages: [] }, new AbortController().signal)
+      .catch((error: unknown) => error as ModelCallFailed);
+    expect(failed).toBeInstanceOf(ModelCallFailed);
+    expect(failed?.detail).toEqual({ cause: 'provider', status, uncharged: true, code });
+    // One free read of the router's record, nothing bought again, and the quote released.
+    expect(f.signedGets()).toBe(1);
+    expect(await f.make().summary(f.job)).toMatchObject({
+      reservedAtomic: '3000',
+      uncertain: [],
+    });
+  },
+);
+
+it('keeps a cut reply reserved when the router record does not say it cost nothing', async () => {
   const f = await fixture();
   const real = f.deps.fetchImpl!;
-  f.setRecoveryState('unknown');
-  f.setVoucher('cancelled');
   f.deps.fetchImpl = async (input, init) =>
     new Request(input, init).headers.has('payment-signature')
-      ? Response.json(
-          { error: { code: 'model_inference_failed', message: 'Model invocation failed' } },
-          { status: 500 },
-        )
+      ? Response.json({ error: { code: 'model_deadline_exceeded' } }, { status: 504 })
       : real(input, init);
   const failed = await f
     .make()
     .messages(f.job, { messages: [] }, new AbortController().signal)
     .catch((error: unknown) => error as ModelCallFailed);
   expect(failed).toBeInstanceOf(ModelCallFailed);
-  expect(failed?.detail).toEqual({ cause: 'provider', status: 500, uncharged: true });
-  // One free read of the router's record, nothing bought again, and the quote released.
-  expect(f.signedGets()).toBe(1);
-  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
+  const { detail } = failed as ModelCallFailed;
+  expect(detail).toMatchObject({ cause: 'failed', status: 504 });
+  expect(detail.uncharged).toBeUndefined();
+  expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
 });
 
 it('retains exposure when signing starts but fails before a paid request is sent', async () => {
