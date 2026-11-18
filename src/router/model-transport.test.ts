@@ -2,12 +2,14 @@ import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as locks from '../lib/lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
+import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
 import { ModelCallFailed } from './model-worker-control';
 import type { ModelJob } from './model-job';
@@ -46,6 +48,8 @@ async function fixture(
     charge?: string;
     minDeposit?: string;
     maxAutoSpendAtomic?: bigint;
+    refundCapability?: 'enabled' | 'legacy';
+    onPaidSend?: () => Promise<void>;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'model-transport-'));
@@ -108,6 +112,20 @@ async function fixture(
   const fetchImpl: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     if (request.method === 'GET') {
+      if (options.refundCapability && !new URL(request.url).search) {
+        if (options.refundCapability === 'legacy') return new Response(null, { status: 405 });
+        return new Response(null, {
+          status: 402,
+          headers: {
+            'tenjin-inference-refunds': 'worker-v1',
+            'payment-required': encodePaymentRequiredHeader({
+              x402Version: 2,
+              resource: { url: request.url },
+              accepts: [{ ...router.requirement, amount: '0' }],
+            }),
+          },
+        });
+      }
       gets++;
       if (request.headers.has(SIWX_HEADER)) signedGets++;
       return Response.json({
@@ -118,7 +136,10 @@ async function fixture(
         result,
       });
     }
-    if (request.headers.has('payment-signature')) paidSignals.push(request.signal);
+    if (request.headers.has('payment-signature')) {
+      paidSignals.push(request.signal);
+      await options.onPaidSend?.();
+    }
     last = (await request.clone().json()) as Record<string, unknown>;
     result = {
       ...(options.protocol === 'responses'
@@ -172,6 +193,77 @@ async function fixture(
     },
   };
 }
+
+it('journals each accepted run before signing requests reach the router and closes after releasing its lock', async () => {
+  const pendingAtSend: string[] = [];
+  const closed: string[] = [];
+  let activeRun: string;
+  const f = await fixture({
+    quote: '60000',
+    maxAutoSpendAtomic: 500000n,
+    refundCapability: 'enabled',
+    onPaidSend: async () => {
+      expect(await readModelRefundResult(f.dir, BASE, activeRun)).toEqual({ state: 'pending' });
+      expect((await lstat(modelRefundRunLock(f.dir, BASE, activeRun))).isDirectory()).toBe(true);
+      pendingAtSend.push(activeRun);
+    },
+  });
+  const close = vi.spyOn(ModelRefundJournal.prototype, 'close').mockImplementation(async (id) => {
+    await expect(lstat(modelRefundRunLock(f.dir, BASE, id))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    closed.push(id);
+    return { state: 'pending' };
+  });
+  try {
+    const signal = new AbortController().signal;
+    for (const id of ['run-1', 'continuation']) {
+      activeRun = id;
+      await f
+        .make()
+        .withInferenceRun(id, signal, (transport) =>
+          transport.messages(f.job, { messages: [{ role: 'user', content: id }] }, signal),
+        );
+    }
+    expect(pendingAtSend).toEqual(['run-1', 'continuation']);
+    expect(closed).toEqual(pendingAtSend);
+    expect(f.router.channels.size).toBe(2);
+    expect(await f.make().summary(f.job)).toMatchObject({ actualAtomic: '5000' });
+  } finally {
+    close.mockRestore();
+  }
+});
+
+it('attempts a refund with its own signal when an accepted worker is cancelled', async () => {
+  const f = await fixture({ refundCapability: 'enabled' });
+  const controller = new AbortController();
+  const close = vi
+    .spyOn(ModelRefundJournal.prototype, 'close')
+    .mockImplementation(async (id, signal) => {
+      expect(id).toBe('cancelled');
+      expect(signal?.aborted).toBe(false);
+      return { state: 'pending' };
+    });
+  try {
+    await expect(
+      f.make().withInferenceRun('cancelled', controller.signal, async () => {
+        controller.abort(new Error('Worker cancelled'));
+        controller.signal.throwIfAborted();
+      }),
+    ).rejects.toThrow('Worker cancelled');
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally {
+    close.mockRestore();
+  }
+});
+
+it('continues to use shared inference credit on a legacy router', async () => {
+  const f = await fixture({ refundCapability: 'legacy' });
+  const transport = f.make();
+  await expect(
+    transport.withInferenceRun('legacy', new AbortController().signal, async (shared) => shared),
+  ).resolves.toBe(transport);
+});
 
 it('funds a Messages quote from saved job consent while preserving an explicit smaller tool limit', async () => {
   const f = await fixture({ maxAutoSpendAtomic: 250000n, minDeposit: '500000' });

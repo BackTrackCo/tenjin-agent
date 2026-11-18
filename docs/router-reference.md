@@ -231,3 +231,5 @@ Update verifies npm provenance, tarball integrity and the pinned Node before act
 Fresh setup enables eligible DeepSeek helpers with consent following each session's qualified native workspace and a $1 cumulative job ceiling. Existing profiles and refreshes keep their settings and consent mode. `tenjin config subagents off` stops new jobs; `on --repository <path> --max-job <USD>` selects explicit directory scope. See [DeepSeek subagents](./subagents.md) for disclosure, fees, parent veto, cancellation, continuation and current host limits.
 
 Model routing and inference use separate channels from tool routing. Each paid invocation has a 360-second client deadline and a 300-second server upstream deadline; receipt recovery remains bounded and never buys a replacement inference.
+
+On a router with worker channel refunds enabled, `tenjin balance` shows the number of pending Claude worker refunds and the USDC confirmed returned to this wallet. `tenjin status --json` and `tenjin balance --json` report these local records under `modelInferenceRefunds`. Deposits still count toward the existing automatic spend limits.

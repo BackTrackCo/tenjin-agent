@@ -38,3 +38,25 @@ export function modelChannelDir(
 ) {
   return join(payerDir(dataDir, address), lane, modelChannelScope(origin, lane, inferenceSlot).id);
 }
+
+/** A new channel for every accepted run, including a continuation of a paid job. */
+export function modelInferenceRunScope(origin: string, runId: string) {
+  const canonicalOrigin = new URL(origin).origin;
+  const id = createHash('sha256')
+    .update(JSON.stringify(['tenjin-model-channel', 2, canonicalOrigin, 'model-inference', runId]))
+    .digest('hex');
+  return { origin: canonicalOrigin, id, salt: `0x${id}` as `0x${string}` };
+}
+
+export function modelInferenceRunDir(
+  dataDir: string,
+  address: string,
+  origin: string,
+  runId: string,
+) {
+  return join(
+    payerDir(dataDir, address),
+    'model-inference',
+    modelInferenceRunScope(origin, runId).id,
+  );
+}

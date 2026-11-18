@@ -21,6 +21,8 @@ import {
   modelChannelDir,
   modelChannelLane,
   modelChannelScope,
+  modelInferenceRunDir,
+  modelInferenceRunScope,
   MODEL_ROUTING_FEE_CEILING_ATOMIC,
   type ModelInferenceSlot,
   type ModelPaymentPath,
@@ -256,6 +258,17 @@ export function chainReader(rpcUrl: string, fetchFn?: typeof fetch): ChainRead {
     }).readContract(args as Parameters<ReturnType<typeof createPublicClient>['readContract']>[0]);
 }
 
+/** The refund journal checks the configured chain and expires unused funding authorizations. */
+export function chainRefundReads(rpcUrl: string) {
+  const client = (timeout: number) =>
+    createPublicClient({ transport: http(rpcUrl, { timeout, retryCount: 0 }) });
+  return {
+    readChainId: (timeoutMs: number) => client(timeoutMs).getChainId(),
+    readBlockTimestamp: async (timeoutMs: number) =>
+      (await client(timeoutMs).getBlock({ blockTag: 'latest' })).timestamp,
+  };
+}
+
 export interface RoutingPayerDeps {
   dataDir: string;
   /** Separate inference lane; never widens the routing-fee instance. */
@@ -264,6 +277,7 @@ export interface RoutingPayerDeps {
     ceilingAtomic: bigint;
     origin: string;
     inferenceSlot?: ModelInferenceSlot;
+    inferenceRun?: string;
   };
   /** The wallet signer, unlocked without a prompt; it signs deposits and vouchers. */
   getSigner: () => Promise<TenjinSigner>;
@@ -275,6 +289,8 @@ export interface RoutingPayerDeps {
   walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
   readContract?: ChainRead;
+  readBlockTimestamp?: (timeoutMs: number) => Promise<bigint>;
+  readChainId?: (timeoutMs: number) => Promise<number>;
   fetchImpl?: typeof fetch;
   now?: () => number;
   /** The timer functions the payer arms; the globals unless a test injects its own. */
@@ -1549,23 +1565,23 @@ export class RoutingPayer {
     const payer = signer.address.toLowerCase() as `0x${string}`;
     if (this.channel !== null && this.channel.payer === payer) return this.channel;
     const lane = this.deps.modelLane;
-    const dir = lane
-      ? modelChannelDir(
-          this.deps.dataDir,
-          payer,
-          modelChannelLane(lane.path),
-          lane.origin,
-          lane.inferenceSlot,
-        )
-      : payerDir(this.deps.dataDir, payer);
+    const modelLane = lane ? modelChannelLane(lane.path) : undefined;
+    const runId = modelLane === 'model-inference' ? lane?.inferenceRun : undefined;
+    const salt =
+      lane && modelLane
+        ? runId
+          ? modelInferenceRunScope(lane.origin, runId).salt
+          : modelChannelScope(lane.origin, modelLane, lane.inferenceSlot).salt
+        : undefined;
+    const dir =
+      lane && modelLane
+        ? runId
+          ? modelInferenceRunDir(this.deps.dataDir, payer, lane.origin, runId)
+          : modelChannelDir(this.deps.dataDir, payer, modelLane, lane.origin, lane.inferenceSlot)
+        : payerDir(this.deps.dataDir, payer);
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),
-      ...(lane
-        ? {
-            salt: modelChannelScope(lane.origin, modelChannelLane(lane.path), lane.inferenceSlot)
-              .salt,
-          }
-        : {}),
+      ...(salt ? { salt } : {}),
       depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
       depositStrategy: (ctx) => this.deposit(ctx),
     });

@@ -3,7 +3,7 @@ import { mask } from '../lib/redact';
 import { modelSettings } from './model-settings';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { RoutingPayerDeps } from './routing-payer';
 import { LocalSendBlocked, RoutingPayer as Payer } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
@@ -24,6 +24,7 @@ import {
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
 import { ModelCallFailed, retryAfterMs, timedOut, WORKER_WALL_MS } from './model-worker-control';
+import { ModelRefundJournal, modelRefundRunLock } from './model-refund';
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
@@ -128,6 +129,7 @@ export class ModelTransport {
       baseUrl: string;
       payerDeps: RoutingPayerDeps;
       inferenceSlot?: ModelInferenceSlot;
+      inferenceRun?: string;
     },
   ) {
     this.routing = new Payer({
@@ -147,6 +149,43 @@ export class ModelTransport {
       ? this
       : new ModelTransport({ ...this.options, inferenceSlot });
   }
+  private refundJournal() {
+    return new ModelRefundJournal(this.options.dataDir, this.origin, this.options.payerDeps);
+  }
+
+  /** The run lock outlives its individual requests so recovery cannot drain a live worker. */
+  async withInferenceRun<T>(
+    runId: string,
+    signal: AbortSignal,
+    run: (transport: ModelTransport) => Promise<T>,
+  ): Promise<T> {
+    const journal = this.refundJournal();
+    const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
+    if (!(await journal.requireSupport(endpoint, signal))) return run(this);
+    const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
+    await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
+    const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
+    let entered = false;
+    try {
+      return await withFileLock(
+        lock,
+        async () => {
+          entered = true;
+          return run(transport);
+        },
+        { signal, takeOverDead: true },
+      );
+    } finally {
+      // The worker may have been cancelled. Refund settlement gets its own bounded signal.
+      // A failed attempt leaves the durable record for recovery rather than changing the result.
+      if (entered) await journal.close(runId, AbortSignal.timeout(8_000)).catch(() => undefined);
+    }
+  }
+
+  async recoverInferenceRefunds(signal: AbortSignal) {
+    await this.refundJournal().recoverPending(signal);
+  }
+
   /** A continuation must retain every old charge and uncertain reservation. */
   async requireResumeBudget(job: ModelJob) {
     const path = join(this.options.dataDir, 'model-jobs', `${job.id}.budget.json`);
@@ -290,7 +329,8 @@ export class ModelTransport {
     const endpoint =
       protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
     const resultLimit = MODEL_RESPONSE_ENVELOPE_BYTES;
-    const { dataDir, baseUrl, payerDeps } = this.options;
+    const { dataDir, baseUrl, payerDeps, inferenceRun } = this.options;
+    const journal = inferenceRun ? this.refundJournal() : undefined;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
     const key =
@@ -486,8 +526,17 @@ export class ModelTransport {
         first = false;
         return challenge;
       }
+      const headers = new Headers(
+        init?.headers ?? (input instanceof Request ? input.headers : undefined),
+      );
+      const signature = headers.get('payment-signature');
+      const paying = signature !== null;
       try {
         await assertCanTransmit();
+        if (signature !== null && journal && inferenceRun) {
+          await journal.record(inferenceRun, url, signature, signal);
+          await assertCanTransmit();
+        }
         signal.throwIfAborted();
         init?.signal?.throwIfAborted();
       } catch (cause) {
@@ -496,10 +545,6 @@ export class ModelTransport {
         localBlock = new LocalSendBlocked(cause);
         throw localBlock;
       }
-      const headers = new Headers(
-        init?.headers ?? (input instanceof Request ? input.headers : undefined),
-      );
-      const paying = headers.has('payment-signature');
       if (paying) paymentSent = true;
       const response = boundedResponse(
         await fetchFn(input, {
@@ -555,11 +600,12 @@ export class ModelTransport {
         ceilingAtomic: quote,
         origin: this.origin,
         inferenceSlot: this.options.inferenceSlot,
+        ...(inferenceRun ? { inferenceRun } : {}),
       },
       fetchImpl: cachedFetch,
     });
-    // The model endpoints share the same two inference channels. Take turns
-    // within each channel across local transports and processes.
+    // Keep the two inference request lanes across local transports and
+    // processes, even when each new worker has its own channel.
     const scope = modelChannelScope(this.origin, 'model-inference', this.options.inferenceSlot);
     const paymentLock = join(dataDir, 'model-jobs', `${scope.id}.payment.lock`);
     let paymentTurn = false;

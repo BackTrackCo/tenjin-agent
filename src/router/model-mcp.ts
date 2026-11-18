@@ -1,6 +1,7 @@
 import { isModelWorkerProcess } from './model-worker-context';
 import type { McpServer, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
@@ -13,6 +14,7 @@ import {
 } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import type { ModelInferenceSlot } from './model-channel';
+import { hasModelRefundRecords, readModelRefundResult } from './model-refund';
 import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
@@ -73,6 +75,7 @@ const continuationExecution = (job: ModelJob, conversation: ModelConversation): 
  * the parent session, so a viewer follows in short reads, never one long one.
  */
 const FOLLOW_MS = 25_000;
+const REFUND_RECOVERY_INTERVAL_MS = 60_000;
 
 /** Who may read or end a job's worker: its parent session, its root and its Claude config. */
 const jobOwner = (job: ModelJob): ModelConversationOwner => ({
@@ -205,6 +208,29 @@ export function registerModelTool(
         await sweepModelRecords(options.dataDir);
         for (const job of await jobs.unfinished()) await strand(job).catch(() => null);
       })().catch(() => undefined);
+  const refundRecovery = new AbortController();
+  const refundsRecovered =
+    options.harness === 'claude' && !isModelWorkerProcess()
+      ? repaired.then(async () => {
+          const { signal } = refundRecovery;
+          while (!signal.aborted) {
+            try {
+              if ((await hasModelRefundRecords(options.dataDir)) && !signal.aborted) {
+                const transport = await options.transport();
+                await transport.recoverInferenceRefunds(
+                  AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+                );
+              }
+            } catch {
+              // The next pass can retry, including when the signer is available again.
+            }
+            // Retry while the session is open without keeping the process alive.
+            await delay(REFUND_RECOVERY_INTERVAL_MS, undefined, { signal, ref: false }).catch(
+              () => undefined,
+            );
+          }
+        })
+      : Promise.resolve();
   let handoff: ModelHandoff | undefined;
   const getHandoff = async () =>
     (handoff ??= new ModelHandoff({
@@ -913,6 +939,11 @@ export function registerModelTool(
               return {};
             }
           };
+          const refundOutcome = async () => {
+            if (options.harness !== 'claude') return {};
+            const refund = await readModelRefundResult(options.dataDir, transport.origin, job.id);
+            return refund.state !== 'none' ? { refund } : {};
+          };
           const done = (async () => {
             let inference: InferenceLease | undefined;
             try {
@@ -959,23 +990,29 @@ export function registerModelTool(
                     .then(workerPermissionAnswer, () => false);
                 },
               };
-              const run = async () => {
+              const run = async (workerTransport: ModelTransport) => {
                 abort.signal.throwIfAborted();
+                const workerOptions = { ...runOptions, transport: workerTransport };
                 if (warm && warm.sdkSessionId === conversation?.sdkSessionId) {
-                  warm.accept({ ...runOptions, job: executionJob }, abort.signal);
+                  warm.accept({ ...workerOptions, job: executionJob }, abort.signal);
                   const outcome = await warm.result;
                   if ('value' in outcome) return outcome.value;
                   if (!outcome.canStartFresh) throw outcome.error;
                 } else await warm?.stop();
                 abort.signal.throwIfAborted();
-                return runModelWorker(executionJob, runOptions);
+                return runModelWorker(executionJob, workerOptions);
               };
-              const result = await run();
+              // A continuation can spend from an earlier job but must close its own channel.
+              const result =
+                options.harness === 'claude'
+                  ? await runOptions.transport.withInferenceRun(job.id, abort.signal, run)
+                  : await run(runOptions.transport);
               const envelope = {
                 status: 'completed',
                 label: 'DeepSeek V4.1 Flash 1017',
                 elapsedMs: Date.now() - started,
                 ...counts(),
+                ...(await refundOutcome()),
                 spend: await transport
                   .summary(executionJob)
                   .catch(() => ({ accounting: 'unknown' })),
@@ -1047,6 +1084,7 @@ export function registerModelTool(
                 stopReason: stop,
                 elapsedMs: Date.now() - started,
                 ...counts(),
+                ...(await refundOutcome()),
                 ...(partial ? { partial } : {}),
                 // An initial offer's held call has a free repeat. A continuation has none,
                 // though it runs with the original job's fields.
@@ -1094,11 +1132,13 @@ export function registerModelTool(
     }),
   );
   const shutdown = async () => {
+    refundRecovery.abort();
     await repaired;
     sessionEnding = true;
     await Promise.all([lifecycle.stop(), ...[...warming.values()].map((warm) => warm.stop())]);
     for (const running of controllers.values()) running.abort.abort();
     await Promise.allSettled([...controllers.values()].map((c) => c.done));
+    await refundsRecovered;
     await views.shutdown();
   };
   workerShutdown.set(server, shutdown);

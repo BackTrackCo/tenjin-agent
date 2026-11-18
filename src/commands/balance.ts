@@ -11,6 +11,7 @@ import {
 } from '../lib/wallet';
 import type { SpendPolicy } from '../lib/policy';
 import { channelCredit, routingSpent } from '../router/channel-credit';
+import { readModelRefundSummary } from '../router/model-refund';
 import { FUND_COMMAND_LINE, LEGACY_ROUTING_QUOTE_ATOMIC } from '../router/fee';
 import { limitsLine } from '../router/spend-question';
 import { dollars, forgetLink, recallLink, watchFunding } from './fund-watch';
@@ -110,6 +111,9 @@ export async function runBalance(
     'model-routing',
     settings.baseUrl,
   ).catch(() => 0n);
+  const refunds = await readModelRefundSummary(ctx.dataDir, settings.baseUrl, address).catch(
+    () => ({ pending: 0, refundedAtomic: '0' }),
+  );
   // What routing has cost: the deposits sent less that credit, also local.
   const spentAtomic = await routingSpent(ctx.dataDir, address).catch(() => 0n);
   const spent = toMoney(spentAtomic.toString());
@@ -123,6 +127,10 @@ export async function runBalance(
       routingCredit: credit,
       modelCredit: toMoney(modelCreditAtomic.toString()),
       modelRoutingCredit: toMoney(modelRoutingCreditAtomic.toString()),
+      modelInferenceRefunds: {
+        pending: refunds.pending,
+        returned: toMoney(refunds.refundedAtomic),
+      },
       routingSpent: spent,
       limits: limitsData(policy),
       low,
@@ -140,6 +148,12 @@ export async function runBalance(
         ? [
             `${label('Model fee')}about ${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
           ]
+        : []),
+      ...(refunds.pending > 0
+        ? [`${label('Refunds')}${refunds.pending} subagent channel refunds pending`]
+        : []),
+      ...(refunds.refundedAtomic !== '0'
+        ? [`${label('Refunded')}${dollars(BigInt(refunds.refundedAtomic))} from subagent channels`]
         : []),
       ...(spentAtomic > 0n ? [`${label('Spent')}about ${dollars(spentAtomic)} on routing`] : []),
       ...(atomic === 0n && creditAtomic < LEGACY_ROUTING_QUOTE_ATOMIC

@@ -38,6 +38,7 @@ import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
 import {
+  chainRefundReads,
   chainReader,
   DETACHED_CEILING_MS,
   RoutingPayer,
@@ -333,6 +334,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           walletBalance: (address, timeoutMs) =>
             readUsdcBalanceWithFallback(address, settings.rpcUrl, { timeoutMs }),
           readContract: chainReader(settings.rpcUrl),
+          ...chainRefundReads(settings.rpcUrl),
         },
       });
     },

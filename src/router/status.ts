@@ -12,6 +12,7 @@ import { dollars } from '../commands/fund-watch';
 import { channelCredit, routingSpent } from './channel-credit';
 import { ROUTING_DEPOSIT_KEY, SUGGESTED_FUND_USD } from './fee';
 import { accountJobs, cachedIdentities, labelOf, type Identities } from './identities';
+import { readModelRefundSummary } from './model-refund';
 import { readVaultHeader } from './accounts/vault';
 import { routerSettings, type RouterSettings } from './settings';
 import { BUILT_IN_SOURCE, type Target } from './settings-wire';
@@ -385,6 +386,12 @@ export async function runRouterStatus(
         ? deps.modelRoutingCredit(ctx)
         : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
     ]);
+  const emptyRefunds = { pending: 0, refundedAtomic: '0' };
+  const refunds = wallet
+    ? await readModelRefundSummary(ctx.dataDir, settings.baseUrl, wallet.address).catch(
+        () => emptyRefunds,
+      )
+    : emptyRefunds;
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const capAtomic = settings.policy.maxAutoSpendAtomic;
   const data = {
@@ -413,6 +420,10 @@ export async function runRouterStatus(
     },
     modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
     modelRoutingCredit: { remaining: toMoney(modelRoutingCreditAtomic.toString()) },
+    modelInferenceRefunds: {
+      pending: refunds.pending,
+      returned: toMoney(refunds.refundedAtomic),
+    },
     caps: { maxAutoSpend: toMoney(capAtomic.toString()) },
     accounts,
     settings: saved,
@@ -488,6 +499,9 @@ export async function runRouterStatus(
                 value: `${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
               },
             ]
+          : []),
+        ...(refunds.pending > 0
+          ? [{ label: 'Refunds', value: `${refunds.pending} subagent channel refunds pending` }]
           : []),
         accountsShown.row,
         settingsShown.row,
