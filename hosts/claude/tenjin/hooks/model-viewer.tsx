@@ -980,10 +980,15 @@ function stopWord(status: unknown, endedBy: unknown): string {
   if (endedByOf(endedBy)) return ENDED_BY[endedBy]!;
   return status === 'cancelled' ? 'Interrupted' : 'Stopped';
 }
-/** An ended worker's line, as a native subagent's: `Done (12 tool uses · 41.2k tokens · 2m 13s · $0.039)`. */
-function endLine(live: TenjinModelWorker): string {
+type WorkerEnding = { word: string; parts: string[] };
+
+function endingText({ word, parts }: WorkerEnding): string {
+  return word + (parts.length ? ' (' + parts.join(' · ') + ')' : '');
+}
+
+function workerEnding(live: TenjinModelWorker): WorkerEnding {
   const time = live.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [];
-  if (live.ended === 'not_started') return 'Not started' + time.map((t) => ' (' + t + ')').join('');
+  if (live.ended === 'not_started') return { word: 'Not started', parts: time };
   // NOT LEARNED HERE: said so, never as a failure of the work, and with no time past its end.
   const unseen = live.ended === 'unseen';
   const word =
@@ -1003,7 +1008,7 @@ function endLine(live: TenjinModelWorker): string {
         ]
       : []),
   ];
-  return word + (parts.length ? ' (' + parts.join(' · ') + ')' : '');
+  return { word, parts };
 }
 
 function displayPreview(message: string, content: string): boolean {
@@ -2013,101 +2018,8 @@ export function registerModelViewer(on: On): void {
         }
         return next(e);
       }
-      const ui = $.ui.resolve(e);
-      const said = textOf(output);
-      const answer = acceptResponse(said);
-      const results = offerIds.length > 1 ? batchOutcomes(answer) : undefined;
-      const draw = async (offerId: string) => {
-        const ended = results?.get(offerId) ?? answer;
-        // The held Agent row reads this, so it never draws beside the DeepSeek row.
-        if (!drawnAccepts.has(offerId)) {
-          drawnAccepts.add(offerId);
-          if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
-          $.ui.invalidate('ui.render');
-        }
-        const [held, known] = await Promise.all([
-          $.state.get({ ...WORKERS, id: offerId }),
-          $.state.get(STATE),
-        ]);
-        const live = held.value;
-        // Before the accept hook has run (the host is still checking the call), the offer's
-        // own record names the task.
-        const title =
-          live?.title ??
-          known.value?.records.find((r) => r.offerId === offerId)?.title ??
-          'subagent';
-        const head = { name: 'DeepSeek', argument: title };
-        const status = ended?.status;
-        if (
-          status === 'completed' ||
-          status === 'cancelled' ||
-          status === 'unknown' ||
-          status === 'stopped'
-        ) {
-          const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
-          return workerRow(ui, {
-            ...head,
-            state: status === 'completed' ? 'done' : 'error',
-            under: word + ' (' + doneParts(ended!, live).join(' · ') + ')',
-          });
-        }
-        // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
-        if (status === 'not_started' || typeof ended?.action === 'string')
-          return workerRow(ui, {
-            ...head,
-            state: isErrored || status === 'not_started' ? 'error' : 'held',
-            under:
-              'Not started' +
-              (typeof ended?.elapsedMs === 'number' ? ' (' + duration(ended.elapsedMs) + ')' : ''),
-          });
-        // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
-        // for a call it moved to the background after two minutes. The worker's
-        // record says where it stands; a missing answer never reads as an end.
-        if (live?.ended)
-          return workerRow(ui, {
-            ...head,
-            state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
-            under: endLine(live),
-          });
-        if (isInterrupted)
-          return workerRow(ui, {
-            ...head,
-            state: 'error',
-            under:
-              'Interrupted' +
-              (live?.elapsedMs !== undefined ? ' (' + duration(live.elapsedMs) + ')' : ''),
-          });
-        const moved = output !== undefined && HOST_MOVED.test(said ?? '');
-        if (output !== undefined && !live && !moved) return undefined;
-        // A running row nothing here follows, after a reload or a resume: the CLI is asked.
-        if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
-        // From the moment of accept: Claude Code is still starting until the first tick says more.
-        const starting = live ? live.state !== 'running' : !moved;
-        const parts = [
-          starting ? 'starting' : undefined,
-          !live && moved ? 'running in the background' : undefined,
-          live?.toolUses ? toolUses(live.toolUses) : undefined,
-          live?.tokens ? tokens(live.tokens) : undefined,
-          live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
-          live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
-        ].filter((part): part is string => part !== undefined);
-        return workerRow(ui, {
-          ...head,
-          state: 'running',
-          tail: ' · ' + parts.join(' · '),
-          ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
-        });
-      };
-      if (offerIds.length === 1) return (await draw(offerIds[0]!)) ?? next(e);
-      const rows = await Promise.all(offerIds.map(draw));
-      if (rows.some((row) => row === undefined)) return next(e);
-      const { Box } = ui;
       return (
-        <Box flexDirection="column">
-          {rows.map((row, index) => (
-            <Box key={offerIds[index]}>{row}</Box>
-          ))}
-        </Box>
+        (await acceptRows($, $.ui.resolve(e), offerIds, e.props, e.props.isExpanded)) ?? next(e)
       );
     }
     if (tool === 'Agent' || tool === 'Task') {
@@ -2147,18 +2059,23 @@ export function registerModelViewer(on: On): void {
     }
     return next(e);
   });
-  // The transcript folds a run of calls into one count line, which for an
-  // accept reads `Calling plugin:tenjin:router…` and draws no row at all. A
-  // group that holds an accept unfolds, so its DeepSeek row draws.
-  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
-    // A call still being written counts: folded, it reads `Calling plugin:tenjin:router…`
-    // for the moment before its offer id is there.
+  // A standalone batch owns one compact group. Ctrl+O draws ToolUse and
+  // ToolResult directly, so its individual rows can expand without render state.
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (e.props.isExpanded) return next(e);
+    const [call] = e.props.calls;
+    if (e.props.isCallsOnly !== false && e.props.calls.length === 1 && call?.tool === ACCEPT) {
+      const ids = acceptedIds(call.input);
+      if (ids && ids.length > 1) {
+        const batch = await acceptRows($, $.ui.resolve(e), ids, call, false);
+        if (batch !== undefined) return batch;
+      }
+    }
+    // Other accepts in a folded run keep the engine's individual rows.
     const accepts = e.props.calls.some(
       (call) => call.tool === ACCEPT && (acceptedIds(call.input) || undecided(call.input)),
     );
-    return next(
-      accepts && !e.props.isExpanded ? { ...e, props: { ...e.props, isExpanded: true } } : e,
-    );
+    return next(accepts ? { ...e, props: { ...e.props, isExpanded: true } } : e);
   });
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const { tool, output, isExpanded } = e.props;
@@ -2236,7 +2153,7 @@ export function registerModelViewer(on: On): void {
               : how === 'cancelled'
                 ? 'was interrupted'
                 : 'stopped') +
-        (live.ended ? ' · ' + endLine(live) : '');
+        (live.ended ? ' · ' + endingText(workerEnding(live)) : '');
       // AS A NATIVE SUBAGENT'S RETURN READS in the compact view: one dim line naming the
       // sender. The row's sender (`from`) is the host's alone to set, so the line is
       // drawn here; in full (ctrl+o) the row says who finished and its counts.
@@ -2337,9 +2254,124 @@ type WorkerRow = {
   state: 'running' | 'done' | 'error' | 'held';
   name: string;
   argument?: string;
+  starting?: boolean;
   tail?: string;
   under?: string;
+  ending?: WorkerEnding;
 };
+async function acceptRows(
+  $: Dollar,
+  ui: Elements,
+  offerIds: string[],
+  {
+    output,
+    isInterrupted,
+    isErrored,
+  }: {
+    output?: unknown;
+    isInterrupted?: boolean;
+    isErrored?: boolean;
+  },
+  isExpanded?: boolean,
+) {
+  const said = textOf(output);
+  const answer = acceptResponse(said);
+  const results = offerIds.length > 1 ? batchOutcomes(answer) : undefined;
+  const describeWorker = async (offerId: string): Promise<WorkerRow | undefined> => {
+    const ended = results?.get(offerId) ?? answer;
+    // The held Agent row reads this, so it never draws beside the DeepSeek row.
+    if (!drawnAccepts.has(offerId)) {
+      drawnAccepts.add(offerId);
+      if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
+      $.ui.invalidate('ui.render');
+    }
+    const [held, known] = await Promise.all([
+      $.state.get({ ...WORKERS, id: offerId }),
+      $.state.get(STATE),
+    ]);
+    const live = held.value;
+    // Before the accept hook has run (the host is still checking the call), the offer's
+    // own record names the task.
+    const title =
+      live?.title ?? known.value?.records.find((r) => r.offerId === offerId)?.title ?? 'subagent';
+    const head = { name: 'DeepSeek', argument: title };
+    const status = ended?.status;
+    if (
+      status === 'completed' ||
+      status === 'cancelled' ||
+      status === 'unknown' ||
+      status === 'stopped'
+    ) {
+      const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
+      return {
+        ...head,
+        state: status === 'completed' ? 'done' : 'error',
+        ending: { word, parts: doneParts(ended!, live) },
+      };
+    }
+    // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
+    if (status === 'not_started' || typeof ended?.action === 'string')
+      return {
+        ...head,
+        state: isErrored || status === 'not_started' ? 'error' : 'held',
+        ending: {
+          word: 'Not started',
+          parts: typeof ended?.elapsedMs === 'number' ? [duration(ended.elapsedMs)] : [],
+        },
+      };
+    // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
+    // for a call it moved to the background after two minutes. The worker's
+    // record says where it stands; a missing answer never reads as an end.
+    if (live?.ended)
+      return {
+        ...head,
+        state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
+        ending: workerEnding(live),
+      };
+    if (isInterrupted)
+      return {
+        ...head,
+        state: 'error',
+        ending: {
+          word: 'Interrupted',
+          parts: live?.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [],
+        },
+      };
+    const moved = output !== undefined && HOST_MOVED.test(said ?? '');
+    if (output !== undefined && !live && !moved) return undefined;
+    // A running row nothing here follows, after a reload or a resume: the CLI is asked.
+    if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
+    // From the moment of accept: Claude Code is still starting until the first tick says more.
+    const starting = live ? live.state !== 'running' : !moved;
+    const parts = [
+      !live && moved ? 'running in the background' : undefined,
+      live?.toolUses ? toolUses(live.toolUses) : undefined,
+      live?.tokens ? tokens(live.tokens) : undefined,
+      live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
+      live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
+    ].filter((part): part is string => part !== undefined);
+    return {
+      ...head,
+      state: 'running',
+      starting,
+      ...(parts.length ? { tail: ' · ' + parts.join(' · ') } : {}),
+      ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
+    };
+  };
+  const described = await Promise.all(offerIds.map(describeWorker));
+  const rows = described.filter((row) => row !== undefined);
+  if (rows.length !== offerIds.length) return undefined;
+  if (rows.length === 1) return workerRow(ui, rows[0]!);
+  if (!isExpanded) return workerGroup(ui, rows, offerIds);
+  const { Box } = ui;
+  return (
+    <Box flexDirection="column">
+      {rows.map((row, index) => (
+        <Box key={offerIds[index]}>{workerRow(ui, row)}</Box>
+      ))}
+    </Box>
+  );
+}
 /** A tool row as the engine draws one: the dot, the name bold, the input in
  *  parentheses, a dim tail, and one dim line under it. */
 function workerRow({ Box, Text }: Elements, row: WorkerRow) {
@@ -2363,18 +2395,19 @@ function workerRow({ Box, Text }: Elements, row: WorkerRow) {
         <Text wrap="truncate-end">
           {row.argument !== undefined ? '(' + row.argument + ')' : ''}
         </Text>
-        <Text dimColor>{row.tail ?? ''}</Text>
+        <Text dimColor>{(row.starting ? ' · starting' : '') + (row.tail ?? '')}</Text>
       </Box>
     </Box>
   );
+  const detail = row.ending ? endingText(row.ending) : row.under;
   const under =
-    row.under === undefined
+    detail === undefined
       ? []
       : [
           <Box key="under" flexDirection="row">
             <Text dimColor>{'  ⎿  '}</Text>
             <Text dimColor wrap="truncate-end">
-              {clean(row.under, 400)}
+              {clean(detail, 400)}
             </Text>
           </Box>,
         ];
@@ -2384,6 +2417,56 @@ function workerRow({ Box, Text }: Elements, row: WorkerRow) {
     </Box>
   );
 }
+/** A compact batch keeps the live state of every accepted worker visible. */
+function workerGroup({ Box, Text }: Elements, rows: WorkerRow[], offerIds: string[]) {
+  const finished = rows.filter((row) => row.state === 'done').length;
+  const running = rows.some((row) => row.state === 'running');
+  const allFinished = finished === rows.length;
+  const summary = running
+    ? `Running ${rows.length} DeepSeek agents…`
+    : allFinished
+      ? `${rows.length} DeepSeek agents finished`
+      : `${finished} of ${rows.length} DeepSeek agents finished`;
+  const dot = running ? { dimColor: true } : { color: allFinished ? 'success' : 'error' };
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="row">
+        <Box minWidth={2}>
+          <Text {...dot}>⏺</Text>
+        </Box>
+        <Text>{summary}</Text>
+      </Box>
+      {rows.map((row, index) => {
+        const last = index === rows.length - 1;
+        const detail =
+          row.ending?.word ?? row.under ?? (row.starting ? 'Initializing…' : undefined);
+        const tail = row.ending?.parts.length ? ' · ' + row.ending.parts.join(' · ') : row.tail;
+        return (
+          <Box key={offerIds[index]} flexDirection="column">
+            <Box flexDirection="row">
+              <Text dimColor>{last ? '  └ ' : '  ├ '}</Text>
+              <Text bold wrap="truncate-end">
+                {row.argument ?? row.name}
+              </Text>
+              <Text dimColor wrap="truncate-end">
+                {tail ?? ''}
+              </Text>
+            </Box>
+            {detail !== undefined ? (
+              <Box flexDirection="row">
+                <Text dimColor>{last ? '    ⎿  ' : '  │ ⎿  '}</Text>
+                <Text dimColor wrap="truncate-end">
+                  {clean(detail, 400)}
+                </Text>
+              </Box>
+            ) : null}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
 /** An accept call's own answer, which its live row already says: a worker
  *  handback (it carries `elapsedMs`) or a refusal to start one. A cancel's
  *  short status is not one, and keeps the engine's result block. */

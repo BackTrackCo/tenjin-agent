@@ -1712,6 +1712,9 @@ test('a worker that stops, is interrupted or never starts says so, never Done', 
 test('a folded run that holds an accept unfolds, so the DeepSeek row draws in place of the count line', async ($, on) => {
   setup($, on);
   const groups: { isExpanded: boolean }[] = [];
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
   on('ui.render', { component: 'ToolGroup' }, ($, e) => {
     groups.push(e.props);
     return $.ui.resolve(e).Text({ children: ['Calling plugin:tenjin:router…'] });
@@ -1736,6 +1739,64 @@ test('a folded run that holds an accept unfolds, so the DeepSeek row draws in pl
     expect(groups.at(-1)?.isExpanded).toBe(unfolds);
     await group.unmount();
   }
+
+  const completed = JSON.stringify({
+    results: [OFFER, SECOND_OFFER].map((offer_id) => ({
+      offer_id,
+      outcome: { status: 'completed', elapsedMs: 3000, toolUses: 1 },
+    })),
+  });
+  const compact = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: {
+      calls: [toolRow(batch.tool_use_id, ACCEPT, batch.input, completed)],
+      isActive: false,
+      isExpanded: false,
+    },
+  });
+  const compactLines = (await shownLines(compact)).join('');
+  expect(compactLines).toContain('2 DeepSeek agents finished');
+  expect(compactLines.match(/⎿ {2}Done/g)).toHaveLength(2);
+  expect(compactLines).not.toContain('engine result');
+  await compact.unmount();
+
+  const withNotice = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: { calls: [batch], isActive: true, isExpanded: false, isCallsOnly: false },
+  });
+  expect(groups.at(-1)?.isExpanded).toBe(true);
+  expect(await shownLines(withNotice)).toEqual(['Calling plugin:tenjin:router…']);
+  await withNotice.unmount();
+
+  // Ctrl+O uses standalone ToolUse and ToolResult, without another ToolGroup.
+  const row = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...toolRow(batch.tool_use_id, ACCEPT, batch.input, completed), isExpanded: true },
+  });
+  const expanded = (await shownLines(row)).join('');
+  expect(expanded.match(/DeepSeek\(subagent\)/g)).toHaveLength(2);
+  expect(expanded).not.toContain('2 DeepSeek agents finished');
+  await row.unmount();
+  const result = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: {
+      tool_use_id: batch.tool_use_id,
+      tool: ACCEPT,
+      output: completed,
+      isErrored: false,
+      isExpanded: true,
+    },
+  });
+  expect(await shownLines(result)).toEqual(['engine result']);
+  await result.unmount();
 });
 
 for (const [phase, started, rows, ending] of [
@@ -2307,6 +2368,18 @@ test('one accept batch binds both viewers to the nested caller and draws one ind
   });
   await f.clock.settle();
   expect(f.state.accepted).toBe(1);
+  const pending = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('nested_batch', ACCEPT, input),
+  });
+  const starting = (await shownLines(pending)).join('');
+  await pending.unmount();
+  expect(starting).toContain('Running 2 DeepSeek agents…');
+  expect(starting).toContain('├ Read selected source');
+  expect(starting).toContain('└ Read selected source');
+  expect(starting.match(/Initializing…/g)).toHaveLength(2);
   const viewers = f.state.agents.slice(1);
   expect(viewers.map(({ description }) => description)).toEqual([
     'Read selected source',
@@ -2344,8 +2417,20 @@ test('one accept batch binds both viewers to the nested caller and draws one ind
   });
   const lines = (await shownLines(ui)).join('');
   await ui.unmount();
-  expect(lines).toContain('Done (3 tool uses · 5s)');
+  expect(lines).toContain('1 of 2 DeepSeek agents finished');
+  expect(lines).toContain('├ Read selected source · 3 tool uses · 5s');
+  expect(lines).toContain('⎿  Done');
   expect(lines).toContain('Stopped by you');
+  const expanded = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...toolRow('nested_batch', ACCEPT, input, answer), isExpanded: true },
+  });
+  const full = (await shownLines(expanded)).join('');
+  await expanded.unmount();
+  expect(full).toContain('DeepSeek(Read selected source)  ⎿  Done (3 tool uses · 5s)');
+  expect(full).not.toContain('DeepSeek agents finished');
   // Both full reports can reach the caller even when their combined length exceeds
   // the usual single-response reader. Only the compact transcript hides them.
   for (const isExpanded of [false, true]) {
@@ -2391,8 +2476,10 @@ test('a background batch reports each confirmed outcome and leaves another worke
   });
   const lines = (await shownLines(ui)).join('');
   await ui.unmount();
-  expect(lines).toContain('DeepSeek(Read selected source)  ⎿  Done');
-  expect(lines).toContain('DeepSeek(Read another file) · 1 tool use');
+  expect(lines).toContain('Running 2 DeepSeek agents…');
+  expect(lines).toContain('├ Read selected source');
+  expect(lines).toContain('⎿  Done');
+  expect(lines).toContain('└ Read another file · 1 tool use');
   for (const task of [{ id: 'k2vf9xspk' }, { toolUseId: 'background_batch' }]) {
     const message = await $.ui.mount({
       plugin: 'tenjin',
