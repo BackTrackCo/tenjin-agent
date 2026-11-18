@@ -101,6 +101,23 @@ export function completedMessageSse(raw: unknown): string {
 }
 
 type Reference = { type: 'tool_reference'; tool_name?: unknown };
+const clientTool = z
+  .object({
+    name: z.string(),
+    description: z.string().optional(),
+    input_schema: z.record(z.string(), z.unknown()),
+    type: z.literal('custom').optional(),
+    defer_loading: z.boolean().optional(),
+  })
+  .passthrough();
+/** Claude Code's mid-conversation tool changes: a tool by reference, or defined in the block. */
+const toolChange = z.object({
+  type: z.enum(['tool_addition', 'tool_removal']),
+  tool: z.union([
+    z.object({ type: z.literal('tool_reference'), name: z.string() }),
+    z.object({ type: z.literal('tool_definition'), definition: clientTool }),
+  ]),
+});
 
 /** A request that offers more tools than the router takes: every model call would fail. */
 export class TooManyTools extends Error {
@@ -123,22 +140,7 @@ export function workerMessages(raw: Record<string, unknown>) {
     raw.stop_sequences === undefined
       ? undefined
       : z.array(z.string().min(1).max(256)).max(16).parse(raw.stop_sequences);
-  const declared =
-    raw.tools === undefined
-      ? undefined
-      : z
-          .array(
-            z
-              .object({
-                name: z.string(),
-                description: z.string().optional(),
-                input_schema: z.record(z.string(), z.unknown()),
-                type: z.literal('custom').optional(),
-                defer_loading: z.boolean().optional(),
-              })
-              .passthrough(),
-          )
-          .parse(raw.tools);
+  const declared = raw.tools === undefined ? undefined : z.array(clientTool).parse(raw.tools);
   // Tool search, as the Messages API serves it: a deferred tool is left out until a
   // ToolSearch result names it in a `tool_reference`, then it can be called, and the
   // result reads as the tool's definition in Claude Code's own text form of it. Neither
@@ -160,27 +162,66 @@ export function workerMessages(raw: Record<string, unknown>) {
       { type: 'text', text: `<functions>${functions.join('')}\n</functions>` },
     ];
   };
+  // TOOL CHANGES IN A MESSAGE, as Claude Code 2.1.327 announces a tool whose MCP server
+  // connected after the first request: a `tool_addition` or `tool_removal` block in a
+  // system message, with the tool declared as deferred or defined in the block. Neither
+  // the proxy nor DeepSeek takes those blocks: the router refused the whole request with
+  // `invalid_model_request` (400) and the job ended. The change is applied to the tools
+  // this request offers, in message order, and the block is left out.
+  const removed = new Set<string>();
+  const defined: z.infer<typeof clientTool>[] = [];
+  const isToolChange = (b: unknown) =>
+    isRecord(b) && (b.type === 'tool_addition' || b.type === 'tool_removal');
+  const applyToolChanges = (blocks: unknown[]) => {
+    for (const block of blocks.filter(isToolChange)) {
+      const change = toolChange.parse(block);
+      const name =
+        change.tool.type === 'tool_reference' ? change.tool.name : change.tool.definition.name;
+      if (change.type === 'tool_removal') {
+        loaded.delete(name);
+        removed.add(name);
+        continue;
+      }
+      removed.delete(name);
+      loaded.add(name);
+      if (change.tool.type === 'tool_definition' && !declared?.some((t) => t.name === name)) {
+        const at = defined.findIndex((t) => t.name === name);
+        if (at >= 0) defined.splice(at, 1);
+        defined.push(change.tool.definition);
+      }
+    }
+  };
   const clearBlocks = (value: unknown): unknown => {
     if (!Array.isArray(value)) return value;
-    return value.map((b) => {
-      if (
-        !b ||
-        typeof b !== 'object' ||
-        !['text', 'thinking', 'tool_use', 'tool_result'].includes(String(b.type))
-      )
-        return b;
-      const kept = { ...b };
-      delete kept.cache_control;
-      if (kept.type !== 'tool_result') return kept;
-      const content = clearBlocks(kept.content);
-      return { ...kept, content: Array.isArray(content) ? loadTools(content) : content };
-    });
+    applyToolChanges(value);
+    return value
+      .filter((b) => !isToolChange(b))
+      .map((b) => {
+        if (
+          !b ||
+          typeof b !== 'object' ||
+          !['text', 'thinking', 'tool_use', 'tool_result'].includes(String(b.type))
+        )
+          return b;
+        const kept = { ...b };
+        delete kept.cache_control;
+        if (kept.type !== 'tool_result') return kept;
+        const content = clearBlocks(kept.content);
+        return { ...kept, content: Array.isArray(content) ? loadTools(content) : content };
+      });
   };
   const messages = Array.isArray(raw.messages)
-    ? raw.messages.map((m) => ({ ...m, content: clearBlocks(m.content) }))
+    ? raw.messages
+        .map((m) => ({ ...m, content: clearBlocks(m.content) }))
+        // A message that held only tool changes has nothing left to say.
+        .filter((m, index) => {
+          const before = (raw.messages as { content?: unknown }[])[index]?.content;
+          return !(Array.isArray(before) && before.length > 0 && m.content.length === 0);
+        })
     : raw.messages;
-  const tools = declared
-    ?.filter((t) => t.defer_loading !== true || loaded.has(t.name))
+  const offered = declared || defined.length ? [...(declared ?? []), ...defined] : undefined;
+  const tools = offered
+    ?.filter((t) => (t.defer_loading !== true || loaded.has(t.name)) && !removed.has(t.name))
     .map((t) => ({
       name: t.name,
       ...(t.description ? { description: t.description } : {}),

@@ -183,3 +183,104 @@ it('refuses a request that offers more tools than the router takes, counting onl
   );
   expect(sent.tools).toHaveLength(256);
 });
+
+// Live case (job fd128c49, Claude Code 2.1.327): two tools of an MCP server that connected
+// after the first request were announced in a system message. The router refused the next
+// request with 400 `invalid_model_request`, and the job ended after 2 tool uses.
+it('applies a tool change announced in a message to the tools it offers, and sends no tool change block', () => {
+  const tool = (name: string, deferred = false) => ({
+    name,
+    description: `${name} description`,
+    input_schema: { type: 'object' },
+    ...(deferred ? { defer_loading: true } : {}),
+  });
+  const announced =
+    'The following tools just became available and are ready to use:\nmcp__x402__request\nmcp__x402__subagent';
+  const result = workerMessages({
+    model: 'deepseek-flash',
+    tools: [
+      tool('Bash'),
+      tool('mcp__x402__request', true),
+      tool('DeferredToolPlaceholder', true),
+      tool('mcp__x402__subagent', true),
+    ],
+    messages: [
+      { role: 'user', content: 'Find the pinned version.' },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'ls' } }],
+      },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'ok' }] },
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: announced },
+          { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp__x402__request' } },
+          {
+            type: 'tool_addition',
+            tool: { type: 'tool_reference', name: 'mcp__x402__subagent' },
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+    ],
+  });
+  expect(result.tools?.map((t) => t.name)).toEqual([
+    'Bash',
+    'mcp__x402__request',
+    'mcp__x402__subagent',
+  ]);
+  expect((result.messages as unknown[]).at(-1)).toEqual({
+    role: 'system',
+    content: [{ type: 'text', text: announced }],
+  });
+  expect(JSON.stringify(result)).not.toContain('tool_addition');
+});
+
+it('offers a tool defined in a tool change, stops offering a removed one, and sends no message of changes alone', () => {
+  const schema = { type: 'object', properties: { query: { type: 'string' } } };
+  const result = workerMessages({
+    model: 'deepseek-flash',
+    tools: [
+      { name: 'Bash', input_schema: { type: 'object' } },
+      { name: 'Monitor', input_schema: { type: 'object' } },
+    ],
+    messages: [
+      { role: 'user', content: 'Search the notes.' },
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'tool_addition',
+            tool: {
+              type: 'tool_definition',
+              definition: {
+                name: 'mcp__notes__search',
+                description: 'Search',
+                input_schema: schema,
+              },
+            },
+          },
+          { type: 'tool_removal', tool: { type: 'tool_reference', name: 'Monitor' } },
+        ],
+      },
+    ],
+  });
+  expect(result.tools).toEqual([
+    { name: 'Bash', input_schema: { type: 'object' } },
+    { name: 'mcp__notes__search', description: 'Search', input_schema: schema },
+  ]);
+  expect(result.messages).toEqual([{ role: 'user', content: 'Search the notes.' }]);
+  // A change the bridge cannot apply fails this request alone, before anything is sent.
+  expect(() =>
+    workerMessages({
+      model: 'deepseek-flash',
+      messages: [
+        {
+          role: 'system',
+          content: [{ type: 'tool_addition', tool: { type: 'web_search_20250305' } }],
+        },
+      ],
+    }),
+  ).toThrow();
+});
