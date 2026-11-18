@@ -5,7 +5,7 @@ import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { RoutingPayerDeps } from './routing-payer';
-import { RoutingPayer as Payer } from './routing-payer';
+import { LocalSendBlocked, RoutingPayer as Payer } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
@@ -151,8 +151,13 @@ export class ModelTransport {
     try {
       const fetchFn = this.options.payerDeps.fetchImpl ?? fetch;
       const guardedFetch: typeof fetch = async (input, init) => {
-        await beforeSend?.();
-        signal?.throwIfAborted();
+        try {
+          await beforeSend?.();
+          signal?.throwIfAborted();
+          init?.signal?.throwIfAborted();
+        } catch (cause) {
+          throw new LocalSendBlocked(cause);
+        }
         return fetchFn(input, {
           ...init,
           signal: AbortSignal.any([
@@ -449,17 +454,37 @@ export class ModelTransport {
       await challenge.body?.cancel();
       return existing(reservation);
     }
+    const release = () =>
+      modelLock(`${path}.lock`, async () => {
+        const state = await load();
+        const call = state.calls[key];
+        if (call?.invocationId === body.invocationId && !call.completed) {
+          state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
+          delete state.calls[key];
+          await writePrivate(path, JSON.stringify(state));
+        }
+      });
     let signingStarted = false;
     let paymentSent = false;
+    let localBlock: LocalSendBlocked | undefined;
     let paidError: { status: number; code?: string } | undefined;
     let first = true;
     const cachedFetch: typeof fetch = async (input, init) => {
-      signal.throwIfAborted();
       if (first) {
+        signal.throwIfAborted();
         first = false;
         return challenge;
       }
-      await assertCanTransmit();
+      try {
+        await assertCanTransmit();
+        signal.throwIfAborted();
+        init?.signal?.throwIfAborted();
+      } catch (cause) {
+        // httpRequest maps fetch failures to transport outcomes. Retain the
+        // evidence that this invocation's authorization stayed local.
+        localBlock = new LocalSendBlocked(cause);
+        throw localBlock;
+      }
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : undefined),
       );
@@ -530,22 +555,19 @@ export class ModelTransport {
       await payer.idle();
     }
     if (failure !== undefined) {
-      // RouteSkipped alone does not prove safety: it can also follow a signed send.
-      // Only a refusal with neither signing nor transmission can release exposure.
-      if (failure instanceof RouteSkipped && !signingStarted && !paymentSent) {
-        await modelLock(`${path}.lock`, async () => {
-          const state = await load();
-          const call = state.calls[key];
-          if (call?.invocationId === body.invocationId && !call.completed) {
-            state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
-            delete state.calls[key];
-            await writePrivate(path, JSON.stringify(state));
-          }
-        });
+      // A refusal before signing or a proven local guard failure can release
+      // the quote only when no signed leg of this invocation reached fetch.
+      if (!paymentSent && (localBlock || (failure instanceof RouteSkipped && !signingStarted))) {
+        await release();
         throw new ModelCallFailed(
-          'Model payment refused before signing; no authorization sent',
-          { cause: 'payment_refused', payer: failure.why },
-          { cause: failure },
+          localBlock
+            ? 'Model payment refused before transmission'
+            : 'Model payment refused before signing; no authorization sent',
+          {
+            cause: 'payment_refused',
+            ...(!localBlock && failure instanceof RouteSkipped ? { payer: failure.why } : {}),
+          },
+          { cause: localBlock ?? failure },
         );
       }
       // THE PROVIDER FAILED THE CALL: the router says so in a fixed code. Its own record
@@ -554,15 +576,7 @@ export class ModelTransport {
       if (paidError?.code !== undefined && PROVIDER_FAILURES.has(paidError.code)) {
         const server = await this.recover(body.invocationId, signal, protocol).catch(() => null);
         if (server && costNothing(server)) {
-          await modelLock(`${path}.lock`, async () => {
-            const state = await load();
-            const call = state.calls[key];
-            if (call?.invocationId === body.invocationId && !call.completed) {
-              state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
-              delete state.calls[key];
-              await writePrivate(path, JSON.stringify(state));
-            }
-          });
+          await release();
           throw new ModelCallFailed(
             'The model provider failed the call; nothing was charged for it',
             { cause: 'provider', status: paidError.status, uncharged: true },

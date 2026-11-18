@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { SIWX_HEADER } from '../lib/siwx';
+import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
 import { ModelTransport } from './model-transport';
 import { ModelCallFailed } from './model-worker-control';
@@ -552,11 +553,14 @@ it('does not transmit a routing authorization after cancellation while the signe
   await rejected;
   expect(router.paidRequests()).toBe(0);
   expect(router.settledFees).toBe(0);
+  expect((await readSpendSummary(dir))?.committedAtomic ?? '0').toBe('0');
 });
 
-it('keeps a signed inference request local when workspace scope changes during signing', async () => {
+it('releases an unsent inference quote and inline deposit when workspace scope changes during signing', async () => {
   const f = await fixture();
+  const transport = f.make();
   let currentScope = true;
+  let committedAtRefusal: string | undefined;
   const getSigner = f.deps.getSigner;
   f.deps.getSigner = async () => {
     const signer = await getSigner();
@@ -570,12 +574,28 @@ it('keeps a signed inference request local when workspace scope changes during s
     };
   };
   await expect(
-    f.make().messages(f.job, { messages: [] }, new AbortController().signal, async () => {
-      if (!currentScope) throw new Error('Workspace scope changed');
+    transport.messages(f.job, { messages: [] }, new AbortController().signal, async () => {
+      if (currentScope) return;
+      committedAtRefusal = (await readSpendSummary(f.dir))?.committedAtomic;
+      throw new Error('Workspace scope changed');
     }),
-  ).rejects.toThrow();
+  ).rejects.toMatchObject({ detail: { cause: 'payment_refused' } });
   expect(currentScope).toBe(false);
+  expect(BigInt(committedAtRefusal ?? '0')).toBeGreaterThan(0n);
   expect(f.router.paidRequests()).toBe(0);
+  expect(f.router.deposits).toBe(0);
+  expect(await readSpendSummary(f.dir)).toMatchObject({
+    committedAtomic: '0',
+    automaticCommittedAtomic: '0',
+    settledAtomic: '0',
+    reservations: [],
+    exposures: [],
+  });
+  expect(await transport.summary(f.job)).toEqual({
+    actualAtomic: '3000',
+    reservedAtomic: '3000',
+    uncertain: [],
+  });
 });
 
 it('keeps native Responses opaque fields intact and budgets worker plus Guardian in the same job', async () => {

@@ -67,6 +67,13 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 export { reasonCode } from '../lib/payment-failure';
 
+/** A trusted local guard stopped this request before delegating to network fetch. */
+export class LocalSendBlocked extends Error {
+  constructor(cause: unknown) {
+    super('The local send guard refused transmission.', { cause });
+  }
+}
+
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
  * `tenjin mcp`, never in a hook. The user approved it with the automatic spend
@@ -911,11 +918,23 @@ export class RoutingPayer {
           return first;
         }
         const deposit = paying ? call.deposits.find((d) => d.state === 'signed') : undefined;
+        const previouslyPaid = call.paid;
         if (paying) call.paid = true;
         // FAIL CLOSED: the deposit counts from the moment it is sent, so a lost
         // answer or a process killed mid-call leaves it counted.
         if (deposit !== undefined) await this.commitDeposit(deposit);
-        const response = await base(request, { signal });
+        let response: Response;
+        try {
+          response = await base(request, { signal });
+        } catch (error) {
+          // A local refusal proves this leg never entered network fetch. Earlier
+          // paid legs and failures from the network itself retain their exposure.
+          if (error instanceof LocalSendBlocked) {
+            call.paid = previouslyPaid;
+            if (deposit !== undefined) await this.releaseDeposit(deposit);
+          }
+          throw error;
+        }
         // Only an answered error proves it did not settle: the server settles
         // nothing on a 4xx or 5xx.
         if (deposit !== undefined && response.status >= 400) await this.releaseDeposit(deposit);
@@ -989,8 +1008,9 @@ export class RoutingPayer {
    * EACH RESERVED DEPOSIT ENDS IN THE LEDGER. It is committed as it is sent,
    * so a lost answer leaves it counted whether or not it landed (an over-count
    * of a few cents, never an under-count), and the SDK resyncs the channel on
-   * the next call. An answered 4xx or 5xx gives exactly that exposure back. A
-   * deposit signed but never sent releases its reservation (`settleDeposits`).
+   * the next call. An answered 4xx or 5xx or a local refusal before fetch gives
+   * exactly that exposure back. A deposit left uncommitted releases its
+   * reservation (`settleDeposits`).
    */
   private async commitDeposit(d: Deposit): Promise<void> {
     // A ledger that cannot take the write stops the request: it is not sent.
