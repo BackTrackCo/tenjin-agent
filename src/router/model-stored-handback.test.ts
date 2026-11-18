@@ -182,6 +182,12 @@ it.each(['completed', 'stopped'] as const)(
         origin: settings.routerOrigin,
         summary: async () => spend,
         reconcile: async () => undefined,
+        // A router with no refund support: the worker runs on the transport as it is.
+        withInferenceRun: <T>(
+          _runId: string,
+          _signal: AbortSignal,
+          run: (shared: ModelTransport) => Promise<T>,
+        ) => run(transport),
       } as unknown as ModelTransport;
       const server = new McpServer({ name: 'test', version: '1' });
       const model = registerModelTool(server, {
