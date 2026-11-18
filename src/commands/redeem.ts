@@ -153,7 +153,7 @@ export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promi
         if (attempt >= ASK_ATTEMPTS) {
           throw new CliError(
             'NETWORK_ERROR',
-            "Couldn't hear back from Tenjin, so the code may have gone through.",
+            "Didn't hear back from Tenjin, so your code may have gone through.",
             {
               fix: `Run \`tenjin balance\` in a minute. Running \`tenjin redeem ${code}\` again is safe: it never pays twice.`,
             },
@@ -221,12 +221,14 @@ export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promi
     // `tenjin balance --wait` then counts the credit even if it lands before that wait starts.
     await rememberStartBalance(ctx.dataDir, address, startBalance, now(), ON_ITS_WAY_MS);
   }
-  // Redeemed on an earlier run: nothing new was added this time.
-  const earlier = redeemed.replayed && !askedAgain;
+  // Redeemed and landed on an earlier run: nothing new was added this time, and
+  // that credit may since have been spent, so the balance says what is there now.
+  // A redemption still on its way is watched like a fresh one.
+  const earlier = redeemed.replayed && !askedAgain && redeemed.confirmed;
   if (landed && human) {
     live.ok(
       earlier
-        ? `Already redeemed: ${dollars(amount)} from ${redeemed.code} went to this wallet`
+        ? `Already redeemed ${redeemed.code} earlier, so nothing new was added`
         : `${dollars(amount)} added`,
     );
   }
@@ -235,15 +237,16 @@ export async function runRedeem(ctx: CommandContext, opts: RedeemOptions): Promi
     data: {
       address,
       code: redeemed.code,
-      ...(earlier ? { alreadyRedeemed: true } : {}),
-      added: toMoney(amount.toString()),
+      ...(earlier ? { alreadyRedeemed: true } : { added: toMoney(amount.toString()) }),
       ...(balance !== undefined ? { balance: toMoney(balance.toString()) } : {}),
       txHash: redeemed.txHash,
       // True once the credit is in the balance: the server saw it land, or this run did.
       confirmed: landed,
-      nextStep: landed
-        ? `${dollars(amount)} from the code is in the balance. Continue the original task.`
-        : `${dollars(amount)} from the code is on its way to the wallet. Tell the person in one sentence, then ${BALANCE_WAIT_STEP}`,
+      nextStep: earlier
+        ? `This wallet already redeemed ${redeemed.code} earlier, so nothing new was added. Tell the person in one sentence; \`balance\` is what the wallet holds now.`
+        : landed
+          ? `${dollars(amount)} from the code is in the balance. Continue the original task.`
+          : `${dollars(amount)} from the code is on its way to the wallet. Tell the person in one sentence, then ${BALANCE_WAIT_STEP}`,
     },
     humanLines: landed
       ? balance !== undefined
@@ -334,7 +337,7 @@ async function githubSignIn(
     throw new CliError(
       'API_UNREACHABLE',
       `GitHub refused the sign-in (${device.detail ?? 'no reason given'}). Nothing was redeemed.`,
-      { fix: 'Retry later.' },
+      { fix: 'Try again in a minute.' },
     );
   }
   const { userCode, verificationUri } = device.code;
@@ -453,13 +456,10 @@ function redeemRefusal(status: number, envelope: ErrorEnvelope, code: string): C
       return new CliError('REFUSED', message, { fix: again, details });
     }
     if (envelope.code === 'promo_github_unreachable') {
-      return new CliError('API_UNREACHABLE', message, {
-        fix: 'Wait a minute, then retry.',
-        details,
-      });
+      return new CliError('API_UNREACHABLE', message, { fix: 'Try again in a minute.', details });
     }
-    // The code is spent and the transfer may still land: a rerun only hears
-    // "already redeemed", so the way to know is the balance.
+    // The code is spent and the transfer may still land: the balance shows it
+    // first. A rerun is safe but cannot know sooner.
     if (envelope.code === 'promo_unconfirmed') {
       return new CliError('API_UNREACHABLE', message, {
         fix: 'Run `tenjin balance` in a few minutes to see whether it arrived.',
@@ -467,7 +467,7 @@ function redeemRefusal(status: number, envelope: ErrorEnvelope, code: string): C
       });
     }
     if (envelope.code === 'promo_unavailable' || status >= 500) {
-      return new CliError('API_UNREACHABLE', message, { fix: 'Retry later.', details });
+      return new CliError('API_UNREACHABLE', message, { fix: 'Try again in a minute.', details });
     }
     // A rule refusal: a code that does not exist, is not open, is used up,
     // or was already redeemed. A retry changes nothing, so there is no fix.
@@ -487,8 +487,8 @@ function redeemRefusal(status: number, envelope: ErrorEnvelope, code: string): C
   }
   return new CliError(
     'API_UNREACHABLE',
-    `The redeem endpoint returned ${status}${envelope.code !== undefined ? ` (${envelope.code})` : ''}. Nothing was redeemed.`,
-    { fix: 'Retry; if it persists, check the service status.' },
+    `Tenjin couldn't redeem this code (error ${status}${envelope.code !== undefined ? `, ${envelope.code}` : ''}). Nothing was redeemed.`,
+    { fix: 'Try again in a minute.' },
   );
 }
 

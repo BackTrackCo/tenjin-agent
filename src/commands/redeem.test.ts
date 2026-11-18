@@ -405,8 +405,35 @@ describe('runRedeem: a lost answer', () => {
       fetchImpl: net.fetchImpl,
       code: 'NCSTATE26',
     });
-    expect(stderr.join('')).toContain('Already redeemed: $2.00 from NCSTATE26 went to this wallet');
+    expect(stderr.join('')).toContain(
+      'Already redeemed NCSTATE26 earlier, so nothing new was added',
+    );
     expect(res.data).toMatchObject({ alreadyRedeemed: true });
+    // The credit may have been spent since: nothing claims it is in the wallet.
+    expect(res.data).not.toHaveProperty('added');
+    expect(String((res.data as { nextStep: string }).nextStep)).toContain('nothing new was added');
+    expect(String((res.data as { nextStep: string }).nextStep)).not.toContain('Continue');
+  });
+
+  it('watches an earlier redemption still on its way like a fresh one', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValueOnce(500_000n).mockResolvedValue(2_500_000n);
+    const net = servers({
+      redeem: [
+        [
+          200,
+          { ...credited(address, { confirmed: false, balanceAtomic: undefined }), replayed: true },
+        ],
+      ],
+    });
+    const res = await redeem(makeCtx({ isTTY: true, json: false }), {
+      provider,
+      fetchImpl: net.fetchImpl,
+      code: 'NCSTATE26',
+    });
+    expect(stderr.join('')).toContain('✓ $2.00 added');
+    expect(res.data).toMatchObject({ confirmed: true, added: { usd: '2' } });
+    expect(res.data).not.toHaveProperty('alreadyRedeemed');
   });
 
   it('never says retry when no answer comes back: the code may have gone through', async () => {
