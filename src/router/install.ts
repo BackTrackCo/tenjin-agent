@@ -24,8 +24,9 @@ import { readAliveStamp } from './alive';
 import {
   captureNewInstall,
   reserveNewInstall,
-  completeNewInstall,
-  newInstallReceipt,
+  DEEPSEEK_INSTALL_TERMS,
+  finishNewInstall,
+  type InstallSubagentChoice,
   type NewInstallSession,
 } from './new-install';
 import { SUGGESTED_FUND_USD } from './fee';
@@ -67,7 +68,6 @@ import {
   limitsLine,
   ROUTER_DEFAULTS,
   ROUTING_FEE_TERMS,
-  DEEPSEEK_INSTALL_TERMS,
   shownLimits,
   SPEND_QUESTION,
   spendChoiceQuestion,
@@ -195,6 +195,7 @@ export interface RouterInstallArgs {
    * for an agent running the person's answer.
    */
   yes?: boolean;
+  subagents?: InstallSubagentChoice;
   /** Create no wallet, for CI and scripted machines. */
   noWallet?: boolean;
   /**
@@ -228,6 +229,7 @@ export interface RouterInstallDeps extends WalletDeps, FundingDeps {
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
+  promptSubagents?: () => Promise<InstallSubagentChoice | null>;
   /** The spend-limit selector; defaults to the clack list. */
   promptLimits?: (message: string) => Promise<LimitsChoice | null>;
   /** One amount question; defaults to the clack text input. */
@@ -448,7 +450,6 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
-  newInstall.accepted ||= args.refresh !== true && (answered || (canPrompt && unasked));
   if (args.refresh !== true)
     await reserveNewInstall(
       newInstall,
@@ -653,32 +654,37 @@ export async function runRouterInstall(
     launcher: rt?.launcher ?? null,
   };
   newInstall.completed.push(plugin.state !== 'failed' && plugin.state !== 'deferred');
-  const defaultEnabled = deps.newInstall ? false : await completeNewInstall(newInstall, ctx);
-  return newInstallReceipt(
-    {
-      data,
-      humanLines: [
-        ...lines(ctx, {
-          plugin,
-          claude,
-          migration,
-          wallet,
-          ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-          asks: asksAgent ? nextSteps.length : 0,
-          policy: effective.policy,
-          ...(spendAsk !== undefined ? { spendAsk } : {}),
-          router,
-          rt,
-          home,
-          env,
-        }),
-        ...removedKeysLines,
-        ...serverLines,
-      ],
-      humanTail: receiptTail(ctx, effective.policy, data.next),
-    },
-    defaultEnabled,
-  );
+  newInstall.continueWith ??= installCommand(args, command);
+  const result: CommandResult = {
+    data,
+    humanLines: [
+      ...lines(ctx, {
+        plugin,
+        claude,
+        migration,
+        wallet,
+        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
+        asks: asksAgent ? nextSteps.length : 0,
+        policy: effective.policy,
+        ...(spendAsk !== undefined ? { spendAsk } : {}),
+        router,
+        rt,
+        home,
+        env,
+      }),
+      ...removedKeysLines,
+      ...serverLines,
+    ],
+    humanTail: receiptTail(ctx, effective.policy, data.next),
+  };
+  return deps.newInstall
+    ? result
+    : finishNewInstall(result, newInstall, ctx, {
+        ...(args.subagents !== undefined ? { choice: args.subagents } : {}),
+        yes: args.yes === true,
+        isInteractive: canPrompt,
+        ...(deps.promptSubagents ? { promptSubagents: deps.promptSubagents } : {}),
+      });
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
@@ -1201,7 +1207,7 @@ export function namedLimits(
 
 /** A pending install step, handled according to its next instructions. */
 export interface QuestionStep {
-  id: 'spend' | 'fund';
+  id: 'spend' | 'subagents' | 'fund';
   /** Prompt text for the terminal choice or agent explanation; follow `next`. */
   question: string;
   options: {
@@ -1227,7 +1233,7 @@ export async function approveLimits(
   deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${DEEPSEEK_INSTALL_TERMS} ${FEE_APPROVAL}`,
+    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return { ...ROUTER_DEFAULTS };

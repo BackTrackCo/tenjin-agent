@@ -53,8 +53,8 @@ import { readInstalledHosts, withNote } from './hosts';
 import {
   captureNewInstall,
   reserveNewInstall,
-  completeNewInstall,
-  newInstallReceipt,
+  finishNewInstall,
+  type InstallSubagentChoice,
 } from './new-install';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
@@ -75,6 +75,7 @@ import { SUGGESTED_FUND_USD } from './fee';
 export interface CodexArgs {
   project?: boolean;
   yes?: boolean;
+  subagents?: InstallSubagentChoice;
   noWallet?: boolean;
   /** `--max-auto-spend`: the non-negative per-call limit in USD. */
   maxAutoSpend?: string;
@@ -92,7 +93,7 @@ export interface CodexSetupDeps
   extends
     WalletDeps,
     FundingDeps,
-    Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount' | 'newInstall'> {
+    Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount' | 'promptSubagents' | 'newInstall'> {
   /** One `codex` command, recorded in tests. */
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
@@ -383,7 +384,6 @@ export async function runCodexInstall(
         : canPrompt && unasked
           ? await approveLimits(deps)
           : {};
-  newInstall.accepted ||= answered || (canPrompt && unasked);
   const initialCodexConfig = newInstall.absent
     ? await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))()
     : undefined;
@@ -468,40 +468,45 @@ export async function runCodexInstall(
   if (asksAgent && nextSteps.length > 0)
     next = `Follow the instructions in nextSteps, then ${next}`;
   newInstall.completed.push(!tooOld);
-  const defaultEnabled = deps.newInstall ? false : await completeNewInstall(newInstall, ctx);
-  return newInstallReceipt(
-    {
-      data: {
-        plugin: CODEX_PLUGIN,
-        wallet,
-        spend: { ...spend, effective },
-        runtime: runtimeData(rt),
-        nextSteps,
-        disclosure: DISCLOSURE,
-        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-        next,
-      },
-      humanLines: [
-        tooOld
-          ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
-          : 'Tenjin is installed for Codex.',
-        ...(tooOld ? [] : CAPABILITY_LINES.map((line) => `  ${line}`)),
-        ...runtimeLines(ctx, rt, home, true),
-        ...walletLines(ctx, wallet, 'Codex'),
-        ...(funding?.warning !== undefined ? [funding.warning] : []),
-        ...(spendAsk !== undefined
-          ? [
-              `  Ask the person in this session: ${spendAsk.question}`,
-              ...spendAsk.options.map(
-                (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
-              ),
-            ]
-          : []),
-      ],
-      humanTail: receiptTail(ctx, policy, next),
+  newInstall.continueWith ??= install;
+  const result: CommandResult = {
+    data: {
+      plugin: CODEX_PLUGIN,
+      wallet,
+      spend: { ...spend, effective },
+      runtime: runtimeData(rt),
+      nextSteps,
+      disclosure: DISCLOSURE,
+      ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
+      next,
     },
-    defaultEnabled,
-  );
+    humanLines: [
+      tooOld
+        ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
+        : 'Tenjin is installed for Codex.',
+      ...(tooOld ? [] : CAPABILITY_LINES.map((line) => `  ${line}`)),
+      ...runtimeLines(ctx, rt, home, true),
+      ...walletLines(ctx, wallet, 'Codex'),
+      ...(funding?.warning !== undefined ? [funding.warning] : []),
+      ...(spendAsk !== undefined
+        ? [
+            `  Ask the person in this session: ${spendAsk.question}`,
+            ...spendAsk.options.map(
+              (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
+            ),
+          ]
+        : []),
+    ],
+    humanTail: receiptTail(ctx, policy, next),
+  };
+  return deps.newInstall
+    ? result
+    : finishNewInstall(result, newInstall, ctx, {
+        ...(args.subagents !== undefined ? { choice: args.subagents } : {}),
+        yes: args.yes === true,
+        isInteractive: canPrompt,
+        ...(deps.promptSubagents ? { promptSubagents: deps.promptSubagents } : {}),
+      });
 }
 
 export async function runCodexUninstall(

@@ -9,7 +9,6 @@ import { NEW_SESSION_FIX, RECONNECT_FIX } from './mcp-processes';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
-import { DEEPSEEK_INSTALL_TERMS } from './spend-question';
 
 /**
  * `tenjin install`'s own decisions: the wallet, the spend question and its
@@ -42,7 +41,7 @@ const folder = () => join(home, '.claude', 'skills', 'tenjin-router');
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
-const FEE_TERMS = `Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. ${DEEPSEEK_INSTALL_TERMS} Either choice approves this.`;
+const FEE_TERMS = `Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. Either choice approves this.`;
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [

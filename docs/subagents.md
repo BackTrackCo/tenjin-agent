@@ -4,7 +4,7 @@ Tenjin can offer DeepSeek V4.1 Flash 1017 for helper work. Your parent keeps its
 
 ## Setup and controls
 
-Fresh installations enable eligible DeepSeek routing for each session's qualified native workspace, with a $1 total ceiling per job for routing, inference and the worker's web searches. The existing setup question and receipt explain sharing. Opening another repository uses that session's current native scope; the folder where installation ran supplies no directory grant. Each job freezes its qualified scope and rechecks it before tools, inference and continuation.
+Fresh installations ask whether to turn on DeepSeek subagents. **Keep off** is the default. **Turn on** enables routing for each session's qualified native workspace, with a $1 total ceiling per job for routing, inference and the worker's web searches. The choice explains sharing and charges. For scripted installs, use `tenjin install --yes --subagents on` to opt in or `--subagents off` to save off. Opening another repository uses that session's current native scope; the folder where installation ran supplies no directory grant. Each job freezes its qualified scope and rechecks it before tools, inference and continuation.
 
 Existing users keep their settings, including off choices and named-directory consent. Updating, refreshing or adding another host does not enable DeepSeek for an existing profile. The parent still accepts or vetoes each offer.
 

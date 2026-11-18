@@ -27,7 +27,13 @@ export function registerCore(reg: Registration): void {
     .option('--refresh', 'bring the plugin this machine already has up to this version')
     .option(
       '--yes',
-      'accept setup and spending defaults ($5 a day, $1 a call; new installs include DeepSeek subagents with parent veto and a $1 job limit)',
+      'accept setup and spending defaults ($5 a day, $1 a call). Subagents require their own choice',
+    )
+    .addOption(
+      new Option(
+        '--subagents <on|off>',
+        'turn DeepSeek subagents on or off during fresh setup',
+      ).choices(['on', 'off']),
     )
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
     .option(
@@ -40,6 +46,7 @@ export function registerCore(reg: Registration): void {
 Examples:
   $ tenjin install
   $ tenjin install --project
+  $ tenjin install --yes --subagents off
   $ tenjin install --max-auto-spend 0.50 --session-budget 10
 
 The daily budget is shared across chats. Its spending counter resets 24 hours after its window starts;
@@ -60,8 +67,10 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { captureNewInstall, completeNewInstall, newInstallReceipt } =
-          await import('../router/new-install');
+        if (o.refresh === true && o.subagents !== undefined) {
+          throw new CliError('USAGE', 'Omit --refresh when choosing whether to enable subagents.');
+        }
+        const { captureNewInstall, finishNewInstall } = await import('../router/new-install');
         const newInstall = await captureNewInstall(ctx.dataDir);
         const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
@@ -107,10 +116,14 @@ Learn more:
           });
         if (o.refresh !== true || harness !== undefined) {
           const installed = await installAll();
-          const result = newInstallReceipt(
-            installed,
-            o.refresh !== true && (await completeNewInstall(newInstall, ctx)),
-          );
+          const result =
+            o.refresh === true
+              ? installed
+              : await finishNewInstall(installed, newInstall, ctx, {
+                  ...(o.subagents !== undefined ? { choice: o.subagents } : {}),
+                  ...(harness !== undefined ? { harness } : {}),
+                  yes: o.yes === true,
+                });
           const finished =
             o.refresh === true
               ? result

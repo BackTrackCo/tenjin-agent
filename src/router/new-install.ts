@@ -2,15 +2,28 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir } from 'node:fs/promises';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from '../commands/config';
-import { resolveSettings, type PartialConfig } from '../lib/config';
+import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
+import { selectOne } from '../lib/clack';
 import { hasCode } from '../lib/errno';
+import type { QuestionStep } from './install';
 import { nativeWorkspaceModelConsent } from './model-settings';
+
+export type InstallSubagentChoice = 'on' | 'off';
+
+export const DEEPSEEK_INSTALL_TERMS =
+  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto and a $1 job limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, and Exa searches cost $0.004 each. Your spend limits apply.';
+
+const SUBAGENT_QUESTION = `Turn on DeepSeek subagents? ${DEEPSEEK_INSTALL_TERMS}`;
+const SUBAGENT_OPTIONS = [
+  { value: 'off', label: 'Keep off' },
+  { value: 'on', label: 'Turn on' },
+] as const;
 
 export type NewInstallSession = {
   readonly dataDir: string;
   readonly absent: boolean;
   claimId?: string;
-  accepted: boolean;
+  continueWith?: string;
   completed: boolean[];
   disqualified?: boolean;
 };
@@ -23,7 +36,7 @@ export async function captureNewInstall(dataDir: string): Promise<NewInstallSess
   } catch (error) {
     absent = hasCode(error, 'ENOENT');
   }
-  return { dataDir, absent, accepted: false, completed: [] };
+  return { dataDir, absent, completed: [] };
 }
 
 function origin(config: PartialConfig, ctx: CommandContext): string | undefined {
@@ -91,7 +104,7 @@ export async function reserveNewInstall(
       session.claimId = pending.id;
       return config;
     }
-    // Another config writer or an older profile always wins over a fresh-install default.
+    // Another config writer or an older profile always wins over a fresh-install choice.
     if (!created || Object.keys(config).length !== 0) return config;
     session.claimId = randomUUID();
     return {
@@ -104,51 +117,137 @@ export async function reserveNewInstall(
   });
 }
 
-/** Run once only after every requested host completed an accepted setup. */
+function hostsCompleted(session: NewInstallSession): boolean {
+  return session.completed.length > 0 && session.completed.every(Boolean);
+}
+
+function matchesClaim(session: NewInstallSession, config: PartialConfig, ctx: CommandContext) {
+  const pending = config.install?.pendingDeepSeekSetup;
+  return (
+    pending !== undefined &&
+    pending.id === session.claimId &&
+    !blocked(config) &&
+    origin(config, ctx) === pending.routerOrigin
+  );
+}
+
+/** Apply one explicit choice after all hosts are installed, under the config lock. */
 export async function completeNewInstall(
   session: NewInstallSession,
   ctx: CommandContext,
-): Promise<boolean> {
-  const claimId = session.claimId;
-  if (
-    !claimId ||
-    !session.accepted ||
-    !session.completed.length ||
-    session.completed.some((done) => !done)
-  )
-    return false;
-  let enabled = false;
+  choice?: InstallSubagentChoice,
+): Promise<InstallSubagentChoice | undefined> {
+  if (!session.claimId || !hostsCompleted(session)) return undefined;
+  let applied: InstallSubagentChoice | undefined;
   await persist(session.dataDir, (config) => {
     const pending = config.install?.pendingDeepSeekSetup;
-    if (!pending || pending.id !== claimId) return config;
+    if (!pending || pending.id !== session.claimId) return config;
     const next = withoutClaim(config);
-    const routerOrigin = origin(config, ctx);
-    if (blocked(config) || routerOrigin !== pending.routerOrigin) return next;
-    enabled = true;
+    if (!matchesClaim(session, config, ctx)) return next;
+    if (choice === undefined) return config;
+    applied = choice;
     return {
       ...next,
       router: {
         ...config.router,
-        subagents: true,
-        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin }),
+        subagents: choice === 'on',
+        ...(choice === 'on'
+          ? { subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: pending.routerOrigin }) }
+          : {}),
       },
     };
   });
-  return enabled;
+  return applied;
 }
 
-/** The shared core action adds this once; standalone host installs use the same receipt. */
-export function newInstallReceipt(result: CommandResult, enabled: boolean): CommandResult {
-  if (!enabled) return result;
+type InstallReceipt = {
+  hosts?: string[];
+  next?: string;
+  nextSteps?: QuestionStep[];
+  [key: string]: unknown;
+};
+
+function addSubagentQuestion(result: CommandResult, command: string): CommandResult {
+  const data = result.data as InstallReceipt;
+  const [first] = data.hosts ?? [];
+  const hostReceipts = data.hosts ? data.hosts.map((host) => data[host] as InstallReceipt) : [data];
+  // The spending answer reruns install. Offer the next choice on that result.
+  if (hostReceipts.some(({ nextSteps }) => nextSteps?.some(({ id }) => id === 'spend')))
+    return result;
+  const target = hostReceipts[0] ?? data;
+  const step: QuestionStep = {
+    id: 'subagents',
+    question: SUBAGENT_QUESTION,
+    options: SUBAGENT_OPTIONS.map(({ value, label }) => ({
+      id: value,
+      label,
+      recommended: value === 'off',
+      command: `${command} --subagents ${value}`,
+    })),
+    next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask the person once with these two choices. Run the selected command only after they answer, then read its result and continue setup. Keep subagents off if they do not answer.`,
+  };
+  const next = target.next ?? 'continue setup';
+  const asked = {
+    ...target,
+    next: next.toLowerCase().startsWith('follow the instructions in nextsteps')
+      ? next
+      : `Follow the instructions in nextSteps, then ${next}`,
+    nextSteps: [step, ...(target.nextSteps ?? [])],
+  };
+  return { ...result, data: first === undefined ? asked : { ...data, [first]: asked } };
+}
+
+export async function finishNewInstall(
+  result: CommandResult,
+  session: NewInstallSession,
+  ctx: CommandContext,
+  options: {
+    choice?: InstallSubagentChoice;
+    yes?: boolean;
+    harness?: 'claude' | 'codex';
+    isInteractive?: boolean;
+    promptSubagents?: () => Promise<InstallSubagentChoice | null>;
+  } = {},
+): Promise<CommandResult> {
+  if (!session.claimId || !hostsCompleted(session)) return result;
+  const interactive =
+    ctx.flags.json !== true &&
+    (options.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
+  const pending =
+    options.choice === undefined &&
+    matchesClaim(session, await loadRawConfig(session.dataDir), ctx);
+  const answer =
+    pending && interactive && !options.yes
+      ? ((await (options.promptSubagents ?? askSubagents)()) ?? 'off')
+      : options.choice;
+  const applied = await completeNewInstall(session, ctx, answer);
+  if (applied === undefined) {
+    if (!pending || interactive || !session.continueWith) return result;
+    const harness = options.harness ? ` --harness ${options.harness}` : '';
+    return addSubagentQuestion(result, session.continueWith + harness);
+  }
+  const enabled = applied === 'on';
   return {
     ...result,
     data: {
       ...(result.data as Record<string, unknown>),
-      subagents: { enabled: true, scope: 'native-workspace', maxJobAtomic: '1000000' },
+      subagents: enabled
+        ? { enabled, scope: 'native-workspace', maxJobAtomic: '1000000' }
+        : { enabled },
     },
     humanLines: [
       ...(result.humanLines ?? []),
-      'DeepSeek subagent routing is enabled with parent veto and a $1 job limit. Turn it off with `tenjin config subagents off`.',
+      enabled
+        ? 'DeepSeek subagent routing is enabled with parent veto and a $1 job limit. Turn it off with `tenjin config subagents off`.'
+        : 'DeepSeek subagent routing is off.',
     ],
   };
+}
+
+function askSubagents() {
+  return selectOne({
+    message: SUBAGENT_QUESTION,
+    choices: [...SUBAGENT_OPTIONS],
+    initialValue: 'off',
+  });
 }

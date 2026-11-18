@@ -6,9 +6,9 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults, including eligible DeepSeek routing on a fresh installation; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, and on a fresh install asks whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. DeepSeek subagents and checkout each require their own choice.
 
-Fresh installations enable DeepSeek helpers for each session's qualified native workspace with a $1 job ceiling within your daily budget. Your parent keeps final accept/veto. Existing users, saved off choices and named-directory consent keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing. [Scope, sharing and worker controls →](./subagents.md)
+Turning on DeepSeek subagents during fresh setup enables them for each session's qualified native workspace with a $1 job ceiling within your daily budget. Your parent keeps final accept/veto. Existing users, saved off choices and named-directory consent keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing. [Scope, sharing and worker controls →](./subagents.md)
 
 Use the activation step the installer returns:
 
@@ -26,7 +26,7 @@ Claude Code requires 2.1.287+. Codex routing hooks require 0.149.0+. Installatio
 
 ## When your agent runs the install
 
-The agent installs for its current host, asks only unanswered spending questions, prepares a funding link and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
+The agent installs for its current host, relays any unanswered spending or subagent choice, and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
 
 When you choose **Add $5**, the agent runs `tenjin fund 5`, which opens checkout in your browser with $5 filled in. Opening checkout moves no money; you confirm the payment there. The agent then runs `tenjin balance --wait` in the background and continues when the money lands, so you never come back to tell it you are done. If you skip funding, the agent continues with available tools and asks when a task first needs a paid tool, saying what the tool is and what it costs. It asks at most once a session. An unknown balance or unconfirmed arrival does not justify another payment: running `tenjin fund` again while a payment is on its way waits on that payment instead of opening a second checkout.
 
@@ -45,7 +45,7 @@ Installation and the first task add no optional retention or second-host questio
 | Wallet balance      | No payment can exceed available funds.                                                                                                                                                                                       |
 | `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                                                                      |
 
-Ordinary spending defaults apply before any answer. Completing accepted fresh setup also records the $1 DeepSeek job ceiling; explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+Ordinary spending defaults apply before any answer. Turning on DeepSeek subagents during fresh setup records the $1 job ceiling. Explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
 
 A DeepSeek job's saved ceiling covers its routing, inference and web searches together. Inference uses that ceiling rather than a positive ordinary per-call limit; an explicit zero automatic-spend stop and the daily budget still apply. A worker's web search, an Exa search at $0.004, is paid like any lookup, within your per-call limit and daily budget too. [Quotes and cumulative job limits →](./subagents.md#charges-and-limits)
 

@@ -1,11 +1,16 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { persist } from '../commands/config';
 import { testCtx } from '../context-test-utils';
-import { captureNewInstall, completeNewInstall, reserveNewInstall } from './new-install';
+import {
+  captureNewInstall,
+  completeNewInstall,
+  finishNewInstall,
+  reserveNewInstall,
+} from './new-install';
 
 let parent: string;
 let dir: string;
@@ -17,12 +22,12 @@ afterEach(async () => {
   await rm(parent, { recursive: true, force: true });
 });
 
-it('retains a pending new-install claim without consent until accepted setup completes', async () => {
+it('retains a pending new-install claim without consent until an explicit setup choice is made', async () => {
   const ctx = testCtx(dir);
   const first = await captureNewInstall(dir);
   await reserveNewInstall(first, ctx);
   first.completed.push(true);
-  expect(await completeNewInstall(first, ctx)).toBe(false);
+  expect(await completeNewInstall(first, ctx)).toBeUndefined();
   const pending = (await loadRawConfig(dir)).install?.pendingDeepSeekSetup;
   expect(pending).toMatchObject({ version: 1, routerOrigin: 'https://tenjin.sh' });
   expect((await loadRawConfig(dir)).router).toBeUndefined();
@@ -30,9 +35,8 @@ it('retains a pending new-install claim without consent until accepted setup com
   expect(continuation.absent).toBe(false);
   await reserveNewInstall(continuation, ctx);
   expect(continuation.claimId).toBe(pending?.id);
-  continuation.accepted = true;
   continuation.completed.push(true);
-  expect(await completeNewInstall(continuation, ctx)).toBe(true);
+  expect(await completeNewInstall(continuation, ctx, 'on')).toBe('on');
   const config = await loadRawConfig(dir);
   expect(config.install?.pendingDeepSeekSetup).toBeUndefined();
   expect(config.router).toEqual({
@@ -49,13 +53,35 @@ it('retains a pending new-install claim without consent until accepted setup com
   });
 });
 
+it.each(['on', 'off', null] as const)(
+  'applies the interactive choice %s only once',
+  async (answer) => {
+    const ctx = testCtx(dir, { json: false });
+    const session = await captureNewInstall(dir);
+    await reserveNewInstall(session, ctx);
+    session.completed.push(true, true);
+    const promptSubagents = vi.fn(async () => answer);
+    const receipt = { data: {} };
+    const opts = { isInteractive: true, promptSubagents };
+    const result = await finishNewInstall(receipt, session, ctx, opts);
+    await finishNewInstall(receipt, session, ctx, opts);
+
+    const enabled = answer === 'on';
+    expect(promptSubagents).toHaveBeenCalledTimes(1);
+    expect(result.data).toMatchObject({ subagents: { enabled } });
+    const config = await loadRawConfig(dir);
+    expect(config.router?.subagents).toBe(enabled);
+    expect(config.install?.pendingDeepSeekSetup).toBeUndefined();
+    if (!enabled) expect(config.router?.subagentConsent).toBeUndefined();
+  },
+);
+
 it('leaves an existing empty profile without a pending claim untouched', async () => {
   await mkdir(dir);
   const session = await captureNewInstall(dir);
   await reserveNewInstall(session, testCtx(dir));
-  session.accepted = true;
   session.completed.push(true);
-  expect(await completeNewInstall(session, testCtx(dir))).toBe(false);
+  expect(await completeNewInstall(session, testCtx(dir), 'on')).toBeUndefined();
   expect(await loadRawConfig(dir)).toEqual({});
 });
 
@@ -68,9 +94,8 @@ it.each([
   const session = await captureNewInstall(dir);
   await reserveNewInstall(session, ctx);
   await persist(dir, (config) => ({ ...config, ...choice }));
-  session.accepted = true;
   session.completed.push(true);
-  expect(await completeNewInstall(session, ctx)).toBe(false);
+  expect(await completeNewInstall(session, ctx, 'on')).toBeUndefined();
   const config = await loadRawConfig(dir);
   expect(config.router).toEqual(choice.router);
   expect(config.install?.pendingDeepSeekSetup).toBeUndefined();
@@ -80,9 +105,8 @@ it('a new config writer wins even if the initial directory snapshot was absent',
   const session = await captureNewInstall(dir);
   await persist(dir, () => ({ maxAutoSpend: '0' }));
   await reserveNewInstall(session, testCtx(dir));
-  session.accepted = true;
   session.completed.push(true);
-  expect(await completeNewInstall(session, testCtx(dir))).toBe(false);
+  expect(await completeNewInstall(session, testCtx(dir), 'on')).toBeUndefined();
   expect(await loadRawConfig(dir)).toEqual({ maxAutoSpend: '0' });
 });
 
@@ -99,9 +123,8 @@ it('one shared claim survives competing absent-profile snapshots without replaci
   expect(second.claimId).toBe(first.claimId);
   await persist(dir, (config) => ({ ...config, router: { subagents: false } }));
   for (const session of [first, second]) {
-    session.accepted = true;
     session.completed.push(true);
-    expect(await completeNewInstall(session, ctx)).toBe(false);
+    expect(await completeNewInstall(session, ctx, 'on')).toBeUndefined();
   }
   expect((await loadRawConfig(dir)).router).toEqual({ subagents: false });
 });
@@ -111,9 +134,8 @@ it('origin changes clear an unfinished claim instead of redirecting disclosure',
   const ctx = testCtx(dir);
   await reserveNewInstall(session, ctx);
   await persist(dir, (config) => ({ ...config, baseUrl: 'https://other.example' }));
-  session.accepted = true;
   session.completed.push(true);
-  expect(await completeNewInstall(session, ctx)).toBe(false);
+  expect(await completeNewInstall(session, ctx, 'on')).toBeUndefined();
   expect((await loadRawConfig(dir)).router).toBeUndefined();
   expect((await loadRawConfig(dir)).install?.pendingDeepSeekSetup).toBeUndefined();
 });
@@ -123,9 +145,8 @@ it('does not enable or change config when its pending claim was removed before c
   const ctx = testCtx(dir);
   await reserveNewInstall(session, ctx);
   await persist(dir, () => ({ maxAutoSpend: '0' }));
-  session.accepted = true;
   session.completed.push(true);
-  expect(await completeNewInstall(session, ctx)).toBe(false);
+  expect(await completeNewInstall(session, ctx, 'on')).toBeUndefined();
   expect(await loadRawConfig(dir)).toEqual({ maxAutoSpend: '0' });
 });
 
@@ -136,9 +157,8 @@ it('refresh and failed or unfinished host setup never grant consent', async () =
   expect(await loadRawConfig(dir)).toEqual({});
   const session = await captureNewInstall(dir);
   await reserveNewInstall(session, ctx);
-  session.accepted = true;
   session.completed.push(true, false);
-  expect(await completeNewInstall(session, ctx)).toBe(false);
+  expect(await completeNewInstall(session, ctx, 'on')).toBeUndefined();
   expect((await loadRawConfig(dir)).router).toBeUndefined();
   expect((await loadRawConfig(dir)).install?.pendingDeepSeekSetup).toBeDefined();
 });

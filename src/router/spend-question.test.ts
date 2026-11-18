@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTER_DEFAULTS } from '../commands/config';
-import {
-  DEEPSEEK_INSTALL_TERMS,
-  shownLimits,
-  spendChoiceQuestion,
-  spendOptions,
-} from './spend-question';
+import { shownLimits, spendChoiceQuestion, spendOptions } from './spend-question';
 
 describe('the spend question', () => {
   it('shows the defaults where the file names no limit, and the file where it does', () => {
@@ -22,7 +17,7 @@ describe('the spend question', () => {
 
   it('asks how much the agent may spend, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      `How much can your agent spend from its balance? Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. ${DEEPSEEK_INSTALL_TERMS} Either choice approves this.`,
+      `How much can your agent spend from its balance? Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. Either choice approves this.`,
     );
   });
 

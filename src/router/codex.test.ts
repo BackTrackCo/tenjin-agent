@@ -750,7 +750,7 @@ describe('Codex install, uninstall and doctor', () => {
         expect.stringContaining(
           'task context and your wallet address are sent to Tenjin for routing',
         ),
-        expect.stringContaining('native workspaces with parent veto'),
+        expect.stringContaining('qualified native workspace, with parent accept or veto'),
         expect.stringContaining('https://tenjin.sh/privacy'),
       ],
     });

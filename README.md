@@ -72,9 +72,9 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
+Setup asks about spending limits and, on a fresh install, whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
-Fresh installations also enable eligible DeepSeek helper routing in your agent's current native workspaces, with a $1 ceiling per job within your daily budget. Your parent keeps final accept/veto. Existing users keep their settings. Stop helper routing with `tenjin config subagents off`. [DeepSeek sharing, charges and controls →](./docs/subagents.md)
+DeepSeek subagents start off. If you turn them on during setup, the parent can accept or decline each eligible offer in the session's native workspace. Each job has a $1 ceiling within your daily budget. Existing users keep their settings. Turn subagents off with `tenjin config subagents off`. [DeepSeek sharing, charges and controls →](./docs/subagents.md)
 
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 

@@ -152,7 +152,7 @@ async function install(args: string[] = []) {
   const code = await main(['install', ...args], captured.io);
   return { code, output: captured.stdout(), config: await loadRawConfig(seams.data) };
 }
-function expectDefault(config: Awaited<ReturnType<typeof loadRawConfig>>) {
+function expectEnabled(config: Awaited<ReturnType<typeof loadRawConfig>>) {
   expect(config.router).toMatchObject({
     subagents: true,
     subagentConsent: {
@@ -170,7 +170,7 @@ function expectDefault(config: Awaited<ReturnType<typeof loadRawConfig>>) {
 }
 
 it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][])(
-  'completes the normal %j agent handoff across invocations without a new question',
+  'offers one explicit subagent choice after spending on %j',
   async (...hosts) => {
     seams.hosts = hosts;
     const first = await install();
@@ -181,21 +181,52 @@ it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][]
     const data = JSON.parse(first.output).data;
     for (const installed of data.hosts ? data.hosts.map((host: string) => data[host]) : [data])
       expect(installed.nextSteps).toMatchObject([{ id: 'spend' }]);
-    expect(first.output).toContain('DeepSeek');
-    expect(first.output).toContain('tenjin config subagents off');
-    const accepted = await install(['--yes']);
-    expect(accepted.code).toBe(0);
-    expectDefault(accepted.config);
-    expect(accepted.config.maxAutoSpend).toBe('1000000');
-    expect(accepted.config.sessionBudget).toBe('5000000');
+    const spending = await install(['--yes']);
+    expect(spending.code).toBe(0);
+    expect(spending.config.router?.subagentConsent).toBeUndefined();
+    expect(spending.config.maxAutoSpend).toBe('1000000');
+    expect(spending.config.sessionBudget).toBe('5000000');
+    const acceptedData = JSON.parse(spending.output).data;
+    const subagentSteps = (
+      acceptedData.hosts
+        ? acceptedData.hosts.map((host: string) => acceptedData[host])
+        : [acceptedData]
+    ).flatMap((receipt: { nextSteps: { id: string }[] }) =>
+      receipt.nextSteps.filter(({ id }) => id === 'subagents'),
+    );
+    expect(subagentSteps).toMatchObject([
+      {
+        question: expect.stringContaining('Turn on DeepSeek subagents?'),
+        options: [
+          { id: 'off', recommended: true, command: expect.stringMatching(/ --subagents off$/) },
+          { id: 'on', recommended: false, command: expect.stringMatching(/ --subagents on$/) },
+        ],
+      },
+    ]);
+    const optedIn = await install(['--subagents', 'on']);
+    expect(optedIn.code).toBe(0);
+    expectEnabled(optedIn.config);
+    expect(optedIn.output).not.toContain('Turn on DeepSeek subagents?');
   },
 );
+
+it('saves off without consent and does not ask again on reinstall', async () => {
+  const off = await install(['--yes', '--subagents', 'off']);
+  expect(off.code).toBe(0);
+  expect(off.config.router).toEqual({ subagents: false });
+  expect(off.config.install?.pendingDeepSeekSetup).toBeUndefined();
+  expect(JSON.parse(off.output).data.subagents).toEqual({ enabled: false });
+  const repeated = await install();
+  expect(repeated.config.router).toEqual({ subagents: false });
+  expect(repeated.output).not.toContain('Turn on DeepSeek subagents?');
+});
 
 it('accepts custom limits on continuation without changing the DeepSeek job ceiling', async () => {
   await install();
   const out = await install(['--max-auto-spend', '0', '--session-budget', 'none']);
   expect(out.code).toBe(0);
-  expectDefault(out.config);
+  expect(out.config.router?.subagentConsent).toBeUndefined();
+  expectEnabled((await install(['--subagents', 'on'])).config);
   expect(out.config.maxAutoSpend).toBe('0');
   expect(out.config.sessionBudget).toBe('none');
 });
@@ -204,9 +235,9 @@ it.each(['claude', 'codex'] as const)(
   'supports the standalone %s installer entrypoint',
   async (host) => {
     const out = await (host === 'claude'
-      ? runRouterInstall({ yes: true }, testCtx(seams.data))
-      : runCodexInstall({ yes: true }, testCtx(seams.data)));
-    expectDefault(await loadRawConfig(seams.data));
+      ? runRouterInstall({ yes: true, subagents: 'on' }, testCtx(seams.data))
+      : runCodexInstall({ yes: true, subagents: 'on' }, testCtx(seams.data)));
+    expectEnabled(await loadRawConfig(seams.data));
     expect(out.data).toMatchObject({ subagents: { enabled: true, maxJobAtomic: '1000000' } });
   },
 );
@@ -226,19 +257,19 @@ it.each([
 
 it('does not enable after runtime failure or a failed second host', async () => {
   seams.failRuntime = true;
-  expect((await install(['--yes'])).code).not.toBe(0);
+  expect((await install(['--yes', '--subagents', 'on'])).code).not.toBe(0);
   expect((await loadRawConfig(seams.data)).router?.subagentConsent).toBeUndefined();
   seams.failRuntime = false;
   seams.hosts = ['claude', 'codex'];
   seams.failCodex = true;
-  expect((await install(['--yes'])).code).not.toBe(0);
+  expect((await install(['--yes', '--subagents', 'on'])).code).not.toBe(0);
   expect((await loadRawConfig(seams.data)).router?.subagentConsent).toBeUndefined();
 });
 
 it('preserves an explicit off written during native registration', async () => {
   seams.hosts = ['codex'];
   seams.turnOff = true;
-  const out = await install(['--yes']);
+  const out = await install(['--yes', '--subagents', 'on']);
   expect(out.code).toBe(0);
   expect(out.config.router).toEqual({ subagents: false });
   expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();

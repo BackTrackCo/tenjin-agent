@@ -228,7 +228,7 @@ Update verifies npm provenance, tarball integrity and the pinned Node before act
 
 ## External subagents
 
-Fresh setup enables eligible DeepSeek helpers with consent following each session's qualified native workspace and a $1 cumulative job ceiling. Existing profiles and refreshes keep their settings and consent mode. `tenjin config subagents off` stops new jobs; `on --repository <path> --max-job <USD>` selects explicit directory scope. See [DeepSeek subagents](./subagents.md) for disclosure, fees, parent veto, cancellation, continuation and current host limits.
+Fresh setup asks whether to enable eligible DeepSeek subagents. An explicit opt-in follows each session's qualified native workspace and records a $1 cumulative job ceiling. Non-interactive installs can pass `--subagents on` or `--subagents off`. Existing profiles and refreshes keep their settings and consent mode. `tenjin config subagents off` stops new jobs; `on --repository <path> --max-job <USD>` selects explicit directory scope. See [DeepSeek subagents](./subagents.md) for disclosure, fees, parent veto, cancellation, continuation and current host limits.
 
 Model routing and inference use separate channels from tool routing. Each paid invocation has a 360-second client deadline and a 300-second server upstream deadline; receipt recovery remains bounded and never buys a replacement inference.
 
