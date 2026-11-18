@@ -316,24 +316,6 @@ Examples:
     'balance',
     runCommand,
   );
-  // A code moves money INTO the wallet from Tenjin's treasury, never out.
-  leaf(WALLET, 'redeem <code>', 'add an event or promo code to your balance')
-    .description(
-      'Redeem an event or promo code: Tenjin adds USDC to this wallet, and no money leaves it. A code that is one per person asks you to sign in with GitHub: at a terminal by a code you enter on github.com, and for an agent on the fund page in your browser.',
-    )
-    .addHelpText(
-      'after',
-      `
-Examples:
-  $ tenjin redeem NCSTATE26
-`,
-    )
-    .action(async function (this: Command, code: string) {
-      await runCommand('redeem', this, async (ctx) => {
-        const { runRedeem } = await import('../commands/redeem');
-        return runRedeem(ctx, { code });
-      });
-    });
 
   // Group-level flags so `tenjin wallet --json show` parses like the config group.
   const wallet = leaf(

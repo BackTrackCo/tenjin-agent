@@ -206,42 +206,6 @@ export async function recallLink(
   }
 }
 
-/**
- * Remember where the balance stood before money that comes with no checkout
- * link (a `--usdc` handoff, a redeemed code's transfer), so `tenjin balance
- * --wait` counts an arrival that lands before it starts. Remembered with no
- * url and no token: `tenjin fund` finds no status to follow, so it never
- * reads this as a checkout on its way. A live checkout link with a token is
- * kept instead: replacing it would hide a card payment still landing from the
- * next `tenjin fund`, which would open a second checkout. Its starting
- * balance drops to this reading when that is lower or it has none (its own
- * read failed, or money was spent since), so `tenjin balance --wait` counts
- * this arrival, and a card payment still rises above it.
- */
-export async function rememberStartBalance(
-  dataDir: string,
-  address: string,
-  startBalance: bigint,
-  now: number,
-  lifetimeMs: number,
-): Promise<void> {
-  const prior = await recallLink(dataDir, address, now);
-  if (prior?.token === undefined) {
-    await rememberLink(dataDir, {
-      version: 1,
-      address: address.toLowerCase(),
-      issuedAt: now,
-      expiresAt: now + lifetimeMs,
-      startBalanceAtomic: startBalance.toString(),
-    });
-  } else if (
-    prior.startBalanceAtomic === undefined ||
-    startBalance < BigInt(prior.startBalanceAtomic)
-  ) {
-    await rememberLink(dataDir, { ...prior, startBalanceAtomic: startBalance.toString() });
-  }
-}
-
 /** The link's money landed and was said: nothing more to follow. */
 export async function forgetLink(dataDir: string): Promise<void> {
   await rm(linkPath(dataDir), { force: true }).catch(() => undefined);

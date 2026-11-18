@@ -26,7 +26,6 @@ vi.mock('../lib/usdc-balance', async (importOriginal) =>
 
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund, type FundOptions } from './fund';
-import { recallLink } from './fund-watch';
 import { runBalance } from './balance';
 import { finishTerminalFunding, fundStep } from '../router/install-funding';
 
@@ -768,105 +767,21 @@ describe('runFund: the link, its context and its status', () => {
     expect(server.mints[0]!.body).not.toHaveProperty('deviceName');
   });
 
-  /**
-   * The fund page's "Have a code?" box checks one redemption per computer by
-   * this hash, and `tenjin redeem` hands a code that needs a GitHub sign-in to
-   * the page by `code`. A plain `tenjin fund` never sends a code: the page
-   * would open in redeem mode instead of checkout.
-   */
-  it('mints with the machine hash, and with the code only when redeem passes one', async () => {
+  // The fund page's "Have a code?" box checks one redemption per computer by this hash.
+  it('mints with the machine hash, and without it when it cannot be read', async () => {
     const { provider } = fakeProvider();
     const server = fundServer([CHECKOUT]);
     const hash = 'a'.repeat(64);
+    const base = { provider, fetchImpl: server.fetchImpl, wait: false, open: false };
+    await fund(makeCtx(), { ...base, machineHash: async () => hash });
     await fund(makeCtx(), {
-      provider,
-      fetchImpl: server.fetchImpl,
-      wait: false,
-      open: false,
-      machineHash: async () => hash,
-    });
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: server.fetchImpl,
-      wait: false,
-      open: false,
-      machineHash: async () => hash,
-      code: 'NCSTATE26',
-    });
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: server.fetchImpl,
-      wait: false,
-      open: false,
+      ...base,
       machineHash: async () => {
         throw new Error('ioreg gone');
       },
     });
     expect(server.mints[0]!.body).toMatchObject({ machineHash: hash });
-    expect(server.mints[0]!.body).not.toHaveProperty('code');
-    expect(server.mints[1]!.body).toMatchObject({ machineHash: hash, code: 'NCSTATE26' });
-    expect(server.mints[2]!.body).not.toHaveProperty('machineHash');
-  });
-
-  it('a redeem link keeps a checkout still landing on record', async () => {
-    const { provider } = fakeProvider();
-    mockedBalance.mockResolvedValue(0n);
-    const checkout = pageLink(Date.now() + 600_000);
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: fundServer([checkout]).fetchImpl,
-      wait: false,
-      open: false,
-    });
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: fundServer(
-        [pageLink(Date.now() + 500_000)],
-        [[200, { state: 'paying', updatedAt: 'x' }]],
-      ).fetchImpl,
-      wait: false,
-      open: false,
-      code: 'NCSTATE26',
-    });
-    // The card payment is still landing: the next fund waits on that checkout, not the code's page.
-    const again = fundServer(
-      [pageLink(Date.now() + 400_000)],
-      [[200, { state: 'paying', updatedAt: 'x' }]],
-    );
-    const res = await fund(makeCtx(), {
-      provider,
-      fetchImpl: again.fetchImpl,
-      wait: false,
-      open: false,
-    });
-    expect(again.mints).toHaveLength(0);
-    expect(res.data).toMatchObject({ paymentInFlight: true, checkoutUrl: checkout });
-  });
-
-  it("a redeem link starts from today's balance once an earlier checkout has landed", async () => {
-    const { provider, address } = fakeProvider();
-    mockedBalance.mockResolvedValue(0n);
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: fundServer([pageLink(Date.now() + 600_000)]).fetchImpl,
-      wait: false,
-      open: false,
-    });
-    // That checkout's $5 arrived; nothing is landing now.
-    mockedBalance.mockResolvedValue(5_000_000n);
-    const ctx = makeCtx();
-    await fund(ctx, {
-      provider,
-      fetchImpl: fundServer(
-        [pageLink(Date.now() + 500_000)],
-        [[200, { state: 'paid', updatedAt: 'x' }]],
-      ).fetchImpl,
-      wait: false,
-      open: false,
-      code: 'NCSTATE26',
-    });
-    const remembered = await recallLink(ctx.dataDir, address, Date.now());
-    expect(remembered?.startBalanceAtomic).toBe('5000000');
+    expect(server.mints[1]!.body).not.toHaveProperty('machineHash');
   });
 
   it('waits on a payment already on its way instead of opening a second checkout', async () => {
@@ -894,21 +809,6 @@ describe('runFund: the link, its context and its status', () => {
     expect(openUrl).not.toHaveBeenCalled();
     expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
     expect((res.data as { nextStep: string }).nextStep).toContain('already on its way');
-
-    // A code to redeem still mints: the link on its way does not carry it.
-    const redeem = fundServer(
-      [pageLink(Date.now() + 600_000)],
-      [[200, { state: 'paying', updatedAt: 'x' }]],
-    );
-    await fund(makeCtx(), {
-      provider,
-      fetchImpl: redeem.fetchImpl,
-      wait: false,
-      open: false,
-      code: 'NCSTATE26',
-    });
-    expect(redeem.mints).toHaveLength(1);
-    expect(redeem.mints[0]!.body).toMatchObject({ code: 'NCSTATE26' });
 
     // Once that money is in the balance, a rerun is a new top-up.
     mockedBalance.mockResolvedValue(5_000_000n);

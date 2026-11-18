@@ -5,7 +5,8 @@ import { win32 } from 'node:path';
 
 /**
  * A HASH THAT NAMES THIS COMPUTER, for the one-per-computer check on event
- * codes (`tenjin redeem`, and the fund page's "Have a code?" box). The server
+ * codes in the fund page's "Have a code?" box. `tenjin fund` signs it into the
+ * link. The server
  * sees only the hash: the operating system's own machine ID never leaves this
  * module, and the prefix keeps the hash from matching any other product's
  * hash of the same ID.

@@ -28,7 +28,6 @@ import {
   readLinkStatus,
   recallLink,
   rememberLink,
-  rememberStartBalance,
   STATUS_GRACE_MS,
   tokenExpiry,
   tokenOf,
@@ -65,7 +64,7 @@ const HOSTED_LIFETIME_MS = 5 * 60_000;
  * not the env, not config. Cutting the surface entirely is what lets the verb
  * sit in the free allowlist tier with nothing to caveat.
  */
-export const FUND_ORIGIN = PRODUCTION_ORIGIN;
+const FUND_ORIGIN = PRODUCTION_ORIGIN;
 /**
  * The only hosts a returned link may point at; anything else is refused unopened.
  * The first is the host of the pinned origin (the Tenjin /fund page), so it
@@ -125,12 +124,6 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   priceUsd?: string;
   /** Overrides the derived source; install passes `install`. */
   source?: FundSource;
-  /**
-   * INTERNAL, no flag: `tenjin redeem` off a terminal, for a code that needs a
-   * GitHub sign-in. The link carries it, and the fund page opens in redeem
-   * mode with it filled in.
-   */
-  code?: string;
   /** The "Add funds to Tenjin" title and balance; install has its own heading. */
   header?: boolean;
   /** Printed after "Stopped watching" on Ctrl-C: install's limits, next step and disclosure. */
@@ -138,7 +131,7 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   fetchImpl?: typeof fetch;
   openUrl?: typeof openInBrowser;
   deviceName?: () => Promise<string | undefined>;
-  /** This computer's hash for the per-computer code check (`lib/machine-id.ts`). */
+  /** This computer's hash for the fund page's one-per-computer code check (`lib/machine-id.ts`). */
   machineHash?: () => Promise<string | undefined>;
   /** One key from the person, for the expired link's `r` / `q`; null when nobody can answer. */
   readKey?: (keys: readonly string[]) => Promise<string | null>;
@@ -203,15 +196,12 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   }
 
   // A PAYMENT ALREADY ON ITS WAY is waited on, never doubled: a rerun while
-  // money is landing is exactly how a second top-up happens. A code to redeem
-  // always mints: the link on its way does not carry the code, and the page it
-  // opens is not a payment.
+  // money is landing is exactly how a second top-up happens.
   const prior = await recallLink(ctx.dataDir, address, now());
-  const landing =
+  const onItsWay =
     prior !== null && now() - prior.issuedAt < DUPLICATE_WINDOW_MS
       ? await paymentOnItsWay(prior, startBalance, opts.fetchImpl)
       : undefined;
-  const onItsWay = opts.code === undefined ? landing : undefined;
 
   const source: FundSource = opts.source ?? (underAgentHarness(env) ? 'agent' : 'terminal');
   // Unlocked only to mint: waiting on a payment already on its way needs no
@@ -229,7 +219,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       source,
       deviceName,
       machineHash,
-      ...(opts.code !== undefined ? { code: opts.code } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     const token = tokenOf(url);
@@ -238,31 +227,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     const expiresAt =
       (token !== undefined ? tokenExpiry(token) : undefined) ??
       issuedAt + (hosted ? HOSTED_LIFETIME_MS : LINK_LIFETIME_MS);
-    // A redeem link is not a payment: it keeps a checkout still landing on
-    // record, as `--usdc` does, so the next `tenjin fund` waits on that payment
-    // instead of opening a second checkout. Only the starting balance is kept.
-    if (opts.code !== undefined) {
-      if (startBalance !== undefined && landing !== undefined) {
-        await rememberStartBalance(
-          ctx.dataDir,
-          address,
-          startBalance,
-          issuedAt,
-          expiresAt - issuedAt,
-        );
-      } else if (startBalance !== undefined) {
-        // Nothing landing: the redeem's own starting balance, so money that already
-        // arrived is never counted as the code's.
-        await rememberLink(ctx.dataDir, {
-          version: 1,
-          address: address.toLowerCase(),
-          issuedAt,
-          expiresAt,
-          startBalanceAtomic: startBalance.toString(),
-        });
-      }
-      return { url, ...(token !== undefined ? { token } : {}), expiresAt, hosted };
-    }
     // Every link is remembered, a hosted one too: its starting balance is what
     // a later `tenjin balance --wait` measures an arrival from. Only a Tenjin
     // link has a token, so only it has a status to follow.
@@ -298,7 +262,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   if (!human) {
     emitWriteNotice(
       ctx.io,
-      `${onItsWay !== undefined ? 'Payment on its way, from' : opts.code !== undefined ? `Redeem ${opts.code}` : 'Checkout'}: ${link.url}`,
+      `${onItsWay !== undefined ? 'Payment on its way, from' : 'Checkout'}: ${link.url}`,
     );
     emitWriteNotice(
       ctx.io,
@@ -472,10 +436,6 @@ function humanEnding(
   ];
 }
 
-/** How an agent waits for money it did not wait on, after `then`; `tenjin redeem` says it too. */
-export const BALANCE_WAIT_STEP =
-  'run `tenjin balance --wait` in the background, with the same Tenjin executable and shell as this command (in Claude Code, as a background Bash command, so you are woken when it exits), and continue the task when it exits: exit 0 means the funds arrived, and its output says how much. If it exits without funds, say once that nothing arrived and nothing went wrong, and continue without paid tools.';
-
 /**
  * THE AGENT'S NEXT STEP after a link it did not wait on: say what the money is
  * for, wait in the background, carry on when it lands. It never asks the
@@ -487,8 +447,10 @@ function agentNextStep(o: {
   inFlight: boolean;
   need?: FundNeed;
 }): string {
+  const wait =
+    'run `tenjin balance --wait` in the background, with the same Tenjin executable and shell as this command (in Claude Code, as a background Bash command, so you are woken when it exits), and continue the task when it exits: exit 0 means the funds arrived, and its output says how much. If it exits without funds, say once that nothing arrived and nothing went wrong, and continue without paid tools.';
   if (o.inFlight) {
-    return `A payment for this machine is already on its way, so no second checkout was opened; do not open another. Tell the person in one sentence, then ${BALANCE_WAIT_STEP} Never ask the person to type "done" or to tell you when the money arrives.`;
+    return `A payment for this machine is already on its way, so no second checkout was opened; do not open another. Tell the person in one sentence, then ${wait} Never ask the person to type "done" or to tell you when the money arrives.`;
   }
   const what =
     o.need !== undefined
@@ -497,7 +459,7 @@ function agentNextStep(o: {
   const where = o.opened
     ? `that checkout is open in their browser with $${o.amount} filled in`
     : `that checkout is ready with $${o.amount} filled in, and show checkoutUrl as a clickable link`;
-  return `Tell the person in one or two sentences ${what} and ${where}. Then ${BALANCE_WAIT_STEP} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
+  return `Tell the person in one or two sentences ${what} and ${where}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
 }
 
 /**
@@ -529,8 +491,31 @@ async function fundByUsdc(
   const startBalance = c.shouldWait
     ? await c.readBalance()
     : await withTimeout(c.readBalance(), BASELINE_TIMEOUT_MS);
+  // Remembered with no url and no token: `tenjin fund` finds no status to
+  // follow, so it never reads this as a checkout on its way. A live checkout
+  // link with a token is kept instead: replacing it would hide a card payment
+  // still landing from the next `tenjin fund`, which would open a second
+  // checkout. Its starting balance drops to this reading when that is lower
+  // or it has none (its own read failed, or money was spent since), so
+  // `tenjin balance --wait` counts a transfer that lands before it starts,
+  // and a card payment still rises above it.
   if (startBalance !== undefined) {
-    await rememberStartBalance(ctx.dataDir, address, startBalance, now(), USDC_WAIT_MS);
+    const prior = await recallLink(ctx.dataDir, address, now());
+    if (prior?.token === undefined) {
+      const issuedAt = now();
+      await rememberLink(ctx.dataDir, {
+        version: 1,
+        address: address.toLowerCase(),
+        issuedAt,
+        expiresAt: issuedAt + USDC_WAIT_MS,
+        startBalanceAtomic: startBalance.toString(),
+      });
+    } else if (
+      prior.startBalanceAtomic === undefined ||
+      startBalance < BigInt(prior.startBalanceAtomic)
+    ) {
+      await rememberLink(ctx.dataDir, { ...prior, startBalanceAtomic: startBalance.toString() });
+    }
   }
   if (human) {
     const err = ctx.io.stderr;
@@ -632,7 +617,6 @@ async function mintLink(
     source: FundSource;
     deviceName: string | undefined;
     machineHash: string | undefined;
-    code?: string;
     fetchImpl?: typeof fetch;
   },
 ): Promise<string> {
@@ -644,18 +628,16 @@ async function mintLink(
     method: 'POST',
     timeoutMs: ctx.flags.timeout,
     headers: { [SIWX_HEADER]: siwxHeader },
-    // `deviceName`, `source` and `need` are display context for the page;
-    // `machineHash` is for the per-computer check when the page redeems a
-    // code, and `code` opens it in redeem mode with that code filled in. A
+    // `deviceName`, `source` and `need` are display context for the page, and
+    // `machineHash` is for its "Have a code?" box's one-per-computer check. A
     // server without them ignores them (its body schema is not strict).
     jsonBody: {
       address,
       ...(extra.presetAmount !== undefined ? { presetAmount: extra.presetAmount } : {}),
       ...(extra.deviceName !== undefined ? { deviceName: extra.deviceName } : {}),
+      ...(extra.machineHash !== undefined ? { machineHash: extra.machineHash } : {}),
       source: extra.source,
       ...(extra.need !== undefined ? { need: extra.need } : {}),
-      ...(extra.machineHash !== undefined ? { machineHash: extra.machineHash } : {}),
-      ...(extra.code !== undefined ? { code: extra.code } : {}),
     },
   };
   const res = await httpRequest(`${FUND_ORIGIN}/api/fund/link`, {
@@ -731,7 +713,7 @@ async function readKey(keys: readonly string[]): Promise<string | null> {
  * file would earn an unactionable 400 on a purely local condition. Normalize here
  * instead, as `send` does for its recipient.
  */
-export function checksummed(address: string): string {
+function checksummed(address: string): string {
   if (!isAddress(address, { strict: false })) {
     throw new CliError(
       'USAGE',
@@ -867,10 +849,7 @@ async function balanceOrUndefined(address: string, rpcUrl: string): Promise<bigi
 }
 
 /** `p`, or undefined once `ms` has passed. */
-export async function withTimeout<T>(
-  p: Promise<T | undefined>,
-  ms: number,
-): Promise<T | undefined> {
+async function withTimeout<T>(p: Promise<T | undefined>, ms: number): Promise<T | undefined> {
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => resolve(undefined), ms);

@@ -143,7 +143,9 @@ const INSTRUCTIONS =
   'Routing top-ups count once, when sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin fund 5` (or the ' +
-  'amount they name). When a paid call fails for low balance, ask the person once to add ' +
+  'amount they name). When the user has a promo or event code, run `tenjin fund` and tell ' +
+  'them to enter it under Have a code? on that page; never ask them to paste the code here. ' +
+  'When a paid call fails for low balance, ask the person once to add ' +
   'funds, saying what the call is for and what it costs, and run the `tenjin fund` command it ' +
   'names only on a yes. Opening checkout moves no money. Follow its `nextStep`: ' +
   'say in a sentence or two what the money is for, run `tenjin balance --wait` in the ' +
