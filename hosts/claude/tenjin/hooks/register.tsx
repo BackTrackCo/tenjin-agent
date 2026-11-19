@@ -17,6 +17,7 @@ import {
   raisedByThisPlugin,
   registerModelViewer,
   rememberModelOffer,
+  followContinuation,
   sessionLives,
   translateViewerContinuation,
   VIEWER_TYPE,
@@ -194,6 +195,32 @@ export const register: Register = (on) => {
       const text = textOf(response.result) ?? response.text;
       const offer = asRecord(parseJson(text));
       if (offer?.action === 'native') await keptNative($, offer.settled);
+      // A MESSAGE THE WORKER TOOK is answered as a native send is: the call ran and succeeded.
+      // `delivered`: to a worker that runs, at its next turn. `continued`: a finished worker,
+      // resumed by the message, whose result arrives by itself as a background agent's does.
+      if (
+        e.tool === 'SendMessage' &&
+        (offer?.action === 'delivered' || offer?.action === 'continued') &&
+        typeof offer.message === 'string' &&
+        offer.message.trim().length > 0 &&
+        offer.message.length <= 2000
+      ) {
+        if (
+          offer.action === 'continued' &&
+          typeof offer.offer_id === 'string' &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            offer.offer_id,
+          )
+        ) {
+          const offerId = offer.offer_id;
+          await rememberModelOffer($, offerId, { ...input, run_in_background: true }).catch(
+            () => undefined,
+          );
+          // The result is the parent's once the worker ends, by the plugin's own prompt.
+          $.clock.after(0, () => void followContinuation($, offerId, 'follow-up'));
+        }
+        return { result: { success: true, message: offer.message } };
+      }
       if (
         offer?.action === 'refused' &&
         offer.started === false &&
@@ -1013,7 +1040,13 @@ function heldAnswer(
   // Native SendMessage refusals return this data shape; an offer is not a delivered message.
   if (tool === 'SendMessage')
     return {
-      result: { success: false, message: offerText },
+      result: {
+        success: false,
+        // The statement of what happened comes first: the host shows a held call as a refusal.
+        message: held
+          ? `Not delivered yet: the follow-up to the DeepSeek worker is held until you run it with subagent({offer_id}) or cancel it. ${offerText}`
+          : offerText,
+      },
       ...(held?.context ? { context: held.context } : {}),
     };
   if (!held) return { deny: `${HELD_NOT_STARTED}.\n${offerText}` };

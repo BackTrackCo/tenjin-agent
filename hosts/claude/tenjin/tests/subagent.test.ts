@@ -233,7 +233,11 @@ test('SendMessage to an owned worker holds the complete continuation without cla
     { session_id: SESSION, tool_use_id: 'resume_send', input, tool: 'SendMessage' },
   ]);
   expect(ran).toEqual([]);
-  expect(result.result).toEqual({ success: false, message: offered });
+  // The host shows a held call as a refusal, so the text says first what happened.
+  expect(result.result).toMatchObject({ success: false });
+  const said = (result.result as { message: string }).message;
+  expect(said).toMatch(/^Not delivered yet: /);
+  expect(said).toContain(offered);
   expect(result.context?.join(' ')).toContain('no continuation started');
   expect(result.context?.join(' ')).toContain('turned DeepSeek subagents on');
   // A native SendMessage resumes its subagent with no confirmation: run it or cancel it.
@@ -242,6 +246,37 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   // What binds an assignment binds a follow-up: it goes to another model.
   expect(result.context?.join(' ')).toContain('binding model, privacy and planning restrictions');
 });
+
+// Failure caught: a message the worker took read to the parent as `{success: false}`, a
+// failure. The host lets a hook answer the call, so it answers as a native send does.
+for (const [action, message] of [
+  [
+    'delivered',
+    `Delivered to the DeepSeek worker ${WORKER}: it reads your message at its next turn.`,
+  ],
+  ['continued', `The DeepSeek worker ${WORKER} continues with your message.`],
+] as const)
+  test(`SendMessage to a worker that took the message (${action}) answers as a native send does`, async ($, on) => {
+    const { files } = machine(on);
+    enabled(files);
+    const text = JSON.stringify({
+      action,
+      worker_handle: WORKER,
+      message,
+      ...(action === 'continued' ? { offer_id: OFFER } : {}),
+    });
+    on('tool.call', { tool: SUBAGENT }, async () => ({ result: text, text }));
+    const ran = native(on);
+    const input = { to: WORKER, message: 'The head moved to abc123. Final line: DONE.' };
+    const result = await $.tool.call({
+      tool: 'SendMessage',
+      tool_use_id: `send_${action}`,
+      ...input,
+    });
+    expect(ran).toEqual([]);
+    expect(result.result).toEqual({ success: true, message });
+    expect(result.deny).toBeUndefined();
+  });
 
 test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {
   const { files } = machine(on);
