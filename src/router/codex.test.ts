@@ -750,10 +750,11 @@ describe('Codex install, uninstall and doctor', () => {
         expect.stringContaining(
           'task context and your wallet address are sent to Tenjin for routing',
         ),
-        expect.stringContaining('qualified native workspace, with parent accept or veto'),
         expect.stringContaining('https://tenjin.sh/privacy'),
       ],
     });
+    // The subagent terms follow an opt-in only: a receipt's disclosure does not repeat them.
+    expect(JSON.stringify(out.data)).not.toContain('with parent accept or veto');
     expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
     expect(JSON.stringify(out)).not.toContain('Help improve routing');
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
