@@ -352,6 +352,36 @@ it('refuses a Messages quote above the per-call limit, whatever ceiling the cons
   expect(f.router.paidRequests()).toBe(0);
 });
 
+// Greptile on 3e3837c4: a quote reserved under the cap as it stood could wait for its
+// inference lane, and a per-call limit lowered meanwhile was held against that one quote
+// only, so the job's total passed the new cap.
+it("holds a job's reserved total against a cap lowered while a call waited for its lane, and releases that call unpaid", async () => {
+  const f = await fixture({ quote: '300000' });
+  const signal = new AbortController().signal;
+  await f.make().messages(f.job, { messages: [{ role: 'user', content: 'first' }] }, signal);
+  expect(f.router.paidRequests()).toBe(1);
+  const budget = join(f.dir, 'model-jobs', `${f.job.id}.budget.json`);
+  const spent = BigInt(JSON.parse(await readFile(budget, 'utf8')).charged);
+  expect(spent > 0n).toBe(true);
+  const lower = async () => {
+    const path = join(f.dir, 'config.json');
+    const config = JSON.parse(await readFile(path, 'utf8'));
+    // Enough for this 300000 quote alone, one short of the job's total with it.
+    await writeFile(
+      path,
+      JSON.stringify({ ...config, maxAutoSpend: (spent + 300000n - 1n).toString() }),
+    );
+  };
+  await expect(
+    f.make().messages(f.job, { messages: [{ role: 'user', content: 'second' }] }, signal, lower),
+  ).rejects.toMatchObject({
+    message: expect.stringContaining('remaining job ceiling'),
+    detail: { cause: 'budget' },
+  });
+  expect(f.router.paidRequests()).toBe(1);
+  expect(JSON.parse(await readFile(budget, 'utf8')).charged).toBe(spent.toString());
+});
+
 it('funds a Messages quote within the per-call limit, with no deposit above that limit', async () => {
   const f = await fixture({ quote: '200000', maxAutoSpendAtomic: 250000n, minDeposit: '250000' });
   await expect(

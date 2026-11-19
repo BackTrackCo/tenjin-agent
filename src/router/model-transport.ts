@@ -154,6 +154,9 @@ function boundedResponse(response: Response, limit = MODEL_RESPONSE_ENVELOPE_BYT
 }
 
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
+/** A reserved quote that no longer fits the job's cap as it stands when its turn to pay comes. */
+class QuoteOverCap extends Error {}
+
 export class ModelTransport {
   private routing: Payer;
   /** Local waiters only. The persisted reservation remains authoritative across transports. */
@@ -677,6 +680,7 @@ export class ModelTransport {
     const scope = modelChannelScope(this.origin, 'model-inference', this.options.inferenceSlot);
     const paymentLock = join(dataDir, 'model-jobs', `${scope.id}.payment.lock`);
     let paymentTurn = false;
+    let overCap: QuoteOverCap | undefined;
     let result;
     let failure: unknown;
     try {
@@ -684,7 +688,17 @@ export class ModelTransport {
         paymentLock,
         async () => {
           await beforeSend?.();
-          await consent();
+          // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS LANE still binds the job's total:
+          // the payer's own check below reads this one quote alone. The quote was reserved
+          // under the cap as it then stood, so what the job has reserved, this call
+          // included, is held against the cap as it stands now. Over it, nothing is signed
+          // and the reservation is released.
+          const current = await consent();
+          const cap =
+            current.maxJobAtomic < BigInt(job.capAtomic)
+              ? current.maxJobAtomic
+              : BigInt(job.capAtomic);
+          if (BigInt((await load()).charged) > cap) throw (overCap = new QuoteOverCap());
           signal.throwIfAborted();
           paymentTurn = true;
           try {
@@ -712,6 +726,10 @@ export class ModelTransport {
       // the quote only when no signed leg of this invocation reached fetch.
       if (!paymentSent && (localBlock || (failure instanceof RouteSkipped && !signingStarted))) {
         await release();
+        if (overCap)
+          throw new ModelCallFailed('Model quote exceeds remaining job ceiling', {
+            cause: 'budget',
+          });
         throw new ModelCallFailed(
           localBlock
             ? 'Model payment refused before transmission'
