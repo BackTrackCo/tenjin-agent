@@ -318,59 +318,101 @@ function outermost(paths: readonly string[]): string[] {
 }
 
 /** A folder as last listed: what its own entry said just before the listing, and when. */
-type Folder = { dev: number; ino: number; ctime: number; mtime: number; at: number };
+type Folder = { ino: number; ctime: number; mtime: number; at: number };
 
 function folderOf(info: Stats, at: number): Folder {
-  return { dev: info.dev, ino: info.ino, ctime: info.ctimeMs, mtime: info.mtimeMs, at };
+  return { ino: info.ino, ctime: info.ctimeMs, mtime: info.mtimeMs, at };
 }
 
 /**
  * The file systems where a folder's own times prove that it gained no entry: APFS and HFS+
  * move a folder's change time for every entry made, removed or renamed in it, and no command
  * can set that time back. On exFAT and FAT the change time is the settable modification time,
- * and NTFS lets a program set it. By device, for this process; false when unknown.
+ * and NTFS lets a program set it.
  */
-const trustedDevices = new Map<number, boolean>();
 const TRUSTED_TYPES = new Set(['apfs', 'hfs']);
 
-/** The type of the file system that holds each path, from the mount table (macOS). */
-async function fileSystemTypes(paths: readonly string[]): Promise<(string | undefined)[]> {
-  if (process.platform !== 'darwin') return paths.map(() => undefined);
-  const table = await new Promise<string>((done) =>
-    execFile('/sbin/mount', [], (error, stdout) => done(error ? '' : String(stdout))),
-  );
-  const mounts = table.split('\n').flatMap((line) => {
-    const match = /^.+? on (.+) \(([^,)]+)/.exec(line);
-    return match ? [{ on: match[1]!, type: match[2]! }] : [];
-  });
-  return Promise.all(
-    paths.map(async (path) => {
-      const real = await realpath(path).catch(() => undefined);
-      if (!real) return undefined;
-      let best: { on: string; type: string } | undefined;
-      for (const mount of mounts)
-        if (inside(mount.on, real) && (!best || mount.on.length > best.on.length)) best = mount;
-      return best?.type;
-    }),
-  );
+type Mount = { on: string; type: string | undefined };
+
+/**
+ * The mount table as macOS's `mount` prints it, a line per mount: `<source> on <mount point>
+ * (<type>, <options>)`. A source or a mount point may hold ` on `, ` (` or a line break, so a
+ * line counts only as far as it reads one way: the type is the first word in its last
+ * parentheses, and each ` on ` followed by `/` starts a possible mount point. A line with more
+ * than one gives each of them no type. A line that does not read at all leaves the whole table
+ * unknown, since its mount point may hold any folder.
+ */
+export function parseMounts(table: string): Mount[] | undefined {
+  const mounts: Mount[] = [];
+  for (const line of table.split('\n')) {
+    if (!line) continue;
+    const match = /^(.*) \(([^\s(),]+)(?:, [^()]*)?\)$/.exec(line);
+    if (!match) return undefined;
+    const head = match[1]!;
+    const points = [...head.matchAll(/ on (?=\/)/g)].map((on) => head.slice(on.index + 4));
+    if (!points.length) return undefined;
+    for (const on of points) mounts.push({ on, type: points.length === 1 ? match[2] : undefined });
+  }
+  return mounts;
 }
 
-/** Learns which of these devices are trusted, by a folder of each. */
-async function trustDevices(samples: ReadonlyMap<number, string>): Promise<void> {
-  const unknown = [...samples].filter(([dev]) => !trustedDevices.has(dev));
-  if (!unknown.length) return;
-  const types = await fileSystemTypes(unknown.map(([, path]) => path));
-  unknown.forEach(([dev], at) => trustedDevices.set(dev, TRUSTED_TYPES.has(types[at] ?? '')));
+/** The mount table, read now; undefined where it cannot be read, or off macOS. */
+async function mountTable(): Promise<Mount[] | undefined> {
+  if (process.platform !== 'darwin') return undefined;
+  const table = await new Promise<string | undefined>((done) =>
+    execFile('/sbin/mount', [], (error, stdout) => done(error ? undefined : String(stdout))),
+  );
+  return table === undefined ? undefined : parseMounts(table);
+}
+
+/**
+ * Whether the file system that holds `real` is trusted: by the deepest mount point above it,
+ * and of two on the same point by the one not trusted. False when its type is unknown.
+ */
+function mountTrusted(mounts: readonly Mount[] | undefined, real: string): boolean {
+  let best: Mount | undefined;
+  for (const mount of mounts ?? [])
+    if (
+      inside(mount.on, real) &&
+      (!best ||
+        mount.on.length > best.on.length ||
+        (mount.on.length === best.on.length && !TRUSTED_TYPES.has(mount.type ?? '')))
+    )
+      best = mount;
+  return TRUSTED_TYPES.has(best?.type ?? '');
+}
+
+/**
+ * Which devices hold a trusted file system, read anew for each pass over the folders: once a
+ * volume is ejected its device number can pass to another, of another type. The mount table is
+ * read once per pass, when the first folder of a device needs it.
+ */
+function deviceTrust(): (dev: number, path: string) => boolean | Promise<boolean> {
+  const devices = new Map<number, boolean | Promise<boolean>>();
+  let mounts: Promise<Mount[] | undefined> | undefined;
+  return (dev, path) => {
+    const known = devices.get(dev);
+    if (known !== undefined) return known;
+    const learning = (async () => {
+      mounts ??= mountTable();
+      const real = await realpath(path).catch(() => undefined);
+      const trusted = real !== undefined && mountTrusted(await mounts, real);
+      devices.set(dev, trusted);
+      return trusted;
+    })();
+    devices.set(dev, learning);
+    return learning;
+  };
 }
 
 /**
  * Whether a folder may have gained or lost an entry since it was listed: always on a file
- * system not trusted (`trustedDevices`); there, a new entry moves the folder's own change time,
+ * system not trusted (`deviceTrust`); there, a new entry moves the folder's own change time,
  * and a folder replaced by another has another inode.
  */
-function folderChanged(info: Stats, folder: Folder): boolean {
+function folderChanged(info: Stats, folder: Folder, trusted: boolean): boolean {
   return (
-    trustedDevices.get(info.dev) !== true ||
+    !trusted ||
     info.ino !== folder.ino ||
     info.ctimeMs !== folder.ctime ||
     info.mtimeMs !== folder.mtime ||
@@ -644,7 +686,6 @@ export class WorkerEnvSecrets {
   /** Forgets the scans kept for later workers; for tests. */
   static forgetScans(): void {
     lastScans.clear();
-    trustedDevices.clear();
   }
 
   /** The same findings over `roots`, sharing nothing that a later find changes. */
@@ -871,6 +912,7 @@ export class WorkerEnvSecrets {
     for (let round = 0; ; round++) {
       const changed: { path: string; folder: Folder }[] = [];
       const gone: string[] = [];
+      const trusted = deviceTrust();
       const relisting: { again: boolean } = (this.relisting = { again: true });
       while (relisting.again) {
         relisting.again = false;
@@ -889,8 +931,13 @@ export class WorkerEnvSecrets {
             else changed.push({ path, folder });
             return;
           }
-          if (!info.isDirectory()) gone.push(path);
-          else if (folderChanged(info, folder)) changed.push({ path, folder: folderOf(info, at) });
+          if (!info.isDirectory()) {
+            gone.push(path);
+            return;
+          }
+          const known = trusted(info.dev, path);
+          if (folderChanged(info, folder, typeof known === 'boolean' ? known : await known))
+            changed.push({ path, folder: folderOf(info, at) });
         });
       }
       this.relisting = undefined;
@@ -929,7 +976,6 @@ export class WorkerEnvSecrets {
       // that it is back, by the change times that move moved.
       for (const path of vanished) this.folders.delete(path);
       gone.push(...vanished);
-      await this.trust();
       if (!gone.length) return found;
       // Folders that keep going and coming hold the send rather than let it rest on a guess.
       if (round >= 8) {
@@ -980,15 +1026,6 @@ export class WorkerEnvSecrets {
     return walk.found;
   }
 
-  /** Learns the file system of each device its folders are on (`trustedDevices`). */
-  private async trust(): Promise<void> {
-    const samples = new Map<number, string>();
-    for (const [path, folder] of this.folders)
-      if (!trustedDevices.has(folder.dev) && !samples.has(folder.dev))
-        samples.set(folder.dev, path);
-    await trustDevices(samples);
-  }
-
   /** A folder found during the job that cannot be listed: listed again at each check from now. */
   private unlistable(folder: string): void {
     if (this.unlisted.some((denied) => inside(denied, folder))) return;
@@ -1001,7 +1038,6 @@ export class WorkerEnvSecrets {
     for (const root of this.roots) this.hot.add(root);
     const relist = this.learning === 'relist';
     const walk = await walkTree(tops, limits, tops, relist ? this.folders : undefined);
-    if (relist) await this.trust();
     this.unlisted.push(...walk.unlisted);
     await Promise.all(walk.found.map((path) => this.load(path, true)));
     return walk.complete;

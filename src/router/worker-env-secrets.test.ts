@@ -733,6 +733,70 @@ it.runIf(MACOS)(
   },
 );
 
+/** Writes an env file into `folder` and gives the folder back every time it had, as exFAT can. */
+function writeWithTimesKept(folder: string, name: string, text: string): void {
+  const before = statSync(folder);
+  writeFileSync(join(folder, name), text);
+  walks.seen.set(folder, () => before);
+}
+
+// Review of 800c27a2, finding F: the first " on " of a line was taken as the separator, so a
+// network source holding " on " made its mount point read as another path, and the folder
+// fell under `/` (APFS) and was trusted. A line that did not read at all was dropped.
+it.runIf(MACOS)(
+  'trusts no mount on a line of the mount table that reads more than one way, and nothing past a line that does not read',
+  async () => {
+    const root = await trialRoot('mounts');
+    const real = realpathSync(root);
+    const system = '/dev/disk3s1 on / (apfs, local, journaled)\n';
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    try {
+      // Its mount point is the root, whatever " on " the source holds.
+      mounts.table = `${system}//u@h/a on b on ${real} (smbfs, nodev, nosuid)\n`;
+      writeWithTimesKept(join(root, 'plain'), '.env.local', 'SMB=smb-value-0x1a1a1a');
+      await env.refresh();
+      expect(env.redact('smb-value-0x1a1a1a')).toBe('[env:SMB]');
+      // Its mount point may be "/b on <root>" or the root itself.
+      mounts.table = `${system}//u@h/a on /b on ${real} (exfat, nodev, nosuid)\n`;
+      writeWithTimesKept(join(root, 'pkg', 'lib'), '.env.local', 'TWO=two-ways-0x1b1b1b');
+      await env.refresh();
+      expect(env.redact('two-ways-0x1b1b1b')).toBe('[env:TWO]');
+      // A mount point with a line break in it.
+      mounts.table = `${system}/dev/disk9s1 on ${real}\nx (exfat, local)\n`;
+      writeWithTimesKept(join(root, 'pkg'), '.env.local', 'BROKEN=broken-line-0x1c1c1c');
+      await env.refresh();
+      expect(env.redact('broken-line-0x1c1c1c')).toBe('[env:BROKEN]');
+    } finally {
+      env.close();
+    }
+  },
+);
+
+// Review of 800c27a2, finding G: a device's type was learned once for the process, and an
+// ejected APFS volume's device number passed to an exFAT one mounted after it.
+it.runIf(MACOS)(
+  'reads the volume type again at each check, so a device number another volume takes is not trusted',
+  async () => {
+    const root = await trialRoot('reused');
+    const real = realpathSync(root);
+    mounts.table = `/dev/disk9s1 on ${real} (apfs, local, journaled)\n`;
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    try {
+      walks.listed.length = 0;
+      await env.refresh();
+      expect(walks.listed).not.toContain(join(root, 'plain'));
+      mounts.table = `/dev/disk9s1 on ${real} (exfat, local, nodev, nosuid)\n`;
+      writeWithTimesKept(join(root, 'plain'), '.env.local', 'SWAP=swapped-volume-0x2c2c2c');
+      await env.refresh();
+      expect(env.redact('swapped-volume-0x2c2c2c')).toBe('[env:SWAP]');
+    } finally {
+      env.close();
+    }
+  },
+);
+
 it.runIf(MACOS)(
   'walks a folder that is gone for a moment while the folders are checked',
   async () => {
