@@ -224,6 +224,8 @@ export type EarlyWorkerAccept = {
   job: ModelJob;
   transport: ModelTransport;
   accepted?: { at: number; marks: Record<string, number> };
+  /** The job's image and document blocks sent as text, which the released worker adds to. */
+  omitted?: Set<string>;
   activity?: Parameters<typeof runModelWorker>[1]['activity'];
   currentClaudePermissionMode?: Parameters<typeof runModelWorker>[1]['currentClaudePermissionMode'];
   permission: Parameters<typeof runModelWorker>[1]['permission'];
@@ -1380,6 +1382,7 @@ async function runQualifiedWorker(
         web.job = accept.job;
         web.transport = options.transport = accept.transport;
         options.permission = accept.permission;
+        options.omitted = accept.omitted;
         options.activity = accept.activity;
         options.currentClaudePermissionMode = accept.currentClaudePermissionMode;
         if (accept.accepted) diagnostics.accepted(accept.accepted.at, accept.accepted.marks);
