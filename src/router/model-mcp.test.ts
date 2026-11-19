@@ -1158,14 +1158,18 @@ it('runs a follow-up to a finished worker in one call from the session that acce
     });
     expect(options.claudeSession).toMatchObject({ resume: expect.any(String) });
     expect(f.route).not.toHaveBeenCalled();
-    const stored = await f.call({ offer_id: sent.offer_id });
-    expect(stored.status === 'completed' || stored.status === 'started').toBe(true);
-    // A permission mode that changed since the accept is refused as the accept refuses it.
-    f.session.turnId = 'third-turn';
-    f.session.claudePermissionMode = 'auto';
+    // Wait for the background worker to end, by its stored result, not by a clock.
     await vi.waitFor(async () =>
-      expect((await f.capture(first.worker_handle)).action).not.toBe('continued'),
+      expect((await f.call({ offer_id: sent.offer_id })).status).toBe('completed'),
     );
+    // A process that did not accept the worker (a resumed session, a reloaded plugin) has
+    // no choice made: the follow-up is held as an offer and starts nothing.
+    f.session.turnId = 'third-turn';
+    const runs = worker.run.mock.calls.length;
+    const held = await f.heldCapture(first.worker_handle);
+    expect(held).toMatchObject({ action: 'offer', continuation: true });
+    expect(held).not.toHaveProperty('direct');
+    expect(worker.run).toHaveBeenCalledTimes(runs);
   } finally {
     await f.close();
   }
