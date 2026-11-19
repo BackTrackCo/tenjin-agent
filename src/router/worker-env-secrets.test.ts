@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import {
   envDeniedRoots,
   envPieces,
@@ -257,6 +257,38 @@ it('picks up a changed or new env file before the next check, and keeps old valu
   await env.add('/etc/.env.outside');
   expect(env.redact('deep-value-0x04')).toBe('[env:DEEP]');
 });
+
+it.runIf(WATCHES)(
+  'runs one check for a model request that follows a tool result at once, after a full wait for file events from that request',
+  async () => {
+    // Operator item of 2026-11-18. A worker's tool result starts a check, and its next
+    // model request, a few milliseconds later, queued a second one behind it: two waits
+    // of 120 ms and two listings in a row before every request that followed a tool.
+    const root = await workspace({ '.env': 'FIRST=first-value-0x01' });
+    const env = await WorkerEnvSecrets.start([root]);
+    const checks = vi.spyOn(env as unknown as { check: () => Promise<void> }, 'check');
+    try {
+      const afterToolResult = env.refresh();
+      await new Promise((done) => setTimeout(done, 60));
+      // Written by the tool that just ran, in a folder nothing has listed: only the
+      // watcher's event tells of it.
+      await mkdir(join(root, 'made/now'), { recursive: true });
+      await writeFile(join(root, 'made/now/.env.local'), 'LATE=late-value-0x02');
+      const asked = Date.now();
+      await env.refresh();
+      // The wait for file events ran in full from the request, and one check read after it.
+      expect(Date.now() - asked).toBeGreaterThanOrEqual(115);
+      expect(env.redact('late-value-0x02')).toBe('[env:LATE]');
+      await afterToolResult;
+      expect(checks).toHaveBeenCalledTimes(1);
+      // A call made once a check has begun to read still gets a check of its own.
+      await env.refresh();
+      expect(checks).toHaveBeenCalledTimes(2);
+    } finally {
+      env.close();
+    }
+  },
+);
 
 it('replaces every value of an env file that grows past 1 MiB during the job, at its end and on its own', async () => {
   const root = await workspace({ '.env.local': 'SMALL=small-value-0x01\n' });

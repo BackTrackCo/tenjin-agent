@@ -327,6 +327,8 @@ export class WorkerEnvSecrets {
   }
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
+  /** Set while the running check still waits for file events: when that wait ends. */
+  private settling: { until: number } | undefined;
 
   private constructor(roots: readonly string[]) {
     this.roots = [...new Set(roots.map((root) => resolve(root)))];
@@ -475,8 +477,18 @@ export class WorkerEnvSecrets {
    * anything is forwarded: every known file is re-read when its size, time or
    * inode changed, and every working root and folder that held an env file is
    * listed again. Calls during a check queue one more check after it.
+   *
+   * A CHECK THAT STILL WAITS FOR FILE EVENTS HAS READ NOTHING YET, so a call made during
+   * that wait joins it: the wait is run again in full from this call, and what the check
+   * then reads is as new as a check of this call's own would read. A worker's tool result
+   * starts a check and its next model request, a few milliseconds later, asked for another
+   * after it: two waits and two listings in a row before every request that followed a tool.
    */
   refresh(): Promise<void> {
+    if (this.settling && this.running) {
+      this.settling.until = Date.now() + SETTLE_MS;
+      return this.running;
+    }
     if (this.queued) return this.queued;
     const next = (async () => {
       await this.running?.catch(() => undefined);
@@ -500,8 +512,14 @@ export class WorkerEnvSecrets {
   }
 
   private async check(): Promise<void> {
-    // File events trail a command's writes by tens of milliseconds: let them arrive.
-    if (this.watchers.length) await new Promise((done) => setTimeout(done, SETTLE_MS));
+    // File events trail a command's writes by tens of milliseconds: let them arrive. The
+    // wait runs its full length from the last call that joined it (`refresh`).
+    if (this.watchers.length) {
+      const settling = (this.settling = { until: Date.now() + SETTLE_MS });
+      for (let wait = SETTLE_MS; wait > 0; wait = settling.until - Date.now())
+        await new Promise((done) => setTimeout(done, wait));
+      this.settling = undefined;
+    }
     const paths = new Set([...this.dirty, ...this.files.keys()]);
     this.dirty.clear();
     await Promise.all(
