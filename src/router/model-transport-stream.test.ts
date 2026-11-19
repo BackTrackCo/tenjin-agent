@@ -368,6 +368,33 @@ it('does not try again a call cut after events, whatever the record says, and ke
   }
 });
 
+// Failure caught: after events reached the caller, a provider failure that was not a cut was
+// released on the looser rule (state `unknown` with a voucher not accepted). A relayed call is
+// released on the strict proof alone, a cancelled voucher with a zero charge.
+it('releases a relayed provider failure only on a cancelled voucher with a zero charge', async () => {
+  const failedAfterEvents: Drive = ({ events, push, finish }) => {
+    push(frame('message_start', events()[0]));
+    finish(502, { error: { code: 'incomplete_model_response', message: 'empty' } });
+  };
+  const free = await fixture({ drive: failedAfterEvents });
+  free.setRecord({ state: 'unknown', voucherState: 'cancelled', actualAtomic: '0' });
+  const released = await call(free);
+  expect(released.error!.detail).toMatchObject({ uncharged: true, relayed: true });
+  expect(await free.make().summary(free.job)).toMatchObject({ uncertain: [] });
+  // The loose proof a whole answer accepts is not enough once events have left.
+  for (const record of [
+    { state: 'unknown', voucherState: 'pending', actualAtomic: '0' },
+    { state: 'unknown', voucherState: 'cancelled', actualAtomic: '1000' },
+  ]) {
+    const f = await fixture({ drive: failedAfterEvents });
+    f.setRecord(record);
+    const { error } = await call(f);
+    expect(error!.detail.uncharged).toBeUndefined();
+    expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+    expect(f.signed()).toBe(1);
+  }
+});
+
 it('keeps a stream that ends with no last event uncertain and never signs again', async () => {
   const f = await fixture({
     drive: ({ events, push, cut }) => {

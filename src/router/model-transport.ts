@@ -1179,7 +1179,11 @@ export class ModelTransport {
       // proof, leaves the call uncertain and its reservation whole.
       if (paidError?.code !== undefined && PROVIDER_FAILURES.has(paidError.code)) {
         const server = await this.recover(body.invocationId, signal, protocol).catch(() => null);
-        const free = MODEL_CUT_REPLY_CODES.has(paidError.code) ? cutCostNothing : costNothing;
+        // After events reached the caller the call is released only on the strict proof, as a
+        // cut reply is: a voucher cancelled together with a zero charge. A record that is
+        // merely `unknown` and unaccepted stays uncertain, whatever the failure's code.
+        const free =
+          relayed || MODEL_CUT_REPLY_CODES.has(paidError.code) ? cutCostNothing : costNothing;
         if (server && free(server)) {
           await release();
           throw new ModelCallFailed(
