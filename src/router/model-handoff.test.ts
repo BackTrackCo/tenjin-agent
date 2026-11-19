@@ -690,7 +690,7 @@ it.each([
   expect(recommendation).toHaveProperty(
     'parentPolicy',
     expect.stringContaining(
-      'An unconditional live no-pay instruction, including an unconditional worker paid-tool ban, vetoes the paid offer.',
+      "A live no-pay instruction vetoes the paid offer only when it bans paying or spending on the whole assignment, bans the worker's paid model or outside inference, requires only free models, or requires human approval for the worker's inference or any whole-assignment spending that has not been given. A limit the worker must obey on its own tool calls, commands, tests or live checks is an action rule and does not veto; for a human message, a blanket no-pay form with no narrower object keeps the veto.",
     ),
   );
   expect(route).toHaveBeenCalledWith(
