@@ -1,3 +1,4 @@
+import { messagesStreamOffered } from './model-stream';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1031,6 +1032,7 @@ it('keeps the optional offer fields in the stored job, and the call wait reads t
     maxOutputTokens: 256_000,
     maxResultBytes: 4_000_000,
     callLimit: { max: 120, windowSeconds: 60 },
+    messagesStream: 1,
   };
   f.route.mockImplementation(async (input: { jobId: string }) => ({
     ...offer,
@@ -1044,6 +1046,22 @@ it('keeps the optional offer fields in the stored job, and the call wait reads t
   expect(paidCallTimeoutMs(job!.decision)).toBe(960_000);
   expect(offeredOutputTokens(job!.decision)).toBe(256_000);
   expect(advertisedCallLimit(job!.decision)).toEqual({ max: 120, windowMs: 60_000 });
+  // The stream gate reads the stored record, as a worker and a reload do.
+  expect(messagesStreamOffered(job!.decision)).toBe(true);
+  // Only the version this client speaks opens it; any other value is no offer of one.
+  for (const bad of [2, '1', true, null]) {
+    f.route.mockImplementation(async (input: { jobId: string }) => ({
+      ...offer,
+      jobId: input.jobId,
+      messagesStream: bad,
+    }));
+    const odd = await f.model.capture(f.session, `stream-${String(bad)}`, {
+      prompt: `Read the fixture once more, ${String(bad)}.`,
+    });
+    const stored = await f.model.store.owned(offerId(odd), 'root');
+    expect(stored?.decision).not.toHaveProperty('messagesStream');
+    expect(messagesStreamOffered(stored!.decision)).toBe(false);
+  }
   // An offer that names none gets the constant.
   f.route.mockImplementation(async (input: { jobId: string }) => ({
     ...offer,

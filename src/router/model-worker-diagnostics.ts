@@ -46,6 +46,9 @@ export type ModelCallTiming = {
   signMs?: number;
   journalMs?: number;
   answerMs?: number;
+  /** A streamed reply: the paid request to its first provider event. `answerMs` is then the
+   *  time to the last event, and far above this for a long reply. */
+  ttfbMs?: number;
   bodyMs?: number;
   drainMs?: number;
   settleMs?: number;
@@ -72,6 +75,7 @@ const CALL_TIMES = [
   'signMs',
   'journalMs',
   'answerMs',
+  'ttfbMs',
   'bodyMs',
   'drainMs',
   'settleMs',

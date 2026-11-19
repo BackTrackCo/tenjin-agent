@@ -80,6 +80,9 @@ export const modelOfferSchema = z.object({
   maxCallDurationMs: z.number().int().nonnegative().optional().catch(undefined),
   /** The router's idle limit for one call, in ms. Kept with the job; no wait derives from it. */
   callIdleLimitMs: z.number().int().nonnegative().optional().catch(undefined),
+  /** The version of the streamed Messages reply this router speaks. Only `1` opens the
+   *  client's `stream`; a router that does not say so, or says another value, gets none. */
+  messagesStream: z.literal(1).optional().catch(undefined),
 });
 export interface ModelSession {
   sessionId: string;

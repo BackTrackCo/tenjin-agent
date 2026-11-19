@@ -45,6 +45,9 @@ export class ModelCallFailed extends Error {
       retryAfterMs?: number;
       /** The router's fixed error code (`{error: {code}}`), never its message. */
       code?: string;
+      /** Provider events of a streamed reply had already reached the worker's child: the
+       *  call is never tried again as if nothing happened. */
+      relayed?: true;
     },
     options?: ErrorOptions,
   ) {
@@ -84,6 +87,8 @@ export const MODEL_CUT_REPLY_CODES: ReadonlySet<string> = new Set([
 ]);
 export function retryableModelCall(error: unknown): error is ModelCallFailed {
   if (!(error instanceof ModelCallFailed) || error.detail.uncharged !== true) return false;
+  // Events already reached the child: a new try would repeat what it has seen.
+  if (error.detail.relayed === true) return false;
   const { cause, status, code } = error.detail;
   if (code === MODEL_REFUSED_CODE) return false;
   if (cause === 'provider' || cause === 'timeout') return true;

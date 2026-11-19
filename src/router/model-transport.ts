@@ -6,6 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RoutingPayerDeps } from './routing-payer';
 import { LocalSendBlocked, RoutingPayer as Payer } from './routing-payer';
+import {
+  messagesStreamOffered,
+  readMessagesStream,
+  streamIdleMs,
+  type StreamEvent,
+} from './model-stream';
 import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
@@ -85,6 +91,9 @@ function statedResultBytes(job: ModelJob): number | undefined {
     ? Math.min(honoured, MODEL_MESSAGES_RESULT_BYTES_MAX)
     : undefined;
 }
+
+/** Jobs whose router refused `stream` after offering it (its flag was turned off again). */
+const streamRefused = new Set<string>();
 
 /** An error answer's fixed code (`{error: {code}}`), never its message. */
 async function errorCode(response: Response): Promise<{ code?: string }> {
@@ -405,8 +414,12 @@ export class ModelTransport {
     beforeSend?: () => Promise<void>,
     /** Diagnostics only: where this call's time went, told once when the call ends. */
     observe?: (timing: ModelCallTiming) => void,
+    /** Provider events as they arrive, for a job whose router offers a streamed reply. The
+     *  call still ends with the whole answer; this only carries its events early. A caller
+     *  that joins a call already in flight gets none. */
+    stream?: (event: StreamEvent) => void,
   ) {
-    return this.invoke(job, messages, signal, 'messages', beforeSend, observe);
+    return this.invoke(job, messages, signal, 'messages', beforeSend, observe, stream);
   }
   async responses(
     job: ModelJob,
@@ -424,6 +437,7 @@ export class ModelTransport {
     protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
     observe?: (timing: ModelCallTiming) => void,
+    stream?: (event: StreamEvent) => void,
   ): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     // Do not share across changed job authority, even when the provider body is identical.
@@ -432,13 +446,15 @@ export class ModelTransport {
     if (!invocation) {
       const abort = new AbortController();
       const timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 };
-      const result = this.invokeOnce(
+      const result = this.invokeStreamed(
         structuredClone(job),
         structuredClone(messages),
         abort.signal,
         protocol,
         beforeSend,
         timing,
+        // Only the caller that starts the call is given its events.
+        protocol === 'messages' ? stream : undefined,
       ).finally(() => {
         if (this.invocations.get(key)?.abort === abort) this.invocations.delete(key);
         try {
@@ -491,6 +507,56 @@ export class ModelTransport {
       if (signal.aborted) cancel();
     });
   }
+  /**
+   * THE CALL WITH ITS STREAM, when the job's offer opens one and the caller wants events. A
+   * router whose flag was turned off after the offer refuses the `stream` field before
+   * payment (`invalid_model_request`, nothing reserved or signed): the call is then made
+   * whole, once, as it would have been without an offer for a stream. A call that failed
+   * after events had left says so (`relayed`), so it is never tried again.
+   */
+  private async invokeStreamed(
+    job: ModelJob,
+    messages: Record<string, unknown>,
+    signal: AbortSignal,
+    protocol: 'messages' | 'responses',
+    beforeSend: (() => Promise<void>) | undefined,
+    timing: ModelCallTiming,
+    stream: ((event: StreamEvent) => void) | undefined,
+  ) {
+    const open =
+      stream !== undefined && messagesStreamOffered(job.decision) && !streamRefused.has(job.id);
+    const seen = { relayed: false };
+    const relay = open
+      ? (event: StreamEvent) => {
+          seen.relayed = true;
+          stream(event);
+        }
+      : undefined;
+    try {
+      return await this.invokeOnce(job, messages, signal, protocol, beforeSend, timing, relay);
+    } catch (error) {
+      if (
+        relay &&
+        !seen.relayed &&
+        error instanceof ModelCallFailed &&
+        error.detail.uncharged === true &&
+        error.detail.status === 400 &&
+        error.detail.code === 'invalid_model_request'
+      ) {
+        streamRefused.add(job.id);
+        try {
+          return await this.invokeOnce(job, messages, signal, protocol, beforeSend, timing);
+        } catch (again) {
+          // The same refusal without a stream was never about the stream.
+          if (again instanceof ModelCallFailed && again.detail.code === 'invalid_model_request')
+            streamRefused.delete(job.id);
+          throw again;
+        }
+      }
+      if (seen.relayed && error instanceof ModelCallFailed) error.detail.relayed = true;
+      throw error;
+    }
+  }
   private async invokeOnce(
     job: ModelJob,
     messages: Record<string, unknown>,
@@ -498,6 +564,7 @@ export class ModelTransport {
     protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
     timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 },
+    relay?: (event: StreamEvent) => void,
   ) {
     signal.throwIfAborted();
     // Diagnostics only: each step's milliseconds, read from a monotonic clock.
@@ -513,6 +580,7 @@ export class ModelTransport {
         | 'waitedOn'
         | 'paceWaitMs'
         | 'requoteMs'
+        | 'ttfbMs'
       >,
     ) => {
       const now = performance.now();
@@ -631,6 +699,7 @@ export class ModelTransport {
       jobId: job.decision.jobId,
       invocationId: randomUUID(),
       ...(stated !== undefined ? { maxResultBytes: stated } : {}),
+      ...(relay ? { stream: true as const } : {}),
       ...(protocol === 'responses'
         ? { protocol, responses: scrub(messages) }
         : { messages: scrub(messages) }),
@@ -678,6 +747,8 @@ export class ModelTransport {
     if (typeof sentMessages?.max_tokens === 'number') timing.outputCap = sentMessages.max_tokens;
     timing.requestBytes = Buffer.byteLength(wire);
     const now = this.options.paceClock?.now ?? Date.now;
+    /** Provider events of this call's stream have reached the caller. */
+    let relayed = false;
     /** The unpaid request: the router's quote for this call, and the amount it names. */
     const askQuote = async (): Promise<{ challenge: Response; amount: bigint }> => {
       if (advertised) {
@@ -816,6 +887,9 @@ export class ModelTransport {
           }
           signal.throwIfAborted();
           init?.signal?.throwIfAborted();
+          // Events of a streamed reply have left: a second signed request is a second
+          // charge for what the child has already been shown.
+          if (paying && relayed) throw new Error('A second payment after a streamed reply');
         } catch (cause) {
           // httpRequest maps fetch failures to transport outcomes. Retain the
           // evidence that this invocation's authorization stayed local.
@@ -828,13 +902,32 @@ export class ModelTransport {
           paid.paymentSent = true;
           step('signMs');
         }
-        const response = boundedResponse(
-          await fetchFn(input, {
-            ...init,
-            signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
-          }),
-          resultLimit,
-        );
+        const callSignal = AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]);
+        const sent = await fetchFn(input, { ...init, signal: callSignal });
+        // A reply that begins as a stream is read to its last event, which is the response
+        // the whole answer would have been. A request that ended before any event answers as
+        // a whole answer does (a refusal, an error, the stored JSON for a paid replay).
+        const response =
+          paying && relay && sent.status === 200 && sent.headers.get('tenjin-model-stream') === '1'
+            ? await readMessagesStream(sent, {
+                signal: callSignal,
+                idleMs: streamIdleMs(job.decision),
+                terminalBytes: resultLimit,
+                contentBytes: readable,
+                onEvent: (event) => {
+                  const first = !relayed;
+                  relayed = true;
+                  // Time to the first event, from the signed request leaving.
+                  if (first && timing.ttfbMs === undefined)
+                    timing.ttfbMs = performance.now() - stepFrom;
+                  try {
+                    relay(event);
+                  } catch {
+                    // What the child is shown never changes what is paid.
+                  }
+                },
+              })
+            : boundedResponse(sent, resultLimit);
         if (paying) step('answerMs');
         // The router's answer to the signed request when it is an error: its status and
         // its fixed error code, read from a copy, never its message.
