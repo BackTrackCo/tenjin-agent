@@ -143,9 +143,11 @@ Temp files:
 - **Reads.** The worker and its commands read `.env` and other `.env*` files inside its working directories (the consented directories and their linked worktrees) as a native subagent does, so tests and scripts that load `.env.local` work. On Linux and macOS, the worker’s sandbox denies env files outside the working directories.
 - **Writes.** Editing or writing one follows the native rules of the accepted mode: default mode asks, Accept edits allows, auto mode's classifier judges, and `.envrc` always asks.
 - **Values never reach Tenjin or DeepSeek.** In every forwarded request, the worker's result, its activity rows, the local progress file and a stopped worker's last activity, each value becomes `[env:NAME]`, the variable's name. The worker knows which variable was there but not its value, so it cannot copy or edit a value in place.
-- **The scan.** Tenjin reads every `.env*` file in the working directories, skipping `node_modules` and `.git`, when it starts the worker. Before each request it rechecks the files it knows and the folders that hold them, and on macOS and Windows it also watches for new ones. It reads and parses each changed file in full, up to 16 MiB. The values are held in memory only, never logged or saved.
+- **The scan.** Tenjin reads every `.env*` file in the working directories, skipping `node_modules` and `.git`, when it starts the worker. Before each request it rechecks the files it knows and the folders that hold them. It reads and parses each changed file in full, up to 16 MiB. The values are held in memory only, never logged or saved.
+- **New files during a job, on macOS.** Before each request Tenjin checks every folder of the working directories and the job's temp folder for a change since it last listed that folder, and lists each changed one again, so a new env file, or a folder moved in with one inside, is read before the request leaves. It does not rely on file change events there: macOS can drop them without notice, after a burst of changes such as an install, or when another watcher in the same process starts or stops.
+- **New files during a job, on Windows.** A watcher reports changes. Before each request Tenjin waits 120 ms for its reports and lists each folder they name. When the watcher says it lost changes, Tenjin walks every working directory, and once a watcher fails, each request checks every folder as on macOS.
 - **A file Tenjin cannot scan.** If a file is too large or Tenjin cannot read or parse it at startup, Linux and macOS workers run with that file denied. A Windows worker starts only from a complete scan. A scan that cannot finish keeps every env file denied for that job. A folder Tenjin cannot list has its contents denied to the worker's commands and its env files to the file tools.
-- **During a job.** If a new or changed env file becomes unreadable, unparseable or too large, or a folder that held an env file can no longer be listed, Tenjin stops forwarding and ends the job with `env_file_unscanned`.
+- **During a job.** If a new or changed env file becomes unreadable, unparseable or too large, a folder Tenjin lists for it can no longer be listed, or a walk cannot finish, Tenjin stops forwarding and ends the job with `env_file_unscanned`.
 
 ### Limits of the env value replacement
 
@@ -157,7 +159,11 @@ These are sent as written:
 - A value in a form Tenjin does not match. A value is matched as parsed, as written in the file, line by line when it spans lines, and URL-encoded, JSON-escaped or base64-encoded whole. Any other form can pass: a hash, hex, base64 of text that contains the value (such as an HTTP Basic header), or a fragment of a one-line value.
 - A secret in an old transcript or your prompt history that has no known token shape (see [Your `~/.claude` folder](#your-claude-folder)).
 
-On Linux there is no watcher: a new env file in a folder that is not a working directory's top level and held no env file at job start is found only when the worker reads it by name, or at the next job.
+A new env file in a folder that is not a working directory's top level and held no env file at job start can be missed for a while:
+
+- **Linux.** There is no watcher: the file is found only when the worker reads it by name, or at the next job.
+- **macOS.** A folder's check depends on the folder's own change time, which every new, removed or renamed entry moves. A network or other mount that does not keep it can hide a new file until the worker reads it by name, or until the next job.
+- **Windows.** A request waits 120 ms for reports of changes. A file whose report comes later is found before the request after it.
 
 ### GitHub access
 

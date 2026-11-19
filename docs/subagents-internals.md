@@ -34,13 +34,19 @@ Where no prompt was typed since Tenjin's process started (a resumed session woke
 
 ## Env file scans
 
-- Where the system watches folders for changes (macOS and Windows), a worker prepared while its offer is open starts its Claude Code from the last complete scan this session made of the same directories, and its own full scan runs meanwhile. It gets no assignment until that scan has ended and found nothing its starting denies leave open.
+- On macOS and Windows, a worker prepared while its offer is open starts its Claude Code from the last complete scan this session made of the same directories, and its own full scan runs meanwhile. Each worker runs its own: two that start together each wait for theirs. It gets no assignment until that scan has ended and found nothing its starting denies leave open.
 - A kept scan is held in the Tenjin process's memory only, like every scan, until a newer one replaces it or the session ends.
-- If a worker warmed before acceptance on Windows or without a recursive watcher, Tenjin scans again before giving it the assignment. A scan that needs new read denies makes Tenjin start a fresh worker.
+- If a worker warmed before acceptance on Windows, or where nothing learns new files during a job, Tenjin scans again before giving it the assignment. A scan that needs new read denies makes Tenjin start a fresh worker.
 - A Windows worker starts only from a complete scan: its own, or, for a worker prepared while its offer is open, the session's last complete one, and that worker sends nothing until its own scan has ended and agrees.
-- Before each request Tenjin rechecks the files it knows and the folders that hold them. A request that follows a tool result runs one check, which waits its full time for file changes after the request arrives.
-- A folder Tenjin cannot list has its env files denied to the file tools as well as its contents to commands, since a command could still open one by name.
-- On Linux there is no watcher for files made during a job, which is why a repository's tracked `.claude/settings.json` stays unreadable to a Linux worker.
+- Before each request Tenjin rechecks the files it knows and the folders that hold them. A request that follows a tool result runs one check, whose wait for file events (Windows) or pass over the folders (macOS) starts again from the request when the request comes during it.
+- A folder Tenjin cannot list has its env files denied to the file tools as well as its contents to commands, since a command could still open one by name. One found during a job ends it with `env_file_unscanned`.
+- On Linux nothing learns files made during a job, which is why a repository's tracked `.claude/settings.json` stays unreadable to a Linux worker.
+
+### New files during a job
+
+- **macOS: no file event is trusted.** libuv delivers every watcher of a Node event loop through one FSEvents stream and rebuilds it whenever a watcher on that loop starts or closes, losing what it had not delivered, with no error. A stream also drops events after a burst of changes, which libuv skips without a callback. Measured on 2026-11-19: a watcher started and closed on the same loop lost a live watcher's event in 19 to 29 of 40 tries; on a thread of its own, the event of an env file written right after 14,000 new folders in its directory was lost in 8 of 8 tries, and after 3,000 in 3 of 8.
+- **macOS: every folder is checked before each request.** The start scan records each folder it lists, as its own entry stood just before the listing. Before each request Tenjin stats every recorded folder and lists again each one whose inode, change time or modification time moved, or which changed less than 2 seconds before it was last listed, since a later change can carry the same time on a coarse clock. A new entry, a removal and a rename each move the folder's change time, and no command can set that time back. A folder not recorded yet (new, moved in, or a root not walked yet, such as the job's temp folder) is walked in full. Measured on 2026-11-19, the stat pass took 0.7 s over 117,643 folders, against 3.8 s to list each one.
+- **Windows: a watcher, trusted while it says what it lost.** Before each request Tenjin waits 120 ms for its reports, then lists every folder they named, whatever its name, skipping `node_modules` and `.git`, since a folder moved in reports itself alone. A report with no name (the system's buffer overflowed), or more than 10,000 named paths, makes the next check walk every working directory. A watcher that fails is dropped: the worker no longer counts as watching, and each check from then on checks every folder as on macOS.
 
 ## Inference channels and their lock
 

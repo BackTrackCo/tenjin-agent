@@ -1,6 +1,6 @@
-import { type Dirent, type FSWatcher, watch } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { type Dirent, type FSWatcher, type Stats, watch } from 'node:fs';
+import { lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * A DEEPSEEK WORKER'S ENV FILES. The worker and its commands read `.env*` files
@@ -30,8 +30,15 @@ const MAX_UNLISTED = 64;
 /** A file this user may not read is closed to the worker's commands as well. */
 const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
 const SKIP = new Set(['node_modules', '.git']);
-/** How long a check waits for file events still in flight (macOS coalesces at 50 ms). */
+/** How long a check waits for file events still in flight, where it trusts a watcher (Windows). */
 const SETTLE_MS = 120;
+/** Paths a watcher named since the last check, past which the next check walks every root. */
+const MAX_NAMED = 10_000;
+/**
+ * A folder that changed this soon before it was listed is listed again at the next check, since
+ * a change after the listing may carry the same time where the file system's clock is coarse.
+ */
+const RACY_MS = 2_000;
 
 export type EnvAssignment = { key: string; value: string; written: string };
 
@@ -263,17 +270,160 @@ export function envDeniedRoots(
     : [...protectedRoots];
 }
 
+/** The roots that no other root holds: each is walked, and the rest with it. */
+function topRoots(roots: readonly string[]): string[] {
+  return roots.filter((root) => !roots.some((other) => other !== root && inside(other, root)));
+}
+
+/**
+ * The folders of `paths` that no other one holds, by their parents: a walk of each covers the
+ * rest. Linear in the paths and their depth, for the thousands a checkout or an install names.
+ */
+function outermost(paths: readonly string[]): string[] {
+  const all = new Set(paths);
+  return [...all].filter((path) => {
+    for (let at = path, up = dirname(at); up !== at; at = up, up = dirname(up))
+      if (all.has(up)) return false;
+    return true;
+  });
+}
+
+/** A folder as last listed: what its own entry said just before the listing, and when. */
+type Folder = { ino: number; ctime: number; mtime: number; at: number };
+
+function folderOf(info: Stats, at: number): Folder {
+  return { ino: info.ino, ctime: info.ctimeMs, mtime: info.mtimeMs, at };
+}
+
+/**
+ * Whether a folder may have gained or lost an entry since it was listed. Every entry made,
+ * removed or renamed in a folder changes the folder's own change time (POSIX), which no
+ * command can set back; a folder replaced by another has another inode.
+ */
+function folderChanged(info: Stats, folder: Folder): boolean {
+  return (
+    info.ino !== folder.ino ||
+    info.ctimeMs !== folder.ctime ||
+    info.mtimeMs !== folder.mtime ||
+    folder.ctime > folder.at - RACY_MS
+  );
+}
+
+async function pool<T>(
+  items: readonly T[],
+  width: number,
+  each: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(width, items.length) }, async () => {
+      while (next < items.length) await each(items[next++]!);
+    }),
+  );
+}
+
+type WalkLimits = Pick<EnvScanLimits, 'maxDirectories' | 'maxFiles' | 'deadlineMs'>;
+
+/**
+ * Every env and settings file under `starts`, skipping `node_modules` and `.git` and following
+ * no link to a folder. `complete` is false when the walk stopped short: a limit, a start in
+ * `fatal` that cannot be listed, or more unlistable folders than can each be denied. With
+ * `folders`, each folder listed is recorded there as its entry stood just before the listing.
+ */
+async function walkTree(
+  starts: readonly string[],
+  limits: WalkLimits,
+  fatal: readonly string[],
+  folders?: Map<string, Folder>,
+): Promise<{ found: string[]; unlisted: string[]; complete: boolean }> {
+  const maxDirectories = limits.maxDirectories ?? 400_000;
+  const maxFiles = limits.maxFiles ?? 5_000;
+  const deadline = Date.now() + (limits.deadlineMs ?? 20_000);
+  const found: string[] = [];
+  const unlisted: string[] = [];
+  const queue = [...starts];
+  let directories = 0;
+  let complete = true;
+  let active = 0;
+  const list = async (directory: string) => {
+    if (!folders) return readdir(directory, { withFileTypes: true });
+    const at = Date.now();
+    // A start may be a link to its folder; a folder below it is never one.
+    const info = await (starts.includes(directory) ? stat : lstat)(directory);
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (info.isDirectory()) folders.set(directory, folderOf(info, at));
+    return entries;
+  };
+  await new Promise<void>((done) => {
+    const pump = () => {
+      if (!complete) return active ? undefined : done();
+      if (!queue.length && !active) return done();
+      // A recorded folder costs a stat before its listing: twice as many at once keeps pace.
+      while (active < (folders ? 64 : 32) && queue.length) {
+        const directory = queue.pop()!;
+        if (++directories > maxDirectories || Date.now() > deadline) {
+          complete = false;
+          return active ? undefined : done();
+        }
+        active++;
+        list(directory)
+          .then(
+            (entries) => {
+              for (const entry of entries) {
+                const path = join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  if (!SKIP.has(entry.name)) queue.push(path);
+                } else if (covered(path)) found.push(path);
+              }
+              if (found.length > maxFiles) complete = false;
+            },
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return;
+              // A folder that cannot be listed may hold env files the worker can reach.
+              // A root, or more such folders than can each be denied, fails the walk.
+              if (fatal.includes(directory) || unlisted.length >= MAX_UNLISTED) complete = false;
+              // One that turned out to be a file has nothing inside to read.
+              else if (error.code !== 'ENOTDIR') unlisted.push(directory);
+            },
+          )
+          .finally(() => {
+            active--;
+            pump();
+          });
+      }
+    };
+    pump();
+  });
+  return { found, unlisted, complete };
+}
+
+/**
+ * How a job learns the env files made after its start scan, before each send:
+ * - `relist` (macOS): every folder the scan listed is stat'ed, and each one that changed is
+ *   listed again, so nothing depends on file events. macOS loses them unreported: measured
+ *   2026-11-19, a watcher on a thread of its own lost the event of an env file written right
+ *   after 14,000 new folders in 8 of 8 tries, and libuv loses what is in flight whenever any
+ *   watcher of the same event loop starts or closes (19 to 29 of 40).
+ * - `events` (Windows): a recursive watcher, which reports when it lost changes.
+ * - `none` (Linux): the known files and their folders only.
+ */
+export type EnvLearning = 'relist' | 'events' | 'none';
+const PLATFORM_LEARNING: EnvLearning =
+  process.platform === 'darwin' ? 'relist' : process.platform === 'win32' ? 'events' : 'none';
+
 export type EnvScanLimits = {
   maxDirectories?: number;
   maxFiles?: number;
   deadlineMs?: number;
-  /** Recursive watching where the OS does it natively (macOS, Windows). */
+  /** False: this scan learns nothing after it (`none`), as for a scan made only to compare. */
   watch?: boolean;
+  /** Default: the platform's own (`EnvLearning`); for tests. */
+  learning?: EnvLearning;
   /** Keep a complete scan of `roots` for the next worker over them (`WorkerEnvSecrets.resume`). */
   keep?: boolean;
   /**
-   * Folders made for this job alone (its temp folder): scanned and watched with the
-   * roots, and left out of a kept scan.
+   * Folders made for this job alone (its temp folder): scanned with the roots, and left out
+   * of a kept scan.
    */
   fresh?: readonly string[];
 };
@@ -317,18 +467,33 @@ export class WorkerEnvSecrets {
   private readonly derived = new Set<string>();
   /** By the hash of a piece's first characters: the lengths of the pieces that start so, longest first. */
   private readonly index = new Map<number, number[]>();
+  private learning: EnvLearning = 'none';
+  /** Every folder listed, for `relist`: a root missing here is walked in full at the next check. */
+  private readonly folders = new Map<string, Folder>();
   private readonly watchers: FSWatcher[] = [];
+  /** A watcher failed (`events`): from now on every check re-lists, as `relist` does. */
+  private failed = false;
+  /** Every path the watcher named since the last check: any of them may be a folder moved in. */
+  private readonly named = new Set<string>();
+  /** The watcher named more than `MAX_NAMED`, or said it lost changes: the next check walks every root. */
+  private overflow = false;
   /**
-   * Whether a recursive watcher learns files made during the job (macOS, Windows). Without
-   * one, a settings file made in a new folder is found by no check before output leaves.
+   * Whether a check before each send learns env and settings files made during the job: by a
+   * re-listing (macOS), or by a recursive watcher that has not failed (Windows). Without it, a
+   * settings file made in a new folder is found by no check before output leaves.
    */
   get watching(): boolean {
-    return this.watchers.length > 0;
+    return (
+      this.learning === 'relist' ||
+      (this.learning === 'events' && !this.failed && this.watchers.length > 0)
+    );
   }
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
   /** Set while the running check still waits for file events: when that wait ends. */
   private settling: { until: number } | undefined;
+  /** Set while the running check stats folders: a call meanwhile restarts that pass (`relist`). */
+  private relisting: { again: boolean } | undefined;
 
   private constructor(roots: readonly string[]) {
     this.roots = [...new Set(roots.map((root) => resolve(root)))];
@@ -340,13 +505,15 @@ export class WorkerEnvSecrets {
     limits: EnvScanLimits = {},
   ): Promise<WorkerEnvSecrets> {
     const env = new WorkerEnvSecrets([...roots, ...(limits.fresh ?? [])]);
+    env.learning = limits.watch === false ? 'none' : (limits.learning ?? PLATFORM_LEARNING);
+    // Watching before the walk begins: a file made in a folder after the walk listed it is
+    // named by an event.
+    if (env.learning === 'events') env.watch();
     try {
       env.scanned = await env.scan(limits);
     } catch {
       env.scanned = false;
     }
-    if (limits.watch !== false && (process.platform === 'darwin' || process.platform === 'win32'))
-      env.watch();
     // Kept for the next worker over these roots when the scan ran to its end: a copy,
     // which this job's later finds never reach.
     if (limits.keep && env.scanned) {
@@ -361,9 +528,10 @@ export class WorkerEnvSecrets {
   /**
    * A worker's scan that starts from the last full scan of `roots` in this process, so
    * its Claude Code can start at once with that scan's read denies. `fresh` are folders
-   * made for this job alone (its temp folder), which hold nothing yet and are covered
-   * from now by the watcher and the per-request checks. Undefined when no such scan is
-   * held, or where nothing watches files (a file made between the scans would be missed).
+   * made for this job alone (its temp folder), which hold nothing yet and are walked at
+   * the first per-request check. Undefined where nothing learns files made during the job
+   * (Linux, or a Windows watcher that cannot start): a file made between the scans would be
+   * missed.
    *
    * `verified` is this worker's own full scan, started here: it adds every value it
    * finds, and resolves false when the denies the child started with no longer cover
@@ -374,12 +542,13 @@ export class WorkerEnvSecrets {
     roots: readonly string[],
     fresh: readonly string[] = [],
   ): { env: WorkerEnvSecrets; verified: Promise<boolean> } | undefined {
-    if (process.platform !== 'darwin' && process.platform !== 'win32') return undefined;
+    if (PLATFORM_LEARNING === 'none') return undefined;
     const held = lastScans.get(scanKey(roots));
     if (!held) return undefined;
     const env = held.copy([...roots, ...fresh]);
+    env.learning = PLATFORM_LEARNING;
     // Watching before its own scan begins: no change falls between the two.
-    env.watch();
+    if (env.learning === 'events') env.watch();
     if (!env.watching) {
       env.close();
       return undefined;
@@ -412,12 +581,16 @@ export class WorkerEnvSecrets {
    * Refreshes a warm child's scan without weakening the read denies it started with:
    * a full scan of `roots` (default: every root of this one), whose values are added
    * here. False when it found a file or folder to deny that the child was not denied.
+   * With `relist`, the folders it listed are the ones each later check stats.
    */
   async refreshBeforeAssignment(
     roots: readonly string[] = this.roots,
     keep = false,
   ): Promise<boolean> {
-    const current = await WorkerEnvSecrets.start(roots, { watch: false, keep });
+    const current = await WorkerEnvSecrets.start(roots, {
+      keep,
+      learning: this.learning === 'relist' ? 'relist' : 'none',
+    });
     if (
       current.scanned !== this.scanned ||
       current.withheld.some((path) => !this.withheld.includes(path)) ||
@@ -431,6 +604,8 @@ export class WorkerEnvSecrets {
       this.remember(value, name, current.derived.has(value));
     for (const [path, signature] of current.files) this.files.set(path, signature);
     for (const directory of current.hot) this.hot.add(directory);
+    if (this.learning === 'relist')
+      for (const [path, folder] of current.folders) this.folders.set(path, folder);
     return true;
   }
 
@@ -476,17 +651,24 @@ export class WorkerEnvSecrets {
    * Picks up env files that changed or appeared since the last check, before
    * anything is forwarded: every known file is re-read when its size, time or
    * inode changed, and every working root and folder that held an env file is
-   * listed again. Calls during a check queue one more check after it.
+   * listed again. On macOS every folder is stat'ed and each changed one listed
+   * (`relist`); on Windows every folder the watcher named is listed (`catchUp`).
+   * Calls during a check queue one more check after it.
    *
-   * A CHECK THAT STILL WAITS FOR FILE EVENTS HAS READ NOTHING YET, so a call made during
-   * that wait joins it: the wait is run again in full from this call, and what the check
-   * then reads is as new as a check of this call's own would read. A worker's tool result
-   * starts a check and its next model request, a few milliseconds later, asked for another
-   * after it: two waits and two listings in a row before every request that followed a tool.
+   * A CHECK THAT HAS NOT YET READ WHAT IT DEPENDS ON is joined by a call made meanwhile:
+   * its wait for file events is run again in full from that call, or its pass over the
+   * folders starts again, so what the check then reads is as new as a check of this call's
+   * own would read. A worker's tool result starts a check and its next model request, a few
+   * milliseconds later, asked for another after it: two waits and two listings in a row
+   * before every request that followed a tool.
    */
   refresh(): Promise<void> {
     if (this.settling && this.running) {
       this.settling.until = Date.now() + SETTLE_MS;
+      return this.running;
+    }
+    if (this.relisting && this.running) {
+      this.relisting.again = true;
       return this.running;
     }
     if (this.queued) return this.queued;
@@ -514,13 +696,20 @@ export class WorkerEnvSecrets {
   private async check(): Promise<void> {
     // File events trail a command's writes by tens of milliseconds: let them arrive. The
     // wait runs its full length from the last call that joined it (`refresh`).
-    if (this.watchers.length) {
+    if (this.learning === 'events' && this.watching) {
       const settling = (this.settling = { until: Date.now() + SETTLE_MS });
       for (let wait = SETTLE_MS; wait > 0; wait = settling.until - Date.now())
         await new Promise((done) => setTimeout(done, wait));
       this.settling = undefined;
     }
-    const paths = new Set([...this.dirty, ...this.files.keys()]);
+    // A scan that stopped short keeps every env file denied: there is nothing to learn.
+    const found =
+      !this.scanned || this.learning === 'none'
+        ? []
+        : this.learning === 'relist' || this.failed
+          ? await this.relist()
+          : await this.catchUp();
+    const paths = new Set([...found, ...this.dirty, ...this.files.keys()]);
     this.dirty.clear();
     await Promise.all(
       [...this.hot].map(async (directory) => {
@@ -549,76 +738,152 @@ export class WorkerEnvSecrets {
     await Promise.all([...paths].map((path) => this.load(path).catch(() => undefined)));
   }
 
-  private async scan(limits: EnvScanLimits): Promise<boolean> {
-    const maxDirectories = limits.maxDirectories ?? 400_000;
-    const maxFiles = limits.maxFiles ?? 5_000;
-    const deadline = Date.now() + (limits.deadlineMs ?? 20_000);
-    const tops = this.roots.filter(
-      (root) => !this.roots.some((other) => other !== root && inside(other, root)),
-    );
-    for (const root of this.roots) this.hot.add(root);
-    const found: string[] = [];
-    const queue = [...tops];
-    let directories = 0;
-    let complete = true;
-    let active = 0;
-    await new Promise<void>((done) => {
-      const pump = () => {
-        if (!complete) return active ? undefined : done();
-        if (!queue.length && !active) return done();
-        while (active < 32 && queue.length) {
-          const directory = queue.pop()!;
-          if (++directories > maxDirectories || Date.now() > deadline) {
-            complete = false;
-            return active ? undefined : done();
-          }
-          active++;
-          readdir(directory, { withFileTypes: true })
-            .then(
-              (entries) => {
-                for (const entry of entries) {
-                  const path = join(directory, entry.name);
-                  if (entry.isDirectory()) {
-                    if (!SKIP.has(entry.name)) queue.push(path);
-                  } else if (covered(path)) found.push(path);
-                }
-                if (found.length > maxFiles) complete = false;
-              },
-              (error: NodeJS.ErrnoException) => {
-                if (error.code === 'ENOENT') return;
-                // A folder that cannot be listed may hold env files the worker can reach.
-                // A root, or more such folders than can each be denied, fails the scan.
-                if (tops.includes(directory) || this.unlisted.length >= MAX_UNLISTED)
-                  complete = false;
-                // One that turned out to be a file has nothing inside to read.
-                else if (error.code !== 'ENOTDIR') this.unlisted.push(directory);
-              },
-            )
-            .finally(() => {
-              active--;
-              pump();
-            });
+  /**
+   * EVERY FOLDER AGAIN, WITH NO FILE EVENT TRUSTED: each folder listed before is stat'ed, and
+   * each one that may have gained an entry (`folderChanged`) is listed again; a folder not
+   * listed before (new, moved in, or a root never walked) is walked in full. A call made
+   * while the folders are stat'ed starts that pass again (`refresh`). Returns the env files
+   * found; a folder that cannot be listed, or a walk that stops short, holds every later send
+   * (`uncovered`).
+   */
+  private async relist(): Promise<string[]> {
+    const tops = topRoots(this.roots);
+    const changed: { path: string; folder: Folder }[] = [];
+    const relisting: { again: boolean } = (this.relisting = { again: true });
+    while (relisting.again) {
+      relisting.again = false;
+      changed.length = 0;
+      await pool([...this.folders], 64, async ([path, folder]) => {
+        if (relisting.again) return;
+        const at = Date.now();
+        let info: Stats;
+        try {
+          info = await (tops.includes(path) ? stat : lstat)(path);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT' || code === 'ENOTDIR') this.folders.delete(path);
+          // Listed below, where a folder that cannot be read holds the send.
+          else changed.push({ path, folder });
+          return;
         }
-      };
-      pump();
+        if (!info.isDirectory()) this.folders.delete(path);
+        else if (folderChanged(info, folder)) changed.push({ path, folder: folderOf(info, at) });
+      });
+    }
+    this.relisting = undefined;
+    const found: string[] = [];
+    const starts = tops.filter((top) => !this.folders.has(top));
+    await pool(changed, 32, async ({ path, folder }) => {
+      let entries: Dirent[];
+      try {
+        entries = await readdir(path, { withFileTypes: true });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') this.folders.delete(path);
+        else this.unlistable(path);
+        return;
+      }
+      this.folders.set(path, folder);
+      for (const entry of entries) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) {
+          if (!SKIP.has(entry.name) && !this.folders.has(child)) starts.push(child);
+        } else if (covered(child)) found.push(child);
+      }
     });
-    await Promise.all(found.map((path) => this.load(path, true)));
-    return complete;
+    found.push(...(await this.walked(starts, tops, this.folders)));
+    return found;
+  }
+
+  /**
+   * WHAT THE WATCHER NAMED IS LISTED (`events`), before anything leaves: every folder it
+   * named, whatever its name, since a folder moved in or copied reports itself alone. Every
+   * root instead when it named too many or said it lost changes.
+   */
+  private async catchUp(): Promise<string[]> {
+    const named = [...this.named];
+    this.named.clear();
+    const tops = topRoots(this.roots);
+    if (this.overflow) {
+      this.overflow = false;
+      return this.walked(tops, tops);
+    }
+    const folders = (
+      await Promise.all(
+        named.map(async (path) =>
+          (await lstat(path).catch(() => null))?.isDirectory() ? path : '',
+        ),
+      )
+    ).filter((path) => path && !this.unlisted.some((folder) => inside(folder, path)));
+    return this.walked(outermost(folders), tops);
+  }
+
+  /** The env files a walk of `starts` finds during the job; what it cannot cover holds every send. */
+  private async walked(
+    starts: string[],
+    tops: readonly string[],
+    folders?: Map<string, Folder>,
+  ): Promise<string[]> {
+    if (!starts.length) return [];
+    const walk = await walkTree(starts, {}, tops, folders);
+    if (!walk.complete) for (const start of starts) this.uncovered.add(start);
+    for (const folder of walk.unlisted) this.unlistable(folder);
+    return walk.found;
+  }
+
+  /** A folder found during the job that cannot be listed: listed again at each check from now. */
+  private unlistable(folder: string): void {
+    if (this.unlisted.some((denied) => inside(denied, folder))) return;
+    this.uncovered.add(folder);
+    this.hot.add(folder);
+  }
+
+  private async scan(limits: EnvScanLimits): Promise<boolean> {
+    const tops = topRoots(this.roots);
+    for (const root of this.roots) this.hot.add(root);
+    const walk = await walkTree(
+      tops,
+      limits,
+      tops,
+      this.learning === 'relist' ? this.folders : undefined,
+    );
+    this.unlisted.push(...walk.unlisted);
+    await Promise.all(walk.found.map((path) => this.load(path, true)));
+    return walk.complete;
   }
 
   private watch(): void {
-    for (const root of this.roots.filter(
-      (root) => !this.roots.some((other) => other !== root && inside(other, root)),
-    )) {
+    for (const root of topRoots(this.roots)) {
       try {
         const watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => {
-          if (name && covered(join(root, String(name)))) this.dirty.add(join(root, String(name)));
+          // The system lost count of changes (a Windows buffer overflow): walk every root.
+          if (name === null || name === undefined) {
+            this.overflow = true;
+            return;
+          }
+          if (
+            String(name)
+              .split(sep)
+              .some((part) => SKIP.has(part))
+          )
+            return;
+          const path = join(root, String(name));
+          if (covered(path)) this.dirty.add(path);
+          if (this.named.size < MAX_NAMED) this.named.add(path);
+          else this.overflow = true;
         });
-        // A watcher that fails leaves the per-request checks of known folders.
-        watcher.on('error', () => watcher.close());
+        // A watcher that fails reports nothing more: it is dropped, and every check from
+        // now re-lists every folder instead, and the accept walks again.
+        watcher.on('error', () => {
+          watcher.close();
+          const at = this.watchers.indexOf(watcher);
+          if (at >= 0) this.watchers.splice(at, 1);
+          this.failed = true;
+        });
         this.watchers.push(watcher);
       } catch {
-        // No native recursive watching here.
+        // No native recursive watching for this root: every check re-lists instead.
+        this.failed = true;
       }
     }
   }

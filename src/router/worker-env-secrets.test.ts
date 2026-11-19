@@ -1,4 +1,5 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdirSync, watch, writeFileSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -11,8 +12,60 @@ import {
   WorkerEnvSecrets,
 } from './worker-env-secrets';
 
+// The folders a walk lists, so a test can hold one listing and tell one walk from two.
+const walks = vi.hoisted(() => ({
+  listed: [] as string[],
+  /** The folders whose listing has been handed back. */
+  done: [] as string[],
+  hold: undefined as Promise<void> | undefined,
+  /** With `hold`, only a listing of this folder waits. */
+  holdOnly: undefined as string | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readdir: (async (path: string, ...rest: unknown[]) => {
+      walks.listed.push(String(path));
+      if (!walks.holdOnly || walks.holdOnly === String(path)) await walks.hold;
+      const entries = await (actual.readdir as (...args: unknown[]) => Promise<unknown>)(
+        path,
+        ...rest,
+      );
+      walks.done.push(String(path));
+      return entries;
+    }) as typeof actual.readdir,
+  };
+});
+
+// The watchers the module makes, so a test can hold back their events or send one of its own.
+const watches = vi.hoisted(() => ({
+  made: [] as { watcher: import('node:fs').FSWatcher; send: (name: string | null) => void }[],
+  mute: false,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    watch: ((
+      path: string,
+      options: object,
+      listener: (event: string, name: string | null) => void,
+    ) => {
+      const watcher = actual.watch(path, options, (event, name) => {
+        if (!watches.mute) listener(event, name as string | null);
+      });
+      watches.made.push({ watcher, send: (name) => listener('rename', name) });
+      return watcher;
+    }) as unknown as typeof actual.watch,
+  };
+});
+
 let dir: string | undefined;
 afterEach(async () => {
+  // A test that failed while holding a listing must not hold the next one's.
+  walks.hold = undefined;
+  walks.holdOnly = undefined;
   if (dir) await rm(dir, { recursive: true, force: true });
   dir = undefined;
 });
@@ -259,25 +312,22 @@ it('picks up a changed or new env file before the next check, and keeps old valu
 });
 
 it.runIf(WATCHES)(
-  'runs one check for a model request that follows a tool result at once, after a full wait for file events from that request',
+  'runs one check for a model request that follows a tool result at once, and it sees the files made before the request',
   async () => {
     // Operator item of 2026-11-18. A worker's tool result starts a check, and its next
     // model request, a few milliseconds later, queued a second one behind it: two waits
-    // of 120 ms and two listings in a row before every request that followed a tool.
+    // for file events and two listings in a row before every request that followed a tool.
     const root = await workspace({ '.env': 'FIRST=first-value-0x01' });
     const env = await WorkerEnvSecrets.start([root]);
     const checks = vi.spyOn(env as unknown as { check: () => Promise<void> }, 'check');
     try {
       const afterToolResult = env.refresh();
-      await new Promise((done) => setTimeout(done, 60));
-      // Written by the tool that just ran, in a folder nothing has listed: only the
-      // watcher's event tells of it.
-      await mkdir(join(root, 'made/now'), { recursive: true });
-      await writeFile(join(root, 'made/now/.env.local'), 'LATE=late-value-0x02');
-      const asked = Date.now();
+      // The check has begun, and has not read what it depends on: no file call returns in this turn.
+      while (!checks.mock.calls.length) await Promise.resolve();
+      // Written by the tool that just ran, in a folder nothing has listed.
+      mkdirSync(join(root, 'made/now'), { recursive: true });
+      writeFileSync(join(root, 'made/now/.env.local'), 'LATE=late-value-0x02');
       await env.refresh();
-      // The wait for file events ran in full from the request, and one check read after it.
-      expect(Date.now() - asked).toBeGreaterThanOrEqual(115);
       expect(env.redact('late-value-0x02')).toBe('[env:LATE]');
       await afterToolResult;
       expect(checks).toHaveBeenCalledTimes(1);
@@ -290,6 +340,282 @@ it.runIf(WATCHES)(
   },
 );
 
+// WHAT NO FILE EVENT CAN PROMISE ON macOS, with real files. libuv rebuilds the one FSEvents
+// stream of an event loop whenever any watcher on that loop starts or closes, and drops what it
+// had not delivered (measured 2026-11-19: 19 to 29 of 40 such events lost); and a stream drops
+// events after a burst of changes, which libuv skips unreported (the event of an env file written
+// right after 14,000 new folders: 8 of 8 lost, on a thread of its own). So a macOS check stats
+// every folder and lists each changed one. The triggers come at once after the write, as they
+// do when a worker starts or ends beside a running one; nothing checked waits on a clock.
+const MACOS = process.platform === 'darwin';
+const TRIALS = 16;
+
+async function trialRoot(name: string): Promise<string> {
+  const root = join(dir ?? (await workspace({})), name);
+  await mkdir(join(root, 'plain'), { recursive: true });
+  await mkdir(join(root, 'pkg', 'lib'), { recursive: true });
+  await writeFile(join(root, '.env'), 'TOP=top-value-0x51');
+  return root;
+}
+
+/** Writes `path` behind other changes in its root, as a checkout or an install does. */
+function writeBehindOthers(root: string, path: string, text: string): void {
+  for (let at = 0; at < 20; at++) writeFileSync(join(root, `noise-${at}.txt`), String(at));
+  writeFileSync(path, text);
+}
+
+/** Starts a watcher on this process's own event loop at once, as other code may, and closes it. */
+async function otherWatcher(elsewhere: string): Promise<void> {
+  const watcher = watch(elsewhere, { recursive: true, persistent: false }, () => undefined);
+  await new Promise((done) => setTimeout(done, 5));
+  watcher.close();
+}
+
+it.runIf(MACOS)(
+  'gives two workers that start together a file made in a folder the first had listed, while another watcher of the process starts and closes',
+  async () => {
+    for (let trial = 0; trial < TRIALS; trial++) {
+      const root = await trialRoot(`f1-${trial}`);
+      const elsewhere = await trialRoot(`f1-elsewhere-${trial}`);
+      const value = `late-value-${trial}-0x5a5a5a`;
+      (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+      const first = WorkerEnvSecrets.resume([root])!;
+      const second = { current: undefined as ReturnType<typeof WorkerEnvSecrets.resume> };
+      try {
+        // The first worker's walk has listed `plain`, which held no env file.
+        expect(await first.verified).toBe(true);
+        writeBehindOthers(root, join(root, 'plain', '.env.local'), `LATE=${value}`);
+        // At once: the second worker starts, and a watcher elsewhere in the process starts and closes.
+        second.current = WorkerEnvSecrets.resume([root])!;
+        await otherWatcher(elsewhere);
+        expect(await second.current.verified).toBe(true);
+        expect(second.current.env.redact(value)).toBe('[env:LATE]');
+        await first.env.refresh();
+        expect(first.env.redact(value), `trial ${trial}`).toBe('[env:LATE]');
+      } finally {
+        first.env.close();
+        second.current?.env.close();
+        WorkerEnvSecrets.forgetScans();
+      }
+    }
+  },
+  60_000,
+);
+
+it.runIf(MACOS)(
+  'gives a running worker a new env file in a folder that held none, while another worker starts and ends beside it, or a watcher elsewhere in the process starts and closes',
+  async () => {
+    for (let trial = 0; trial < TRIALS; trial++) {
+      const root = await trialRoot(`f4-${trial}`);
+      const other = await trialRoot(`f4-other-${trial}`);
+      const env = await WorkerEnvSecrets.start([root]);
+      try {
+        await env.refresh();
+        const [starts, closes, elsewhere] = [0, 1, 2].map((at) => `late-${at}-${trial}-0x6b6b6b`);
+        // A worker over other roots starts.
+        writeBehindOthers(root, join(root, 'plain', '.env.local'), `A=${starts}`);
+        const beside = WorkerEnvSecrets.start([other]);
+        await beside;
+        await env.refresh();
+        // It ends.
+        mkdirSync(join(root, 'pkg', 'lib', 'deep'));
+        writeBehindOthers(root, join(root, 'pkg', 'lib', 'deep', '.env.test'), `B=${closes}`);
+        (await beside).close();
+        await env.refresh();
+        // Other code of the process starts and closes a watcher of its own.
+        writeBehindOthers(root, join(root, 'plain', '.env.other'), `C=${elsewhere}`);
+        await otherWatcher(other);
+        await env.refresh();
+        expect(env.redact(`${starts} ${closes} ${elsewhere}`), `trial ${trial}`).toBe(
+          '[env:A] [env:B] [env:C]',
+        );
+      } finally {
+        env.close();
+      }
+    }
+  },
+  60_000,
+);
+
+it.runIf(MACOS)(
+  'gives a running worker an env file written at once after thousands of new folders in its root',
+  async () => {
+    for (let trial = 0; trial < 3; trial++) {
+      const root = await trialRoot(`flood-${trial}`);
+      const env = await WorkerEnvSecrets.start([root]);
+      try {
+        await env.refresh();
+        // An install or a checkout, then a setup step that writes the env file.
+        for (let a = 0; a < 50; a++)
+          for (let b = 0; b < 50; b++)
+            for (const c of ['c', 'd'])
+              mkdirSync(join(root, 'vendor', `a${a}`, `b${b}`, c), { recursive: true });
+        mkdirSync(join(root, 'pkg', 'lib', 'setup'));
+        writeFileSync(join(root, 'pkg', 'lib', 'setup', '.env.local'), 'SET=set-value-0x9f9f9f');
+        await env.refresh();
+        expect(env.redact('set-value-0x9f9f9f'), `trial ${trial}`).toBe('[env:SET]');
+      } finally {
+        env.close();
+      }
+    }
+  },
+  60_000,
+);
+
+it.runIf(WATCHES)(
+  'gives a worker the env files of a folder moved into a listed folder, before its release and during its job',
+  async () => {
+    const root = await trialRoot('moved');
+    const elsewhere = await trialRoot('moved-from');
+    const move = async (name: string, value: string) => {
+      await mkdir(join(elsewhere, name, 'inner'), { recursive: true });
+      await writeFile(
+        join(elsewhere, name, 'inner', '.env.local'),
+        `${name.toUpperCase()}=${value}`,
+      );
+      // One event, for the folder, and one change of `pkg`: nothing names the file inside.
+      await rename(join(elsewhere, name), join(root, 'pkg', name));
+    };
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    // Its walk lists `pkg`, and holds on `plain` while the folder moves in.
+    walks.done.length = 0;
+    let release!: () => void;
+    walks.hold = new Promise<void>((done) => (release = done));
+    walks.holdOnly = join(root, 'plain');
+    const resumed = WorkerEnvSecrets.resume([root])!;
+    try {
+      await vi.waitFor(() => expect(walks.done).toContain(join(root, 'pkg')), { timeout: 10_000 });
+      await move('conf', 'moved-before-0x7c7c7c');
+      release();
+      expect(await resumed.verified).toBe(true);
+      // Released, and its first check comes before its first send.
+      await resumed.env.refresh();
+      expect(resumed.env.redact('moved-before-0x7c7c7c')).toBe('[env:CONF]');
+      await move('later', 'moved-during-0x7d7d7d');
+      await resumed.env.refresh();
+      expect(resumed.env.redact('moved-during-0x7d7d7d')).toBe('[env:LATER]');
+    } finally {
+      resumed.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+// WHERE A WATCHER IS TRUSTED (Windows): it says when it lost changes, and it can fail. Run here
+// on macOS's own watcher with its real events held back, since macOS drops some, and each
+// event the test needs sent by hand.
+it.runIf(WATCHES)(
+  'lists a folder a watcher names, walks every root when it lost changes, and re-lists once it fails',
+  async () => {
+    const root = await trialRoot('events');
+    const elsewhere = await trialRoot('events-from');
+    const env = await WorkerEnvSecrets.start([root], { learning: 'events' });
+    const watcher = watches.made.at(-1)!;
+    watches.mute = true;
+    try {
+      await env.refresh();
+      expect(env.watching).toBe(true);
+      // A folder moved in: only its own name is reported.
+      await mkdir(join(elsewhere, 'conf'));
+      await writeFile(join(elsewhere, 'conf', '.env.local'), 'MOVED=moved-value-0x8a8a8a');
+      await rename(join(elsewhere, 'conf'), join(root, 'pkg', 'conf'));
+      watcher.send(join('pkg', 'conf'));
+      await env.refresh();
+      expect(env.redact('moved-value-0x8a8a8a')).toBe('[env:MOVED]');
+      // The system lost count: no event names this file, and the next check walks every root.
+      mkdirSync(join(root, 'pkg', 'lib', 'lost'));
+      writeFileSync(join(root, 'pkg', 'lib', 'lost', '.env.local'), 'LOST=lost-value-0x8b8b8b');
+      watcher.send(null);
+      await env.refresh();
+      expect(env.redact('lost-value-0x8b8b8b')).toBe('[env:LOST]');
+      // It fails: it no longer counts as watching, so the accept walks again, and each check
+      // re-lists every folder.
+      watcher.watcher.emit('error', new Error('EPERM'));
+      expect(env.watching).toBe(false);
+      mkdirSync(join(root, 'plain', 'after'));
+      writeFileSync(join(root, 'plain', 'after', '.env.local'), 'AFTER=after-value-0x8e8e8e');
+      await env.refresh();
+      expect(env.redact('after-value-0x8e8e8e')).toBe('[env:AFTER]');
+    } finally {
+      watches.mute = false;
+      env.close();
+    }
+  },
+);
+
+it.runIf(MACOS)(
+  'releases a worker only once its own walk listed every root, and lets a send go only once each changed folder is listed again',
+  async () => {
+    const root = await trialRoot('release');
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    let release!: () => void;
+    walks.hold = new Promise<void>((done) => (release = done));
+    walks.holdOnly = join(root, 'plain');
+    const resumed = WorkerEnvSecrets.resume([root])!;
+    try {
+      let verified: boolean | undefined;
+      void resumed.verified.then((value) => (verified = value));
+      await vi.waitFor(() => expect(walks.listed).toContain(join(root, 'plain')), {
+        timeout: 10_000,
+      });
+      // Held for longer than any walk of this root takes: still not released.
+      await new Promise((done) => setTimeout(done, 300));
+      expect(verified).toBeUndefined();
+      release();
+      expect(await resumed.verified).toBe(true);
+      // During the job a file appears in `plain`, which held none: its check lists `plain`
+      // again, and does not end before that listing.
+      walks.hold = new Promise<void>((done) => (release = done));
+      writeFileSync(join(root, 'plain', '.env.local'), 'HELD=held-value-0x9a9a9a');
+      walks.listed.length = 0;
+      let checked = false;
+      const check = resumed.env.refresh().then(() => (checked = true));
+      await vi.waitFor(() => expect(walks.listed).toContain(join(root, 'plain')), {
+        timeout: 10_000,
+      });
+      await new Promise((done) => setTimeout(done, 300));
+      expect(checked).toBe(false);
+      release();
+      await check;
+      expect(resumed.env.redact('held-value-0x9a9a9a')).toBe('[env:HELD]');
+    } finally {
+      release();
+      resumed.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+it.runIf(MACOS)(
+  'lists again a folder whose own change time moved, and one that changed just before its last listing',
+  async () => {
+    const root = await trialRoot('racy');
+    const realNow = () => performance.timeOrigin + performance.now();
+    // Listed a minute after its last change: only a new change makes a check list it again.
+    vi.useFakeTimers({ toFake: ['Date'], now: realNow() + 60_000 });
+    const env = await WorkerEnvSecrets.start([root]);
+    try {
+      walks.listed.length = 0;
+      await env.refresh();
+      expect(walks.listed).not.toContain(join(root, 'plain'));
+      writeFileSync(join(root, 'plain', '.env.local'), 'NEW=new-value-0x7e7e7e');
+      await env.refresh();
+      expect(walks.listed).toContain(join(root, 'plain'));
+      expect(env.redact('new-value-0x7e7e7e')).toBe('[env:NEW]');
+      // Listed within moments of a change: a later change may carry the same time on a coarse
+      // clock, so the next check lists it again, changed or not.
+      vi.setSystemTime(realNow());
+      writeFileSync(join(root, 'pkg', 'note.txt'), 'x');
+      await env.refresh();
+      walks.listed.length = 0;
+      await env.refresh();
+      expect(walks.listed).toContain(join(root, 'pkg'));
+    } finally {
+      vi.useRealTimers();
+      env.close();
+    }
+  },
+);
 it('replaces every value of an env file that grows past 1 MiB during the job, at its end and on its own', async () => {
   const root = await workspace({ '.env.local': 'SMALL=small-value-0x01\n' });
   const env = await WorkerEnvSecrets.start([root], { watch: false });

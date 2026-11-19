@@ -1326,8 +1326,10 @@ async function runQualifiedWorker(
         diagnostics.mark('earlyReady');
         const accept = await Promise.race([early.accept, stoppedBeforeAssignment]);
         assertCurrentMode();
-        // Without a recursive watcher, refresh() cannot discover a new env file in a
-        // previously empty nested directory. Start fresh if its fixed denies need to change.
+        // Without a recursive watcher, or with one that failed, no event tells of a new env
+        // file in a previously empty nested directory: Linux finds it only by name, and macOS
+        // and Windows by a walk before each request, which ends the job on a file the fixed
+        // denies leave open. Start fresh instead if those denies need to change.
         if (
           (!envFiles.watching || binary.windows) &&
           !(await Promise.race([envFiles.refreshBeforeAssignment(), stoppedBeforeAssignment]))
