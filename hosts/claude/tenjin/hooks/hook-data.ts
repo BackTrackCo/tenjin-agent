@@ -53,6 +53,16 @@ export async function subagentsEnabled($: Dollar): Promise<boolean> {
 }
 
 /**
+ * HOW A HELD AGENT CALL IS ANSWERED: as a refusal whose text carries the offer. Claude
+ * Code's own summary of two or more Agent calls reads each call's state, which no hook
+ * redraws; answered as completed, a call that was only held read `finished` and `Done`.
+ * Refused, it reads as not run. The first line is for a person, and it is how this plugin
+ * knows its own held calls again (`model-viewer.tsx`).
+ */
+export const HELD_WITH_OFFER = 'Tenjin offered DeepSeek for this call and held it';
+export const HELD_NOT_STARTED = 'Tenjin held this call and started nothing';
+
+/**
  * THE ROUTER'S HINT FOR A DELEGATED TASK REACHES THE SUBAGENT AS CONTEXT, NOT IN ITS PROMPT.
  * The CLI's hook leg for an Agent call appends its hint to the call's prompt
  * (`updatedInput`, `src/router/hooks.ts`). In auto mode Claude Code then refuses the call

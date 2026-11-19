@@ -1,6 +1,8 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
 import {
   asRecord,
+  HELD_NOT_STARTED,
+  HELD_WITH_OFFER,
   keepDelegatedHint,
   parseJson,
   readJson,
@@ -158,14 +160,11 @@ export const register: Register = (on) => {
     const translated = await translateViewerContinuation($, e.tool, raw);
     const input = translated.input;
     const owned = translated.owned || ownedContinuationAddress(input, e.tool);
-    const unavailable = () => ({
-      result: heldModelResult(
+    const unavailable = () =>
+      heldAnswer(
         e.tool,
-        input,
         'Tenjin continuation is unavailable. No continuation started. Do not retry this owned handle through native tools.',
-        'tenjin-unavailable',
-      ),
-    });
+      );
     if (translated.unavailable) return unavailable();
     if (e.tool === 'SendMessage' && !owned) return next(e);
     try {
@@ -204,19 +203,15 @@ export const register: Register = (on) => {
         offer.instruction.trim().length > 0 &&
         offer.instruction.length <= 4000
       )
-        return {
-          result: heldModelResult(
-            e.tool,
-            input,
-            JSON.stringify({
-              action: 'refused',
-              started: false,
-              reason: offer.reason,
-              instruction: offer.instruction,
-            }),
-            'tenjin-unavailable',
-          ),
-        };
+        return heldAnswer(
+          e.tool,
+          JSON.stringify({
+            action: 'refused',
+            started: false,
+            reason: offer.reason,
+            instruction: offer.instruction,
+          }),
+        );
       if (
         offer?.action === 'offer' &&
         offer.started === false &&
@@ -226,16 +221,10 @@ export const register: Register = (on) => {
         )
       ) {
         await rememberModelOffer($, offer.offer_id, input).catch(() => undefined);
-        const context = heldOfferContext(offer, e.tool === 'SendMessage');
-        return {
-          result: heldModelResult(
-            e.tool,
-            input,
-            text ?? JSON.stringify(offer),
-            `tenjin-offer-${offer.offer_id}`,
-          ),
-          ...(context ? { context } : {}),
-        };
+        return heldAnswer(e.tool, text ?? JSON.stringify(offer), {
+          offer: offer.offer_id,
+          context: heldOfferContext(offer, e.tool === 'SendMessage'),
+        });
       }
     } catch {
       /* An owned handle must never reach a native executor, including on local failure. */
@@ -1002,28 +991,33 @@ async function callerOf($: Dollar, agentId: string): Promise<Json> {
   }
 }
 
-function heldModelResult(tool: string, input: Json, offerText: string, agentId: string) {
+/**
+ * A held call's answer. An Agent or Task call is refused, with the offer as the refusal's
+ * text (`hook-data.ts` says why): the first line for a person, then what the parent is to
+ * do with it, then what the hook would have added as context (a refusal carries none),
+ * then the offer itself. A refusal reads as an error to a model, so the text says first
+ * that nothing failed and names the only two moves; a parent that took a held call for a
+ * failure once switched to another tool.
+ */
+function heldAnswer(
+  tool: string,
+  offerText: string,
+  held?: { offer: string; context: string[] | undefined },
+) {
   // Native SendMessage refusals return this data shape; an offer is not a delivered message.
-  if (tool === 'SendMessage') return { success: false, message: offerText };
+  if (tool === 'SendMessage')
+    return {
+      result: { success: false, message: offerText },
+      ...(held?.context ? { context: held.context } : {}),
+    };
+  if (!held) return { deny: `${HELD_NOT_STARTED}.\n${offerText}` };
   return {
-    status: 'completed' as const,
-    agentId,
-    ...(typeof input.subagent_type === 'string' ? { agentType: input.subagent_type } : {}),
-    prompt: typeof input.prompt === 'string' ? input.prompt : '',
-    content: [{ type: 'text' as const, text: offerText }],
-    totalToolUseCount: 0,
-    totalDurationMs: 0,
-    totalTokens: 0,
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_creation_input_tokens: null,
-      cache_read_input_tokens: null,
-      server_tool_use: null,
-      service_tier: null,
-      cache_creation: null,
-    },
-    canContinueAgent: false,
+    deny: [
+      `${HELD_WITH_OFFER} (offer ${held.offer}). It has not run.`,
+      `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this ${tool} call until you choose. Your two moves are to accept the offer with subagent({offer_id}), or to send this same ${tool} call again unchanged, which runs it natively. Do not switch to another tool or do the work yourself because of this message.`,
+      ...(held.context ?? []),
+      offerText,
+    ].join('\n'),
   };
 }
 

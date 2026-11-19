@@ -335,6 +335,9 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
 }
 const remember = ($: Engine, input: Record<string, unknown> = INPUT) =>
   $.tool.call({ tool: 'Agent', ...input });
+/** What a held call was answered with: the refusal's text (an earlier build's completed result). */
+const heldAnswer = (answer: { deny?: string; result?: unknown }): unknown =>
+  answer.deny ?? answer.result;
 const translate = ($: Engine, targetTool: string, input: Record<string, unknown>) =>
   $.tool.call({ tool: targetTool, ...input });
 const complete = (
@@ -733,9 +736,9 @@ test('confirmed aliases preserve the full follow-up and original Explore profile
   expect(JSON.stringify([...f.store.values()])).not.toContain('PRIVATE_');
   expect(JSON.stringify([...f.store.values()])).not.toContain(INPUT.prompt);
   f.state.cwd = '/another-repository';
-  expect(
-    (await translate($, 'Agent', { resume: 'native-viewer-1', prompt: task })).result,
-  ).toMatchObject({ agentId: 'tenjin-unavailable', canContinueAgent: false });
+  expect((await translate($, 'Agent', { resume: 'native-viewer-1', prompt: task })).deny).toContain(
+    'Tenjin held this call and started nothing',
+  );
   expect(f.state.nativeCalls).toEqual([]);
 });
 
@@ -919,8 +922,8 @@ test('unbound viewer IDs refuse while ordinary native resumes remain unchanged',
   expect(f.state.captures.at(-1)?.input).toEqual(original);
   const before = f.state.captures.length;
   expect(
-    (await translate($, 'Agent', { resume: 'unbound-viewer', prompt: 'Continue' })).result,
-  ).toMatchObject({ agentId: 'tenjin-unavailable', canContinueAgent: false });
+    (await translate($, 'Agent', { resume: 'unbound-viewer', prompt: 'Continue' })).deny,
+  ).toContain('Tenjin held this call and started nothing');
   expect(f.state.captures.length).toBe(before);
   expect(f.state.nativeCalls).toEqual([]);
 });
@@ -2289,7 +2292,7 @@ for (const settled of ['kept native', 'cancelled', 'expired'] as const)
           props: {
             ...toolRow('held_agent', 'Agent', INPUT),
             isRunning: false,
-            output: held.result,
+            output: heldAnswer(held),
           },
         });
         const lines = (await shownLines(ui)).join('');
@@ -2675,9 +2678,9 @@ test('two offers and two workers at once each keep their own row, viewer entry a
     return $.ui.resolve(e).Text({ children: ['engine spinner'] });
   });
   f.state.offer = OFFER;
-  const first = (await remember($, INPUT)).result;
+  const first = heldAnswer(await remember($, INPUT));
   f.state.offer = OFFER2;
-  const second = (await remember($, INPUT2)).result;
+  const second = heldAnswer(await remember($, INPUT2));
   f.state.offer = OFFER;
   expect(await heldRow($, 'held_a', INPUT, first)).toBe(
     '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
@@ -2752,9 +2755,9 @@ test('two offers and two workers at once each keep their own row, viewer entry a
 test('a repeat that keeps one of two identical offers native clears that offer’s row alone', async ($, on) => {
   const f = setup($, on);
   f.state.offer = OFFER;
-  const first = (await remember($)).result;
+  const first = heldAnswer(await remember($));
   f.state.offer = OFFER2;
-  const second = (await remember($)).result;
+  const second = heldAnswer(await remember($));
   const open = '⏺Agent(Read selected source) · Tenjin offered DeepSeek';
   expect(await heldRow($, 'held_a', INPUT, first)).toBe(open);
   expect(await heldRow($, 'held_b', INPUT, second)).toBe(open);
@@ -2771,7 +2774,7 @@ test('an offer for a custom agent type draws its row and its viewer entry as a b
   const f = setup($, on);
   f.state.nativeProfile = 'loop-worker-high';
   const custom = { ...INPUT, subagent_type: 'loop-worker-high' };
-  const held = (await remember($, custom)).result;
+  const held = heldAnswer(await remember($, custom));
   expect(await heldRow($, 'held_agent', custom, held)).toBe(
     '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
   );
@@ -2879,7 +2882,7 @@ test("a native subagent's accept draws the worker's row and its viewer under tha
   f.state.followWait = blocked;
   await remember($);
   f.state.offer = OFFER2;
-  const second = (await remember($, INPUT2)).result;
+  const second = heldAnswer(await remember($, INPUT2));
   f.state.offer = OFFER;
   const accept = { tool: ACCEPT, offer_id: OFFER, tool_use_id: 'child_accept' };
   const running = $.tool.call({ ...accept, agentId: 'native-child' });
@@ -3137,7 +3140,7 @@ test("an accepted offer's worker draws where its Agent call was held, live and t
   on('ui.render', { component: 'ToolUse' }, ($, e) =>
     $.ui.resolve(e).Text({ children: ['engine row'] }),
   );
-  const held = (await remember($)).result;
+  const held = heldAnswer(await remember($));
   let release: () => void = () => undefined;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -3267,7 +3270,7 @@ test("a background worker's row reads as a native background agent's, and its re
   );
   // As Claude Code 2.1.327 handed it to the hook live: the string, not the boolean.
   const call = { ...INPUT, run_in_background: 'true' };
-  const held = (await remember($, call)).result;
+  const held = heldAnswer(await remember($, call));
   expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(
     '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
   );
@@ -3351,7 +3354,7 @@ test('workers whose calls sit in the summary block all draw at the accept call, 
   const f = setup($, on);
   on('classic.PostToolBatch', () => ({}));
   f.state.offer = OFFER;
-  const first = (await remember($, { ...INPUT, tool_use_id: 'held_first' })).result;
+  const first = heldAnswer(await remember($, { ...INPUT, tool_use_id: 'held_first' }));
   // Before the second call joins it, the first draws as a row of its own.
   expect((await heldDrawing($, 'held_first', INPUT, first)).lines).toContain(
     'Tenjin offered DeepSeek',
@@ -3465,7 +3468,7 @@ test('a background worker the parent cancelled sends one message, which says so 
     return { text: e.text };
   });
   const call = { ...INPUT, run_in_background: true };
-  const held = (await remember($, call)).result;
+  const held = heldAnswer(await remember($, call));
   const started = JSON.stringify({ status: 'started', background: true, offer_id: OFFER });
   f.state.work = () => ({ result: started, text: started });
   await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'bg_accept' });
@@ -3587,7 +3590,7 @@ test('an accept batch draws only the workers whose held call has no row of its o
   await remember($, INPUT2);
   f.state.offer = THIRD_OFFER;
   const alone = { ...INPUT, description: 'Sent again alone' };
-  const third = (await remember($, alone)).result;
+  const third = heldAnswer(await remember($, alone));
   f.state.offer = OFFER;
   // The third call was the only Agent call of its response: its row is drawn.
   expect((await heldDrawing($, 'held_c', alone, third)).lines).toContain('Tenjin offered DeepSeek');

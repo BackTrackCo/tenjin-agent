@@ -9,6 +9,8 @@ import { update } from 'claude-code';
 import {
   asRecord as record,
   subagentsEnabled as enabled,
+  HELD_NOT_STARTED,
+  HELD_WITH_OFFER,
   tenjinDataDir,
   textOf,
   withDelegatedHint,
@@ -2208,18 +2210,13 @@ export function registerModelViewer(on: On): void {
     const answer = await next(e);
     // PostToolBatch sees model-facing text. Claude omits the agent id from
     // Explore and Plan handbacks, so identify holds before it formats them.
-    const held = heldOffer(answer.result);
+    const held = heldOffer(answer.deny ?? answer.result);
     // An Agent call that ran natively is the parent's answer to the batch before it. One
     // that is held too is not: live, auto mode refused one call of a response, the parent
     // sent it again, and the line was written though both offers were then accepted.
     if (!held) sayHeld($);
     if (held) {
-      heldCalls.set(
-        e.tool_use_id,
-        held === 'unavailable'
-          ? undefined
-          : String(record(answer.result)?.agentId).slice(13).toLowerCase(),
-      );
+      heldCalls.set(e.tool_use_id, held === 'unavailable' ? undefined : held.offerId.toLowerCase());
       if (heldCalls.size > 512) heldCalls.delete(heldCalls.keys().next().value!);
     }
     return answer;
@@ -2316,7 +2313,7 @@ export function registerModelViewer(on: On): void {
     if (tool === 'Agent' || tool === 'Task') {
       const held = heldOffer(output);
       if (!held) return next(e);
-      const offerId = String(record(output)?.agentId ?? '').slice(13);
+      const offerId = held === 'unavailable' ? '' : held.offerId;
       const ui = $.ui.resolve(e);
       const full = e.props.isExpanded === true;
       if (held !== 'unavailable' && UUID.test(offerId)) {
@@ -2874,12 +2871,38 @@ function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {
   ];
 }
 /**
- * A held Agent call's result as the local hook made it (`register.tsx`): an
- * offer, with its cap when the offer named one, or a call held and not started.
- * The fabricated `completed` shape stays, as the Agent output schema has no
- * other that carries the offer to the parent; only its drawing changes.
+ * A held Agent call, as the local hook answered it (`register.tsx`): refused with an
+ * offer, whose id and cap are read from the refusal's text, or held and not started.
+ * Told by the text's first line. A call held by an earlier build was answered as a
+ * completed result with the offer in it, and is still read, so a session resumed across
+ * the update draws its rows.
  */
-function heldOffer(output: unknown): { capAtomic?: string } | 'unavailable' | undefined {
+function heldOffer(
+  output: unknown,
+): { offerId: string; capAtomic?: string } | 'unavailable' | undefined {
+  const capOf = (offer: Json | undefined): { capAtomic?: string } => {
+    const cap = offer?.capAtomic;
+    return typeof cap === 'string' && /^[1-9][0-9]{0,29}$/.test(cap) ? { capAtomic: cap } : {};
+  };
+  // The refusal, as the row holds it: its text, bare or inside the host's own wrapping.
+  const said =
+    typeof output === 'string'
+      ? output
+      : (textOf(output) ??
+        [record(output)?.text, record(output)?.error, record(output)?.message].find(
+          (text): text is string => typeof text === 'string',
+        ));
+  if (said) {
+    const at = said.indexOf(HELD_WITH_OFFER + ' (offer ');
+    if (at >= 0) {
+      const offerId = said.slice(at + HELD_WITH_OFFER.length + 8, at + HELD_WITH_OFFER.length + 44);
+      if (!UUID.test(offerId)) return undefined;
+      // The offer is the text's last line, as the CLI wrote it.
+      const from = said.indexOf('\n{', at);
+      return { offerId, ...capOf(from < 0 ? undefined : json(said.slice(from + 1).trim())) };
+    }
+    if (said.includes(HELD_NOT_STARTED)) return 'unavailable';
+  }
   const result = record(output);
   if (
     result?.status !== 'completed' ||
@@ -2890,7 +2913,5 @@ function heldOffer(output: unknown): { capAtomic?: string } | 'unavailable' | un
   if (result.agentId === 'tenjin-unavailable') return 'unavailable';
   if (!/^tenjin-offer-/.test(result.agentId) || !UUID.test(result.agentId.slice(13)))
     return undefined;
-  const offer = json(textOf(result.content));
-  const cap = offer?.capAtomic;
-  return typeof cap === 'string' && /^[1-9][0-9]{0,29}$/.test(cap) ? { capAtomic: cap } : {};
+  return { offerId: result.agentId.slice(13), ...capOf(json(textOf(result.content))) };
 }

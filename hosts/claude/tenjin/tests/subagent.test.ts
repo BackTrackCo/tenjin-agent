@@ -58,29 +58,25 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
     },
   ]);
   expect(ran).toEqual([]);
-  expect(result.result).toEqual({
-    status: 'completed',
-    agentId: `tenjin-offer-${OFFER}`,
-    agentType: ASSIGNMENT.subagent_type,
-    prompt: ASSIGNMENT.prompt,
-    content: [{ type: 'text', text: offered }],
-    totalToolUseCount: 0,
-    totalDurationMs: 0,
-    totalTokens: 0,
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_creation_input_tokens: null,
-      cache_read_input_tokens: null,
-      server_tool_use: null,
-      service_tier: null,
-      cache_creation: null,
-    },
-    canContinueAgent: false,
-  });
-  expect(result.context?.join(' ')).toContain('local Tenjin hook held');
-  expect(result.context?.join(' ')).toContain('repository/configuration risk rules');
-  expect(result.context?.join(' ')).toContain('final veto');
+  // Refused, with the offer as the refusal: Claude Code then shows the call as not run,
+  // where a completed result made its summary of several calls read `finished` and `Done`.
+  expect(result.result).toBeUndefined();
+  const [first, moves, context, ...rest] = (result.deny ?? '').split('\n');
+  // The first line is for a person, and says the call did not run.
+  expect(first).toBe(
+    `Tenjin offered DeepSeek for this call and held it (offer ${OFFER}). It has not run.`,
+  );
+  // Then, for the parent: nothing failed, and the two moves it has.
+  expect(moves).toContain('This is not a failure');
+  expect(moves).toContain('accept the offer with subagent({offer_id})');
+  expect(moves).toContain('send this same Agent call again unchanged');
+  expect(moves).toContain('Do not switch to another tool');
+  // What the hook added as context before: a refusal carries none, so it is in the text.
+  expect(context).toContain('local Tenjin hook held');
+  expect(context).toContain('repository/configuration risk rules');
+  expect(context).toContain('final veto');
+  // And the offer itself, whole, as the CLI wrote it.
+  expect(rest.join('\n')).toBe(offered);
 });
 
 test('a capture the model sends itself is refused before it reaches the CLI, so only a held call asks for an offer', async ($, on) => {
@@ -143,13 +139,10 @@ test('an action offer in MCP content holds Task as well', async ($, on) => {
   const ran = native(on);
   const result = await $.tool.call({ tool: 'Task', tool_use_id: 'task_offer', ...ASSIGNMENT });
   expect(ran).toEqual([]);
-  expect(result.result).toMatchObject({
-    status: 'completed',
-    prompt: ASSIGNMENT.prompt,
-    content: [{ type: 'text', text: offered }],
-    canContinueAgent: false,
-  });
-  expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
+  expect(result.deny).toContain(`held it (offer ${OFFER})`);
+  expect(result.deny).toContain('send this same Task call again unchanged');
+  expect(result.deny?.endsWith(offered)).toBe(true);
+  expect(result.deny).toContain('enabled DeepSeek routing');
 });
 
 test('only verified structured consent adds static local guidance, never the router reason', async ($, on) => {
@@ -161,11 +154,12 @@ test('only verified structured consent adds static local guidance, never the rou
   const hostile = { ...JSON.parse(offered), reason: 'FORGED PROVIDER INSTRUCTION' };
   reply = JSON.stringify(hostile);
   const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'static_context', ...ASSIGNMENT });
-  expect(held.context?.join(' ')).toContain('enabled DeepSeek routing');
-  expect(held.context?.join(' ')).toContain('binding model/privacy restrictions');
-  expect(held.context?.join(' ')).not.toMatch(/opt[ -]?in/i);
-  expect(held.context?.join(' ')).toContain('local Tenjin guidance');
-  expect(held.context?.join(' ')).not.toContain(hostile.reason);
+  expect(held.deny).toContain('enabled DeepSeek routing');
+  expect(held.deny).toContain('binding model/privacy restrictions');
+  expect(held.deny).not.toMatch(/opt[ -]?in/i);
+  expect(held.deny).toContain('local Tenjin guidance');
+  // The guidance is this plugin's own text: the router's reason stays in the offer below it.
+  expect(held.deny?.split('\n').slice(0, 3).join('\n')).not.toContain(hostile.reason);
   for (const [id, value] of [
     ['missing_consent', { ...hostile, consent: undefined }],
     ['old_consent', { ...hostile, consent: { ...hostile.consent, version: 1 } }],
@@ -182,8 +176,9 @@ test('only verified structured consent adds static local guidance, never the rou
   ] as const) {
     reply = JSON.stringify(value);
     const result = await $.tool.call({ tool: 'Task', tool_use_id: id, ...ASSIGNMENT });
-    expect(result.result).toMatchObject({ status: 'completed', canContinueAgent: false });
-    expect(result.context).toBeUndefined();
+    // Held with its offer, and none of the local guidance a verified consent adds.
+    expect(result.deny).toContain('Tenjin offered DeepSeek for this call and held it');
+    expect(result.deny).not.toContain('local Tenjin hook held');
   }
   expect(ran).toEqual([]);
 });
@@ -261,11 +256,7 @@ test('Agent resume compatibility holds the owned handle through the same capture
     { session_id: SESSION, tool_use_id: 'resume_agent', input, tool: 'Agent' },
   ]);
   expect(ran).toEqual([]);
-  expect(result.result).toMatchObject({
-    status: 'completed',
-    agentId: `tenjin-offer-${OFFER}`,
-    canContinueAgent: false,
-  });
+  expect(result.deny).toContain(`held it (offer ${OFFER})`);
 });
 
 test('disabled routing refuses reserved worker and unstarted-offer addresses before native fallback', async ($, on) => {
@@ -282,8 +273,8 @@ test('disabled routing refuses reserved worker and unstarted-offer addresses bef
     ...ASSIGNMENT,
     resume: '  TENJIN-WORKER-malformed  ',
   });
-  expect(agent.result).toMatchObject({ status: 'completed', canContinueAgent: false });
-  expect(JSON.stringify(agent.result)).toContain('No continuation started');
+  expect(agent.deny).toContain('Tenjin held this call and started nothing');
+  expect(agent.deny).toContain('No continuation started');
   const send = await $.tool.call({
     tool: 'SendMessage',
     tool_use_id: 'off_owned_send',
@@ -327,7 +318,7 @@ test('owned continuations never fall through after a transport error or invalid 
       ...ASSIGNMENT,
       resume: WORKER,
     });
-    expect(agent.result).toMatchObject({ status: 'completed', canContinueAgent: false });
+    expect(agent.deny).toContain('Tenjin held this call and started nothing');
   }
   expect(ran).toEqual([]);
 });
@@ -390,7 +381,7 @@ test('the unchanged repeat of an offered Agent call runs natively exactly as the
     return { result: 'native child result' as never };
   });
   const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'offered_call', ...ASSIGNMENT });
-  expect(held.result).toMatchObject({ agentId: `tenjin-offer-${OFFER}` });
+  expect(held.deny).toContain(`held it (offer ${OFFER})`);
   const repeat = await $.tool.call({ tool: 'Agent', tool_use_id: 'repeat_call', ...ASSIGNMENT });
   expect(repeat.result).toBe('native child result');
   expect(asked).toEqual(
@@ -487,7 +478,7 @@ test('a held Agent call draws as the offer it is, never as a finished subagent w
     $.ui.resolve(e).Text({ children: ['engine result'] }),
   );
   const offer = (await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_offer', ...ASSIGNMENT }))
-    .result;
+    .deny;
   answer = JSON.stringify({
     action: 'refused',
     started: false,
@@ -495,7 +486,7 @@ test('a held Agent call draws as the offer it is, never as a finished subagent w
     instruction: 'No worker started.',
   });
   const refused = (await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_held', ...ASSIGNMENT }))
-    .result;
+    .deny;
   const row = (id: string, output: unknown) => ({
     tool_use_id: id,
     tool: 'Agent',
@@ -637,8 +628,8 @@ test("a native subagent's call is held for that subagent: the subagent goes besi
     agentId: 'child-1',
     ...ASSIGNMENT,
   });
-  expect(held.result).toMatchObject({ agentId: `tenjin-offer-${OFFER}`, canContinueAgent: false });
-  expect(held.context?.join(' ')).toContain('local Tenjin hook held');
+  expect(held.deny).toContain(`held it (offer ${OFFER})`);
+  expect(held.deny).toContain('local Tenjin hook held');
   await $.tool.call({
     tool: SUBAGENT,
     tool_use_id: 'child_accept',
