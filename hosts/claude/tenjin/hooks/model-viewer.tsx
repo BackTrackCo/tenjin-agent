@@ -113,8 +113,15 @@ const heldNotice: { pending?: { text: string; offers: Set<string> } } = {};
 function sayHeld($: Dollar, accepted?: string[]): void {
   const notice = heldNotice.pending;
   if (!notice) return;
+  if (accepted) {
+    // An accept settles the offers it names. With none left the line is dropped; the
+    // rest wait for their own answer (a second accept, or anything else).
+    const before = notice.offers.size;
+    for (const id of accepted) notice.offers.delete(id.toLowerCase());
+    if (notice.offers.size === 0) heldNotice.pending = undefined;
+    if (notice.offers.size < before) return;
+  }
   heldNotice.pending = undefined;
-  if (accepted?.some((id) => notice.offers.has(id.toLowerCase()))) return;
   try {
     $.ui.log(notice.text);
   } catch {
@@ -1982,12 +1989,14 @@ export function registerModelViewer(on: On): void {
   // By call: the offer it got, or none where Tenjin held it with no offer.
   const heldCalls = new Map<string, string | undefined>();
   on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
-    // Any other Agent call is the parent's answer to the batch before it.
-    sayHeld($);
     const answer = await next(e);
     // PostToolBatch sees model-facing text. Claude omits the agent id from
     // Explore and Plan handbacks, so identify holds before it formats them.
     const held = heldOffer(answer.result);
+    // An Agent call that ran natively is the parent's answer to the batch before it. One
+    // that is held too is not: live, auto mode refused one call of a response, the parent
+    // sent it again, and the line was written though both offers were then accepted.
+    if (!held) sayHeld($);
     if (held) {
       heldCalls.set(
         e.tool_use_id,

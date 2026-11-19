@@ -7,6 +7,7 @@ import { DATA, NOW, OFFER, SESSION, SURFACES, sha256Hex, shownLines, toolRow } f
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const TYPE = 'tenjin:deepseek-viewer';
 const SECOND_OFFER = 'b446d2eb-1bf8-4cf0-aa19-bc5df4aa668f';
+const THIRD_OFFER = 'c2a1d7e0-52c3-4f0e-9d38-6f6a1b0c7d21';
 const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
 const INPUT = {
   prompt: 'Read src/example.ts. Preserve exactly this final line: DONE.',
@@ -3129,6 +3130,23 @@ test('the held notice of a parallel Agent summary is dropped by an accept and wr
     durationMs: 1,
   } as never);
   expect(notices).toEqual([]);
+  // Live on alpha.73: auto mode refused one call of the response, the parent sent it again
+  // (held again, with a new offer), then accepted both offers: no line.
+  await remember($, { ...INPUT, tool_use_id: 'held_r1' });
+  await batch('held_r1', 'refused_r2');
+  f.state.offer = THIRD_OFFER;
+  await remember($, { ...INPUT, tool_use_id: 'repeat_r2' });
+  f.state.offer = OFFER;
+  expect(notices).toEqual([]);
+  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, THIRD_OFFER] });
+  await $.turn.complete({
+    reason: 'answer',
+    turnId: 'parent-turn',
+    isAborted: false,
+    answer: '',
+    durationMs: 1,
+  } as never);
+  expect(notices).toEqual([]);
   // Kept native: the line is written before the repeated call runs.
   await hold('held_c', 'held_d');
   f.state.keepNative = true;
@@ -3168,22 +3186,26 @@ test('the held notice counts only held Agent calls in the batch', async ($, on) 
         tool_use_id: id,
       })),
     });
-  // Each line is written when the next Agent call says the offers were not accepted.
+  // Each line is written when a later Agent call runs natively: the offers were not accepted.
+  const native = async (id: string) => {
+    f.state.keepNative = true;
+    await remember($, { ...INPUT, tool_use_id: id });
+    f.state.keepNative = false;
+  };
   await remember($, { ...INPUT, tool_use_id: 'held_a' });
   await remember($, { ...INPUT, tool_use_id: 'held_b' });
   await batch('held_a', 'held_b');
-  await remember($, { ...INPUT, tool_use_id: 'held_c' });
+  await native('native_0');
   expect(notices).toEqual(['Held 2 of 2 Agent calls before native execution.']);
 
-  f.state.keepNative = true;
-  await remember($, { ...INPUT, tool_use_id: 'native_a' });
+  await remember($, { ...INPUT, tool_use_id: 'held_c' });
+  await native('native_a');
   await batch('held_c', 'native_a');
   await batch('native_a', 'native_b');
-  f.state.keepNative = false;
   await remember($, { ...INPUT, tool_use_id: 'held_d' });
   await batch('held_d');
   await batch('held_d', 'native_a');
-  await remember($, { ...INPUT, tool_use_id: 'held_e' });
+  await native('native_e');
   expect(notices).toEqual([
     'Held 2 of 2 Agent calls before native execution.',
     'Held 1 of 2 Agent calls before native execution.',
