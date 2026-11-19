@@ -972,14 +972,20 @@ export class WorkerEnvSecrets {
         }
       });
       found.push(...(await this.walked(starts, tops, this.folders, vanished)));
-      // Each moved after this pass stat'ed every folder: the next round finds where it went, or
-      // that it is back, by the change times that move moved.
-      for (const path of vanished) this.folders.delete(path);
+      // Each moved after this pass stat'ed every folder: the next round finds where it went by
+      // the change times the move moved, and lists its folder again, which walks it if it is back.
+      for (const path of vanished) {
+        this.folders.delete(path);
+        const parent = this.folders.get(dirname(path));
+        if (parent) this.folders.set(dirname(path), { ...parent, ctime: Number.NaN });
+      }
       gone.push(...vanished);
       if (!gone.length) return found;
-      // Folders that keep going and coming hold the send rather than let it rest on a guess.
+      // Folders that keep going and coming hold the send rather than let it rest on a guess, each
+      // by its own path: a hold on its folder, which lists, was lifted before this check ended by
+      // the listing of every folder that held an env file.
       if (round >= 8) {
-        for (const path of gone) this.unlistable(dirname(path));
+        for (const path of gone) this.uncovered.add(path);
         return found;
       }
     }

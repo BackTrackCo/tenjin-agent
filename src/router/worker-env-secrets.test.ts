@@ -797,6 +797,22 @@ it.runIf(MACOS)(
   },
 );
 
+// Review of 800c27a2, J (M11): a folder gone at every pass holds the send after 8, rather than
+// let it rest on a guess, or pass again for ever.
+it.runIf(MACOS)('holds the send once a folder is gone at 8 passes in a row', async () => {
+  const root = await trialRoot('flapping');
+  aged();
+  const env = await WorkerEnvSecrets.start([root]);
+  try {
+    const lib = join(root, 'pkg', 'lib');
+    walks.seen.set(lib, () => Object.assign(new Error('gone'), { code: 'ENOENT' }));
+    await env.refresh();
+    expect([...env.uncovered]).toEqual([lib]);
+  } finally {
+    env.close();
+  }
+});
+
 it.runIf(MACOS)(
   'walks a folder that is gone for a moment while the folders are checked',
   async () => {
