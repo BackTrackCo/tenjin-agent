@@ -1,5 +1,6 @@
+import { execFile } from 'node:child_process';
 import { type Dirent, type FSWatcher, type Stats, watch } from 'node:fs';
-import { lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -30,6 +31,8 @@ const MAX_UNLISTED = 64;
 /** A file this user may not read is closed to the worker's commands as well. */
 const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
 const SKIP = new Set(['node_modules', '.git']);
+/** macOS walks these folders too: a command can read an env file there (`relist`). */
+const NO_SKIP: ReadonlySet<string> = new Set();
 /** How long a check waits for file events still in flight, where it trusts a watcher (Windows). */
 const SETTLE_MS = 120;
 /** Paths a watcher named since the last check, past which the next check walks every root. */
@@ -289,19 +292,59 @@ function outermost(paths: readonly string[]): string[] {
 }
 
 /** A folder as last listed: what its own entry said just before the listing, and when. */
-type Folder = { ino: number; ctime: number; mtime: number; at: number };
+type Folder = { dev: number; ino: number; ctime: number; mtime: number; at: number };
 
 function folderOf(info: Stats, at: number): Folder {
-  return { ino: info.ino, ctime: info.ctimeMs, mtime: info.mtimeMs, at };
+  return { dev: info.dev, ino: info.ino, ctime: info.ctimeMs, mtime: info.mtimeMs, at };
 }
 
 /**
- * Whether a folder may have gained or lost an entry since it was listed. Every entry made,
- * removed or renamed in a folder changes the folder's own change time (POSIX), which no
- * command can set back; a folder replaced by another has another inode.
+ * The file systems where a folder's own times prove that it gained no entry: APFS and HFS+
+ * move a folder's change time for every entry made, removed or renamed in it, and no command
+ * can set that time back. On exFAT and FAT the change time is the settable modification time,
+ * and NTFS lets a program set it. By device, for this process; false when unknown.
+ */
+const trustedDevices = new Map<number, boolean>();
+const TRUSTED_TYPES = new Set(['apfs', 'hfs']);
+
+/** The type of the file system that holds each path, from the mount table (macOS). */
+async function fileSystemTypes(paths: readonly string[]): Promise<(string | undefined)[]> {
+  if (process.platform !== 'darwin') return paths.map(() => undefined);
+  const table = await new Promise<string>((done) =>
+    execFile('/sbin/mount', [], (error, stdout) => done(error ? '' : String(stdout))),
+  );
+  const mounts = table.split('\n').flatMap((line) => {
+    const match = /^.+? on (.+) \(([^,)]+)/.exec(line);
+    return match ? [{ on: match[1]!, type: match[2]! }] : [];
+  });
+  return Promise.all(
+    paths.map(async (path) => {
+      const real = await realpath(path).catch(() => undefined);
+      if (!real) return undefined;
+      let best: { on: string; type: string } | undefined;
+      for (const mount of mounts)
+        if (inside(mount.on, real) && (!best || mount.on.length > best.on.length)) best = mount;
+      return best?.type;
+    }),
+  );
+}
+
+/** Learns which of these devices are trusted, by a folder of each. */
+async function trustDevices(samples: ReadonlyMap<number, string>): Promise<void> {
+  const unknown = [...samples].filter(([dev]) => !trustedDevices.has(dev));
+  if (!unknown.length) return;
+  const types = await fileSystemTypes(unknown.map(([, path]) => path));
+  unknown.forEach(([dev], at) => trustedDevices.set(dev, TRUSTED_TYPES.has(types[at] ?? '')));
+}
+
+/**
+ * Whether a folder may have gained or lost an entry since it was listed: always on a file
+ * system not trusted (`trustedDevices`); there, a new entry moves the folder's own change time,
+ * and a folder replaced by another has another inode.
  */
 function folderChanged(info: Stats, folder: Folder): boolean {
   return (
+    trustedDevices.get(info.dev) !== true ||
     info.ino !== folder.ino ||
     info.ctimeMs !== folder.ctime ||
     info.mtimeMs !== folder.mtime ||
@@ -335,6 +378,7 @@ async function walkTree(
   limits: WalkLimits,
   fatal: readonly string[],
   folders?: Map<string, Folder>,
+  skip: ReadonlySet<string> = SKIP,
 ): Promise<{ found: string[]; unlisted: string[]; complete: boolean }> {
   const maxDirectories = limits.maxDirectories ?? 400_000;
   const maxFiles = limits.maxFiles ?? 5_000;
@@ -372,7 +416,7 @@ async function walkTree(
               for (const entry of entries) {
                 const path = join(directory, entry.name);
                 if (entry.isDirectory()) {
-                  if (!SKIP.has(entry.name)) queue.push(path);
+                  if (!skip.has(entry.name)) queue.push(path);
                 } else if (covered(path)) found.push(path);
               }
               if (found.length > maxFiles) complete = false;
@@ -461,6 +505,8 @@ export class WorkerEnvSecrets {
   readonly uncovered = new Set<string>();
   private readonly roots: string[];
   private readonly files = new Map<string, string>();
+  /** When each known file was last read: one that changed within `RACY_MS` of it is read again. */
+  private readonly readAt = new Map<string, number>();
   private readonly hot = new Set<string>();
   private readonly dirty = new Set<string>();
   private readonly placeholders = new Map<string, string>();
@@ -468,6 +514,8 @@ export class WorkerEnvSecrets {
   /** By the hash of a piece's first characters: the lengths of the pieces that start so, longest first. */
   private readonly index = new Map<number, number[]>();
   private learning: EnvLearning = 'none';
+  /** The start scan's limits, which every walk during the job keeps too. */
+  private limits: WalkLimits = {};
   /** Every folder listed, for `relist`: a root missing here is walked in full at the next check. */
   private readonly folders = new Map<string, Folder>();
   private readonly watchers: FSWatcher[] = [];
@@ -506,6 +554,11 @@ export class WorkerEnvSecrets {
   ): Promise<WorkerEnvSecrets> {
     const env = new WorkerEnvSecrets([...roots, ...(limits.fresh ?? [])]);
     env.learning = limits.watch === false ? 'none' : (limits.learning ?? PLATFORM_LEARNING);
+    env.limits = {
+      maxDirectories: limits.maxDirectories,
+      maxFiles: limits.maxFiles,
+      deadlineMs: limits.deadlineMs,
+    };
     // Watching before the walk begins: a file made in a folder after the walk listed it is
     // named by an event.
     if (env.learning === 'events') env.watch();
@@ -560,6 +613,7 @@ export class WorkerEnvSecrets {
   /** Forgets the scans kept for later workers; for tests. */
   static forgetScans(): void {
     lastScans.clear();
+    trustedDevices.clear();
   }
 
   /** The same findings over `roots`, sharing nothing that a later find changes. */
@@ -569,6 +623,7 @@ export class WorkerEnvSecrets {
     env.withheld.push(...this.withheld);
     env.unlisted.push(...this.unlisted);
     for (const [path, signature] of this.files) env.files.set(path, signature);
+    for (const [path, at] of this.readAt) env.readAt.set(path, at);
     for (const directory of this.hot)
       if (env.roots.some((root) => inside(root, directory))) env.hot.add(directory);
     for (const [value, name] of this.placeholders) env.placeholders.set(value, name);
@@ -603,6 +658,7 @@ export class WorkerEnvSecrets {
     for (const [value, name] of current.placeholders)
       this.remember(value, name, current.derived.has(value));
     for (const [path, signature] of current.files) this.files.set(path, signature);
+    for (const [path, at] of current.readAt) this.readAt.set(path, at);
     for (const directory of current.hot) this.hot.add(directory);
     if (this.learning === 'relist')
       for (const [path, folder] of current.folders) this.folders.set(path, folder);
@@ -748,51 +804,71 @@ export class WorkerEnvSecrets {
    */
   private async relist(): Promise<string[]> {
     const tops = topRoots(this.roots);
-    const changed: { path: string; folder: Folder }[] = [];
-    const relisting: { again: boolean } = (this.relisting = { again: true });
-    while (relisting.again) {
-      relisting.again = false;
-      changed.length = 0;
-      await pool([...this.folders], 64, async ([path, folder]) => {
-        if (relisting.again) return;
-        const at = Date.now();
-        let info: Stats;
+    const found: string[] = [];
+    // A folder gone for a moment while the pass runs (moved away and back, or moved within
+    // the roots) may hold what this send carries: the pass runs again until none is gone.
+    for (let round = 0; ; round++) {
+      const changed: { path: string; folder: Folder }[] = [];
+      const gone: string[] = [];
+      const relisting: { again: boolean } = (this.relisting = { again: true });
+      while (relisting.again) {
+        relisting.again = false;
+        changed.length = 0;
+        gone.length = 0;
+        await pool([...this.folders], 64, async ([path, folder]) => {
+          if (relisting.again) return;
+          const at = Date.now();
+          let info: Stats;
+          try {
+            info = await (tops.includes(path) ? stat : lstat)(path);
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT' || code === 'ENOTDIR') gone.push(path);
+            // Listed below, where a folder that cannot be read holds the send.
+            else changed.push({ path, folder });
+            return;
+          }
+          if (!info.isDirectory()) gone.push(path);
+          else if (folderChanged(info, folder)) changed.push({ path, folder: folderOf(info, at) });
+        });
+      }
+      this.relisting = undefined;
+      const starts = tops.filter((top) => !this.folders.has(top));
+      for (const path of gone) {
+        this.folders.delete(path);
+        // Its folder is listed again, which walks it if it is back, and the pass runs again,
+        // which finds it if it moved to a folder this pass had already stat'ed.
+        const parent = this.folders.get(dirname(path));
+        if (parent && !changed.some((entry) => entry.path === dirname(path)))
+          changed.push({ path: dirname(path), folder: { ...parent, ctime: Number.NaN } });
+      }
+      await pool(changed, 32, async ({ path, folder }) => {
+        let entries: Dirent[];
         try {
-          info = await (tops.includes(path) ? stat : lstat)(path);
+          entries = await readdir(path, { withFileTypes: true });
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code === 'ENOENT' || code === 'ENOTDIR') this.folders.delete(path);
-          // Listed below, where a folder that cannot be read holds the send.
-          else changed.push({ path, folder });
+          else this.unlistable(path);
           return;
         }
-        if (!info.isDirectory()) this.folders.delete(path);
-        else if (folderChanged(info, folder)) changed.push({ path, folder: folderOf(info, at) });
+        this.folders.set(path, folder);
+        for (const entry of entries) {
+          const child = join(path, entry.name);
+          if (entry.isDirectory()) {
+            if (!this.folders.has(child)) starts.push(child);
+          } else if (covered(child)) found.push(child);
+        }
       });
+      found.push(...(await this.walked(starts, tops, this.folders)));
+      await this.trust();
+      if (!gone.length) return found;
+      // Folders that keep going and coming hold the send rather than let it rest on a guess.
+      if (round >= 8) {
+        for (const path of gone) this.unlistable(dirname(path));
+        return found;
+      }
     }
-    this.relisting = undefined;
-    const found: string[] = [];
-    const starts = tops.filter((top) => !this.folders.has(top));
-    await pool(changed, 32, async ({ path, folder }) => {
-      let entries: Dirent[];
-      try {
-        entries = await readdir(path, { withFileTypes: true });
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') this.folders.delete(path);
-        else this.unlistable(path);
-        return;
-      }
-      this.folders.set(path, folder);
-      for (const entry of entries) {
-        const child = join(path, entry.name);
-        if (entry.isDirectory()) {
-          if (!SKIP.has(entry.name) && !this.folders.has(child)) starts.push(child);
-        } else if (covered(child)) found.push(child);
-      }
-    });
-    found.push(...(await this.walked(starts, tops, this.folders)));
-    return found;
   }
 
   /**
@@ -825,10 +901,19 @@ export class WorkerEnvSecrets {
     folders?: Map<string, Folder>,
   ): Promise<string[]> {
     if (!starts.length) return [];
-    const walk = await walkTree(starts, {}, tops, folders);
+    const walk = await walkTree(starts, this.limits, tops, folders, folders ? NO_SKIP : SKIP);
     if (!walk.complete) for (const start of starts) this.uncovered.add(start);
     for (const folder of walk.unlisted) this.unlistable(folder);
     return walk.found;
+  }
+
+  /** Learns the file system of each device its folders are on (`trustedDevices`). */
+  private async trust(): Promise<void> {
+    const samples = new Map<number, string>();
+    for (const [path, folder] of this.folders)
+      if (!trustedDevices.has(folder.dev) && !samples.has(folder.dev))
+        samples.set(folder.dev, path);
+    await trustDevices(samples);
   }
 
   /** A folder found during the job that cannot be listed: listed again at each check from now. */
@@ -841,12 +926,15 @@ export class WorkerEnvSecrets {
   private async scan(limits: EnvScanLimits): Promise<boolean> {
     const tops = topRoots(this.roots);
     for (const root of this.roots) this.hot.add(root);
+    const relist = this.learning === 'relist';
     const walk = await walkTree(
       tops,
       limits,
       tops,
-      this.learning === 'relist' ? this.folders : undefined,
+      relist ? this.folders : undefined,
+      relist ? NO_SKIP : SKIP,
     );
+    if (relist) await this.trust();
     this.unlisted.push(...walk.unlisted);
     await Promise.all(walk.found.map((path) => this.load(path, true)));
     return walk.complete;
@@ -861,14 +949,15 @@ export class WorkerEnvSecrets {
             this.overflow = true;
             return;
           }
+          const path = join(root, String(name));
+          if (covered(path)) this.dirty.add(path);
+          // Inside `node_modules` or `.git` only an env or settings file is read, by its name.
           if (
             String(name)
               .split(sep)
               .some((part) => SKIP.has(part))
           )
             return;
-          const path = join(root, String(name));
-          if (covered(path)) this.dirty.add(path);
           if (this.named.size < MAX_NAMED) this.named.add(path);
           else this.overflow = true;
         });
@@ -889,15 +978,25 @@ export class WorkerEnvSecrets {
   }
 
   private async load(path: string, atStart = false): Promise<void> {
+    const at = Date.now();
     const info = await stat(path).catch(() => null);
     // Deleted or not a file: the values already seen stay replaced.
     if (!info?.isFile()) {
       this.uncovered.delete(path);
       return;
     }
-    const signature = `${info.ino}:${info.size}:${info.mtimeMs}`;
+    // The change time too: `cp -p` or `touch -r` can rewrite a file in place with its old size
+    // and modification time, and only the change time moves.
+    const signature = `${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
     // A file denied at start stays denied: the worker cannot read it, whatever it holds now.
-    if (this.files.get(path) === signature || (!atStart && this.withheld.includes(path))) return;
+    if (!atStart && this.withheld.includes(path)) return;
+    // Read again while it changed within RACY_MS of its last read: on a coarse clock (HFS+ has
+    // 1 s) a later rewrite of the same size can keep every time it had.
+    if (
+      this.files.get(path) === signature &&
+      !(info.ctimeMs > (this.readAt.get(path) ?? 0) - RACY_MS)
+    )
+      return;
     this.hot.add(dirname(path));
     let bytes: Buffer | undefined;
     let readable = info.size <= MAX_ENV_FILE_BYTES;
@@ -939,6 +1038,7 @@ export class WorkerEnvSecrets {
     }
     // Only now is this version of the file covered in full.
     this.files.set(path, signature);
+    this.readAt.set(path, at);
     this.uncovered.delete(path);
   }
 
