@@ -209,6 +209,25 @@ it('names a stop with no known reason as a worker error', () => {
   expect(workerEnd(undefined)).toBe('worker_error');
 });
 
+// A refusal used to reach the parent and the person as a bare provider failure, which
+// does not say why the job ended. It has its own end now, and it is still never retried.
+it('names a request DeepSeek refused as its own end, with the plain reason and no charge', () => {
+  expect(
+    workerEnd({ kind: 'execution_failure', reason: 'provider_failed', code: 'model_refused' }),
+  ).toBe('refused');
+  expect(WORKER_ENDS.refused).toBe(
+    'DeepSeek refused to answer this request, and nothing was charged for that call.',
+  );
+  // The same stop without that router code stays a provider failure.
+  expect(
+    workerEnd({
+      kind: 'execution_failure',
+      reason: 'provider_failed',
+      code: 'model_inference_failed',
+    }),
+  ).toBe('provider');
+});
+
 it('turns a failed model call into a stop of fixed codes, and leaves every other error as it was', () => {
   const failed = new ModelCallFailed('Model call uncertain (secret-id)', {
     cause: 'failed',

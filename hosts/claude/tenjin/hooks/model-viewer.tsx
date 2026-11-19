@@ -1088,6 +1088,7 @@ const ENDED_BY: Record<string, string> = {
   model_call_timeout: 'Model call timed out',
   payment_refused: 'Payment refused',
   provider: 'DeepSeek unavailable',
+  refused: 'DeepSeek refused',
   worker_error: 'Stopped',
 };
 function endedByOf(code: unknown): code is string {

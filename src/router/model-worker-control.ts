@@ -211,6 +211,7 @@ export const WORKER_ENDS = {
     'Its model call through Tenjin timed out; that call stays reserved until its receipt is read.',
   payment_refused: 'Tenjin refused to pay for its next model call, and sent nothing for it.',
   provider: 'DeepSeek could not take its next request, and nothing was charged for that call.',
+  refused: 'DeepSeek refused to answer this request, and nothing was charged for that call.',
   worker_error: 'The worker or the provider failed.',
 } as const;
 export type WorkerEnd = keyof typeof WORKER_ENDS;
@@ -233,7 +234,9 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
     case 'router_unreachable':
       return stop.reason;
     case 'provider_failed':
-      return 'provider';
+      // A refusal is its own end: the parent and the person read why, not a bare
+      // provider failure. It is still never tried again (`retryableModelCall`).
+      return stop.code === MODEL_REFUSED_CODE ? 'refused' : 'provider';
     case 'startup_timeout':
       return 'not_started';
     default:

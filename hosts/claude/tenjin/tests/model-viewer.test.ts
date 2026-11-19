@@ -1192,6 +1192,7 @@ for (const [endedBy, word, status] of [
   ['model_call_timeout', 'Model call timed out', 'stopped'],
   ['payment_refused', 'Payment refused', 'stopped'],
   ['provider', 'DeepSeek unavailable', 'stopped'],
+  ['refused', 'DeepSeek refused', 'stopped'],
   ['worker_error', 'Stopped', 'unknown'],
 ] as const)
   test('a worker ended by ' + endedBy + ' says so on its row', async ($, on) => {
