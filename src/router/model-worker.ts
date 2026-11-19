@@ -1,5 +1,5 @@
 import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
-import { WorkerDiagnosticsRecord } from './model-worker-diagnostics';
+import { WorkerDiagnosticsRecord, type ModelCallTiming } from './model-worker-diagnostics';
 import type { Identities } from './identities';
 import {
   answerWorkerWebSearch,
@@ -340,6 +340,8 @@ async function runQualifiedWorker(
 ) {
   // A worker started at offer time sends nothing until its accept releases it.
   let released = !early;
+  // Start times for the diagnostic record, which is made further down.
+  const startTimes: Record<string, number> = { workerStart: Date.now() };
   options.signal.throwIfAborted();
   const permissionMode = assertClaudeWorkerMode(
     job.decision.claudePermissionMode,
@@ -425,7 +427,11 @@ async function runQualifiedWorker(
   const resumedEnv = early ? WorkerEnvSecrets.resume(envRoots, envTemp) : undefined;
   const envFiles =
     resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
+  startTimes.envReady = Date.now();
   const envVerified = resumedEnv?.verified ?? Promise.resolve(true);
+  void resumedEnv?.verified.then(() => {
+    startTimes.envVerified = Date.now();
+  });
   const envDenied = new Set(
     envDeniedRoots(
       protectedRoots,
@@ -574,6 +580,7 @@ async function runQualifiedWorker(
   };
   const bridge = createServer((req, res) => {
     const handle = async () => {
+      let timed: ReturnType<WorkerDiagnosticsRecord['call']> | undefined;
       try {
         if (
           req.method !== 'POST' ||
@@ -593,6 +600,7 @@ async function runQualifiedWorker(
           );
           return;
         }
+        timed = diagnostics.call();
         await assertCurrentSend();
         if (!(await nativeModeReady))
           throw new Error('Native Claude did not preserve the owned permission mode');
@@ -644,6 +652,7 @@ async function runQualifiedWorker(
           messages = workerMessages(raw);
           diagnostics.mark('firstRequest');
           diagnostics.request(raw);
+          timed.prepared();
         } catch (error) {
           // The router would refuse it, and every call after it that offers as many.
           if (error instanceof TooManyTools)
@@ -660,19 +669,30 @@ async function runQualifiedWorker(
         // A RETRY IS A NEW SEND: it waits, so it passes again every check this request did
         // (consent and the workspace, the mode, a cancel, env files and their values).
         let attempts = 0;
+        let timing: ModelCallTiming | undefined;
         const message = await withModelRetry(
           async () => {
             if (attempts++ > 0) messages = workerMessages(await outgoing());
-            return options.transport.messages(job, messages, controller.signal, assertCurrentSend);
+            return options.transport.messages(
+              job,
+              messages,
+              controller.signal,
+              assertCurrentSend,
+              (split) => {
+                timing = split;
+              },
+            );
           },
           controller.signal,
           (attempt, failure) => diagnostics.retry(attempt, failure.detail),
           options.retryWait,
         ).catch((error: unknown) => {
+          timed?.done({ tries: attempts, ...(timing ? { timing } : {}) });
           throw controller.signal.aborted ? error : modelCallStop(error);
         });
         diagnostics.mark('firstAnswer');
         send(message);
+        timed.done({ usage: message.usage, tries: attempts, ...(timing ? { timing } : {}) });
       } catch (error) {
         // ONE REQUEST THE BRIDGE CANNOT SEND fails alone, as a provider's 400 does: nothing
         // was sent on or paid, and the native tool that asked for it reports the error.
@@ -710,6 +730,9 @@ async function runQualifiedWorker(
             stop,
           );
         else stop();
+      } finally {
+        // A request that was no model call (a web search, one the bridge refused).
+        timed?.drop();
       }
     };
     const done = handle();
@@ -731,6 +754,8 @@ async function runQualifiedWorker(
     MODEL_OUTPUT_TOKENS,
   );
   if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
+  for (const name of ['workerStart', 'envReady']) diagnostics.mark(name, startTimes[name]);
+  diagnostics.fact('envKept', resumedEnv !== undefined);
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
     diagnostics.repeat(tool, reminder);
@@ -757,6 +782,7 @@ async function runQualifiedWorker(
         workingDirectories: [...workspace.workingDirectories, ...worktrees],
       },
     );
+    diagnostics.mark('workspaceRead');
     // Known before the worker starts, so a first read of a settings file is replaced too.
     for (const values of privatePaths.settingsEnv) settingsEnv.add(values);
     settingsFiles = privatePaths.settingsFiles;
@@ -797,6 +823,7 @@ async function runQualifiedWorker(
       ]);
     const offeredSettings = early ? startSettings({ resolved, disclosure }) : undefined;
     const offeredAgent = early ? await nativeAgentStartKey(agentInput) : undefined;
+    const promptReadFrom = Date.now();
     try {
       nativeAgent = await readNativeAgentPromptCached({
         ...agentInput,
@@ -805,6 +832,8 @@ async function runQualifiedWorker(
         signal: controller.signal,
       });
       diagnostics.mark('promptRead');
+      // A kept read answers in a few milliseconds; a fresh one starts a Claude Code.
+      diagnostics.fact('promptReadMs', Date.now() - promptReadFrom);
     } catch (error) {
       if (controller.signal.aborted) throw error;
       // The worker still starts, with Claude Code's main prompt and the subagent note.
@@ -1209,6 +1238,7 @@ async function runQualifiedWorker(
       // accountInfo is the maintained SDK initialize response, before a task is
       // sent. A saved gateway can override env/helper auth without an env flag.
       const account = await Promise.race([worker.accountInfo(), stoppedBeforeAssignment]);
+      diagnostics.mark('sdkInitialized');
       if (
         account?.apiProvider !== 'firstParty' ||
         !['apiKeyHelper', 'ANTHROPIC_API_KEY'].includes(account.apiKeySource ?? '') ||
@@ -1225,6 +1255,8 @@ async function runQualifiedWorker(
         // Its own env file scan has ended, and found nothing its fixed denies leave open.
         if (!(await Promise.race([envVerified, stoppedBeforeAssignment])))
           throw new Error("The warm Claude worker's env file restrictions changed");
+        if (startTimes.envVerified !== undefined)
+          diagnostics.mark('envVerified', startTimes.envVerified);
         // SDK initialization can finish before an assignment is sent. Release inference
         // only after the accept path has won the job and this child still fits its scope.
         diagnostics.mark('earlyReady');
@@ -1281,6 +1313,7 @@ async function runQualifiedWorker(
         options.activity = accept.activity;
         options.currentClaudePermissionMode = accept.currentClaudePermissionMode;
         if (accept.accepted) diagnostics.accepted(accept.accepted.at, accept.accepted.marks);
+        diagnostics.mark('released');
         early.onRelease();
         released = true;
       }
@@ -1333,6 +1366,7 @@ async function runQualifiedWorker(
         }
       }
       if (message.type === 'result') {
+        diagnostics.mark('resultMessage');
         diagnostics.stop(message);
         session?.assert(message.session_id);
         if (message.subtype !== 'success') throw workerResultError(message);
@@ -1380,6 +1414,7 @@ async function runQualifiedWorker(
     await new Promise<void>((resolve) => bridge.close(() => resolve()));
     options.signal.removeEventListener('abort', cancel);
     closeFailure = await processClosed;
+    diagnostics.mark('childClosed');
     if (released) await diagnostics.write(options.dataDir, job.id);
     await github?.close().catch(() => undefined);
     await temp?.close().catch(() => undefined);

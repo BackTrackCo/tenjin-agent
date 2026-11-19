@@ -667,6 +667,52 @@ it('runs the unchanged Agent repeat of an offer natively through capture, once, 
   }
 });
 
+it('records the time before an offer when the capture answers, and the ends of the accept call', async () => {
+  // Operator item of 2026-11-18: no record had the time before the offer (the held call,
+  // the router's decision, the offer returned) or the tail after the worker's last answer.
+  const f = await ownedClaudeFixture();
+  vi.stubEnv('HOME', dir);
+  f.route.mockImplementation(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
+  try {
+    const made = await f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: 'timed-call',
+        tool: 'Agent',
+        input: { prompt: 'Read the timed fixture.' },
+      },
+    });
+    expect(made).toMatchObject({ action: 'offer' });
+    const path = join(dir, 'model-jobs', `${made.offer_id}.diagnostics.json`);
+    const before = JSON.parse(await readFile(path, 'utf8'));
+    expect(before).toEqual({
+      version: 1,
+      offer: {
+        at: expect.any(Number),
+        action: 'offer',
+        marks: {
+          job: expect.any(Number),
+          routeSent: expect.any(Number),
+          routeAnswered: expect.any(Number),
+          decided: expect.any(Number),
+          warm: expect.any(Number),
+          returned: expect.any(Number),
+        },
+        routeFetchMs: [],
+      },
+    });
+    expect(await f.call({ offer_id: made.offer_id })).toMatchObject({ status: 'completed' });
+    const after = JSON.parse(await readFile(path, 'utf8'));
+    expect(after.offer).toEqual(before.offer);
+    expect(Object.keys(after.phases)).toEqual(
+      expect.arrayContaining(['handbackStored', 'answered']),
+    );
+    expect(after.phases.answered).toBeGreaterThanOrEqual(after.phases.handbackStored);
+  } finally {
+    await f.close();
+  }
+});
+
 it("offers a native subagent's held call for that subagent, runs its accept, and records its failure as from a subagent", async () => {
   // Catches: a capture with no field for the subagent that made the call, so its offer
   // named no agent (and the main loop's same call could settle it), and its no-offer

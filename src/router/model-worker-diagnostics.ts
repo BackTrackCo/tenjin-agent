@@ -9,6 +9,166 @@ import { readJsonFile } from './store-files';
 const run = promisify(execFile);
 const MAX_NAMES = 256;
 const MAX_REPEATS = 32;
+const MAX_CALLS = 64;
+const MAX_PHASES = 48;
+const MAX_MS = 86_400_000;
+
+/** A duration or count for the record: a whole number from 0, bounded. */
+const whole = (value: unknown, max = MAX_MS): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(max, Math.max(0, Math.round(value)))
+    : undefined;
+
+/**
+ * WHERE ONE MODEL CALL'S TIME WENT inside the transport, in milliseconds: the first budget
+ * read (`budgetMs`), the unpaid quote round trip (`quoteMs`), the reservation (`reserveMs`),
+ * the wait for the inference lane's payment lock (`laneWaitMs`, on lane `slot`), the checks
+ * under it (`gateMs`), the payer from its start to the paid request leaving (`signMs`:
+ * policy, signer, signing, a deposit; `journalMs` of it is the refund journal's write), the
+ * paid request to its response headers (`answerMs`), the headers to the payer's return
+ * (`bodyMs`: the body read and the payment SDK's accounting), the payer's drain (`drainMs`)
+ * and the local settlement (`settleMs`). `fetches` counts the other HTTP requests the payer
+ * made. The router answers a call whole, so no first token is seen here: `answerMs` is the
+ * model's whole answer unless the router sends its headers early.
+ */
+export type ModelCallTiming = {
+  slot: number;
+  budgetMs?: number;
+  quoteMs?: number;
+  reserveMs?: number;
+  laneWaitMs?: number;
+  gateMs?: number;
+  signMs?: number;
+  journalMs?: number;
+  answerMs?: number;
+  bodyMs?: number;
+  drainMs?: number;
+  settleMs?: number;
+  fetches?: number;
+  requestBytes?: number;
+};
+const CALL_TIMES = [
+  'budgetMs',
+  'quoteMs',
+  'reserveMs',
+  'laneWaitMs',
+  'gateMs',
+  'signMs',
+  'journalMs',
+  'answerMs',
+  'bodyMs',
+  'drainMs',
+  'settleMs',
+] as const;
+
+/**
+ * One model call as the worker's bridge saw it: when its request arrived (`at`, ms after
+ * the accept), how many other calls of this worker were then in flight (`live`), the time
+ * since the worker's previous answer when none was (`gapMs`: the tools the worker ran in
+ * between, and Claude Code's own work), the bridge's checks, redaction and body read
+ * before the transport (`prepMs`), the whole call (`ms`), the transport's own split, the
+ * tries it took, and the answer's token counts.
+ */
+export type WorkerCall = Partial<ModelCallTiming> & {
+  at: number;
+  live: number;
+  gapMs?: number;
+  prepMs?: number;
+  ms?: number;
+  tries?: number;
+  failed?: true;
+  inputTokens?: number;
+  cachedTokens?: number;
+  outputTokens?: number;
+  thinkingTokens?: number;
+};
+
+/**
+ * ONE HELD CALL BEFORE ITS OFFER, written when the capture answers, also for an offer
+ * nobody accepts. `at` is when the capture reached `tenjin mcp`: the plugin's hook held
+ * the call before that, which this record does not see. The marks are milliseconds after
+ * `at`: `job` (consent, repeat and worker checks done, the job record made),
+ * `routeSent` (the parent context read, the routing request ready), `routeAnswered` (the
+ * router's decision call, whole: the fee's signing and the server's own model call),
+ * `decided` (the offer stored), `warm` (its worker's preparation started) and `returned`
+ * (the answer handed back to the plugin). `routeFetchMs` is each HTTP round trip of the
+ * decision call.
+ */
+export type OfferTiming = {
+  at: number;
+  action: string;
+  marks: Record<string, number>;
+  routeFetchMs: number[];
+};
+
+const OFFER_MARKS = ['job', 'routeSent', 'routeAnswered', 'decided', 'warm', 'returned'];
+
+/** Merges fields into a job's record, or starts it. Never throws. */
+async function mergeRecord(
+  dataDir: string,
+  jobId: string,
+  merge: (kept: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  try {
+    const path = join(dataDir, 'model-jobs', `${jobId}.diagnostics.json`);
+    const kept = await readJsonFile(path, 1_000_000).catch(() => null);
+    await writeFileAtomic(
+      path,
+      JSON.stringify(merge(isRecord(kept) && kept.version === 1 ? kept : { version: 1 })),
+      { mode: 0o600, dirMode: 0o700 },
+    );
+  } catch {
+    // A record that cannot be written leaves the job as it is.
+  }
+}
+
+/** The time before an offer, kept beside the job's record. Never throws. */
+export async function writeOfferTiming(
+  dataDir: string,
+  jobId: string,
+  timing: {
+    at: number;
+    action: string;
+    marks: Record<string, number>;
+    routeFetchMs?: readonly number[];
+  },
+): Promise<void> {
+  const marks: Record<string, number> = {};
+  for (const name of OFFER_MARKS) {
+    const when = timing.marks[name];
+    const after = when === undefined ? undefined : whole(when - timing.at);
+    if (after !== undefined) marks[name] = after;
+  }
+  const offer: OfferTiming = {
+    at: Math.round(timing.at),
+    action: timing.action.slice(0, 40),
+    marks,
+    routeFetchMs: (timing.routeFetchMs ?? []).slice(0, 8).flatMap((ms) => whole(ms) ?? []),
+  };
+  await mergeRecord(dataDir, jobId, (kept) => ({ ...kept, offer }));
+}
+
+/**
+ * Start and end phases marked outside the worker (the accept call's own steps after the
+ * worker returned), added to the job's record as milliseconds after `acceptedAt`. Never
+ * throws, and the caller does not wait for it.
+ */
+export async function writeWorkerPhases(
+  dataDir: string,
+  jobId: string,
+  acceptedAt: number,
+  marks: Record<string, number>,
+): Promise<void> {
+  await mergeRecord(dataDir, jobId, (kept) => {
+    const phases: Record<string, number> = isRecord(kept.phases)
+      ? (kept.phases as Record<string, number>)
+      : {};
+    for (const [name, when] of Object.entries(marks).slice(0, 16))
+      if (!(name in phases) && Object.keys(phases).length < MAX_PHASES && Number.isFinite(when))
+        phases[name.slice(0, 40)] = Math.round(when - acceptedAt);
+    return { ...kept, phases };
+  });
+}
 
 /**
  * A BOUNDED RECORD OF HOW ONE WORKER RUN WENT, for looking into a stop or a drift later:
@@ -46,9 +206,24 @@ export type WorkerDiagnostics = {
    * before releasing a warm worker), `childReady` (the SDK's
    * init), `firstRequest` (the bridge's first model request, before its quote round trip),
    * `firstAnswer` (that call answered), `firstActivity` (the first worker reply observed,
-   * which the viewer's first row draws from).
+   * which the viewer's first row draws from). A worker's preparation: `workerStart`,
+   * `envReady` (the env file scan, or an earlier one taken up), `workspaceRead` (settings
+   * and private paths), `sdkInitialized` (the SDK's initialize answer), `envVerified` (a
+   * warm worker's own scan agreed), `released` (the checks after the accept). The run's
+   * ends: `refundProbed` (the router's refund-support answer), `lastAnswer` (the last
+   * model answer sent to the worker), `resultMessage` (the SDK's result), `childClosed`
+   * (its process gone), `workerReturned`, `refundClosed` (the run's channel closed),
+   * `handbackStored` and `answered` (the accept call's answer handed to the host). With
+   * an `offer`: `offerCaptured` and `offerReturned`.
    */
   phases: Record<string, number>;
+  /** Facts of the start: whether an earlier env scan was taken up, and a kept prompt read. */
+  start: Record<string, boolean | number>;
+  /** The time before the offer, written by the capture. */
+  offer?: OfferTiming;
+  /** The first model calls, one by one, and every call's sums. */
+  calls: WorkerCall[];
+  callTotals: Record<string, number>;
   /** Model calls tried again after a failure the router confirmed cost nothing. */
   retries: { attempt: number; cause: string; status?: number }[];
   stop?: { subtype: string; turns?: number; stopReason?: string };
@@ -105,20 +280,7 @@ export async function writeWorkerFailure(
   jobId: string,
   failure: WorkerFailure,
 ): Promise<void> {
-  try {
-    const path = join(dataDir, 'model-jobs', `${jobId}.diagnostics.json`);
-    const kept = await readJsonFile(path, 1_000_000).catch(() => null);
-    await writeFileAtomic(
-      path,
-      JSON.stringify({
-        ...(isRecord(kept) && kept.version === 1 ? kept : { version: 1 }),
-        failure,
-      }),
-      { mode: 0o600, dirMode: 0o700 },
-    );
-  } catch {
-    // A record that cannot be written leaves the job as it is.
-  }
+  await mergeRecord(dataDir, jobId, (kept) => ({ ...kept, failure }));
 }
 
 const names = (value: unknown): string[] =>
@@ -147,8 +309,99 @@ export class WorkerDiagnosticsRecord {
       repeats: [],
       retries: [],
       phases: {},
+      start: {},
+      calls: [],
+      callTotals: { count: 0 },
     };
     this.acceptedAt = Date.now();
+  }
+
+  /** A fact of the start, once: a flag or a count. */
+  fact(name: string, value: boolean | number): void {
+    if (name in this.value.start || Object.keys(this.value.start).length >= 16) return;
+    this.value.start[name.slice(0, 40)] =
+      typeof value === 'boolean' ? value : (whole(value, Number.MAX_SAFE_INTEGER) ?? 0);
+  }
+
+  private live = 0;
+  private answeredAt: number | undefined;
+
+  /**
+   * One model request the bridge received. `prepared` when it is ready for the transport,
+   * `done` with the answer's usage (or nothing for a call that failed), whichever try
+   * answered and the transport's own split.
+   */
+  call(at = Date.now()): {
+    prepared: (at?: number) => void;
+    done: (
+      outcome: { usage?: unknown; tries?: number; timing?: ModelCallTiming },
+      at?: number,
+    ) => void;
+    /** A request that turned out to be no model call: counted nowhere. */
+    drop: () => void;
+  } {
+    const idle = this.live === 0 && this.answeredAt !== undefined;
+    const gapMs = idle ? whole(at - this.answeredAt!) : undefined;
+    const entry: WorkerCall = {
+      at: Math.round(at - this.acceptedAt),
+      live: this.live,
+      ...(gapMs !== undefined ? { gapMs } : {}),
+    };
+    this.live++;
+    let ended = false;
+    return {
+      drop: () => {
+        if (ended) return;
+        ended = true;
+        this.live--;
+      },
+      prepared: (when = Date.now()) => {
+        const prepMs = whole(when - at);
+        if (prepMs !== undefined) entry.prepMs = prepMs;
+      },
+      done: (outcome, when = Date.now()) => {
+        if (ended) return;
+        ended = true;
+        this.live--;
+        this.answeredAt = when;
+        this.value.phases.lastAnswer = Math.round(when - this.acceptedAt);
+        const ms = whole(when - at);
+        if (ms !== undefined) entry.ms = ms;
+        const tries = whole(outcome.tries, 1000);
+        if (tries !== undefined && tries > 1) entry.tries = tries;
+        const usage = isRecord(outcome.usage) ? outcome.usage : undefined;
+        if (!usage) entry.failed = true;
+        const tokens = (value: unknown) => whole(value, Number.MAX_SAFE_INTEGER);
+        const counts = {
+          inputTokens: tokens(usage?.input_tokens),
+          cachedTokens: tokens(usage?.cache_read_input_tokens),
+          outputTokens: tokens(usage?.output_tokens),
+          thinkingTokens: tokens(
+            isRecord(usage?.output_tokens_details)
+              ? usage.output_tokens_details.thinking_tokens
+              : undefined,
+          ),
+        };
+        for (const [name, value] of Object.entries(counts))
+          if (value !== undefined) entry[name as keyof typeof counts] = value;
+        const timing = outcome.timing;
+        if (timing) {
+          entry.slot = whole(timing.slot, 16) ?? 0;
+          for (const name of [...CALL_TIMES, 'fetches', 'requestBytes'] as const) {
+            const value = whole(timing[name], Number.MAX_SAFE_INTEGER);
+            if (value !== undefined) entry[name] = value;
+          }
+        }
+        const totals = this.value.callTotals;
+        totals.count = (totals.count ?? 0) + 1;
+        for (const name of ['ms', 'gapMs', 'prepMs', 'outputTokens', ...CALL_TIMES] as const) {
+          const value = entry[name];
+          if (value !== undefined) totals[name] = (totals[name] ?? 0) + value;
+        }
+        if (entry.failed) totals.failed = (totals.failed ?? 0) + 1;
+        if (this.value.calls.length < MAX_CALLS) this.value.calls.push(entry);
+      },
+    };
   }
 
   /** The SDK's `init` message: the model, tools and MCP servers the run has. */
@@ -201,13 +454,14 @@ export class WorkerDiagnosticsRecord {
     // are moved to count from the accept too, so they read negative.
     for (const name of Object.keys(this.value.phases))
       this.value.phases[name] = this.value.phases[name]! + Math.round(this.acceptedAt - at);
+    for (const call of this.value.calls) call.at += Math.round(this.acceptedAt - at);
     this.acceptedAt = at;
     for (const [name, when] of Object.entries(marks).slice(0, 16)) this.mark(name, when);
   }
 
   /** A start phase reached, once: milliseconds since the accept. */
   mark(name: string, at = Date.now()): void {
-    if (name in this.value.phases || Object.keys(this.value.phases).length >= 32) return;
+    if (name in this.value.phases || Object.keys(this.value.phases).length >= MAX_PHASES) return;
     this.value.phases[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
   }
 
@@ -245,11 +499,18 @@ export class WorkerDiagnosticsRecord {
       }).catch(() => undefined);
       const commit = head?.stdout.trim();
       if (commit && /^[0-9a-f]{40,64}$/.test(commit)) this.value.commit = commit;
-      await writeFileAtomic(
-        join(dataDir, 'model-jobs', `${jobId}.diagnostics.json`),
-        JSON.stringify(this.value),
-        { mode: 0o600, dirMode: 0o700 },
-      );
+      const path = join(dataDir, 'model-jobs', `${jobId}.diagnostics.json`);
+      // The capture wrote the time before the offer into this file: kept, and its two
+      // ends are counted from the accept beside the other phases.
+      const kept = await readJsonFile(path, 1_000_000).catch(() => null);
+      const offer = isRecord(kept) && isRecord(kept.offer) ? (kept.offer as OfferTiming) : null;
+      if (offer && typeof offer.at === 'number') {
+        this.value.offer = offer;
+        this.mark('offerCaptured', offer.at);
+        if (typeof offer.marks?.returned === 'number')
+          this.mark('offerReturned', offer.at + offer.marks.returned);
+      }
+      await writeFileAtomic(path, JSON.stringify(this.value), { mode: 0o600, dirMode: 0o700 });
     } catch {
       // A record that cannot be written leaves the job as it is.
     }

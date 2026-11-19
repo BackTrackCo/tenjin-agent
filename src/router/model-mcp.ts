@@ -3,7 +3,7 @@ import type { McpServer, ToolCallback } from '@modelcontextprotocol/sdk/server/m
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { ModelHandoff, type ModelSession } from './model-handoff';
+import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings } from './model-settings';
 import {
@@ -39,7 +39,12 @@ import {
 import { startWorkerProgress, workerProgressPath } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
-import { workerFailure, writeWorkerFailure } from './model-worker-diagnostics';
+import {
+  workerFailure,
+  writeOfferTiming,
+  writeWorkerFailure,
+  writeWorkerPhases,
+} from './model-worker-diagnostics';
 
 type ActiveConversation = {
   handle: string;
@@ -712,6 +717,8 @@ export function registerModelTool(
               return unavailable('Owned root or permission prompts unavailable');
             }
             try {
+              // Where the time before the offer went, for the job's diagnostic record.
+              const timing: CaptureTiming = { marks: {}, routeFetchMs: [] };
               const outcome = await (
                 await getHandoff()
               ).capture(
@@ -727,11 +734,23 @@ export function registerModelTool(
                   parents: args.capture.agent.parents,
                   cwd: args.capture.agent.cwd,
                 },
+                timing,
               );
               if ('settled' in outcome && typeof outcome.settled === 'string')
                 await warming.get(outcome.settled)?.stop();
-              if ('offer_id' in outcome && typeof outcome.offer_id === 'string')
+              if ('offer_id' in outcome && typeof outcome.offer_id === 'string') {
                 await warmOffer(outcome.offer_id, session.sessionId, signal).catch(() => undefined);
+                timing.marks.warm = Date.now();
+              }
+              if (timing.jobId) {
+                timing.marks.returned = Date.now();
+                await writeOfferTiming(options.dataDir, timing.jobId, {
+                  at: acceptedAt,
+                  action: String(outcome.action),
+                  marks: timing.marks,
+                  routeFetchMs: timing.routeFetchMs,
+                });
+              }
               return answer(outcome);
             } catch {
               await noOffer(signal.aborted ? 'interrupted' : 'capture_error');
@@ -989,6 +1008,8 @@ export function registerModelTool(
             const refund = await readModelRefundResult(options.dataDir, transport.origin, job.id);
             return refund.state !== 'none' ? { refund } : {};
           };
+          // The accept call's own steps after its worker returned, for the diagnostic record.
+          const endMarks: Record<string, number> = {};
           const done = (async () => {
             let inference: InferenceLease | undefined;
             try {
@@ -1051,7 +1072,14 @@ export function registerModelTool(
               // A continuation can spend from an earlier job but must close its own channel.
               const result =
                 options.harness === 'claude'
-                  ? await runOptions.transport.withInferenceRun(job.id, abort.signal, run)
+                  ? await runOptions.transport.withInferenceRun(
+                      job.id,
+                      abort.signal,
+                      run,
+                      (name) => {
+                        (name === 'refundProbed' ? startMarks : endMarks)[name] = Date.now();
+                      },
+                    )
                   : await run(runOptions.transport);
               const envelope = {
                 status: 'completed',
@@ -1086,6 +1114,7 @@ export function registerModelTool(
                 // job update is repaired by replay, never by another worker.
                 await model.store.finish(job.id, 'completed').catch(() => undefined);
               } else await model.store.finish(job.id, 'completed', result);
+              endMarks.handbackStored = Date.now();
               try {
                 activity?.handback(result);
               } catch {
@@ -1095,6 +1124,8 @@ export function registerModelTool(
                 'completed',
                 'reservedAtomic' in envelope.spend ? envelope.spend : undefined,
               );
+              endMarks.answered = Date.now();
+              await writeWorkerPhases(options.dataDir, job.id, acceptedAt, endMarks);
               return answer(envelope);
             } catch (error) {
               const state = abort.signal.aborted ? 'cancelled' : 'unknown';

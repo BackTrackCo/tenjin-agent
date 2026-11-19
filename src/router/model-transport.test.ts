@@ -471,6 +471,42 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
   });
 });
 
+it('tells where a model call spent its time, once, and nothing for a call replayed from its kept result', async () => {
+  // Operator item of 2026-11-18: a 99 s job of four tool uses had no record of its waits.
+  const f = await fixture({ quote: '120000' });
+  const transport = f.make();
+  const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'timed' }] };
+  const seen: Record<string, number | undefined>[] = [];
+  await transport.messages(f.job, request, new AbortController().signal, undefined, (timing) =>
+    seen.push({ ...timing }),
+  );
+  expect(seen).toHaveLength(1);
+  const steps = [
+    'budgetMs',
+    'quoteMs',
+    'reserveMs',
+    'laneWaitMs',
+    'gateMs',
+    'signMs',
+    'answerMs',
+    'bodyMs',
+    'drainMs',
+    'settleMs',
+  ];
+  expect(Object.keys(seen[0]!)).toEqual(expect.arrayContaining(['slot', 'requestBytes', ...steps]));
+  for (const name of steps) expect(seen[0]![name]).toBeGreaterThanOrEqual(0);
+  expect(seen[0]!.slot).toBe(0);
+  expect(f.router.paidRequests()).toBe(1);
+  // The kept result answers the same request again: no quote, no lane, no payment.
+  await f
+    .make()
+    .messages(f.job, request, new AbortController().signal, undefined, (timing) =>
+      seen.push({ ...timing }),
+    );
+  expect(f.router.paidRequests()).toBe(1);
+  expect(Object.keys(seen[1]!).sort()).toEqual(['budgetMs', 'slot']);
+});
+
 it('settles overlapping inference on two reusable channels with a $0.50 funding budget', async ({
   onTestFinished,
 }) => {

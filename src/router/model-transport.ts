@@ -34,6 +34,7 @@ import {
   WORKER_WALL_MS,
 } from './model-worker-control';
 import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
+import type { ModelCallTiming } from './model-worker-diagnostics';
 
 /**
  * How long each try of a run's refund-support question may take. A first accept once got
@@ -196,10 +197,14 @@ export class ModelTransport {
     runId: string,
     signal: AbortSignal,
     run: (transport: ModelTransport) => Promise<T>,
+    /** Diagnostics only: when the refund-support answer came, and when the run's channel closed. */
+    mark?: (name: 'refundProbed' | 'workerReturned' | 'refundClosed') => void,
   ): Promise<T> {
     const journal = this.refundJournal();
     const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
-    if (!(await this.refundSupport(journal, endpoint, signal))) return run(this);
+    const supported = await this.refundSupport(journal, endpoint, signal);
+    mark?.('refundProbed');
+    if (!supported) return run(this).finally(() => mark?.('workerReturned'));
     const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
     await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
     const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
@@ -209,7 +214,7 @@ export class ModelTransport {
         lock,
         async () => {
           entered = true;
-          return run(transport);
+          return run(transport).finally(() => mark?.('workerReturned'));
         },
         { signal, takeOverDead: true },
       );
@@ -217,6 +222,7 @@ export class ModelTransport {
       // The worker may have been cancelled. Refund settlement gets its own bounded signal.
       // A failed attempt leaves the durable record for recovery rather than changing the result.
       if (entered) await journal.close(runId, AbortSignal.timeout(8_000)).catch(() => undefined);
+      mark?.('refundClosed');
     }
   }
 
@@ -258,7 +264,13 @@ export class ModelTransport {
         throw new Error('Original model budget is unavailable; refusing continuation');
     });
   }
-  async route(body: unknown, signal?: AbortSignal, beforeSend?: () => Promise<void>) {
+  async route(
+    body: unknown,
+    signal?: AbortSignal,
+    beforeSend?: () => Promise<void>,
+    /** Diagnostics only: the milliseconds of each HTTP round trip the decision call made. */
+    fetchMs?: number[],
+  ) {
     signal?.throwIfAborted();
     const route = this.routing.routeFor(this.options.baseUrl);
     let result;
@@ -272,13 +284,14 @@ export class ModelTransport {
         } catch (cause) {
           throw new LocalSendBlocked(cause);
         }
+        const sent = performance.now();
         return fetchFn(input, {
           ...init,
           signal: AbortSignal.any([
             ...(signal ? [signal] : []),
             ...(init?.signal ? [init.signal] : []),
           ]),
-        });
+        }).finally(() => fetchMs?.push(performance.now() - sent));
       };
       result = await route.send(
         new URL('/api/model-router/route', this.options.baseUrl).toString(),
@@ -304,8 +317,10 @@ export class ModelTransport {
     messages: Record<string, unknown>,
     signal: AbortSignal,
     beforeSend?: () => Promise<void>,
+    /** Diagnostics only: where this call's time went, told once when the call ends. */
+    observe?: (timing: ModelCallTiming) => void,
   ) {
-    return this.invoke(job, messages, signal, 'messages', beforeSend);
+    return this.invoke(job, messages, signal, 'messages', beforeSend, observe);
   }
   async responses(
     job: ModelJob,
@@ -322,6 +337,7 @@ export class ModelTransport {
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
+    observe?: (timing: ModelCallTiming) => void,
   ): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     // Do not share across changed job authority, even when the provider body is identical.
@@ -329,14 +345,21 @@ export class ModelTransport {
     let invocation = this.invocations.get(key);
     if (!invocation) {
       const abort = new AbortController();
+      const timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 };
       const result = this.invokeOnce(
         structuredClone(job),
         structuredClone(messages),
         abort.signal,
         protocol,
         beforeSend,
+        timing,
       ).finally(() => {
         if (this.invocations.get(key)?.abort === abort) this.invocations.delete(key);
+        try {
+          observe?.(timing);
+        } catch {
+          // Diagnostics change nothing.
+        }
       });
       invocation = { abort, callers: 0, result };
       this.invocations.set(key, invocation);
@@ -388,8 +411,16 @@ export class ModelTransport {
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
+    timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 },
   ) {
     signal.throwIfAborted();
+    // Diagnostics only: each step's milliseconds, read from a monotonic clock.
+    let stepFrom = performance.now();
+    const step = (name: Exclude<keyof ModelCallTiming, 'slot' | 'fetches' | 'requestBytes'>) => {
+      const now = performance.now();
+      timing[name] = (timing[name] ?? 0) + now - stepFrom;
+      stepFrom = now;
+    };
     const endpoint =
       protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
     const resultLimit = MODEL_RESPONSE_ENVELOPE_BYTES;
@@ -466,6 +497,7 @@ export class ModelTransport {
       await consent();
       return (await load()).calls[key];
     });
+    step('budgetMs');
     if (old) return existing(old);
     const scrub = (value: unknown, field = ''): unknown => {
       if (protocol === 'responses' && ['parameters', 'input_schema', 'format'].includes(field))
@@ -509,10 +541,13 @@ export class ModelTransport {
     const fetchFn = payerDeps.fetchImpl ?? fetch;
     // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
     await assertCanTransmit();
+    const wire = JSON.stringify(body);
+    timing.requestBytes = Buffer.byteLength(wire);
+    stepFrom = performance.now();
     const challenge = await fetchFn(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: wire,
       redirect: 'error',
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     }).catch((error: unknown) => {
@@ -537,6 +572,7 @@ export class ModelTransport {
         ...(wait !== undefined ? { retryAfterMs: wait } : {}),
       });
     }
+    step('quoteMs');
     const header = challenge.headers.get('payment-required');
     if (!header) {
       await challenge.body?.cancel();
@@ -573,6 +609,7 @@ export class ModelTransport {
       await challenge.body?.cancel();
       throw error;
     }
+    step('reserveMs');
     if (reservation.invocationId !== body.invocationId) {
       await challenge.body?.cancel();
       return existing(reservation);
@@ -606,7 +643,9 @@ export class ModelTransport {
       try {
         await assertCanTransmit();
         if (signature !== null && journal && inferenceRun) {
+          const from = performance.now();
           await journal.record(inferenceRun, url, signature, signal);
+          timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
           await assertCanTransmit();
         }
         signal.throwIfAborted();
@@ -617,7 +656,12 @@ export class ModelTransport {
         localBlock = new LocalSendBlocked(cause);
         throw localBlock;
       }
-      if (paying) paymentSent = true;
+      // A second signed request, or any unsigned one, is counted beside the first.
+      if (!paying || paymentSent) timing.fetches = (timing.fetches ?? 0) + 1;
+      if (paying) {
+        paymentSent = true;
+        step('signMs');
+      }
       const response = boundedResponse(
         await fetchFn(input, {
           ...init,
@@ -625,6 +669,7 @@ export class ModelTransport {
         }),
         resultLimit,
       );
+      if (paying) step('answerMs');
       // The router's answer to the signed request when it is an error: its status and
       // its fixed error code, read from a copy, never its message.
       if (paying && response.status >= 400)
@@ -683,10 +728,12 @@ export class ModelTransport {
     let overCap: QuoteOverCap | undefined;
     let result;
     let failure: unknown;
+    stepFrom = performance.now();
     try {
       result = await withFileLock(
         paymentLock,
         async () => {
+          step('laneWaitMs');
           await beforeSend?.();
           // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS LANE still binds the job's total:
           // the payer's own check below reads this one quote alone. The quote was reserved
@@ -701,16 +748,22 @@ export class ModelTransport {
           if (BigInt((await load()).charged) > cap) throw (overCap = new QuoteOverCap());
           signal.throwIfAborted();
           paymentTurn = true;
+          step('gateMs');
           try {
-            return await payer.routeFor(baseUrl).send(url, {
+            const sent = await payer.routeFor(baseUrl).send(url, {
               method: 'POST',
               jsonBody: body,
               timeoutMs: 360_000,
               blockRedirects: true,
             });
+            if (timing.answerMs !== undefined) step('bodyMs');
+            return sent;
           } finally {
             // Hold the channel until SDK accounting drains, including detached work.
+            const from = performance.now();
             await payer.idle();
+            timing.drainMs = performance.now() - from;
+            stepFrom = performance.now();
           }
         },
         { signal, takeOverDead: true, timeoutMs: WORKER_WALL_MS, retryMs: 100 },
@@ -776,10 +829,13 @@ export class ModelTransport {
           ...(typeof result?.status === 'number' ? { status: result.status } : {}),
         },
       );
-    return settle(
+    stepFrom = performance.now();
+    const settled = await settle(
       reservation,
       this.receipt(result.json, body.invocationId, quote, protocol, readable),
     );
+    step('settleMs');
+    return settled;
   }
 
   /** The job's budget as kept, or the routing fee alone for a job with no file yet. */

@@ -842,6 +842,132 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   expect(native.githubClose).toHaveBeenCalledOnce();
 });
 
+it("keeps each model call's timing, token counts and the worker's start and end phases in the diagnostic record", async () => {
+  // Operator item of 2026-11-18: where a job's time goes. The record had the first call's
+  // two marks only; a 99 s job of four tool uses could not be explained from it.
+  const messages = vi.fn(
+    async (
+      _job: unknown,
+      _messages: unknown,
+      _signal: unknown,
+      _beforeSend: unknown,
+      observe?: (timing: Record<string, number>) => void,
+    ) => {
+      observe?.({ slot: 1, quoteMs: 210, laneWaitMs: 9_000, signMs: 35, answerMs: 2_800 });
+      return {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'PRIVATE_ANSWER' }],
+        usage: { input_tokens: 900, cache_read_input_tokens: 27_000, output_tokens: 120 },
+      };
+    },
+  );
+  vi.mocked(query).mockImplementation((call) => {
+    let complete!: () => void;
+    const forwarded = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    handle(
+      {
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(
+            JSON.stringify({
+              model: 'deepseek-flash',
+              max_tokens: 32000,
+              messages: [{ role: 'user', content: 'PRIVATE_ASSIGNMENT' }],
+            }),
+          );
+        },
+      },
+      {
+        headersSent: false,
+        destroyed: false,
+        writeHead() {
+          return this;
+        },
+        end(_body: string, done?: () => void) {
+          done?.();
+          // After the bridge's own bookkeeping for this answer.
+          setImmediate(complete);
+          return this;
+        },
+      },
+    );
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+        await forwarded;
+        yield { type: 'result', subtype: 'success', result: 'done' };
+      },
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+  const dataDir = await mkdtemp(join(tmpdir(), 'worker-timing-'));
+  let diagnostics: {
+    calls: Record<string, number>[];
+    callTotals: Record<string, number>;
+    phases: Record<string, number>;
+    start: Record<string, unknown>;
+  };
+  try {
+    await runModelWorker(job, {
+      ...options(),
+      dataDir,
+      transport: { messages } as unknown as ModelTransport,
+    });
+    const written = await readFile(
+      join(dataDir, 'model-jobs', `${job.id}.diagnostics.json`),
+      'utf8',
+    );
+    expect(written).not.toContain('PRIVATE_');
+    diagnostics = JSON.parse(written);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+  expect(diagnostics.calls).toEqual([
+    {
+      at: expect.any(Number),
+      live: 0,
+      prepMs: expect.any(Number),
+      ms: expect.any(Number),
+      inputTokens: 900,
+      cachedTokens: 27_000,
+      outputTokens: 120,
+      slot: 1,
+      quoteMs: 210,
+      laneWaitMs: 9_000,
+      signMs: 35,
+      answerMs: 2_800,
+    },
+  ]);
+  expect(diagnostics.callTotals).toMatchObject({ count: 1, laneWaitMs: 9_000, outputTokens: 120 });
+  expect(Object.keys(diagnostics.phases)).toEqual(
+    expect.arrayContaining([
+      'workerStart',
+      'envReady',
+      'workspaceRead',
+      'childSpawned',
+      'sdkInitialized',
+      'childReady',
+      'firstRequest',
+      'firstAnswer',
+      'lastAnswer',
+      'resultMessage',
+      'childClosed',
+    ]),
+  );
+  // No kept env scan to take up: this worker started at its accept and scanned first.
+  expect(diagnostics.start).toMatchObject({ envKept: false });
+});
+
 it("puts the job's GitHub env above a GitHub token in the person's settings env", async () => {
   // The failure: Claude Code hands its settings env to the worker's commands over the
   // process env, so the person's own token there beat the job's, which was only in the

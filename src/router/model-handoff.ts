@@ -219,6 +219,13 @@ function blockedField(native: Record<string, unknown>): string | null {
   return set ?? null;
 }
 
+/** Where a held call's time went before its offer, for the job's diagnostic record. */
+export type CaptureTiming = {
+  jobId?: string;
+  marks: Record<string, number>;
+  routeFetchMs: number[];
+};
+
 export class ModelHandoff {
   readonly store: ModelJobStore;
   readonly conversations: ModelConversationStore;
@@ -358,6 +365,8 @@ export class ModelHandoff {
     nativeTool: ModelNativeTool = 'Agent',
     step?: string,
     caller?: ModelCaller,
+    /** Diagnostics only: filled with the job's id and when each step before the offer ended. */
+    timing?: CaptureTiming,
   ) {
     signal?.throwIfAborted();
     const settings = await this.currentConsent(session.cwd);
@@ -446,7 +455,11 @@ export class ModelHandoff {
       },
       'routing',
     );
-    return this.route(session, job, signal);
+    if (timing) {
+      timing.jobId = job.id;
+      timing.marks.job = Date.now();
+    }
+    return this.route(session, job, signal, timing);
   }
   private async continue(
     session: ModelSession,
@@ -566,7 +579,12 @@ export class ModelHandoff {
         "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
     };
   }
-  private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {
+  private async route(
+    session: ModelSession,
+    job: ModelJob,
+    signal?: AbortSignal,
+    timing?: CaptureTiming,
+  ) {
     const { transport } = this.options;
     const native = async (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) => {
       await this.store.decided(job.id, { action: 'native' });
@@ -655,31 +673,38 @@ export class ModelHandoff {
       const changed = uncovered(consent);
       if (changed) return native(changed);
       signal?.throwIfAborted();
+      if (timing) timing.marks.routeSent = Date.now();
       raw =
         job.state === 'offered'
           ? job.decision
-          : await transport.route(input, signal, async () => {
-              if (claudeWorkspace) {
-                const worker = await qualifiedModelWorker(
-                  session.cwd,
-                  String(job.native.subagent_type ?? 'general-purpose'),
-                  undefined,
-                  this.options.dataDir,
-                  signal,
-                  session.claudePermissionMode,
-                );
-                if (
-                  !worker?.claudeWorkspace ||
-                  !sameClaudeWorkspace(claudeWorkspace, worker.claudeWorkspace) ||
-                  worker.windows?.fingerprint !== job.decision.windowsWorker
-                )
-                  throw new Error('Native Claude workspace scope changed');
-              } else if (instructions) await assertInstructionMetadataCurrent(instructions);
-              const current = await this.currentConsent(session.cwd);
-              changedBeforeFee = current ? uncovered(current) : 'no_consent';
-              if (changedBeforeFee)
-                throw new Error('Model routing consent or workspace scope changed');
-            });
+          : await transport.route(
+              input,
+              signal,
+              async () => {
+                if (claudeWorkspace) {
+                  const worker = await qualifiedModelWorker(
+                    session.cwd,
+                    String(job.native.subagent_type ?? 'general-purpose'),
+                    undefined,
+                    this.options.dataDir,
+                    signal,
+                    session.claudePermissionMode,
+                  );
+                  if (
+                    !worker?.claudeWorkspace ||
+                    !sameClaudeWorkspace(claudeWorkspace, worker.claudeWorkspace) ||
+                    worker.windows?.fingerprint !== job.decision.windowsWorker
+                  )
+                    throw new Error('Native Claude workspace scope changed');
+                } else if (instructions) await assertInstructionMetadataCurrent(instructions);
+                const current = await this.currentConsent(session.cwd);
+                changedBeforeFee = current ? uncovered(current) : 'no_consent';
+                if (changedBeforeFee)
+                  throw new Error('Model routing consent or workspace scope changed');
+              },
+              ...(timing ? [timing.routeFetchMs] : []),
+            );
+      if (timing) timing.marks.routeAnswered = Date.now();
       signal?.throwIfAborted();
     } catch {
       await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
@@ -716,6 +741,7 @@ export class ModelHandoff {
         ? { claudePermissionMode: job.decision.claudePermissionMode }
         : {}),
     });
+    if (timing) timing.marks.decided = Date.now();
     return {
       action: 'offer',
       started: false,
