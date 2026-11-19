@@ -1,3 +1,4 @@
+import { mask } from '../lib/redact';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -289,7 +290,7 @@ export function workerFailure(endedBy: string, error: unknown): WorkerFailure {
       name: (typeof value.name === 'string' ? value.name : typeof current).slice(0, 80),
       ...(code ? { code } : {}),
       ...(status !== undefined ? { status } : {}),
-      message: (typeof value.message === 'string' ? value.message : String(current)).slice(
+      message: mask(typeof value.message === 'string' ? value.message : String(current)).slice(
         0,
         MAX_MESSAGE,
       ),

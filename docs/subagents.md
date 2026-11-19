@@ -284,7 +284,7 @@ These run natively:
 
 - **The worker's transcript** is a local record in Claude Code's own session files, as a native subagent's transcript is, with the job's GitHub token already replaced. Of a call's output it holds only short lines, never a file's content.
 - **Each handback**, so a later accept in the same session can return it: a completed worker's result, and a stopped worker's last text and up to 24 recent steps, with the same replacements already made, in files only your user can read. Tenjin's data folder keeps no live worker activity after a job.
-- **A diagnostic record** beside each job: the worker's tools and MCP servers, its root and commit, its request settings, retries, times and token counts, and how it ended. These are names, times, counts and codes only. For a job that did not complete it also holds the error: the job's end code, and the class name, code and first 300 characters of the message of the error and its causes, as written. It is readable by your user alone and is sent nowhere.
+- **A diagnostic record** beside each job: the worker's tools and MCP servers, its root and commit, its request settings, retries, times and token counts, and how it ended. These are names, times, counts and codes only. For a job that did not complete it also holds the error: the job's end code, and the class name, code and first 300 characters of the message of the error and its causes, with secret-shaped values masked: this is Tenjin's own diagnostic file, not what the worker forwards. It is readable by your user alone and is sent nowhere.
 - Tenjin removes its own local job, conversation, budget, handback and diagnostic records 7 days after their last write.
 
 ## Charges and limits
