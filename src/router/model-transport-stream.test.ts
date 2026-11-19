@@ -48,6 +48,8 @@ type Drive = (io: {
   /** The connection ends with no last event. */
   cut: () => void;
   signed: Request;
+  /** The router's own answers, to make the corrective 402 a payer recovers from. */
+  router: FakeRouter;
 }) => Promise<void> | void;
 
 async function fixture(
@@ -117,6 +119,8 @@ async function fixture(
   let lastId: unknown;
   const fetchImpl: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
+    // The signed request as it left, for a test to send to the router again.
+    const again = request.clone();
     if (request.method === 'GET')
       return Response.json({
         invocationId: lastId,
@@ -172,7 +176,8 @@ async function fixture(
         },
         // After what was pushed has been read: an errored stream drops its queue.
         cut: () => void setTimeout(() => control.error(new TypeError('terminated')), 20),
-        signed: request,
+        signed: again,
+        router,
       }),
     );
     return new Response(stream, {
@@ -395,6 +400,34 @@ it('releases a relayed provider failure only on a cancelled voucher with a zero 
   }
 });
 
+// Failure caught (the review removed the guard and a second signed request went out, and the
+// child got `message_start` twice): a last event that is a corrective 402 after events have
+// left makes the payer's recovery sign the call again, and nothing may be sent.
+it('never sends a second signed request after events have left, whatever the last event says', async () => {
+  const f = await fixture({
+    drive: async ({ events, push, signed, router }) => {
+      push(frame('message_start', events()[0]));
+      // The same voucher again: the router answers the corrective 402 the payer recovers from.
+      const corrective = await router.fetch(signed);
+      const required = corrective.headers.get('payment-required');
+      await corrective.body?.cancel();
+      push(
+        frame('tenjin_error', {
+          status: 402,
+          headers: required ? { 'payment-required': required } : {},
+          body: {},
+        }),
+      );
+    },
+  });
+  const { got, error } = await call(f);
+  expect(got.map((e) => e.type)).toEqual(['message_start']);
+  expect(f.signed()).toBe(1);
+  expect(error!.detail.uncharged).toBeUndefined();
+  expect(retryableModelCall(error)).toBe(false);
+  expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+});
+
 it('keeps a stream that ends with no last event uncertain and never signs again', async () => {
   const f = await fixture({
     drive: ({ events, push, cut }) => {
@@ -477,6 +510,13 @@ it('asks again without a stream once, when the router refuses the field it offer
       got.push(e),
     ),
   ).resolves.toEqual(reply);
+  // The refused request was the unpaid quote: nothing was reserved or signed for it, so the
+  // call paid once and holds one settled charge, with nothing left uncertain.
+  expect(f.signed()).toBe(1);
+  expect(await transport.summary(f.job)).toMatchObject({ uncertain: [] });
+  expect(Number((await transport.summary(f.job)).reservedAtomic)).toBe(
+    Number((await transport.summary(f.job)).actualAtomic),
+  );
   await expect(
     transport.messages(f.job, say('Two'), new AbortController().signal, undefined, undefined, (e) =>
       got.push(e),
