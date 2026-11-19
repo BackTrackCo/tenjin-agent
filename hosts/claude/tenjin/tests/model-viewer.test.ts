@@ -1739,8 +1739,8 @@ test('a folded run that holds an accept unfolds, so the DeepSeek row draws in pl
     [[read, accept], true],
     [[read, batch], true],
     [[read], false],
-    // A cancel is not an accept: its row stays the engine's.
-    [[toolRow('parent_cancel', ACCEPT, { cancel: OFFER })], false],
+    // A cancel draws nothing of its own either, so its run unfolds too.
+    [[toolRow('parent_cancel', ACCEPT, { cancel: OFFER })], true],
   ] as const) {
     const group = await $.ui.mount({
       plugin: 'tenjin',
@@ -2196,8 +2196,10 @@ test("an accept call still being written draws nothing of the host's, and its gr
   // accept hook has not run yet, so the offer's own record names the task.
   await remember($);
   expect(await row({ offer_id: OFFER })).toBe('⏺DeepSeek(Read selected source) · starting');
-  // A cancel, and a call that already has its answer, keep the host's row.
-  expect(await row({ cancel: OFFER })).toBe('plugin:tenjin:router - subagent (MCP)');
+  // A cancel draws nothing of its own, as an accept draws none. A capture, and a call
+  // that already has its answer, keep the host's row.
+  expect(await row({ cancel: OFFER })).toBe('');
+  expect(await row({ capture: {} })).toBe('plugin:tenjin:router - subagent (MCP)');
   expect(await row({}, { isRunning: false, output: 'Invalid input' })).toBe(
     'plugin:tenjin:router - subagent (MCP)',
   );
@@ -2223,7 +2225,8 @@ test("an accept call still being written draws nothing of the host's, and its gr
   expect(await group({})).toBe(true);
   expect(await group({ offer_id: OFFER.slice(0, 13) })).toBe(true);
   expect(await group({ offer_id: OFFER })).toBe(true);
-  expect(await group({ cancel: OFFER })).toBe(false);
+  expect(await group({ cancel: OFFER })).toBe(true);
+  expect(await group({ capture: {} })).toBe(false);
 });
 
 test("the parent model cannot poll a worker with the viewer's own activity read, and the viewer still can", async ($, on) => {
@@ -2270,7 +2273,11 @@ test("the plugin's own activity read is told from the model's by who raised it, 
 
 for (const settled of ['kept native', 'cancelled', 'expired'] as const)
   test(
-    'an offer that is ' + settled + ' draws no row of its own, so the task has one row',
+    'an offer that is ' +
+      settled +
+      (settled === 'cancelled'
+        ? ' keeps its row, which says so'
+        : ' draws no row of its own, so the task has one row'),
     async ($, on) => {
       const f = setup($, on);
       const held = await remember($);
@@ -2299,8 +2306,13 @@ for (const settled of ['kept native', 'cancelled', 'expired'] as const)
       } else if (settled === 'cancelled') {
         await $.tool.call({ tool: ACCEPT, cancel: OFFER, tool_use_id: 'parent_cancel' });
       } else await f.clock.advance(15 * 60_000 + 1000);
-      // Settled with no worker: only the native call's own row is left for the task.
-      expect(await offerRow()).toBe('');
+      // Kept native or expired: only the native call's own row is left for the task. A
+      // cancelled offer keeps its row, which says so: the cancel call draws nothing.
+      expect(await offerRow()).toBe(
+        settled === 'cancelled'
+          ? '⏺Agent(Read selected source) · Tenjin offered DeepSeek · cancelled'
+          : '',
+      );
       await f.clock.settle();
     },
   );
@@ -2891,7 +2903,9 @@ test("a native subagent's accept draws the worker's row and its viewer under tha
   });
   // The subagent's cancel of the other offer it got settles that offer's row too.
   await $.tool.call({ tool: ACCEPT, cancel: OFFER2, agentId: 'native-child' });
-  expect(await heldRow($, 'held_b', INPUT2, second)).toBe('');
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe(
+    '⏺Agent(Check the cancel path) · Tenjin offered DeepSeek · cancelled',
+  );
   // Stopping the viewer from the agent list cancels its worker.
   f.state.agents[0]!.status = 'killed';
   await complete($, 'native-viewer-1');
@@ -3304,7 +3318,7 @@ test("a background worker's row reads as a native background agent's, and its re
   await f.clock.settle();
   expect(submitted).toHaveLength(1);
   expect(submitted[0]).toContain(
-    `DeepSeek background worker "Read selected source" ended (offer ${OFFER}).`,
+    `DeepSeek background worker "Read selected source" (offer ${OFFER}) finished. This is the result`,
   );
   expect(submitted[0]!.endsWith(handback)).toBe(true);
   expect(await heldDrawing($, 'held_bg', call, held)).toMatchObject({
@@ -3327,6 +3341,162 @@ test("a background worker's row reads as a native background agent's, and its re
     expect(await shownLines(row)).toEqual(['› Message from @DeepSeek (ctrl+o to expand)']);
     await row.unmount();
   }
+});
+
+// Live on alpha.80 (019f0a42): two Explore calls of one response, one of them a background
+// call, accepted in one batch. Only the background worker had a DeepSeek row. The first
+// call had drawn as a row of its own for a moment before the second joined it in Claude
+// Code's summary block, and so counted as drawn in place.
+test('workers whose calls sit in the summary block all draw at the accept call, also one whose call drew alone for a moment', async ($, on) => {
+  const f = setup($, on);
+  on('classic.PostToolBatch', () => ({}));
+  f.state.offer = OFFER;
+  const first = (await remember($, { ...INPUT, tool_use_id: 'held_first' })).result;
+  // Before the second call joins it, the first draws as a row of its own.
+  expect((await heldDrawing($, 'held_first', INPUT, first)).lines).toContain(
+    'Tenjin offered DeepSeek',
+  );
+  f.state.offer = OFFER2;
+  await remember($, { ...INPUT2, run_in_background: 'true', tool_use_id: 'held_second' });
+  f.state.offer = OFFER;
+  await $.classic.PostToolBatch({
+    tool_calls: [
+      { tool_name: 'Agent', tool_input: INPUT, tool_use_id: 'held_first' },
+      { tool_name: 'Agent', tool_input: INPUT2, tool_use_id: 'held_second' },
+    ],
+  });
+  const answer = JSON.stringify({
+    results: [
+      {
+        offer_id: OFFER,
+        outcome: { status: 'completed', elapsedMs: 9000, toolUses: 3, result: 'foreground' },
+      },
+      { offer_id: OFFER2, outcome: { status: 'started', background: true, offer_id: OFFER2 } },
+    ],
+  });
+  f.state.work = () => ({ result: answer, text: answer });
+  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, OFFER2], tool_use_id: 'mixed' });
+  await f.clock.settle();
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('mixed', ACCEPT, { offer_ids: [OFFER, OFFER2] }, answer),
+  });
+  const lines = (await shownLines(ui)).join('');
+  await ui.unmount();
+  // Both workers, each with its own line: the foreground one's end, the background one's state.
+  expect(lines).toContain('├ Read selected source · 3 tool uses · 9s');
+  expect(lines).toContain('Done');
+  expect(lines).toContain('└ Check the cancel path');
+  expect(lines).toContain('Backgrounded agent');
+  // Its held row, should the host draw it alone again, adds no second row.
+  expect((await heldDrawing($, 'held_first', INPUT, first)).lines).toBe('');
+});
+
+// Live on alpha.80: under the worker's `Cancelled by the parent` row stood the host's own
+// `plugin:tenjin:router - DeepSeek subagent (MCP)(cancel: "…")` with `{"status":"cancelled"}`.
+test('a cancel draws nothing of its own: not its call, not its answer, not its id as it streams', async ($, on) => {
+  setup($, on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine row'] }),
+  );
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
+  on('ui.render', { component: 'ToolGroup' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: [e.props.isExpanded ? 'rows' : 'count line'] }),
+  );
+  const drawn = async (component: 'ToolUse' | 'ToolResult', props: Record<string, unknown>) => {
+    const ui = await $.ui.mount({ plugin: 'tenjin', surface: 'terminal', component, props });
+    const lines = await shownLines(ui);
+    await ui.unmount();
+    return lines;
+  };
+  const cancelled = '{"status":"cancelled"}';
+  const cancel = (input: unknown, output?: string) => toolRow('a_cancel', ACCEPT, input, output);
+  // As its id streams, while it runs, and once it took: nothing.
+  expect(await drawn('ToolUse', cancel({ cancel: OFFER.slice(0, 9) }))).toEqual([]);
+  expect(await drawn('ToolUse', cancel({ cancel: OFFER }))).toEqual([]);
+  expect(await drawn('ToolUse', cancel({ cancel: OFFER }, cancelled))).toEqual([]);
+  expect(
+    await drawn('ToolResult', {
+      tool_use_id: 'a_cancel',
+      tool: ACCEPT,
+      output: cancelled,
+      isErrored: false,
+    }),
+  ).toEqual([]);
+  // A folded run that holds it unfolds, so no count line names the server.
+  const group = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: {
+      calls: [{ ...cancel({ cancel: OFFER }, cancelled), isRunning: false }],
+      isActive: false,
+      isExpanded: false,
+      isCallsOnly: true,
+    },
+  });
+  expect(await shownLines(group)).toEqual(['rows']);
+  await group.unmount();
+  // A cancel that did not take keeps the host's row and answer.
+  const refused = '{"status":"not_owned"}';
+  expect(await drawn('ToolUse', cancel({ cancel: OFFER }, refused))).toEqual(['engine row']);
+  expect(
+    await drawn('ToolResult', {
+      tool_use_id: 'a_cancel',
+      tool: ACCEPT,
+      output: refused,
+      isErrored: false,
+    }),
+  ).toEqual(['engine result']);
+  expect(
+    await drawn('ToolUse', { ...cancel({ cancel: OFFER }, 'cut'), isInterrupted: true }),
+  ).toEqual(['engine row']);
+});
+
+test('a background worker the parent cancelled sends one message, which says so first', async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  const call = { ...INPUT, run_in_background: true };
+  const held = (await remember($, call)).result;
+  const started = JSON.stringify({ status: 'started', background: true, offer_id: OFFER });
+  f.state.work = () => ({ result: started, text: started });
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'bg_accept' });
+  await f.clock.settle();
+  await f.clock.advance(3000);
+  const handback = JSON.stringify({
+    status: 'cancelled',
+    endedBy: 'parent_cancel',
+    ended: 'The parent cancelled it with subagent({cancel}).',
+    elapsedMs: 3000,
+    toolUses: 0,
+    tokens: 0,
+    spend: { reservedAtomic: '3000', actualAtomic: '3000', uncertain: [] },
+  });
+  await $.tool.call({ tool: ACCEPT, cancel: OFFER, tool_use_id: 'bg_cancel' });
+  f.state.phase = 'cancelled';
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  await f.clock.advance(60_000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]!.split('\n')[0]).toContain(
+    `DeepSeek background worker "Read selected source" (offer ${OFFER}) did not complete: The parent cancelled it with subagent({cancel}).`,
+  );
+  expect(submitted[0]!.split('\n')[0]).toContain('it is not a new task');
+  // Its row says who ended it, on the held call's row; the cancel call drew nothing.
+  expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(
+    '⏺DeepSeek(Read selected source)  ⎿  Cancelled by the parent (0 tool uses · 0 tokens · 3s · $0.003)',
+  );
 });
 
 // Greptile on 7c1d9550: a batch call holds until its foreground workers end, so a background
@@ -3384,7 +3554,7 @@ test('a background worker of a mixed batch that ends before the batch call retur
   await f.clock.advance(5000);
   await f.clock.settle();
   expect(submitted).toHaveLength(1);
-  expect(submitted[0]).toContain(`ended (offer ${OFFER2}).`);
+  expect(submitted[0]).toContain(`(offer ${OFFER2}) finished.`);
   expect(submitted[0]!.endsWith(handback)).toBe(true);
 });
 

@@ -118,6 +118,16 @@ const servedCalls = new Map<string, string>();
  * and the next drawing of each row writes them again.
  */
 const heldRows = new Set<string>();
+/**
+ * Offers whose held call was one of two or more Agent calls of one response, which Claude
+ * Code draws as its summary block: never in place, whatever drew before. Live on alpha.80
+ * the first call of such a response drew as a row of its own for a moment, before the
+ * second call joined it, and marked itself in place; the accept then drew nothing for it
+ * and its worker had no row at all.
+ */
+const groupedOffers = new Set<string>();
+const inPlace = (surface: string, offerId: string) =>
+  heldRows.has(surface + ':' + offerId) && !groupedOffers.has(offerId.toLowerCase());
 type AcceptCall = { output?: unknown; isInterrupted?: boolean; isErrored?: boolean };
 type AcceptSeen = AcceptCall & { call: string; batched: boolean; started: boolean };
 const acceptSeen = new Map<string, AcceptSeen>();
@@ -1462,13 +1472,25 @@ function undecided(input: unknown): boolean {
   const partial = (id: unknown): boolean =>
     typeof id === 'string' && !UUID.test(id) && /^[0-9a-f-]{0,35}$/i.test(id);
   if (Object.keys(given).length !== 1) return false;
-  if (partial(given.offer_id)) return true;
+  // A cancel's id streams in the same way.
+  if (partial(given.offer_id) || partial(given.cancel)) return true;
   const ids = given.offer_ids;
   return (
     Array.isArray(ids) &&
     (ids.length < 2 || ids.some(partial)) &&
     ids.every((id) => (short(id) && UUID.test(id)) || partial(id))
   );
+}
+
+/** A cancel of one offer by its id, as the model writes it: the offer's id. */
+function cancelOf(input: unknown): string | undefined {
+  const given = record(input);
+  const id = given?.cancel;
+  return given && Object.keys(given).length === 1 && short(id) && UUID.test(id) ? id : undefined;
+}
+/** The CLI's answer to a cancel that took: nothing but its status. */
+function cancelAnswer(answer: Json | undefined): boolean {
+  return answer?.status === 'cancelled' && Object.keys(answer).length === 1;
 }
 
 function acceptedIds(input: unknown, withMetadata = false): string[] | undefined {
@@ -1551,7 +1573,7 @@ function deliverLater($: Dollar): void {
 }
 /** That prompt's first line, as its row reads it, bare or under the host's frame for a plugin's prompt. */
 const BACKGROUND_ROW =
-  /DeepSeek background worker "[^"\n]{0,80}" ended \(offer [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\)\./i;
+  /DeepSeek background worker "[^"\n]{0,80}" \(offer [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\) /i;
 const delivering = new Set<string>();
 /** How long a read waits for the CLI to store an ended job's handback, at most. */
 const HANDBACK_READS = 20;
@@ -1570,9 +1592,18 @@ async function deliverBackground($: Dollar, offerId: string, title: string): Pro
         handback = said;
       else await $.clock.sleep(500);
     }
+    // HOW IT ENDED COMES FIRST, in the job's own words: a worker the parent cancelled says
+    // so before anything else, so its late message is not read as new work.
+    const answer = acceptResponse(handback);
+    const how =
+      answer?.status === 'completed'
+        ? 'finished.'
+        : typeof answer?.ended === 'string' && answer.ended.trim()
+          ? 'did not complete: ' + clean(answer.ended, 200).replace(/[.]?$/, '.')
+          : 'ended.';
     await $.prompt.submit({
       text:
-        `${BACKGROUND_RESULT} "${title}" ended (offer ${offerId}). This is the result of the background subagent call you accepted earlier, as a background agent's result arrives; nothing new started and nothing more was charged.\n` +
+        `${BACKGROUND_RESULT} "${title}" (offer ${offerId}) ${how} This is the result of the background subagent call you accepted earlier, as a background agent's result arrives: it is not a new task, nothing new started and nothing more was charged.\n` +
         (handback ??
           '{"status":"unknown","nextStep":"Its result could not be read here. Accept this offer again with subagent({offer_id}) to read the stored result; that starts no worker."}'),
     });
@@ -2205,6 +2236,13 @@ export function registerModelViewer(on: On): void {
         heldCalls.delete(call.tool_use_id);
         if (offer) offers.add(offer);
         else offered = false;
+        // One of several Agent calls of the response: the host's block is its row.
+        if (offer && calls.length > 1 && !groupedOffers.has(offer)) {
+          groupedOffers.add(offer);
+          if (groupedOffers.size > DRAWN_MAX)
+            groupedOffers.delete(groupedOffers.values().next().value!);
+          $.ui.invalidate('ui.render');
+        }
       }
       return held.length > 0 && calls.length > 1
         ? [`${held.length} of ${calls.length} ${tool} calls`]
@@ -2254,6 +2292,20 @@ export function registerModelViewer(on: On): void {
           const { Box } = $.ui.resolve(e);
           return <Box display="none" />;
         }
+        // A CANCEL DRAWS NOTHING OF ITS OWN, as an accept draws nothing: the worker's row
+        // says `Cancelled by the parent`, and an offer nobody accepted says `cancelled` on
+        // its held row. Live on alpha.80 the host's row stood under the worker's with the
+        // raw `{"status":"cancelled"}`. A cancel that was refused, failed or was cut keeps
+        // the host's row.
+        if (
+          cancelOf(input) &&
+          !isErrored &&
+          !isInterrupted &&
+          (output === undefined || cancelAnswer(acceptResponse(textOf(output))))
+        ) {
+          const { Box } = $.ui.resolve(e);
+          return <Box display="none" />;
+        }
         return next(e);
       }
       return (
@@ -2282,6 +2334,8 @@ export function registerModelViewer(on: On): void {
         if (worker.value || seen) {
           markHeldRow($, key, !full);
           if (full) return next(e);
+          // In the host's summary block this row is not on the screen: the accept call's is.
+          if (groupedOffers.has(offerId.toLowerCase())) return <ui.Box display="none" />;
           const row = await describeWorker(
             $,
             offerId,
@@ -2291,16 +2345,28 @@ export function registerModelViewer(on: On): void {
           );
           if (row) return workerRow(ui, row);
         }
-        // An offer kept native by its repeated call, cancelled or left to expire is
-        // settled with no worker: the native call's own row is the task's row, and this
-        // one draws nothing.
+        // An offer kept native by its repeated call or left to expire is settled with no
+        // worker: the native call's own row is the task's row, and this one draws nothing.
         else if (
           offer.value &&
+          offer.value.state !== 'cancelled' &&
           (offer.value.state !== 'offered' || now - offer.value.at > OFFER_MS)
         ) {
           if (full) return next(e);
           return <ui.Box display="none" />;
-        } else markHeldRow($, key, !full);
+        } else {
+          markHeldRow($, key, !full);
+          // A CANCELLED OFFER NOBODY ACCEPTED keeps this row, which says so: the cancel
+          // call draws nothing, and no native call follows a cancel.
+          if (offer.value?.state === 'cancelled')
+            return workerRow(ui, {
+              state: 'held',
+              name: tool,
+              struck: true,
+              argument: titleOf(record(input), 'subagent'),
+              tail: ' · Tenjin offered DeepSeek · cancelled',
+            });
+        }
       }
       // THE OFFER, as the tool router marks a held `Web Search` row: the native name
       // struck through, and what Tenjin offered in its place.
@@ -2332,7 +2398,9 @@ export function registerModelViewer(on: On): void {
     }
     // Other accepts in a folded run keep the engine's individual rows.
     const accepts = e.props.calls.some(
-      (call) => call.tool === ACCEPT && (acceptedIds(call.input) || undecided(call.input)),
+      (call) =>
+        call.tool === ACCEPT &&
+        (acceptedIds(call.input) || undecided(call.input) || cancelOf(call.input)),
     );
     return next(accepts ? { ...e, props: { ...e.props, isExpanded: true } } : e);
   });
@@ -2345,7 +2413,11 @@ export function registerModelViewer(on: On): void {
     const answer = tool === ACCEPT ? acceptResponse(said) : undefined;
     const ours =
       tool === ACCEPT
-        ? acceptAnswer(answer) || !!batchOutcomes(answer) || HOST_MOVED.test(said ?? '')
+        ? acceptAnswer(answer) ||
+          !!batchOutcomes(answer) ||
+          HOST_MOVED.test(said ?? '') ||
+          // Only a cancel that took answers with its status alone.
+          cancelAnswer(answer)
         : (tool === 'Agent' || tool === 'Task') && heldOffer(output) !== undefined;
     if (!ours) return next(e);
     const { Box } = $.ui.resolve(e);
@@ -2653,7 +2725,7 @@ async function acceptRows(
   if (described.some((row) => row === undefined)) return undefined;
   const { Box } = ui;
   const kept = offerIds.flatMap((offerId, index) =>
-    heldRows.has(surface + ':' + offerId) ? [] : [{ offerId, row: described[index]! }],
+    inPlace(surface, offerId) ? [] : [{ offerId, row: described[index]! }],
   );
   if (kept.length === 0) return <Box display="none" />;
   const rows = kept.map((item) => item.row);
