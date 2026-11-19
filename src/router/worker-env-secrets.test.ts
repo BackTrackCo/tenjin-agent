@@ -319,6 +319,35 @@ it.runIf(WATCHES)(
 );
 
 it.runIf(WATCHES)(
+  'lets a worker whose roots lie inside a running walk take it, and a file made there during the walk is known',
+  async () => {
+    const root = await workspace({ 'a/.env': 'A=a-value-0x51', '.env': 'TOP=top-value-0x52' });
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    (await WorkerEnvSecrets.start([join(root, 'a')], { keep: true, watch: false })).close();
+    walks.listed.length = 0;
+    let release!: () => void;
+    walks.hold = new Promise<void>((done) => (release = done));
+    const first = WorkerEnvSecrets.resume([root])!;
+    const inner = WorkerEnvSecrets.resume([join(root, 'a')])!;
+    await writeFile(join(root, 'a', '.env.new'), 'NEW=new-value-0x53');
+    const dirty = (first.env as unknown as { dirty: Set<string> }).dirty;
+    await vi.waitFor(() => expect(dirty.has(join(root, 'a', '.env.new'))).toBe(true));
+    walks.hold = undefined;
+    release();
+    try {
+      expect(await first.verified).toBe(true);
+      expect(await inner.verified).toBe(true);
+      expect(inner.env.redact('new-value-0x53')).toBe('[env:NEW]');
+      expect(walks.listed.filter((path) => path === root)).toHaveLength(1);
+    } finally {
+      first.env.close();
+      inner.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+it.runIf(WATCHES)(
   'does not join a walk whose first worker was cancelled: its watcher no longer feeds the walk',
   async () => {
     const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
