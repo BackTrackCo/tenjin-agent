@@ -512,8 +512,9 @@ export class WorkerDiagnosticsRecord {
   /** A start-up checkpoint of the child, once: milliseconds since the accept. */
   childMark(name: string, at = Date.now()): void {
     const marks = this.value.childMarks;
-    if (name in marks || Object.keys(marks).length >= MAX_PHASES) return;
-    marks[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
+    const key = name.slice(0, 40);
+    if (key in marks || Object.keys(marks).length >= MAX_PHASES) return;
+    marks[key] = Math.round(at - this.acceptedAt);
   }
 
   /** A model call tried again: which try failed, and why (fixed codes). */

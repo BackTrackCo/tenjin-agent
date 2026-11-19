@@ -239,3 +239,15 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// A name longer than the stored 40 characters is checked as stored, so a second mark of it
+// is the same mark and does not take a second slot.
+it('records a child checkpoint once, by the name it stores', () => {
+  const record = new WorkerDiagnosticsRecord('/no/such/repo', 786_432, 65_536);
+  const long = 'x'.repeat(50);
+  record.childMark(long, Date.now() + 10);
+  record.childMark(long, Date.now() + 99_000);
+  const marks = (record.snapshot() as { childMarks: Record<string, number> }).childMarks;
+  expect(Object.keys(marks)).toEqual(['x'.repeat(40)]);
+  expect(marks['x'.repeat(40)]).toBeLessThan(5000);
+});
