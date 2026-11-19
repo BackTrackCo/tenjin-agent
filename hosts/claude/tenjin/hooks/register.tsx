@@ -221,9 +221,12 @@ export const register: Register = (on) => {
         )
       ) {
         await rememberModelOffer($, offer.offer_id, input).catch(() => undefined);
+        // The handoff marks a follow-up to an owned worker, whichever tool carried it.
+        const continuation = offer.continuation === true || e.tool === 'SendMessage';
         return heldAnswer(e.tool, text ?? JSON.stringify(offer), {
           offer: offer.offer_id,
-          context: heldOfferContext(offer, e.tool === 'SendMessage'),
+          context: heldOfferContext(offer, continuation),
+          continuation,
         });
       }
     } catch {
@@ -1002,7 +1005,7 @@ async function callerOf($: Dollar, agentId: string): Promise<Json> {
 function heldAnswer(
   tool: string,
   offerText: string,
-  held?: { offer: string; context: string[] | undefined },
+  held?: { offer: string; context: string[] | undefined; continuation?: boolean },
 ) {
   // Native SendMessage refusals return this data shape; an offer is not a delivered message.
   if (tool === 'SendMessage')
@@ -1014,7 +1017,11 @@ function heldAnswer(
   return {
     deny: [
       `${HELD_WITH_OFFER} (offer ${held.offer}). It has not run.`,
-      `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this ${tool} call until you choose. Your two moves are to accept the offer with subagent({offer_id}), or to send this same ${tool} call again unchanged, which runs it natively. Do not switch to another tool or do the work yourself because of this message.`,
+      // A FOLLOW-UP TO A TENJIN WORKER HAS NO NATIVE FORM: its handle never reaches a native
+      // tool, so the same call sent again is held again, as a new offer in place of this one.
+      held.continuation
+        ? `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this follow-up to a DeepSeek worker until you choose. Your two moves are to run it with subagent({offer_id}), or to cancel it with subagent({cancel: offer_id}). Sending this same ${tool} call again does not run it: a Tenjin worker handle never runs natively, and the repeat is held again. Do not switch to another tool or do the work yourself because of this message.`
+        : `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this ${tool} call until you choose. Your two moves are to accept the offer with subagent({offer_id}), or to send this same ${tool} call again unchanged, which runs it natively. Do not switch to another tool or do the work yourself because of this message.`,
       ...(held.context ?? []),
       offerText,
     ].join('\n'),

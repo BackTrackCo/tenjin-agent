@@ -245,9 +245,11 @@ test('Agent resume compatibility holds the owned handle through the same capture
   const { files } = machine(on);
   enabled(files);
   const asked: unknown[] = [];
+  // As the handoff answers a follow-up to an owned worker: the same offer, marked.
+  const followUp = JSON.stringify({ ...JSON.parse(offered), continuation: true });
   on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
     asked.push(e.capture);
-    return { result: offered, text: offered };
+    return { result: followUp, text: followUp };
   });
   const ran = native(on);
   const input = { ...ASSIGNMENT, resume: WORKER };
@@ -257,6 +259,11 @@ test('Agent resume compatibility holds the owned handle through the same capture
   ]);
   expect(ran).toEqual([]);
   expect(result.deny).toContain(`held it (offer ${OFFER})`);
+  // A worker handle never runs natively, so the repeat is no way out: run it or cancel it.
+  expect(result.deny).not.toContain('which runs it natively');
+  expect(result.deny).toContain('subagent({cancel: offer_id})');
+  expect(result.deny).toContain('no continuation started');
+  expect(result.deny).not.toMatch(/final veto|risk rules/);
 });
 
 test('disabled routing refuses reserved worker and unstarted-offer addresses before native fallback', async ($, on) => {
