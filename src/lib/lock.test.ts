@@ -173,14 +173,12 @@ describe('withFirstFileLock', () => {
     const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
     const inside = [0, 0];
     let most = 0;
-    let together = 0;
     const call = () =>
       withFirstFileLock(
         locks,
         async (index) => {
           inside[index]!++;
           most = Math.max(most, inside[index]!);
-          together = Math.max(together, inside[0]! + inside[1]!);
           await new Promise<void>((resolve) => setImmediate(resolve));
           inside[index]!--;
         },
@@ -188,7 +186,29 @@ describe('withFirstFileLock', () => {
       );
     await Promise.all(Array.from({ length: 12 }, call));
     expect(most).toBe(1);
-    expect(together).toBe(2);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  // Whether two callers overlap in time depends on the runner, so no timing is guessed: each
+  // holder stays until the other one is inside too. Locks that let only one caller in at a
+  // time would leave both waiting for each other, and the test would time out.
+  it('lets two callers hold the two locks at once, each its own', async () => {
+    const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
+    const held: number[] = [];
+    let bothIn!: () => void;
+    const both = new Promise<void>((resolve) => (bothIn = resolve));
+    const call = () =>
+      withFirstFileLock(
+        locks,
+        async (index) => {
+          held.push(index);
+          if (held.length === 2) bothIn();
+          await both;
+        },
+        { retryMs: 1 },
+      );
+    await Promise.all([call(), call()]);
+    expect([...held].sort()).toEqual([0, 1]);
     expect(readdirSync(dir)).toEqual([]);
   });
 });
