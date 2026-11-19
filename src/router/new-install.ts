@@ -6,7 +6,7 @@ import {
   SUBAGENT_TERMS,
   SUBAGENTS_OFF_LINE,
   subagentsOnLines,
-} from '../commands/config-subagents';
+} from './subagents-shown';
 import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
 import { selectOne } from '../lib/clack';
 import { hasCode } from '../lib/errno';

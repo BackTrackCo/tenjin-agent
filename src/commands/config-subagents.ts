@@ -1,14 +1,11 @@
 import { realpath } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
-import { paint } from '../lib/output';
-import { tilde } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
 import { modelConsent, modelConsentSchema, namedDirectories } from '../router/model-settings';
-import { loadRawConfig, type PartialConfig } from '../lib/config';
+import { loadRawConfig } from '../lib/config';
 import {
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
@@ -17,6 +14,14 @@ import {
 } from '../router/model-limits';
 import { ModelJobStore, type NoOffer } from '../router/model-job';
 import { validateWindowsWorkerConfig } from '../router/windows-worker-config';
+import {
+  ON_HINT,
+  SUBAGENT_TERMS,
+  SUBAGENTS_OFF_LINE,
+  scopeShown,
+  subagentsOnLines,
+  type SubagentsShown,
+} from '../router/subagents-shown';
 
 export type SubagentConfigFlags = {
   /** One directory or several: the limited scope. */
@@ -29,29 +34,10 @@ export type SubagentConfigFlags = {
   acceptWindowsShellAccess?: boolean;
 };
 
+const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
+
 const NATIVE_WINDOWS_DISCLOSURE =
   'The Windows DeepSeek worker runs under the dedicated standard account with Claude’s native permissions and without its shell sandbox. Shell tools can reach files and networks available to that Windows account. Tenjin and DeepSeek can receive instructions and tool results from those resources. Exa can receive search queries and public page addresses. Use a separate shared Claude profile and keep wallet, login and spend data under the controller account.';
-
-/** The page the setup question and each turn-on send a person to for the full terms. */
-export const SUBAGENT_DETAILS_URL =
-  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md';
-
-/**
- * THE ONE SHORT TERMS TEXT, printed after `tenjin config subagents on` and after "Turn on"
- * in setup. It names every recipient the consent record names and the `~/.claude` read.
- * The full terms are the guide and the `disclosure` field of `on --json`.
- */
-export const SUBAGENT_TERMS: readonly string[] = [
-  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs up to $0.003 an offer, also when Claude declines it.',
-  'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results. Web searches, and the address of a public page the worker could not fetch, go to Exa.',
-  'In ~/.claude, Claude Code loads your CLAUDE.md, skills and plugins as the worker’s instructions. The worker’s file tools can read the session transcripts, prompt history and settings there, and what they read can reach DeepSeek.',
-  `Details: ${SUBAGENT_DETAILS_URL}`,
-];
-
-const OFF_HINT = 'Run `tenjin config subagents off` to turn them off.';
-const ON_HINT = 'Run `tenjin config subagents on` to turn them on.';
-/** After `off`, and after "Keep off" in setup. */
-export const SUBAGENTS_OFF_LINE = '○ DeepSeek subagents are off. No new jobs will start.';
 
 /**
  * Why a call got no offer, in plain words. The code and its detail stay in `--json`; a
@@ -143,94 +129,6 @@ function whyLines(entries: readonly NoOffer[]): string[] {
   return entries.map(
     (entry) => `  ${whyTime(entry.at)}  ${tool(entry).padEnd(width)}  ${whyReason(entry)}`,
   );
-}
-
-/**
- * THE SCOPE IN PLAIN WORDS, the same in the status, after each `on` and in `tenjin status`:
- * every workspace, or the listed directories. A listed directory includes its subfolders.
- */
-export function scopeWords(directories: readonly string[] | null, home = homedir()): string {
-  if (!directories) return 'Every workspace';
-  const shown = directories.map((path) => tilde(path, home)).join(', ');
-  return `${shown} and ${directories.length === 1 ? 'its' : 'their'} subfolders`;
-}
-const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
-
-/** What a turn-on or the status shows: the scope, a change of it, and the cap in force. */
-export type SubagentsShown = {
-  directories: readonly string[] | null;
-  /** The scope this turn-on replaced, where it narrowed or widened a saved consent. */
-  was?: readonly string[] | 'every-workspace';
-  perCall: bigint;
-  /** The ceiling named with `--max-job`. */
-  named?: bigint;
-  /** Whether a daily budget is set. */
-  daily: boolean;
-  routerOrigin: string;
-};
-
-/** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
-function costWords({ perCall, named, daily }: SubagentsShown): string {
-  const cap =
-    named === undefined
-      ? `Up to ${usd(perCall)} a job (your per-call limit)`
-      : named < perCall
-        ? `Up to ${usd(named)} a job (your --max-job)`
-        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it)`;
-  return daily ? `${cap} · your daily budget applies` : cap;
-}
-
-const ROW_LABEL = 9;
-const row = (label: string, value: string) => `  ${label.padEnd(ROW_LABEL)}${value}`;
-
-/** The scope row's words: the scope, and the one a turn-on replaced when it changed it. */
-function scopeShown({ directories, was }: SubagentsShown, home = homedir()): string {
-  const before =
-    was === undefined
-      ? ''
-      : was === 'every-workspace'
-        ? ' (was every workspace)'
-        : ` (was ${was.map((path) => tilde(path, home)).join(', ')} only)`;
-  return scopeWords(directories, home) + before;
-}
-
-/**
- * THE ON BLOCK, laid out as `tenjin status` is: the header, the scope and cost rows, the
- * short terms after a turn-on, and how to turn it off. `tenjin config subagents`, its `on`
- * and the setup receipt after "Turn on" all print this, so there is one layout and one terms text.
- */
-export function subagentsOnLines(
-  ctx: CommandContext,
-  shown: SubagentsShown,
-  options: { terms?: boolean; notes?: readonly string[] } = {},
-): string[] {
-  return [
-    `${paint(ctx.io, 'green', '●')} DeepSeek subagents are on`,
-    '',
-    row('Scope', scopeShown(shown)),
-    row('Cost', costWords(shown)),
-    // The router is said only when it is not Tenjin's own.
-    ...(shown.routerOrigin === 'https://tenjin.sh' ? [] : [row('Router', shown.routerOrigin)]),
-    ...(options.terms ? ['', ...SUBAGENT_TERMS] : []),
-    ...(options.notes?.length ? ['', ...options.notes] : []),
-    '',
-    OFF_HINT,
-  ];
-}
-
-/** The `Subagents` row of `tenjin status`: on with its scope, or off. */
-export function subagentsStatusValue(config: PartialConfig): string {
-  if (config.router?.subagents !== true) return 'Off';
-  const consent = modelConsentSchema.safeParse(config.router?.subagentConsent);
-  if (!consent.success) return 'On, but no consent is saved';
-  const directories = namedDirectories(consent.data);
-  return `On · ${
-    !directories
-      ? 'every workspace'
-      : directories.length === 1
-        ? scopeWords(directories)
-        : `${directories.length} directories`
-  }`;
 }
 
 /** Read only: whether DeepSeek subagents are on, their scope and the cap in force. */
