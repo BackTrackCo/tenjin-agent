@@ -92,7 +92,7 @@ it('keeps provider, aliases and the native auto classifier inside the disposable
     CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '838860',
     // The most the bridge and the router take; Claude Code asks 32,000 unless told.
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: '65536',
     // Failure caught: a worker's first turn waiting on the slowest MCP server it starts
@@ -147,7 +147,7 @@ it('pins the native settings flag layer and clears inherited provider credential
     ANTHROPIC_MODEL: 'deepseek-flash[1m]',
     CLAUDE_CODE_AUTO_MODE_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '838860',
     // In the flag layer, above a wait the person's settings env may set.
     CLAUDE_CODE_MCP_STARTUP_WAIT_MS: '0',
     CLAUDE_CODE_USE_BEDROCK: '',

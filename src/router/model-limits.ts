@@ -22,6 +22,25 @@ export function offeredOutputTokens(decision: Record<string, unknown>): number |
     ? Math.min(offered, MODEL_OUTPUT_TOKENS_MAX)
     : undefined;
 }
+/** The context of the DeepSeek model a worker runs on. */
+export const MODEL_CONTEXT_TOKENS = 1_048_576;
+/** The room the DeepSeek harness leaves above its compaction trigger for a request's own overhead. */
+const COMPACT_HEADROOM_TOKENS = 65_536;
+/**
+ * WHERE A WORKER COMPACTS ITS CONVERSATION, as the DeepSeek harness's `compaction-basic`
+ * does at its defaults (read in its source, `config.ts`): `floor(min(0.8 * window, window -
+ * reply cap - 65,536 headroom))`, with the reply cap of the job's own calls. 838,860 at
+ * 65,536 (production today), 727,040 at 256,000. A fixed value leaves a reply that is
+ * allowed to be longer without room: 786,432 and a 256,000 reply is 1,042,432 of 1,048,576.
+ */
+export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): number {
+  return Math.floor(
+    Math.min(
+      MODEL_CONTEXT_TOKENS * 0.8,
+      MODEL_CONTEXT_TOKENS - outputCap - COMPACT_HEADROOM_TOKENS,
+    ),
+  );
+}
 /**
  * HOW LONG THE CLIENT WAITS FOR A PAID MODEL CALL'S ANSWER: never less than the router
  * allows it. The router's total deadline for one call is 540 s on the next server (its idle

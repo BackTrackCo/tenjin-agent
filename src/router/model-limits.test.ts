@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import {
+  compactWindowTokens,
   fittingOutputTokens,
   offeredOutputTokens,
   MODEL_MINIMUM_CALL_ATOMIC,
@@ -56,4 +57,15 @@ it('steps the output cap down to the largest one whose reserve fits what a job h
   expect(fittingOutputTokens(bytes, 256_000, 1_000n)).toBe(65_536);
   // A call that asks no more than 65,536 is never changed.
   expect(fittingOutputTokens(bytes, 32_000, 1_000n)).toBe(32_000);
+});
+
+// The DeepSeek harness compacts at floor(min(0.8 * window, window - reply cap - 65,536)). A fixed
+// 786,432 left a 256,000 reply 6,144 tokens of the 1,048,576 context.
+it('compacts where the DeepSeek harness does for the reply cap of the job', () => {
+  expect(compactWindowTokens(65_536)).toBe(838_860);
+  expect(compactWindowTokens(256_000)).toBe(727_040);
+  expect(compactWindowTokens()).toBe(compactWindowTokens(MODEL_OUTPUT_TOKENS));
+  // A reply and the headroom always fit under the trigger's context.
+  for (const cap of [65_536, 128_000, 256_000])
+    expect(compactWindowTokens(cap) + cap).toBeLessThanOrEqual(1_048_576 - 65_536);
 });

@@ -42,6 +42,7 @@ import { CLAUDE_TENJIN_TOOLS } from './names';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
   MODEL_NATIVE_TEXT_BYTES,
+  compactWindowTokens,
   MODEL_OUTPUT_TOKENS,
   offeredOutputTokens,
 } from './model-limits';
@@ -55,7 +56,6 @@ import {
   claudeManagedProviderCompatible,
   claudeMcpProviderCompatible,
   claudeWorkerAuthCompatible,
-  CLAUDE_DEEPSEEK_COMPACT_WINDOW,
   CLAUDE_DEEPSEEK_WORKER_MODEL,
   CLAUDE_WORKER_THINKING_ENV,
   type ClaudeWorkerPermissionMode,
@@ -824,7 +824,7 @@ async function runQualifiedWorker(
   const outputCap = offeredOutputTokens(job.decision);
   const diagnostics = new WorkerDiagnosticsRecord(
     job.root,
-    CLAUDE_DEEPSEEK_COMPACT_WINDOW,
+    compactWindowTokens(outputCap),
     outputCap ?? MODEL_OUTPUT_TOKENS,
   );
   if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
@@ -844,7 +844,12 @@ async function runQualifiedWorker(
     });
     const address = bridge.address();
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
-    const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
+    const env = claudeDeepSeekWorkerEnv(
+      process.env,
+      `http://127.0.0.1:${address.port}`,
+      token,
+      outputCap,
+    );
     const { resolved, disclosure } = await assertCurrentWorkspace();
     const privatePaths = await claudeWorkerPrivatePaths(
       options.dataDir,
@@ -953,7 +958,11 @@ async function runQualifiedWorker(
             : {}),
           ...(!binary.windows ? { apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper() } : {}),
           env: {
-            ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
+            ...claudeDeepSeekWorkerSettingsEnv(
+              `http://127.0.0.1:${address.port}`,
+              token,
+              outputCap,
+            ),
             ...CLAUDE_WORKER_THINKING_ENV,
             // Above a GitHub token in the person's settings env, which Claude Code would
             // otherwise hand the worker's commands in place of the job's own, or of none.

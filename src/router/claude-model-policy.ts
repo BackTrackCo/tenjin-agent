@@ -2,7 +2,7 @@ import { basename, resolve } from 'node:path';
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { isRecord } from '../lib/guards';
 import { MODEL_WORKER_CREDENTIAL_KEYS } from './model-worker-privacy';
-import { MODEL_NATIVE_TEXT_BYTES, MODEL_OUTPUT_TOKENS } from './model-limits';
+import { compactWindowTokens, MODEL_NATIVE_TEXT_BYTES, MODEL_OUTPUT_TOKENS } from './model-limits';
 
 export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
 // Claude strips this native context hint before calling the fixed Flash provider.
@@ -119,10 +119,11 @@ export function claudeDeepSeekWorkerEnv(
   parent: NodeJS.ProcessEnv,
   baseUrl: string,
   token: string,
+  outputCap?: number,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...parent,
-    ...claudeDeepSeekWorkerSettingsEnv(baseUrl, token),
+    ...claudeDeepSeekWorkerSettingsEnv(baseUrl, token, outputCap),
   };
   for (const key of [...CLEARED_ENV, ...Object.keys(CLAUDE_WORKER_THINKING_ENV)])
     env[key] = undefined;
@@ -131,12 +132,11 @@ export function claudeDeepSeekWorkerEnv(
 
 /** The SDK flag layer outranks user/project/local settings, but never managed policy.
  * Empty values must survive JSON serialization to clear lower-tier credentials. */
-/** DeepSeek's recommended compaction window for its 1M context. */
-export const CLAUDE_DEEPSEEK_COMPACT_WINDOW = 786_432;
-
 export function claudeDeepSeekWorkerSettingsEnv(
   baseUrl: string,
   token: string,
+  /** The reply cap of the job's own model calls: where its compaction triggers follows it. */
+  outputCap?: number,
 ): Record<string, string> {
   return {
     ...Object.fromEntries(CLEARED_ENV.map((key) => [key, ''])),
@@ -151,7 +151,7 @@ export function claudeDeepSeekWorkerSettingsEnv(
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(CLAUDE_DEEPSEEK_COMPACT_WINDOW),
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindowTokens(outputCap)),
     // Claude Code asks 32,000 by default; it clamps a larger value to 128,000.
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(MODEL_OUTPUT_TOKENS),
     // Native's explicit false disable flag otherwise forces memory on ahead of settings.

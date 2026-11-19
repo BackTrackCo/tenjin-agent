@@ -565,7 +565,7 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
   expect(given(call.options).settings).toMatchObject({
     autoMemoryEnabled: false,
     apiKeyHelper: expect.any(String),
-    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '838860', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   });
   // Thinking stays on above the person's own settings: `alwaysThinkingEnabled: false`,
   // or `MAX_THINKING_TOKENS=0` in their settings env, sent each worker turn without it.
@@ -913,11 +913,11 @@ it('makes no prompt read ahead of the scan when the checks that stand before the
 // Operator ruling 2026-11-18: a worker asks for 256,000 output tokens of a router whose
 // offer says it accepts them. Its Claude Code is told 65,536, so the bridge sets the cap.
 it.each([
-  ['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000],
-  ['an offer that names no cap', {}, 65_536],
+  ['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000, 727_040],
+  ['an offer that names no cap', {}, 65_536, 838_860],
 ] as const)(
   "asks the job's router for the output cap of %s on a worker's turn, and records it",
-  async (_name, offered, cap) => {
+  async (_name, offered, cap, window) => {
     const messages = vi.fn(
       async (
         _job: unknown,
@@ -1002,6 +1002,15 @@ it.each([
       // The job's cap, and the cap each call asked for (less when the ceiling ran short).
       expect(record.settings.outputCap).toBe(cap);
       expect(record.calls).toMatchObject([{ outputCap: cap }]);
+      // Compaction triggers where the DeepSeek harness's does for that cap, in the child's
+      // process env and in its flag settings alike.
+      expect(record.settings.compactWindow).toBe(window);
+      const started = vi.mocked(query).mock.calls[0]![0];
+      expect(started.options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(window));
+      expect(
+        (given(started.options).settings as { env: Record<string, string> }).env
+          .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+      ).toBe(String(window));
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -3371,7 +3380,7 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
   expect(toolCall).toHaveBeenCalledWith(job, 'exa-contents', 1000n, expect.any(Function));
   expect(diagnostics).toMatchObject({
     root: job.root,
-    settings: { compactWindow: 786_432, maxTurns: null },
+    settings: { compactWindow: 838_860, maxTurns: null },
     stop: { subtype: 'success' },
     phases: expect.objectContaining({
       childSpawned: expect.any(Number),
