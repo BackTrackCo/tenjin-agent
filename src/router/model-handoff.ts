@@ -19,7 +19,6 @@ import type { ModelJob } from './model-job';
 import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
-import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { RouteSkipped } from './decision';
 import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { ModelConversationStore } from './model-conversations';
@@ -78,6 +77,11 @@ export const modelOfferSchema = z.object({
    *  quote. A router that does not say so counts after the signature. */
   callLimit: callLimitSchema,
 });
+/** What a job's routing call was authorized to charge, as this client recorded it. */
+function savedAuthorized(decision: Record<string, unknown>): bigint {
+  const value = decision.routingAuthorizedAtomic;
+  return typeof value === 'string' && /^\d{1,30}$/.test(value) ? BigInt(value) : 0n;
+}
 export interface ModelSession {
   sessionId: string;
   turnId: string;
@@ -665,6 +669,8 @@ export class ModelHandoff {
           ? 'job_cap_lowered'
           : null;
     let raw: unknown;
+    // What the routing call's own payment could charge, as this client measured it.
+    let authorizedAtomic: bigint;
     // What the router's 402 stated for this call, and the most the person's own job cap leaves
     // for it beside one model call: the fee ceiling is the tool router's, with no cap of its own.
     const capAtomic =
@@ -693,7 +699,7 @@ export class ModelHandoff {
       if (timing) timing.marks.routeSent = Date.now();
       const answered =
         job.state === 'offered'
-          ? { json: job.decision, authorizedAtomic: 0n }
+          ? { json: job.decision, authorizedAtomic: savedAuthorized(job.decision) }
           : await transport.route(
               input,
               signal,
@@ -723,6 +729,7 @@ export class ModelHandoff {
               limitAtomic,
             );
       raw = answered.json;
+      authorizedAtomic = answered.authorizedAtomic;
       if (timing) timing.marks.routeAnswered = Date.now();
       signal?.throwIfAborted();
     } catch (error) {
@@ -738,7 +745,7 @@ export class ModelHandoff {
     if (
       !parsed.success ||
       parsed.data.jobId !== job.id ||
-      BigInt(parsed.data.routingFeeAtomic) > MODEL_ROUTING_FEE_CEILING_ATOMIC
+      BigInt(parsed.data.routingFeeAtomic) > authorizedAtomic
     ) {
       // The server's own answer that the work stays native names its reason as a code.
       const declined = z.object({ action: z.literal('native'), reason: z.string() }).safeParse(raw);
@@ -755,6 +762,8 @@ export class ModelHandoff {
     if (!consent || changed) return native(changed ?? 'no_consent');
     await this.store.decided(job.id, {
       ...parsed.data,
+      // Measured here, never taken from the offer: the job's budget starts from it.
+      routingAuthorizedAtomic: authorizedAtomic.toString(),
       routerOrigin: transport.origin,
       ...(instructions ? { instructionContext: instructions } : {}),
       ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),

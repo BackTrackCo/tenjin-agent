@@ -41,6 +41,9 @@ function answering(route: (...args: never[]) => unknown) {
     };
   };
 }
+const authorize = (route: unknown, atomic: bigint) => {
+  (route as { authorized?: bigint }).authorized = atomic;
+};
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -960,6 +963,60 @@ async function routedFixture() {
   }));
   return { ...f, session: { ...f.session, transcript } };
 }
+
+it.each(['3000', '8100', '250000'])(
+  'offers a job whose routing fee is %s when the call authorized that much, and records the authorization',
+  async (fee) => {
+    const f = await routedFixture();
+    f.route.mockImplementation(async (input: { jobId: string }) => ({
+      ...offer,
+      jobId: input.jobId,
+      routingFeeAtomic: fee,
+    }));
+    const made = await f.model.capture(f.session, 'fee-call', { prompt: 'Read the fixture.' });
+    expect(made).toMatchObject({ action: 'offer', routingFeeAtomic: fee });
+    const job = await f.model.store.owned(offerId(made), 'root');
+    expect(job?.decision).toMatchObject({ routingAuthorizedAtomic: fee });
+  },
+);
+
+it.each([
+  // The router charged more than the call authorized.
+  ['8100', 3000n],
+  // Nothing was signed, so no fee can be charged.
+  ['3000', 0n],
+])(
+  'refuses an offer with the routing fee %s over what the call authorized (%s)',
+  async (fee, authorized) => {
+    const f = await routedFixture();
+    authorize(f.route, authorized);
+    f.route.mockImplementation(async (input: { jobId: string }) => ({
+      ...offer,
+      jobId: input.jobId,
+      routingFeeAtomic: fee,
+    }));
+    expect(
+      await f.model.capture(f.session, 'over-call', { prompt: 'Read the fixture.' }),
+    ).toMatchObject({
+      action: 'native',
+    });
+    expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'invalid_offer' });
+  },
+);
+
+it('takes the authorization from the call, never from a field the offer carries', async () => {
+  const f = await routedFixture();
+  authorize(f.route, 3000n);
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+    routingAuthorizedAtomic: '250000',
+  }));
+  const made = await f.model.capture(f.session, 'forged', { prompt: 'Read the fixture.' });
+  expect((await f.model.store.owned(offerId(made), 'root'))?.decision).toMatchObject({
+    routingAuthorizedAtomic: '3000',
+  });
+});
 
 it('offers a call made while another job of the session runs, in a turn no prompt started', async () => {
   const f = await routedFixture();
