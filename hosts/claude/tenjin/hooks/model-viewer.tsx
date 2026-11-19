@@ -1535,6 +1535,16 @@ function allowedAccept(input: unknown, ownCall: boolean): boolean {
  * after a reload.
  */
 const BACKGROUND_RESULT = 'DeepSeek background worker';
+/**
+ * Results whose prompt the host did not take, by offer, with the task's title. The host
+ * refuses a prompt submitted while a `tool.call` hook of this plugin holds the turn (a
+ * batch's accept call waiting for its foreground workers): it is sent again when that
+ * call has returned, and when the main loop's turn completes.
+ */
+const undelivered = new Map<string, string>();
+function deliverLater($: Dollar): void {
+  for (const [offerId, title] of [...undelivered]) void deliverBackground($, offerId, title);
+}
 /** That prompt's first line, as its row reads it, bare or under the host's frame for a plugin's prompt. */
 const BACKGROUND_ROW =
   /DeepSeek background worker "[^"\n]{0,80}" ended \(offer [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\)\./i;
@@ -1562,10 +1572,15 @@ async function deliverBackground($: Dollar, offerId: string, title: string): Pro
         (handback ??
           '{"status":"unknown","nextStep":"Its result could not be read here. Accept this offer again with subagent({offer_id}) to read the stored result; that starts no worker."}'),
     });
+    undelivered.delete(offerId);
     const current = (await $.state.get(ref)).value;
     if (current) await $.state.set(ref, { ...current, delivered: true });
   } catch {
-    /* The stored result stays: accepting the offer again returns it. */
+    // Sent again from a later event. The stored result stays too: accepting the offer
+    // again returns it.
+    undelivered.delete(offerId);
+    undelivered.set(offerId, title);
+    if (undelivered.size > 64) undelivered.delete(undelivered.keys().next().value!);
   } finally {
     delivering.delete(offerId);
   }
@@ -1585,7 +1600,6 @@ async function watchAccept(
     prepared = false,
     viewerStarted = false,
     background = false,
-    delivers = false,
     stopped = false,
     observed = false,
     startedAt = 0;
@@ -1615,7 +1629,10 @@ async function watchAccept(
         // Followed here no more once its end is written, so no drawing takes it for a
         // row that a reload left behind.
         if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
-        if (ended && delivers) {
+        // A background worker's result goes to the parent now, whichever came first: its
+        // end, or its accept call's answer (a batch holds that until its foreground
+        // workers end). `deliverBackground` sends nothing for a foreground offer.
+        if (ended) {
           const title = (await $.state.get({ ...WORKERS, id: offerId }).catch(() => undefined))
             ?.value?.title;
           void deliverBackground($, offerId, title ?? 'subagent');
@@ -1749,9 +1766,8 @@ async function watchAccept(
       if (timer) background = true;
       else stop();
     },
-    /** A background call's worker: followed to its end, and its result handed to the parent then. */
+    /** A background call's worker: followed to its end, where its result is handed to the parent. */
     follow: () => {
-      delivers = true;
       if (timer) background = true;
       else stop();
     },
@@ -1964,6 +1980,13 @@ export function registerModelViewer(on: On): void {
         else watcher.stop(endedFrom(own));
       }
     }
+    // A background result that waited for this call to return goes out once it has.
+    if (undelivered.size)
+      try {
+        $.clock.after(0, () => deliverLater($));
+      } catch {
+        /* The turn's end sends it. */
+      }
     return outcome;
   });
   on('turn.step', async function* ($, e, next) {
@@ -2022,6 +2045,7 @@ export function registerModelViewer(on: On): void {
   on('turn.complete', async ($, e, next) => {
     // The main loop's turn alone: a viewer's turn that ends meanwhile says nothing of it.
     if (!e.agentId) sayHeld($);
+    if (!e.agentId && undelivered.size) deliverLater($);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);

@@ -3328,6 +3328,65 @@ test("a background worker's row reads as a native background agent's, and its re
   }
 });
 
+// Greptile on 7c1d9550: a batch call holds until its foreground workers end, so a background
+// worker of the batch that ended first was stopped with nothing sent, and the batch's late
+// `started` answer for it sent nothing either.
+test('a background worker of a mixed batch that ends before the batch call returns still hands its result to the parent, once', async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  f.state.offer = OFFER;
+  await remember($, INPUT);
+  f.state.offer = OFFER2;
+  await remember($, { ...INPUT2, run_in_background: true });
+  f.state.offer = OFFER;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const answer = JSON.stringify({
+    results: [
+      { offer_id: OFFER, outcome: { status: 'completed', elapsedMs: 9000, result: 'foreground' } },
+      { offer_id: OFFER2, outcome: { status: 'started', background: true, offer_id: OFFER2 } },
+    ],
+  });
+  f.state.work = async () => {
+    await held;
+    return { result: answer, text: answer };
+  };
+  const batch = $.tool.call({
+    tool: ACCEPT,
+    offer_ids: [OFFER, OFFER2],
+    tool_use_id: 'mixed_batch',
+  });
+  await f.clock.settle();
+  await f.clock.advance(2000);
+  // The background worker ends while the batch call still waits for the foreground one.
+  const handback = JSON.stringify({ status: 'completed', elapsedMs: 2000, result: 'background' });
+  f.state.per[OFFER2] = { phase: 'completed' };
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  // Its stored result is read at its end. The host takes no prompt while this plugin's
+  // hook holds the batch call, so it goes out when that call has returned.
+  expect(f.state.handbackReads).toBe(1);
+  expect(submitted).toEqual([]);
+  // The batch's own answer, which names that worker as started, sends nothing more.
+  f.state.ended = undefined;
+  release();
+  expect((await batch).text).toBe(answer);
+  await f.clock.settle();
+  await f.clock.advance(5000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain(`ended (offer ${OFFER2}).`);
+  expect(submitted[0]!.endsWith(handback)).toBe(true);
+});
+
 test("a foreground worker's result is its accept call's own answer, and nothing is sent to the parent besides", async ($, on) => {
   const f = setup($, on);
   const submitted: string[] = [];
