@@ -67,6 +67,8 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     captures: [] as { input: Record<string, unknown>; tool: string }[],
     nativeCalls: [] as unknown[],
     keepNative: false,
+    /** Set: the CLI's answer to a held call, in place of an offer. */
+    captureAnswer: undefined as string | undefined,
     accepted: 0,
     snapshot: undefined as TenjinModelViewerState | undefined,
     liveFile: true,
@@ -284,6 +286,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
         const native = JSON.stringify({ action: 'native', settled: state.offer });
         return { result: native, text: native };
       }
+      if (state.captureAnswer) return { result: state.captureAnswer, text: state.captureAnswer };
       const offered = JSON.stringify({
         action: 'offer',
         started: false,
@@ -1078,6 +1081,81 @@ test('a viewer stopped from the agent list cancels its worker with the reason, a
   release();
   await running;
   await f.clock.settle();
+});
+
+/** A follow-up to a finished worker, sent as one call that the CLI started in the background. */
+async function sendFollowUp($: Engine, f: ReturnType<typeof setup>) {
+  f.state.captureAnswer = JSON.stringify({
+    action: 'continued',
+    offer_id: f.state.offer,
+    worker_handle: WORKER,
+    message: `The DeepSeek worker ${WORKER} continues with your message.`,
+  });
+  let release: () => void = () => undefined;
+  f.state.spawnBlocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const sent = $.tool.call({
+    tool: 'SendMessage',
+    tool_use_id: 'follow_up',
+    to: WORKER,
+    message: 'Continue with the moved head.',
+  });
+  await f.clock.settle();
+  const nativeId = 'native-viewer-' + f.state.calls;
+  await $.classic.SubagentStart({ agent_id: nativeId, agent_type: TYPE });
+  const stream = $.turn.step({
+    agentId: nativeId,
+    index: 0,
+    turnId: 'viewer-turn',
+    model: 'inherit',
+    messageCount: 0,
+  });
+  void (async () => {
+    while (!(await stream.next()).done);
+  })();
+  await f.clock.settle();
+  release();
+  await f.clock.settle();
+  return { sent, nativeId };
+}
+
+// Failure caught: a one-call follow-up ran in the background with no agent the person could
+// see or stop (the accept hook never saw it), though it kept changing files and spending the
+// job's allowance. It has the row, the activity and the stop control an accepted job has.
+test('a one-call follow-up to a finished worker has its own viewer row, which the list can stop', async ($, on) => {
+  const f = setup($, on);
+  f.state.liveFile = true;
+  const { sent, nativeId } = await sendFollowUp($, f);
+  expect((await sent).result).toMatchObject({ success: true });
+  // The agent-list entry exists, as the tenjin viewer of the follow-up's job.
+  expect(f.state.agents).toHaveLength(1);
+  expect(f.state.agents[0]).toMatchObject({ type: TYPE, spawnedBy: 'tenjin' });
+  // The turn ends before the list marks the agent stopped; stopping it from the list then
+  // ends the follow-up, with the plugin's own reason.
+  await complete($, nativeId);
+  expect(f.state.cancellations).toEqual([]);
+  f.state.agents[0]!.status = 'killed';
+  await f.clock.advance(1500);
+  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'agent_stopped' }]);
+  await f.clock.settle();
+});
+
+// A parent's own cancel ends the follow-up's row too, and its result is handed over once.
+test('a parent cancel ends a one-call follow-up and its row, and its result is handed over once', async ($, on) => {
+  const f = setup($, on);
+  f.state.liveFile = true;
+  f.state.handback = JSON.stringify({ status: 'cancelled', endedBy: 'parent_cancel' });
+  const { sent } = await sendFollowUp($, f);
+  await sent;
+  const cancelled = await $.tool.call({ tool: ACCEPT, cancel: OFFER });
+  expect(JSON.stringify(cancelled.result)).toContain('cancelled');
+  expect(f.state.handbackReads).toBe(0);
+  f.state.phase = 'cancelled';
+  await f.clock.advance(5000);
+  await f.clock.settle();
+  // The follow-up was followed to its end: its stored result was read to hand over.
+  expect(f.state.handbackReads).toBeGreaterThan(0);
 });
 
 // Eight minutes of the row's one-second ticks: longer than the kit's default time for a test.

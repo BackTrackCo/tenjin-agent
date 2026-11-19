@@ -17,7 +17,7 @@ import {
   raisedByThisPlugin,
   registerModelViewer,
   rememberModelOffer,
-  followContinuation,
+  watchContinuation,
   sessionLives,
   translateViewerContinuation,
   VIEWER_TYPE,
@@ -216,8 +216,10 @@ export const register: Register = (on) => {
           await rememberModelOffer($, offerId, { ...input, run_in_background: true }).catch(
             () => undefined,
           );
-          // The result is the parent's once the worker ends, by the plugin's own prompt.
-          $.clock.after(0, () => void followContinuation($, offerId, 'follow-up'));
+          // THE FOLLOW-UP IS AN ACCEPTED JOB, so it has what one has: its agent-list entry with
+          // the activity and the stop control, tied to the calling agent, and its result handed
+          // over once it ends. The accept hook does not see it, so it is set up here.
+          await watchContinuation($, offerId, e.agentId).catch(() => undefined);
         }
         return { result: { success: true, message: offer.message } };
       }

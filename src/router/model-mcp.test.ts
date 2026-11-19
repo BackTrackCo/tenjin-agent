@@ -1175,6 +1175,42 @@ it('runs a follow-up to a finished worker in one call from the session that acce
   }
 });
 
+// Failure caught: a one-call follow-up runs with no accept call of the parent's to end, so a
+// cancel by its offer id (what the agent list's stop and a parent cancel send) must end it:
+// the worker's signal aborts, and it ends cancelled with nothing signed again.
+it('ends a one-call follow-up when it is cancelled by its offer id', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const first = await f.call({ offer_id: f.job.id });
+    expect(first.status).toBe('completed');
+    let aborted = false;
+    worker.run.mockImplementation(
+      (_job, options) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            aborted = true;
+            reject(options.signal.reason);
+          });
+        }),
+    );
+    f.session.turnId = 'followup-turn';
+    const sent = await f.capture(first.worker_handle);
+    expect(sent.action).toBe('continued');
+    await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(2));
+    expect(aborted).toBe(false);
+    expect(await f.call({ cancel: sent.offer_id, reason: 'agent_stopped' })).toEqual({
+      status: 'cancelled',
+    });
+    await vi.waitFor(() => expect(aborted).toBe(true));
+    await vi.waitFor(async () =>
+      expect((await f.call({ offer_id: sent.offer_id })).status).toBe('cancelled'),
+    );
+    expect(worker.run).toHaveBeenCalledTimes(2);
+  } finally {
+    await f.close();
+  }
+});
+
 it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
   const f = await ownedClaudeFixture();
   let release!: () => void;

@@ -1009,9 +1009,19 @@ async function endedNow(
  * before a reload, which stops this module's timers, or a resume. It asks the CLI
  * how the job stands: ended, its end line is written; running, it is followed again.
  */
-/** A follow-up the CLI started in the background: followed to its end, where its result is handed to the parent. */
-export async function followContinuation($: Dollar, offerId: string, title: string): Promise<void> {
-  await settle($, offerId, title);
+/**
+ * A follow-up the CLI started in the background from one SendMessage: the accept hook never
+ * sees it, so it gets here what an accepted job gets there. Its viewer is spawned (the
+ * agent-list entry, its activity and its stop control, tied to the calling agent), and the
+ * job is followed to its end, where its result is handed to the parent.
+ */
+export async function watchContinuation(
+  $: Dollar,
+  offerId: string,
+  caller: string | undefined,
+): Promise<void> {
+  const watcher = await watchAccept($, offerId, caller, false);
+  watcher.follow();
 }
 async function settle($: Dollar, offerId: string, title: string): Promise<void> {
   if (liveWorkers.has(offerId)) return;
