@@ -86,7 +86,8 @@ On native Windows a worker has no shell sandbox:
 - **While the offer is open.** Claude Code can prepare a local worker. The worker gets its assignment only when the parent accepts. Declining or cancelling the offer, letting it expire, or ending the parent session stops that process.
 - **After acceptance.** Applicable instructions, assignments and tool results reach DeepSeek through Tenjin. A worker's web search queries, and the address of a public page its WebFetch could not fetch, reach Exa (see [Web searches and page reads](#web-searches-and-page-reads)).
 - **Env files are not masked.** A worker reads them as a normal subagent of the session does, and what it reads can reach Tenjin and DeepSeek as written.
-- **Masking.** What remains is masking of secrets in a known token shape; sensitive prose is not guaranteed anonymous.
+- **What is still protected.** Secrets in a known token shape are masked in what a worker forwards, not guaranteed. The job's own bridge and GitHub tokens are masked by value. A worker's commands refuse the credential probes (`security`, `git credential`, `git-credential-*`, `gh auth token` and its relatives) in every mode, and the sandbox and the file tools keep the Tenjin data folder, the wallet and other jobs' temp, GitHub and settings folders closed to it. A limited consent keeps its repository boundary: no offer and no worker for work outside the named directories, and reads and writes stay inside the granted working directories. Sensitive prose is not guaranteed anonymous.
+- **Limit of the limited scope.** A command a worker runs inherits the environment of its session, as a native subagent's does, so a variable exported in your shell can be printed and sent to Tenjin and DeepSeek even when the directory you named holds nothing secret.
 - **Retention.** Server replay content expires after 24 hours. Financial and continuation authorization records persist.
 
 ### Permissions
