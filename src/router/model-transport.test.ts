@@ -13,7 +13,8 @@ import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test
 import { modelChannelScope, modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
-import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
+import { ModelPace } from './model-pace';
+import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
 
 const made: string[] = [];
@@ -28,6 +29,13 @@ function deferred() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+/** Whether a request carries a payment, read without using up the request's body. */
+function signedRequest(input: Parameters<typeof fetch>[0], init?: RequestInit): boolean {
+  return new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).has(
+    'payment-signature',
+  );
 }
 
 function watchPaymentLock() {
@@ -1002,8 +1010,7 @@ it('recovers after a process that died between signing and sending: its lock is 
   let die = true;
   const fetchImpl = f.deps.fetchImpl!;
   f.deps.fetchImpl = async (input, init) => {
-    if (die && new Request(input, init).headers.has('payment-signature'))
-      throw new Error('process died before the send');
+    if (die && signedRequest(input, init)) throw new Error('process died before the send');
     return fetchImpl(input, init);
   };
   const lost = f.make();
@@ -2001,3 +2008,156 @@ it.each(['revoked', 'other router'] as const)(
     expect((await r.read()).charged).toBe(String(3000 + 2000 + 500000));
   },
 );
+
+/** A clock a test drives: a wait records what had been sent when it began, then passes. */
+function pacedBy(sentSoFar: () => number, start = 1_000_000) {
+  const state = { now: start, waits: [] as { ms: number; sent: number }[] };
+  return {
+    state,
+    paceClock: {
+      now: () => state.now,
+      wait: async (ms: number) => {
+        state.waits.push({ ms, sent: sentSoFar() });
+        state.now += ms;
+      },
+    },
+  };
+}
+
+// Production allows a wallet 30 signed model calls per 60 s, and a signed call it refuses
+// for rate ends the job as uncertain. With lanes shared out, two sessions reach that rate.
+it('holds a signed call back until the unadvertised rate has room, counting every transport of the wallet', async () => {
+  const f = await fixture({ quote: '2000', charge: '1000', minDeposit: '900000' });
+  const signal = new AbortController().signal;
+  const paced = pacedBy(() => f.vouchers.length);
+  const sentAt: number[] = [];
+  const real = f.deps.fetchImpl!;
+  f.deps.fetchImpl = async (input, init) => {
+    if (signedRequest(input, init)) sentAt.push(paced.state.now);
+    return real(input, init);
+  };
+  // Two processes' worth of transports for one wallet.
+  const transports = [0, 1].map(
+    () =>
+      new ModelTransport({
+        dataDir: f.dir,
+        baseUrl: BASE,
+        payerDeps: f.deps,
+        paceClock: paced.paceClock,
+      }),
+  );
+  const timings: Record<string, unknown>[] = [];
+  for (let n = 0; n < 34; n++)
+    await transports[n % 2]!.messages(f.job, say(`Call ${n}`), signal, undefined, (timing) =>
+      timings.push({ ...timing }),
+    );
+  // The 30th call waited, signed and unsent, and nothing left during its wait.
+  expect(paced.state.waits[0]).toMatchObject({ sent: 29 });
+  expect(timings.slice(0, 29).every((timing) => timing.paceWaitMs === undefined)).toBe(true);
+  expect(timings[29]!.paceWaitMs).toBeGreaterThan(50_000);
+  expect(f.vouchers.map((voucher) => voucher.status)).toEqual(Array(34).fill(200));
+  // The router's own estimate (the current window plus a share of the one before) would
+  // have let every send through, wherever its windows start against this clock.
+  for (const [index, at] of sentAt.entries())
+    for (let offset = 0; offset < 60_000; offset += 1_000) {
+      const window = (time: number) => Math.floor((time + offset) / 60_000);
+      const before = sentAt.slice(0, index);
+      const current = before.filter((time) => window(time) === window(at)).length;
+      const previous = before.filter((time) => window(time) === window(at) - 1).length;
+      const share = ((at + offset) % 60_000) / 60_000;
+      expect(Math.floor((1 - share) * previous) + current).toBeLessThan(30);
+    }
+});
+
+it('waits before the unpaid quote at the rate an offer advertises, and never between signature and send', async () => {
+  const f = await fixture({ quote: '2000', charge: '1000', minDeposit: '900000' });
+  const job: ModelJob = {
+    ...f.job,
+    decision: { ...f.job.decision, callLimit: { max: 6, windowSeconds: 60 } },
+  };
+  const unpaid = () => f.router.log.filter((line) => line.endsWith(' unpaid')).length;
+  const paced = pacedBy(() => unpaid() * 100 + f.vouchers.length);
+  const transport = new ModelTransport({
+    dataDir: f.dir,
+    baseUrl: BASE,
+    payerDeps: f.deps,
+    paceClock: paced.paceClock,
+  });
+  const timings: Record<string, unknown>[] = [];
+  for (let n = 0; n < 7; n++)
+    await transport.messages(
+      job,
+      say(`Call ${n}`),
+      new AbortController().signal,
+      undefined,
+      (timing) => timings.push({ ...timing }),
+    );
+  // Five calls fit. The sixth waited with five quotes asked and five calls signed: its
+  // own quote had not been asked. No wait began with a quote asked and its call unsigned.
+  expect(paced.state.waits[0]).toMatchObject({ sent: 505 });
+  expect(paced.state.waits.every((wait) => Math.floor(wait.sent / 100) === wait.sent % 100)).toBe(
+    true,
+  );
+  expect(timings[5]!.paceWaitMs).toBeGreaterThan(0);
+  expect(f.vouchers.map((voucher) => voucher.status)).toEqual(Array(7).fill(200));
+});
+
+it("counts a signed routing request in the unadvertised rate's window", async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'model-route-pace-'));
+  made.push(dir);
+  const router = new FakeRouter({ path: '/api/model-router/route' });
+  const transport = new ModelTransport({
+    dataDir: dir,
+    baseUrl: BASE,
+    payerDeps: payerDeps(router, dir, privateKeyToAccount(generatePrivateKey())),
+  });
+  const signal = new AbortController().signal;
+  // The transport counts on the real clock: the test's count reads from just after it.
+  const paced = pacedBy(() => router.paidRequests(), Date.now() + 1_000);
+  const pace = () =>
+    new ModelPace(dir, BASE, paced.paceClock).take(
+      'paid',
+      ['paid', 'route'],
+      { max: 3, windowMs: 60_000 },
+      signal,
+    );
+  expect(await pace()).toBe(0);
+  await transport.route({ schemaVersion: 1 }, signal);
+  expect(router.paidRequests()).toBe(1);
+  // One model call and the routing request: the window of three has no room for a third.
+  expect(await pace()).toBeGreaterThan(0);
+});
+
+it('keeps a signed call the router refuses for rate as uncertain, and never tries or signs it again', async () => {
+  const f = await fixture();
+  const real = f.deps.fetchImpl!;
+  let signed = 0;
+  f.deps.fetchImpl = async (input, init) => {
+    if (!signedRequest(input, init)) return real(input, init);
+    signed++;
+    return Response.json(
+      { error: { code: 'rate_limited', message: 'too many requests' } },
+      { status: 429, headers: { 'retry-after': '7' } },
+    );
+  };
+  f.setRecoveryState('unknown');
+  f.setVoucher('none');
+  const signal = new AbortController().signal;
+  const error = await f
+    .make()
+    .messages(f.job, say('Refused after signing'), signal)
+    .then(
+      () => undefined,
+      (failure: unknown) => failure as ModelCallFailed,
+    );
+  expect(error?.message).toMatch(/uncertain/);
+  expect(error?.detail).toEqual({ cause: 'failed', status: 429 });
+  // Not a call the retry rule takes: nothing says it cost nothing.
+  expect(retryableModelCall(error)).toBe(false);
+  expect(signed).toBe(1);
+  await expect(f.make().messages(f.job, say('Refused after signing'), signal)).rejects.toThrow(
+    'no new authorization sent',
+  );
+  expect(signed).toBe(1);
+  expect((await f.make().summary(f.job)).uncertain).toHaveLength(1);
+});

@@ -36,6 +36,13 @@ import {
 } from './model-worker-control';
 import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
 import type { ModelCallTiming } from './model-worker-diagnostics';
+import {
+  advertisedCallLimit,
+  ModelPace,
+  UNADVERTISED_CALL_LIMIT,
+  type PaceClock,
+  type PaceKind,
+} from './model-pace';
 
 /**
  * How long each try of a run's refund-support question may take. A first accept once got
@@ -171,6 +178,8 @@ class QuoteOverCap extends Error {}
 
 export class ModelTransport {
   private routing: Payer;
+  /** This wallet's count of sends against the router's call rate, shared by every process. */
+  private readonly pace: ModelPace;
   /** Local waiters only. The persisted reservation remains authoritative across transports. */
   private readonly invocations = new Map<string, InFlightInvocation>();
   constructor(
@@ -180,8 +189,11 @@ export class ModelTransport {
       payerDeps: RoutingPayerDeps;
       inferenceSlot?: ModelInferenceSlot;
       inferenceRun?: string;
+      /** The pace's clock and wait: the real ones unless a test drives them. */
+      paceClock?: PaceClock;
     },
   ) {
+    this.pace = new ModelPace(options.dataDir, options.baseUrl, options.paceClock);
     this.routing = new Payer({
       ...options.payerDeps,
       modelLane: {
@@ -314,6 +326,12 @@ export class ModelTransport {
         } catch (cause) {
           throw new LocalSendBlocked(cause);
         }
+        // A router that advertises no call rate counts a signed routing request in the
+        // one window its model calls share: counted here, where it waits for nothing.
+        const headers = new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        );
+        if (headers.has('payment-signature')) await this.pace.note('route');
         const sent = performance.now();
         return fetchFn(input, {
           ...init,
@@ -330,7 +348,7 @@ export class ModelTransport {
           jsonBody: body,
           timeoutMs: 5000,
           blockRedirects: true,
-          ...(signal || beforeSend ? { fetchImpl: guardedFetch } : {}),
+          fetchImpl: guardedFetch,
         },
       );
       signal?.throwIfAborted();
@@ -449,7 +467,7 @@ export class ModelTransport {
     const step = (
       name: Exclude<
         keyof ModelCallTiming,
-        'slot' | 'fetches' | 'requestBytes' | 'laneMoved' | 'waitedOn'
+        'slot' | 'fetches' | 'requestBytes' | 'laneMoved' | 'waitedOn' | 'paceWaitMs'
       >,
     ) => {
       const now = performance.now();
@@ -574,10 +592,29 @@ export class ModelTransport {
     };
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;
+    // THE CALL RATE. A router whose offer says its rate counts a call at this unpaid
+    // quote, so the call waits here for room in the wallet's count. A router that says
+    // nothing counts the signed request, so there the wait comes before that request
+    // leaves (`cachedFetch`), at the rate production has. A WAIT PRECEDES A SEND: after
+    // one, the request passes again every check it passed before it.
+    const advertised = advertisedCallLimit(job.decision);
+    const paced = async (kind: PaceKind) => {
+      const waited = await this.pace.take(
+        kind,
+        advertised ? ['quote'] : ['paid', 'route'],
+        advertised ?? UNADVERTISED_CALL_LIMIT,
+        signal,
+      );
+      if (waited > 0) {
+        timing.paceWaitMs = (timing.paceWaitMs ?? 0) + waited;
+        await assertCanTransmit();
+      }
+    };
     // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
     await assertCanTransmit();
     const wire = JSON.stringify(body);
     timing.requestBytes = Buffer.byteLength(wire);
+    if (advertised) await paced('quote');
     stepFrom = performance.now();
     const challenge = await fetchFn(url, {
       method: 'POST',
@@ -695,6 +732,13 @@ export class ModelTransport {
             await journal.record(inferenceRun, url, signature, signal);
             timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
             await assertCanTransmit();
+          }
+          if (paying && !advertised) {
+            // The signed request waits for room before it leaves: nothing was sent yet,
+            // so a cancel during the wait releases the quote as any local refusal does.
+            step('signMs');
+            await paced('paid');
+            stepFrom = performance.now();
           }
           signal.throwIfAborted();
           init?.signal?.throwIfAborted();

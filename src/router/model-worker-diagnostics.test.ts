@@ -109,6 +109,7 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
         answerMs: 2_900,
         laneMoved: true,
         waitedOn: 'other_process',
+        paceWaitMs: 41_250,
       },
     },
     17_000,
@@ -143,6 +144,7 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
       answerMs: 2_900,
       laneMoved: true,
       waitedOn: 'other_process',
+      paceWaitMs: 41_250,
     },
     { at: 600, live: 1, ms: 15_500, tries: 2, failed: true },
     { at: 18_100, live: 0, gapMs: 2_000, ms: 900, outputTokens: 5, slot: 1, laneWaitMs: 3 },
@@ -157,6 +159,7 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
     laneWaitMs: 12_003,
     signMs: 40,
     answerMs: 2_900,
+    paceWaitMs: 41_250,
     failed: 1,
   });
   expect(phases.lastAnswer).toBe(19_000);

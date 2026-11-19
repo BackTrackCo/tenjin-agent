@@ -38,6 +38,7 @@ import {
   type ModelNativeTool,
   nativeBackground,
 } from './model-continuation';
+import { callLimitSchema } from './model-pace';
 
 /**
  * A follow-up to a worker is not a new routing decision: the worker, its history and its
@@ -67,6 +68,9 @@ export const modelOfferSchema = z.object({
   /** The largest `maxResultBytes` this router honours on a Messages call. A router that
    *  does not say so refuses the field, so none is sent to it. */
   maxResultBytes: z.number().int().positive().optional().catch(undefined),
+  /** The wallet's model-call rate over all its jobs and processes, counted at the unpaid
+   *  quote. A router that does not say so counts after the signature. */
+  callLimit: callLimitSchema,
 });
 export interface ModelSession {
   sessionId: string;

@@ -21,7 +21,9 @@ const whole = (value: unknown, max = MAX_MS): number | undefined =>
 
 /**
  * WHERE ONE MODEL CALL'S TIME WENT inside the transport, in milliseconds: the first budget
- * read (`budgetMs`), the unpaid quote round trip (`quoteMs`), the reservation (`reserveMs`),
+ * read (`budgetMs`), the wait for room in the wallet's call rate (`paceWaitMs`: before the
+ * quote for a router that advertises its rate, before the signed request for one that does
+ * not), the unpaid quote round trip (`quoteMs`), the reservation (`reserveMs`),
  * the wait for a channel's payment lock (`laneWaitMs`; `slot` is the shared lane the call
  * paid on, `laneMoved` says it was the other lane than its worker's own, and `waitedOn`
  * says who held its own channel when every channel it could pay on was held: this process
@@ -48,6 +50,8 @@ export type ModelCallTiming = {
   settleMs?: number;
   fetches?: number;
   requestBytes?: number;
+  /** The wait for room in the wallet's call rate, before the request the router counts. */
+  paceWaitMs?: number;
   /** The call paid on the other shared lane, because another call held its worker's own. */
   laneMoved?: true;
   /** Every channel the call could pay on was held when it came: who held its own. */
@@ -65,6 +69,7 @@ const CALL_TIMES = [
   'bodyMs',
   'drainMs',
   'settleMs',
+  'paceWaitMs',
 ] as const;
 
 /**
