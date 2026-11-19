@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   realpathSync,
   rmSync,
@@ -1036,6 +1037,39 @@ it("replaces the env values of a repository's .claude/settings.json at any depth
   );
   await env.add(join(root, 'apps/new/.claude/settings.json'));
   expect(env.redact('later-value-0x0e')).toBe('[env:LATER_KEY]');
+});
+
+// macOS and Windows volumes ignore case by default: `cat .env` opens a file named `.ENV`, so a
+// scan that took only the lower case left its values unreplaced. On a case-sensitive volume
+// (Linux) `.env` and `.ENV` are two files, and both are env files.
+it('treats .ENV and .Env.local as env files, whether the volume ignores case or not', async () => {
+  const root = await workspace({
+    '.ENV': 'UPPER=upper-value-0x5a5a5a',
+    'apps/web/.Env.local': 'MIXED=mixed-value-0x5b5b5b',
+    '.Claude/Settings.json': JSON.stringify({ env: { CASED: 'cased-settings-0x5e5e5e' } }),
+  });
+  const caseless = existsSync(join(root, '.env'));
+  if (!caseless) writeFileSync(join(root, '.env'), 'LOWER=lower-value-0x5c5c5c');
+  aged();
+  const env = await WorkerEnvSecrets.start([root]);
+  try {
+    expect(env.redact('upper-value-0x5a5a5a mixed-value-0x5b5b5b cased-settings-0x5e5e5e')).toBe(
+      '[env:UPPER] [env:MIXED] [env:CASED]',
+    );
+    if (!caseless) expect(env.redact('lower-value-0x5c5c5c')).toBe('[env:LOWER]');
+    // One the worker opens with the Read tool, by any spelling.
+    writeFileSync(join(root, 'apps', '.ENV.test'), 'OPENED=opened-value-0x5d5d5d');
+    await env.add(join(root, 'apps', '.ENV.test'));
+    expect(env.redact('opened-value-0x5d5d5d')).toBe('[env:OPENED]');
+    if (env.watching) {
+      // And one made during the job, before the next send.
+      writeFileSync(join(root, 'apps', 'web', '.ENV.production'), 'MADE=made-value-0x5f5f5f');
+      await env.refresh();
+      expect(env.redact('made-value-0x5f5f5f')).toBe('[env:MADE]');
+    }
+  } finally {
+    env.close();
+  }
 });
 
 it('lists the forms of a value it replaces, never a plain one', () => {

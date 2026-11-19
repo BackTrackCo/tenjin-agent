@@ -626,6 +626,11 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
 
 /** A rule for a path inside a `node_modules` or `.git` folder, which the env scan skips. */
 const SKIPPED_FOLDER = /\/(node_modules|\.git)\//;
+/**
+ * An env file's name in a deny rule, in any case: `.ENV` and `.Env.local` are env files too,
+ * and a case-sensitive matcher (Linux) would pass them by under `.env*`.
+ */
+const ENV = '.[eE][nN][vV]*';
 
 it('keeps native sibling working directories distinct from read-only and shell-write exceptions', async () => {
   const workspace = {
@@ -675,19 +680,20 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   expect(
     deny.filter(
       (rule) =>
-        rule.startsWith('Read(//sibling') && rule.includes('.env') && !SKIPPED_FOLDER.test(rule),
+        rule.startsWith('Read(//sibling') && rule.includes(ENV) && !SKIPPED_FOLDER.test(rule),
     ),
   ).toEqual([]);
   expect(deny).toEqual(
-    expect.arrayContaining(['Read(//read-only/**/.env*)', 'Write(//shell-write/**/.env*)']),
+    expect.arrayContaining([`Read(//read-only/**/${ENV})`, `Write(//shell-write/**/${ENV})`]),
   );
   const denyRead = given(call.options).sandbox?.filesystem?.denyRead ?? [];
   expect(
     denyRead.filter(
-      (path) => /^\/(repo|sibling)\/.*\.env/.test(path) && !SKIPPED_FOLDER.test(path),
+      (path) =>
+        /^\/(repo|sibling)\//.test(path) && path.includes(ENV) && !SKIPPED_FOLDER.test(path),
     ),
   ).toEqual([]);
-  expect(denyRead).toEqual(expect.arrayContaining(['/read-only/**/.env*', '/shell-write/.env*']));
+  expect(denyRead).toEqual(expect.arrayContaining([`/read-only/**/${ENV}`, `/shell-write/${ENV}`]));
   // So are other repositories' `.claude/settings.json`: read where the scan learns their
   // env values, never written; closed outside. Local settings and MCP config stay closed.
   expect(deny).not.toContain('Read(//sibling/**/.claude/settings.json)');
@@ -748,7 +754,7 @@ it('denies the env and settings files in node_modules and .git, which the env sc
   const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
   for (const root of ['/repo', '/sibling'])
     for (const folder of ['node_modules', '.git'])
-      for (const name of ['.env*', '.claude/settings.json']) {
+      for (const name of [ENV, '.claude/settings.json']) {
         // A command can neither read nor write one (checked under Claude Code's own sandbox).
         expect(denyRead).toContain(`${root}/**/${folder}/**/${name}`);
         expect(deny).toEqual(
@@ -759,7 +765,7 @@ it('denies the env and settings files in node_modules and .git, which the env sc
       }
   // Everything else there stays readable: git and the installed packages work.
   const skippedOther = (rule: string) =>
-    SKIPPED_FOLDER.test(rule) && !/(\.env\*|\.claude\/settings\.json)\)?$/.test(rule);
+    SKIPPED_FOLDER.test(rule) && !rule.includes(ENV) && !/\.claude\/settings\.json\)?$/.test(rule);
   expect([...deny, ...denyRead].filter(skippedOther)).toEqual([]);
 });
 
@@ -1355,7 +1361,7 @@ it("reads its working directories' env files natively, and only their placeholde
     const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
       .deny;
     // Apart from those in node_modules and .git, which the scan skips.
-    const unskipped = (rule: string) => rule.includes('.env') && !SKIPPED_FOLDER.test(rule);
+    const unskipped = (rule: string) => rule.includes(ENV) && !SKIPPED_FOLDER.test(rule);
     expect(deny.filter(unskipped)).toEqual([]);
     expect((given(call.options).sandbox?.filesystem?.denyRead ?? []).filter(unskipped)).toEqual([]);
     // Tenjin and DeepSeek, the parent and the activity rows see names, never values.
@@ -1561,14 +1567,16 @@ it.skipIf(process.getuid?.() === 0)(
       // command could open `locked/.env.local` by name, and its value was never learned.
       expect(deny).toEqual(
         expect.arrayContaining([
-          `Read(//${locked.replace(/^\/+/, '')}/.env*)`,
+          `Read(//${locked.replace(/^\/+/, '')}/${ENV})`,
           // A repository's settings file there too: its env values were never learned.
           `Read(//${locked.replace(/^\/+/, '')}/**/.claude/settings.json)`,
         ]),
       );
       expect(sent?.sandbox?.filesystem?.denyRead).toContain(locked);
       // The readable env file next to it stays the worker's to read.
-      expect(deny.filter((rule) => rule.includes(`${root.replace(/^\/+/, '')}/.env*`))).toEqual([]);
+      expect(deny.filter((rule) => rule.includes(`${root.replace(/^\/+/, '')}/${ENV}`))).toEqual(
+        [],
+      );
     } finally {
       await chmod(locked, 0o755).catch(() => undefined);
       await rm(root, { recursive: true, force: true });

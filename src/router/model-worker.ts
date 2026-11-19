@@ -114,7 +114,12 @@ import {
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
-import { envDeniedRoots, skippedEnvPatterns, WorkerEnvSecrets } from './worker-env-secrets';
+import {
+  ENV_GLOB,
+  envDeniedRoots,
+  skippedEnvPatterns,
+  WorkerEnvSecrets,
+} from './worker-env-secrets';
 import {
   modelCallStop,
   withModelRetry,
@@ -1014,9 +1019,9 @@ async function runQualifiedWorker(
                   // do those in `node_modules` and `.git`, which the env scan skips.
                   ...(envDenied.has(root)
                     ? [
-                        `${absolute}/.env*`,
-                        `${absolute}/**/.env*`,
-                        ...(basename(root).startsWith('.env') ? [absolute] : []),
+                        `${absolute}/${ENV_GLOB}`,
+                        `${absolute}/**/${ENV_GLOB}`,
+                        ...(basename(root).toLowerCase().startsWith('.env') ? [absolute] : []),
                       ]
                     : skippedEnvPatterns(absolute)),
                   // A consented workspace holds other repositories' native settings too.
@@ -1044,8 +1049,8 @@ async function runQualifiedWorker(
               ...envFiles.unlisted.flatMap((path) => {
                 const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 return ['Read', 'Edit', 'Write'].flatMap((tool) => [
-                  `${tool}(${absolute}/.env*)`,
-                  `${tool}(${absolute}/**/.env*)`,
+                  `${tool}(${absolute}/${ENV_GLOB})`,
+                  `${tool}(${absolute}/**/${ENV_GLOB})`,
                   `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
                 ]);
               }),
@@ -1081,9 +1086,9 @@ async function runQualifiedWorker(
                       ...protectedRoots.flatMap((root) => [
                         ...(envDenied.has(root)
                           ? [
-                              `${root}/.env*`,
-                              `${root}/**/.env*`,
-                              ...(basename(root).startsWith('.env') ? [root] : []),
+                              `${root}/${ENV_GLOB}`,
+                              `${root}/**/${ENV_GLOB}`,
+                              ...(basename(root).toLowerCase().startsWith('.env') ? [root] : []),
                             ]
                           : skippedEnvPatterns(root)),
                         ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),

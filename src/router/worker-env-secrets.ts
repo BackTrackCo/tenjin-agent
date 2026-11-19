@@ -56,7 +56,7 @@ export type EnvAssignment = { key: string; value: string; written: string };
  */
 export function skippedEnvPatterns(root: string): string[] {
   return SKIPPED_FOLDERS.flatMap((folder) => [
-    `${root}/**/${folder}/**/.env*`,
+    `${root}/**/${folder}/**/${ENV_GLOB}`,
     `${root}/**/${folder}/**/.claude/settings.json`,
   ]);
 }
@@ -67,13 +67,23 @@ export function skippedEnvPatterns(root: string): string[] {
  * an env file's are. One that cannot be parsed is not read line by line: it is denied.
  */
 export function isClaudeSettingsFile(path: string): boolean {
-  return basename(path) === 'settings.json' && basename(dirname(path)) === '.claude';
+  return (
+    basename(path).toLowerCase() === 'settings.json' &&
+    basename(dirname(path)).toLowerCase() === '.claude'
+  );
 }
 
-/** A file this scan covers: an env file, or a repository's Claude Code settings file. */
+/**
+ * A file this scan covers: an env file, or a repository's Claude Code settings file. In any
+ * case: macOS and Windows volumes ignore case by default, so `cat .env` opens `.ENV`, and a
+ * scan that took only the lower case would leave its values unreplaced.
+ */
 function covered(path: string): boolean {
-  return basename(path).startsWith('.env') || isClaudeSettingsFile(path);
+  return basename(path).toLowerCase().startsWith('.env') || isClaudeSettingsFile(path);
 }
+
+/** An env file's name in any case, as a deny pattern: `.env*` by the scan's own rule (`covered`). */
+export const ENV_GLOB = '.[eE][nN][vV]*';
 
 /**
  * A Claude Code settings file's `env` block: `{}` when it has none, undefined when the
