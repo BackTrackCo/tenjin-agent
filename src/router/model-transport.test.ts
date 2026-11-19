@@ -274,6 +274,50 @@ it('continues to use shared inference credit on a legacy router', async () => {
   ).resolves.toBe(transport);
 });
 
+it('takes a refund-support answer asked ahead of the run, asks no second time, and does not wait for it past a cancel', async () => {
+  // Operator item of 2026-11-18: the question was asked only when the run began, after
+  // the accept's own checks; asked while they run, the run waits for the one answer.
+  const f = await fixture({ refundCapability: 'legacy' });
+  const real = f.deps.fetchImpl!;
+  let asked = 0;
+  let answer!: () => void;
+  const held = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  f.deps.fetchImpl = async (input, init) => {
+    if (new Request(input, init).method === 'GET') {
+      asked++;
+      await held;
+    }
+    return real(input, init);
+  };
+  const transport = f.make();
+  const ahead = transport.askRefundSupport(new AbortController().signal);
+  // A run cancelled while the answer is out ends at the cancel.
+  const cancelled = new AbortController();
+  const stopped = transport.withInferenceRun(
+    'cancelled-ahead',
+    cancelled.signal,
+    async (shared) => shared,
+    undefined,
+    ahead,
+  );
+  cancelled.abort(new Error('cancelled'));
+  await expect(stopped).rejects.toThrow('cancelled');
+  const marks: string[] = [];
+  const run = transport.withInferenceRun(
+    'asked-ahead',
+    new AbortController().signal,
+    async (shared) => shared,
+    (name) => marks.push(name),
+    ahead,
+  );
+  answer();
+  await expect(run).resolves.toBe(transport);
+  expect(asked).toBe(1);
+  expect(marks).toEqual(['refundProbed', 'workerReturned']);
+});
+
 // Live case (job 77f41059, 2026-11-18): of two workers accepted together, one got no answer
 // to this question inside 3 s. Its job ended `unknown` after 3.0 s with no cause and no record.
 it('asks again when the refund-support question gets no answer, then runs the worker', async () => {

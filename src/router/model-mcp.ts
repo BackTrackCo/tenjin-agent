@@ -825,6 +825,9 @@ export function registerModelTool(
             }
           }
           startMarks.checked = Date.now();
+          // The run's refund-support question waits for none of the checks below.
+          const refundSupport =
+            options.harness === 'claude' ? transport.askRefundSupport(signal) : undefined;
           const qualified = await qualifiedModelWorker(
             session.cwd,
             String(
@@ -1079,6 +1082,7 @@ export function registerModelTool(
                       (name) => {
                         (name === 'refundProbed' ? startMarks : endMarks)[name] = Date.now();
                       },
+                      refundSupport,
                     )
                   : await run(runOptions.transport);
               const envelope = {

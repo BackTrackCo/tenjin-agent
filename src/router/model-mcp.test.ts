@@ -163,6 +163,7 @@ it.each(
     const transport = {
       origin: 'http://localhost:3939',
       route,
+      askRefundSupport: async () => true,
       withInferenceRun,
       summary: async () => ({ actualAtomic: '0' }),
     } as unknown as ModelTransport;
@@ -521,12 +522,14 @@ async function ownedClaudeFixture(
     uncertain: [],
   }));
   const reconcile = vi.fn(async (_job: ModelJob) => {});
+  const askRefundSupport = vi.fn(async (_signal: AbortSignal) => true);
   const inference = {
     origin: 'http://localhost:3939',
     route,
     requireResumeBudget,
     reconcile,
     summary,
+    askRefundSupport,
     withInferenceRun,
   };
   const secondaryTransport = inference as unknown as ModelTransport;
@@ -643,6 +646,8 @@ async function ownedClaudeFixture(
     getTransport,
     forInferenceSlot,
     secondaryTransport,
+    transport,
+    askRefundSupport,
   };
 }
 
@@ -663,6 +668,31 @@ it('runs the unchanged Agent repeat of an offer natively through capture, once, 
     expect(f.route).not.toHaveBeenCalled();
     expect(worker.run).not.toHaveBeenCalled();
   } finally {
+    await f.close();
+  }
+});
+
+it("asks the run's refund-support question while the accept's checks run, and hands its answer to the run", async () => {
+  // Operator item of 2026-11-18: a worker that was ready waited for the accept's checks
+  // and then for this round trip, one after the other.
+  const f = await ownedClaudeFixture();
+  const qualified = worker.qualified.getMockImplementation()!;
+  let askedBeforeChecksEnded: boolean | undefined;
+  worker.qualified.mockImplementation(async (...args: Parameters<typeof qualified>) => {
+    await new Promise((done) => setTimeout(done, 20));
+    askedBeforeChecksEnded = f.askRefundSupport.mock.calls.length > 0;
+    return qualified(...args);
+  });
+  const answer = Promise.resolve(false);
+  f.askRefundSupport.mockReturnValue(answer);
+  const run = vi.spyOn(f.transport, 'withInferenceRun');
+  try {
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({ status: 'completed' });
+    expect(askedBeforeChecksEnded).toBe(true);
+    expect(f.askRefundSupport).toHaveBeenCalledOnce();
+    expect(run.mock.calls[0]![4]).toBe(answer);
+  } finally {
+    worker.qualified.mockImplementation(qualified);
     await f.close();
   }
 });

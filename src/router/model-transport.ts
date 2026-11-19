@@ -154,6 +154,16 @@ function boundedResponse(response: Response, limit = MODEL_RESPONSE_ENVELOPE_BYT
   );
 }
 
+/** A promise's outcome, or the signal's reason when the signal aborts first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', stop));
+  });
+}
+
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 /** A reserved quote that no longer fits the job's cap as it stands when its turn to pay comes. */
 class QuoteOverCap extends Error {}
@@ -192,6 +202,21 @@ export class ModelTransport {
     return new ModelRefundJournal(this.options.dataDir, this.origin, this.options.payerDeps);
   }
 
+  /**
+   * THE REFUND-SUPPORT QUESTION OF A RUN ABOUT TO START, asked while the accept's own
+   * checks run and handed to `withInferenceRun`, which waits for its answer where it used
+   * to ask. The question signs nothing, buys nothing and names no job, so an accept that
+   * a later check refuses has sent one unsigned read. It came after those checks, one
+   * round trip in the way of a worker that was ready.
+   */
+  askRefundSupport(signal: AbortSignal): Promise<boolean> {
+    const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
+    const asked = this.refundSupport(this.refundJournal(), endpoint, signal);
+    // Its failure is the run's, reported where the run waits for it.
+    asked.catch(() => undefined);
+    return asked;
+  }
+
   /** The run lock outlives its individual requests so recovery cannot drain a live worker. */
   async withInferenceRun<T>(
     runId: string,
@@ -199,10 +224,14 @@ export class ModelTransport {
     run: (transport: ModelTransport) => Promise<T>,
     /** Diagnostics only: when the refund-support answer came, and when the run's channel closed. */
     mark?: (name: 'refundProbed' | 'workerReturned' | 'refundClosed') => void,
+    /** The answer asked ahead (`askRefundSupport`); absent, it is asked here. */
+    asked?: Promise<boolean>,
   ): Promise<T> {
     const journal = this.refundJournal();
     const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
-    const supported = await this.refundSupport(journal, endpoint, signal);
+    const supported = await (asked
+      ? untilAborted(asked, signal)
+      : this.refundSupport(journal, endpoint, signal));
     mark?.('refundProbed');
     if (!supported) return run(this).finally(() => mark?.('workerReturned'));
     const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
