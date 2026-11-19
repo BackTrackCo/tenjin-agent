@@ -2106,14 +2106,15 @@ it("counts a signed routing request in the unadvertised rate's window", async ()
   const dir = await mkdtemp(join(tmpdir(), 'model-route-pace-'));
   made.push(dir);
   const router = new FakeRouter({ path: '/api/model-router/route' });
+  const signal = new AbortController().signal;
+  // One clock for the transport's count and the count the test reads.
+  const paced = pacedBy(() => router.paidRequests());
   const transport = new ModelTransport({
     dataDir: dir,
     baseUrl: BASE,
     payerDeps: payerDeps(router, dir, privateKeyToAccount(generatePrivateKey())),
+    paceClock: paced.paceClock,
   });
-  const signal = new AbortController().signal;
-  // The transport counts on the real clock: the test's count reads from just after it.
-  const paced = pacedBy(() => router.paidRequests(), Date.now() + 1_000);
   const pace = () =>
     new ModelPace(dir, BASE, paced.paceClock).take(
       'paid',

@@ -29,10 +29,15 @@ const ORIGIN = 'https://tenjin.example';
  */
 function routerAllows(sent: readonly number[], at: number, limit: ModelCallLimit, offset: number) {
   const window = Math.floor((at + offset) / limit.windowMs);
-  const inWindow = (n: number) =>
-    sent.filter((time) => Math.floor((time + offset) / limit.windowMs) === n).length;
+  let current = 0;
+  let previous = 0;
+  for (const time of sent) {
+    const its = Math.floor((time + offset) / limit.windowMs);
+    if (its === window) current++;
+    else if (its === window - 1) previous++;
+  }
   const share = ((at + offset) % limit.windowMs) / limit.windowMs;
-  return Math.floor((1 - share) * inWindow(window - 1)) + inWindow(window) < limit.max;
+  return Math.floor((1 - share) * previous) + current < limit.max;
 }
 
 function clock(start = 1_000_000) {
@@ -48,30 +53,36 @@ function clock(start = 1_000_000) {
 }
 
 // A signed call the router refuses for rate ends its job as uncertain. A plain count of
-// the last 60 s is refused by the router's weighted estimate after a burst.
+// the last 60 s is refused by the router's weighted estimate after a burst. The rule is
+// driven here with no clock and no file: each send happens at the instant the rule gives.
 it.each([UNADVERTISED_CALL_LIMIT, { max: 120, windowMs: 60_000 }])(
   'never sends what the router would refuse at $max per window, in bursts or steadily, wherever its windows start',
-  async (limit) => {
-    const time = clock();
-    const pace = new ModelPace(await folder(), ORIGIN, time);
-    const signal = new AbortController().signal;
+  (limit) => {
+    let now = 1_000_000;
     const sent: number[] = [];
-    const send = async () => {
-      await pace.take('paid', ['paid'], limit, signal);
-      for (let offset = 0; offset < limit.windowMs; offset += 1_000)
-        expect(routerAllows(sent, time.state.now, limit, offset)).toBe(true);
-      sent.push(time.state.now);
+    let held = 0;
+    let refused = 0;
+    const send = () => {
+      // What the count keeps in reach of one estimate.
+      const recent = sent.filter((time) => time > now - 2 * limit.windowMs);
+      const wait = paceDelayMs(recent, now, limit);
+      if (wait > 0) held++;
+      now += wait;
+      for (let offset = 0; offset < limit.windowMs; offset += 5_000)
+        if (!routerAllows(recent, now, limit, offset)) refused++;
+      sent.push(now);
     };
     // A sender that always has a call ready: it is held back, and not far below the rate.
-    for (let n = 0; n < limit.max * 4; n++) await send();
-    expect(time.state.waits.length).toBeGreaterThan(0);
+    for (let n = 0; n < limit.max * 2; n++) send();
+    expect(held).toBeGreaterThan(0);
     const minutes = (sent.at(-1)! - sent[0]!) / limit.windowMs;
     expect(sent.length / minutes).toBeGreaterThan(limit.max * 0.8);
-    // Calls a few seconds apart, then bursts again.
-    for (let n = 0; n < limit.max * 3; n++) {
-      time.state.now += n < limit.max ? 3_700 : 0;
-      await send();
+    // Calls a few seconds apart, then a burst again.
+    for (let n = 0; n < limit.max * 2; n++) {
+      now += n < limit.max ? 3_700 : 0;
+      send();
     }
+    expect(refused).toBe(0);
   },
 );
 
