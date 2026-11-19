@@ -339,6 +339,8 @@ export class WorkerEnvSecrets {
   }
   /** Where this worker's watcher also reports covered files, for workers that join its scan. */
   private feed: Set<string> | undefined;
+  /** The walk this worker started and its watcher feeds: joinable only while that watcher lives. */
+  private shared: Verification | undefined;
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
   /** Set while the running check still waits for file events: when that wait ends. */
@@ -412,6 +414,7 @@ export class WorkerEnvSecrets {
       result: WorkerEnvSecrets.start(held.roots, { watch: false, keep: true }),
     };
     env.feed = scan.events;
+    env.shared = scan;
     verifications.add(scan);
     void scan.result.finally(() => verifications.delete(scan));
     return { env, verified: env.verifyAgainst(scan, held.roots).catch(() => false) };
@@ -561,6 +564,8 @@ export class WorkerEnvSecrets {
   }
 
   close(): void {
+    // Its watcher stops feeding the walk's events: a worker starting later must walk for itself.
+    if (this.shared) verifications.delete(this.shared);
     for (const watcher of this.watchers.splice(0)) watcher.close();
   }
 

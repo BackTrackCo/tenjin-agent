@@ -243,6 +243,31 @@ it.runIf(WATCHES)(
 );
 
 it.runIf(WATCHES)(
+  'does not join a walk whose first worker was cancelled: its watcher no longer feeds the walk',
+  async () => {
+    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    walks.listed.length = 0;
+    let release!: () => void;
+    walks.hold = new Promise<void>((done) => (release = done));
+    const first = WorkerEnvSecrets.resume([root])!;
+    first.env.close();
+    const second = WorkerEnvSecrets.resume([root])!;
+    walks.hold = undefined;
+    release();
+    try {
+      await first.verified;
+      expect(await second.verified).toBe(true);
+      // A walk of its own: nothing but a live watcher's events may stand in for one.
+      expect(walks.listed.filter((path) => path === root)).toHaveLength(2);
+    } finally {
+      second.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+it.runIf(WATCHES)(
   'does not release a joined worker when the shared walk finds a file that needs a deny',
   async () => {
     const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
