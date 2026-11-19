@@ -494,6 +494,58 @@ it('reads frames split across chunks and CRLF, and answers the last event as the
   expect(await response.json()).toEqual({ ok: 1 });
 });
 
+// The same bytes split at every position, one and two chunks, LF and CRLF: the events and
+// the last response never depend on where the network cut. The text holds a character of
+// four bytes and a long data line, so a cut also falls inside a character and a line.
+it.each(['\n', '\r\n'])(
+  'reads one stream the same at every byte split (line end %j)',
+  async (eol) => {
+    const delta = (text: string) => ({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text },
+    });
+    const text = [
+      frame('message_start', { type: 'message_start' }),
+      frame('content_block_delta', delta('caf\u00e9 \u{1F600} \u4e2d ' + 'x'.repeat(40))),
+      frame('content_block_delta', delta('second')),
+      frame('tenjin_result', {
+        status: 200,
+        headers: { 'payment-response': 'abc' },
+        body: { ok: 1 },
+      }),
+    ]
+      .join('')
+      .replace(/\n/g, eol);
+    const bytes = new TextEncoder().encode(text);
+    const run = async (cuts: number[]) => {
+      const seen: unknown[] = [];
+      const parts = [0, ...cuts, bytes.length]
+        .slice(0, -1)
+        .map((at, i, all) => bytes.slice(at, [...all.slice(i + 1), bytes.length][0]));
+      const response = await readMessagesStream(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              for (const part of parts) c.enqueue(part);
+              c.close();
+            },
+          }),
+          { status: 200 },
+        ),
+        reading({ onEvent: (e) => seen.push(e) }),
+      );
+      return { seen, status: response.status, body: await response.json() };
+    };
+    const whole = await run([]);
+    expect(whole.seen).toHaveLength(3);
+    expect(whole.body).toEqual({ ok: 1 });
+    for (let at = 1; at < bytes.length; at++) expect(await run([at])).toEqual(whole);
+    // Every byte alone.
+    expect(await run(Array.from({ length: bytes.length - 1 }, (_, i) => i + 1))).toEqual(whole);
+  },
+);
+
 it.each([
   [
     'an idle stream',
