@@ -156,6 +156,9 @@ export async function readMessagesStream(
   const leave = () => void reader.cancel(o.signal.reason).catch(() => undefined);
   o.signal.addEventListener('abort', leave, { once: true });
   let buffer = '';
+  // A chunk may end between a CR and its LF: the CR waits for the next chunk, so it
+  // never reads as a line end of its own and makes a false blank line with that LF.
+  let heldCr = '';
   let eventBytes = 0;
   let contentBytes = 0;
   try {
@@ -174,8 +177,11 @@ export async function readMessagesStream(
       arm();
       eventBytes += chunk.value.byteLength;
       if (eventBytes > STREAM_EVENT_BYTES) throw new StreamCut('too_large');
-      buffer += decoder.decode(chunk.value, { stream: true }).replace(/\r\n?/g, '\n');
-      // A frame ends at a blank line. A lone trailing CR waits for its LF in the next chunk.
+      let text = heldCr + decoder.decode(chunk.value, { stream: true });
+      heldCr = text.endsWith('\r') ? '\r' : '';
+      if (heldCr) text = text.slice(0, -1);
+      buffer += text.replace(/\r\n?/g, '\n');
+      // A frame ends at a blank line.
       for (let end = buffer.indexOf('\n\n'); end !== -1; end = buffer.indexOf('\n\n')) {
         const frame = parseFrame(buffer.slice(0, end));
         buffer = buffer.slice(end + 2);

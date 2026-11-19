@@ -1197,6 +1197,8 @@ it.each(['general-purpose', 'Explore'] as const)(
         worker_handle: expect.stringMatching(/^tenjin-worker-/),
         continuation: expect.stringContaining('SendMessage'),
       });
+      // The address the offer named before the accept is the one the conversation took.
+      expect(first.worker_handle).toBe(`tenjin-worker-${f.job.id}`);
       const [initialExecution, initialOptions] = worker.run.mock.calls[0]!;
       expect(initialExecution.native).toMatchObject({ subagent_type: nativeProfile });
       for (const follow of [false, true])

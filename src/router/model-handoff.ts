@@ -20,7 +20,7 @@ import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './c
 import parentPolicy from './model-parent-policy.json';
 import { RouteSkipped } from './decision';
 import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
-import { ModelConversationStore } from './model-conversations';
+import { ModelConversationStore, workerHandleFor } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
   modelClaudeWorkspaceCovered,
@@ -817,7 +817,12 @@ export class ModelHandoff {
       } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto.${
         // In Claude Code the hook's refusal line already says the call was held and has not run.
         session.harness === 'claude' ? '' : ' No assignment has been sent to a worker.'
+      }${
+        session.harness === 'claude'
+          ? ` Once accepted, the worker's address is ${workerHandleFor(job.id)}: to tell it something while it runs, call SendMessage({to:"${workerHandleFor(job.id)}",message:"<complete message>"}); it reaches the worker at its next turn, as a native subagent's message does.`
+          : ''
       }`,
+      ...(session.harness === 'claude' ? { worker_handle: workerHandleFor(job.id) } : {}),
       ...(nativeBackground(job.native) === true ? { background: true } : {}),
     };
   }

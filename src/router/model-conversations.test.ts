@@ -63,6 +63,8 @@ it('fences the initial activation, persists native identity and never resets the
   await writeFile(budget, ledger);
   expect(handle).toMatch(/^tenjin-worker-[a-f0-9-]{36}$/);
   expect(handle).not.toContain(f.sdkSessionId);
+  // Fixed by the first job, so an offer can name it before the accept.
+  expect(handle).toBe(`tenjin-worker-${f.job.id}`);
   expect(await f.store.offer(handle, f.owner, f.followup())).toBeNull();
   const first = await f.store.accept(handle, f.owner, f.job.id);
   expect(first?.action).toBe('start');
