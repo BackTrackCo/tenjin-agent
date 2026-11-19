@@ -43,6 +43,14 @@ describe('Ultravioleta discovery adapter', () => {
     expect(sweep.resources[0]).toMatchObject({ serviceName: 'Speech API', extensions });
   });
 
+  it('verifies a payment against a listing whose display metadata is malformed', async () => {
+    stub(() => page([item({ serviceName: null, extensions: 'none' })]));
+    await expect(verifyAgainstRegistries([UV], URL, LIVE, 1000)).resolves.toEqual({
+      outcome: 'verified',
+      registry: UV,
+    });
+  });
+
   it('reports a standard registry search cursor as incomplete coverage', async () => {
     stub(() =>
       Response.json({

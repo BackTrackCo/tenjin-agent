@@ -61,8 +61,10 @@ const ultravioletResource = z.object({
   type: z.string(),
   x402Version: z.number().int(),
   description: z.string().optional(),
-  serviceName: z.string().optional(),
-  extensions: z.record(z.string(), z.unknown()).optional(),
+  // Display metadata for `tenjin discover` only. A malformed value is dropped,
+  // so the pay-time lookup accepts the same records with or without it.
+  serviceName: z.string().optional().catch(undefined),
+  extensions: z.record(z.string(), z.unknown()).optional().catch(undefined),
   accepts: z.array(paymentTerms).max(100),
   lastUpdated: z.number().int().nonnegative().max(8_640_000_000_000),
 });
