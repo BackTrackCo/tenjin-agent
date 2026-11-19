@@ -13,6 +13,7 @@ import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test
 import { modelChannelScope, modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
+import { modelPeakQuoteAtomic } from './model-limits';
 import { ModelPace } from './model-pace';
 import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
@@ -1563,6 +1564,37 @@ it('states the result size it reads only to a router whose offer says it honours
   responses.job.decision.maxResultBytes = 4_000_000;
   await responses.make().responses(responses.job, { model: 'deepseek-flash', input: [] }, signal);
   expect(responses.last()).not.toHaveProperty('maxResultBytes');
+});
+
+// A 256,000-token call reserves about three times what a 65,536-token one does, so a job
+// near its ceiling would stop on a call that a smaller output cap still fits.
+it('asks for the largest output cap the rest of the job ceiling can reserve, never below 65,536, and says which', async () => {
+  const request = { model: 'deepseek-flash', max_tokens: 256_000, messages: [] };
+  const sent = async (cap: string, quote = '100000') => {
+    // The fake router quotes a fixed amount, so only the client's own fit decides.
+    const f = await fixture({ cap, quote });
+    f.job.capAtomic = cap;
+    const seen: { outputCap?: number; requestBytes?: number }[] = [];
+    const transport = f.make();
+    const signal = new AbortController().signal;
+    await transport.messages(f.job, request, signal, undefined, (timing) => seen.push(timing));
+    const asked = (f.last()?.messages as { max_tokens: number }).max_tokens;
+    expect(seen).toMatchObject([{ outputCap: asked }]);
+    // The same request again is the same call: answered from its kept result, unpaid.
+    await transport.messages(f.job, request, signal);
+    expect(f.router.paidRequests()).toBe(1);
+    return { asked, bytes: seen[0]!.requestBytes! };
+  };
+  // Room for the whole cap.
+  expect((await sent('1000000')).asked).toBe(256_000);
+  // $0.20 less the routing fee: less than 256,000 reserves, more than 65,536 does.
+  const stepped = await sent('200000');
+  expect(stepped.asked).toBeGreaterThan(65_536);
+  expect(stepped.asked).toBeLessThan(256_000);
+  expect(modelPeakQuoteAtomic(stepped.bytes, stepped.asked)).toBeLessThanOrEqual(197_000n);
+  expect(modelPeakQuoteAtomic(stepped.bytes, stepped.asked + 1_000)).toBeGreaterThan(197_000n);
+  // Too little for more than the floor: 65,536, and the quote decides as it always did.
+  expect((await sent('80000', '50000')).asked).toBe(65_536);
 });
 
 it('rejects a Messages result above the server message ceiling even when the receipt envelope fits', async () => {

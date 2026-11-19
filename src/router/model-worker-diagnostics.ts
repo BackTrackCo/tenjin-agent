@@ -33,7 +33,7 @@ const whole = (value: unknown, max = MAX_MS): number | undefined =>
  * paid request to its response headers (`answerMs`), the headers to the payer's return
  * (`bodyMs`: the body read and the payment SDK's accounting), the payer's drain (`drainMs`)
  * and the local settlement (`settleMs`). `fetches` counts the other HTTP requests the payer
- * made. The router answers a call whole, so no first token is seen here: `answerMs` is the
+ * made, `outputCap` is the `max_tokens` the call asked for. The router answers a call whole, so no first token is seen here: `answerMs` is the
  * model's whole answer unless the router sends its headers early.
  */
 export type ModelCallTiming = {
@@ -51,6 +51,9 @@ export type ModelCallTiming = {
   settleMs?: number;
   fetches?: number;
   requestBytes?: number;
+  /** The output cap the call asked for (`max_tokens` as sent): the job's cap, or less
+   *  where what was left of the job's ceiling could not reserve that much. */
+  outputCap?: number;
   /** The wait for room in the wallet's call rate, before the request the router counts. */
   paceWaitMs?: number;
   /** The quote asked again under the channel's lock, because the first had grown old. */
@@ -409,7 +412,7 @@ export class WorkerDiagnosticsRecord {
             timing.waitedOn === 'unknown'
           )
             entry.waitedOn = timing.waitedOn;
-          for (const name of [...CALL_TIMES, 'fetches', 'requestBytes'] as const) {
+          for (const name of [...CALL_TIMES, 'fetches', 'requestBytes', 'outputCap'] as const) {
             const value = whole(timing[name], Number.MAX_SAFE_INTEGER);
             if (value !== undefined) entry[name] = value;
           }

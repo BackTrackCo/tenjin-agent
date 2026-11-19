@@ -149,7 +149,11 @@ export class TooManyTools extends Error {
 }
 
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
-export function workerMessages(raw: Record<string, unknown>) {
+export function workerMessages(
+  raw: Record<string, unknown>,
+  /** The output cap the job's router offers, when its offer names one. */
+  outputCap?: number,
+) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
   // THINKING IS ON FOR EVERY TURN OF THE WORKER, as the DeepSeek harness has it, whatever
   // the request asks: Claude Code sends a turn with no `thinking` field when the person's
@@ -164,7 +168,8 @@ export function workerMessages(raw: Record<string, unknown>) {
     raw.thinking === undefined
       ? 'disabled'
       : z.object({ type: z.enum(['enabled', 'adaptive', 'disabled']) }).parse(raw.thinking).type;
-  const mode = raw.stream === true || raw.tools !== undefined ? 'enabled' : asked;
+  const ownTurn = raw.stream === true || raw.tools !== undefined;
+  const mode = ownTurn ? 'enabled' : asked;
   const stopSequences =
     raw.stop_sequences === undefined
       ? undefined
@@ -261,10 +266,16 @@ export function workerMessages(raw: Record<string, unknown>) {
   if (tools && tools.length > MODEL_MESSAGES_MAX_TOOLS) throw new TooManyTools(tools.length);
   return {
     model: 'deepseek-flash',
+    // A WORKER'S OWN TURN ASKS FOR THE OUTPUT CAP ITS ROUTER OFFERS. Claude Code clamps
+    // what it asks for itself to 128,000, so the cap is set here; it takes a longer reply
+    // than it asked for as it is. A side request keeps its own small cap, and so does every
+    // request to a router whose offer names none.
     max_tokens:
-      raw.max_tokens === undefined
-        ? 16384
-        : z.number().int().min(1).max(MODEL_OUTPUT_TOKENS).parse(raw.max_tokens),
+      ownTurn && outputCap !== undefined
+        ? outputCap
+        : raw.max_tokens === undefined
+          ? 16384
+          : z.number().int().min(1).max(MODEL_OUTPUT_TOKENS).parse(raw.max_tokens),
     thinking: { type: mode === 'adaptive' ? 'enabled' : mode },
     ...(stopSequences ? { stop_sequences: stopSequences } : {}),
     messages,

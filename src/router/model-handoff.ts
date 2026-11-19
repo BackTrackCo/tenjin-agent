@@ -68,6 +68,9 @@ export const modelOfferSchema = z.object({
   /** The largest `maxResultBytes` this router honours on a Messages call. A router that
    *  does not say so refuses the field, so none is sent to it. */
   maxResultBytes: z.number().int().positive().optional().catch(undefined),
+  /** The largest `max_tokens` this router's Messages endpoint accepts. A router that does
+   *  not say so accepts 65,536. */
+  maxOutputTokens: z.number().int().positive().optional().catch(undefined),
   /** The wallet's model-call rate over all its jobs and processes, counted at the unpaid
    *  quote. A router that does not say so counts after the signature. */
   callLimit: callLimitSchema,

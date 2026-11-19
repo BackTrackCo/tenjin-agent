@@ -2,9 +2,26 @@ export const MODEL_ROUTE_BODY_BYTES = 16_384;
 export const MODEL_ROUTE_ENVELOPE_BYTES = 64;
 export const MODEL_CODEX_TASK_BYTES = 16_000;
 export const MODEL_NATIVE_TEXT_BYTES = 256_000;
-/** A worker's output cap per request: the most the bridge and the router's contract take
- *  today (operator ruling 2026-11-17; the DeepSeek harness asks 256,000 once the router does). */
+/** A worker's output cap per request on a router whose offer names none: the most that
+ *  router's contract takes. The least a job needs is derived from it for every router. */
 export const MODEL_OUTPUT_TOKENS = 65_536;
+/** The DeepSeek harness's output cap per request, and the most this CLI asks for: Claude
+ *  Code 2.1.325 and 2.1.328 took a reply of that many reported tokens whole. */
+export const MODEL_OUTPUT_TOKENS_MAX = 256_000;
+/**
+ * THE OUTPUT CAP OF A JOB'S MODEL CALLS: what its router's offer says its Messages endpoint
+ * accepts (`maxOutputTokens`), up to 256,000, the DeepSeek harness's cap (operator ruling
+ * 2026-11-18). Undefined for an offer that names none, such as production's today, which
+ * accepts 65,536: read from the offer alone, never guessed from a version.
+ */
+export function offeredOutputTokens(decision: Record<string, unknown>): number | undefined {
+  const offered = decision.maxOutputTokens;
+  return typeof offered === 'number' &&
+    Number.isSafeInteger(offered) &&
+    offered > MODEL_OUTPUT_TOKENS
+    ? Math.min(offered, MODEL_OUTPUT_TOKENS_MAX)
+    : undefined;
+}
 /** The routing fee's ceiling, which a job's ceiling also covers. */
 export const MODEL_ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /**
@@ -19,7 +36,25 @@ export function modelPeakQuoteAtomic(bytes: number, outputTokens: number): bigin
     1000n;
   return usage + (usage * 5n + 99n) / 100n;
 }
-/** The least quote a worker's request can have: no body, the full output cap. */
+/**
+ * THE LARGEST OUTPUT CAP, FROM `asked` DOWN, WHOSE PEAK QUOTE FITS `remaining` of a job's
+ * ceiling for a request of `bytes`. A quote reserves the output a call asks for, so a
+ * 256,000-token call reserves about $0.37 where a 65,536-token one reserves $0.13: near
+ * the end of a job's ceiling the call asks for less output and the job goes on. Never
+ * below 65,536, where the ceiling's own rule decides, as it always did.
+ */
+export function fittingOutputTokens(bytes: number, asked: number, remaining: bigint): number {
+  if (asked <= MODEL_OUTPUT_TOKENS || modelPeakQuoteAtomic(bytes, asked) <= remaining) return asked;
+  let fits = MODEL_OUTPUT_TOKENS;
+  let over = asked;
+  while (over - fits > 1) {
+    const middle = Math.floor((fits + over) / 2);
+    if (modelPeakQuoteAtomic(bytes, middle) <= remaining) fits = middle;
+    else over = middle;
+  }
+  return fits;
+}
+/** The least quote a worker's request can have: no body, the output cap every router takes. */
 export const MODEL_MINIMUM_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_TOKENS);
 /** Necessary floor: one such call and the routing fee. Actual system/tools/history increase
  *  the quote; this is not a sufficiency guarantee. Derived from the cap, so the two move together. */

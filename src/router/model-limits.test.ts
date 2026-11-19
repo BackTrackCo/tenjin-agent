@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
 import {
+  fittingOutputTokens,
+  offeredOutputTokens,
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_OUTPUT_TOKENS,
@@ -20,4 +22,38 @@ it('derives the job floor from the output cap with the router quote formula', ()
   expect(modelPeakQuoteAtomic(0, 256_000) + 3_000n).toBe(326_851n);
   // Input is bound by the model's context, as the router bounds it.
   expect(modelPeakQuoteAtomic(10_000_000, 0)).toBe(modelPeakQuoteAtomic(1_048_576, 0));
+});
+
+// Operator ruling 2026-11-18: 256,000 output tokens, the DeepSeek harness's cap, on a
+// router that says it accepts them. A worker asked 65,536 of every router.
+it("reads a job's output cap from its offer alone, up to 256,000", () => {
+  expect(offeredOutputTokens({ maxOutputTokens: 256_000 })).toBe(256_000);
+  expect(offeredOutputTokens({ maxOutputTokens: 128_000 })).toBe(128_000);
+  expect(offeredOutputTokens({ maxOutputTokens: 1_000_000 })).toBe(256_000);
+  // Production's offer names none: 65,536 as before, whatever its version is.
+  for (const decision of [{}, { maxOutputTokens: '256000' }, { maxOutputTokens: 65_536 }])
+    expect(offeredOutputTokens(decision)).toBeUndefined();
+});
+
+// A 256,000-token call reserves $0.365784 for a 130 KiB request where a 65,536-token one
+// reserves $0.125799: without a step down, a job stopped on its ceiling that much sooner.
+it('steps the output cap down to the largest one whose reserve fits what a job has left, never below 65,536', () => {
+  const bytes = 130 * 1024;
+  expect(modelPeakQuoteAtomic(bytes, 256_000)).toBe(365_784n);
+  expect(modelPeakQuoteAtomic(bytes, 128_000)).toBe(204_504n);
+  expect(modelPeakQuoteAtomic(bytes, 65_536)).toBe(125_799n);
+  expect(fittingOutputTokens(bytes, 256_000, 365_784n)).toBe(256_000);
+  expect(fittingOutputTokens(bytes, 256_000, 1_000_000n)).toBe(256_000);
+  // One atomic unit short of a cap's reserve: the largest cap that still fits.
+  for (const remaining of [365_783n, 204_504n, 204_503n, 150_000n]) {
+    const fits = fittingOutputTokens(bytes, 256_000, remaining);
+    expect(modelPeakQuoteAtomic(bytes, fits)).toBeLessThanOrEqual(remaining);
+    expect(modelPeakQuoteAtomic(bytes, fits + 1)).toBeGreaterThan(remaining);
+  }
+  expect(fittingOutputTokens(bytes, 256_000, 204_504n)).toBeGreaterThanOrEqual(128_000);
+  // At and under the 65,536 reserve the cap stops there, and the ceiling's own rule decides.
+  expect(fittingOutputTokens(bytes, 256_000, 125_799n)).toBe(65_536);
+  expect(fittingOutputTokens(bytes, 256_000, 1_000n)).toBe(65_536);
+  // A call that asks no more than 65,536 is never changed.
+  expect(fittingOutputTokens(bytes, 32_000, 1_000n)).toBe(32_000);
 });

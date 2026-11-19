@@ -905,6 +905,104 @@ it('makes no prompt read ahead of the scan when the checks that stand before the
   expect(query).not.toHaveBeenCalled();
 });
 
+// Operator ruling 2026-11-18: a worker asks for 256,000 output tokens of a router whose
+// offer says it accepts them. Its Claude Code is told 65,536, so the bridge sets the cap.
+it.each([
+  ['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000],
+  ['an offer that names no cap', {}, 65_536],
+] as const)(
+  "asks the job's router for the output cap of %s on a worker's turn, and records it",
+  async (_name, offered, cap) => {
+    const messages = vi.fn(
+      async (
+        _job: unknown,
+        sent: { max_tokens: number },
+        _signal: unknown,
+        _beforeSend: unknown,
+        observe?: (timing: Record<string, number>) => void,
+      ) => {
+        observe?.({ slot: 0, outputCap: sent.max_tokens });
+        return {
+          id: 'msg',
+          type: 'message',
+          role: 'assistant',
+          model: 'deepseek-flash',
+          content: [{ type: 'text', text: 'ok' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 9, output_tokens: 1 },
+        };
+      },
+    );
+    vi.mocked(query).mockImplementation((call) => {
+      let complete!: () => void;
+      const forwarded = new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      const handle = native.createServer.mock.calls[0]![0] as (
+        request: unknown,
+        response: unknown,
+      ) => void;
+      handle(
+        {
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from(
+              JSON.stringify({
+                model: 'deepseek-flash',
+                max_tokens: 65536,
+                stream: true,
+                thinking: { type: 'adaptive' },
+                messages: [{ role: 'user', content: 'Go.' }],
+              }),
+            );
+          },
+        },
+        {
+          headersSent: false,
+          destroyed: false,
+          writeHead() {
+            return this;
+          },
+          end(_body: string, done?: () => void) {
+            done?.();
+            setImmediate(complete);
+            return this;
+          },
+        },
+      );
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+          await forwarded;
+          yield { type: 'result', subtype: 'success', result: 'done' };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      } as unknown as ReturnType<typeof query>;
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'worker-output-cap-'));
+    try {
+      await runModelWorker(
+        { ...job, decision: { ...job.decision, ...offered } },
+        { ...options(), dataDir, transport: { messages } as unknown as ModelTransport },
+      );
+      expect(messages.mock.calls[0]![1]).toMatchObject({ max_tokens: cap });
+      const record = JSON.parse(
+        await readFile(join(dataDir, 'model-jobs', `${job.id}.diagnostics.json`), 'utf8'),
+      );
+      // The job's cap, and the cap each call asked for (less when the ceiling ran short).
+      expect(record.settings.outputCap).toBe(cap);
+      expect(record.calls).toMatchObject([{ outputCap: cap }]);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  },
+);
+
 it("keeps each model call's timing, token counts and the worker's start and end phases in the diagnostic record", async () => {
   // Operator item of 2026-11-18: where a job's time goes. The record had the first call's
   // two marks only; a 99 s job of four tool uses could not be explained from it.

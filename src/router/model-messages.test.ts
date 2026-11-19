@@ -184,6 +184,21 @@ it('preserves the native worker output allowance instead of silently halving it'
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 0 })).toThrow();
 });
+// Claude Code clamps the output it asks for to 128,000, so a worker could never ask for
+// the 256,000 its router offers unless the bridge sets it.
+it("asks for the output cap the job's router offers on a worker's own turn, and leaves a side request's cap alone", () => {
+  const tools = [{ name: 'Read', input_schema: { type: 'object' } }];
+  const turn = { model: 'deepseek-flash', max_tokens: 65536, stream: true, tools };
+  expect(workerMessages(turn, 256_000).max_tokens).toBe(256_000);
+  // The classifier's two requests keep their own caps.
+  for (const max_tokens of [2112, 10240])
+    expect(workerMessages({ model: 'deepseek-flash', max_tokens }, 256_000).max_tokens).toBe(
+      max_tokens,
+    );
+  // A router whose offer names no cap: what the worker asked, 65,536 at most, as before.
+  expect(workerMessages(turn).max_tokens).toBe(65536);
+  expect(() => workerMessages({ ...turn, max_tokens: 65537 })).toThrow();
+});
 it('serves tool search as the Messages API does, so a ToolSearch result never stops the job', () => {
   // The shape Claude Code 2.1.326 sends with tool search on, after one ToolSearch call:
   // the proxy and DeepSeek take neither `defer_loading` nor a `tool_reference` block.

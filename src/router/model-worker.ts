@@ -43,6 +43,7 @@ import {
   MODEL_MESSAGES_MAX_TOOLS,
   MODEL_NATIVE_TEXT_BYTES,
   MODEL_OUTPUT_TOKENS,
+  offeredOutputTokens,
 } from './model-limits';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -710,7 +711,7 @@ async function runQualifiedWorker(
         }
         let messages: ReturnType<typeof workerMessages>;
         try {
-          messages = workerMessages(raw);
+          messages = workerMessages(raw, outputCap);
           diagnostics.mark('firstRequest');
           diagnostics.request(raw);
           timed.prepared();
@@ -733,7 +734,7 @@ async function runQualifiedWorker(
         let timing: ModelCallTiming | undefined;
         const message = await withModelRetry(
           async () => {
-            if (attempts++ > 0) messages = workerMessages(await outgoing());
+            if (attempts++ > 0) messages = workerMessages(await outgoing(), outputCap);
             return options.transport.messages(
               job,
               messages,
@@ -809,10 +810,12 @@ async function runQualifiedWorker(
   // Auto and bypass workers never wait on a person; the sandbox and the secrets boundary still apply.
   const nobodyAsked = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
   const repeats = new WorkerRepeatReminder();
+  // What the job's own offer says, so a job keeps one cap from its first call to its last.
+  const outputCap = offeredOutputTokens(job.decision);
   const diagnostics = new WorkerDiagnosticsRecord(
     job.root,
     CLAUDE_DEEPSEEK_COMPACT_WINDOW,
-    MODEL_OUTPUT_TOKENS,
+    outputCap ?? MODEL_OUTPUT_TOKENS,
   );
   if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
   for (const name of ['workerStart', 'envReady']) diagnostics.mark(name, startTimes[name]);

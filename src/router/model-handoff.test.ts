@@ -857,6 +857,15 @@ it('consumes the server canonical offer contract without enabling an alias or pr
   expect(modelOfferSchema.parse({ ...offer, maxResultBytes: '4MB' }).maxResultBytes).toBe(
     undefined,
   );
+  // So is the output cap its Messages endpoint accepts: dropped from the job, a worker
+  // would ask 65,536 of a router that takes 256,000.
+  expect(modelOfferSchema.parse({ ...offer, maxOutputTokens: 256_000 }).maxOutputTokens).toBe(
+    256_000,
+  );
+  expect(modelOfferSchema.parse(offer)).not.toHaveProperty('maxOutputTokens');
+  expect(modelOfferSchema.parse({ ...offer, maxOutputTokens: 'many' }).maxOutputTokens).toBe(
+    undefined,
+  );
 });
 
 it('keeps a legacy undersized job native before purchasing model routing', async () => {
