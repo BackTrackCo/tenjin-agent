@@ -26,6 +26,8 @@ import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
 import { modelConsent } from './model-settings';
 import { RouteSkipped } from './decision';
+import { offeredOutputTokens, paidCallTimeoutMs } from './model-limits';
+import { advertisedCallLimit } from './model-pace';
 import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 let dir: string;
 /**
@@ -874,6 +876,16 @@ it('native-workspace continuation keeps its original scope and budget with a tru
 });
 
 it('consumes the server canonical offer contract without enabling an alias or provider switch', () => {
+  expect(
+    modelOfferSchema.parse({ ...offer, maxCallDurationMs: 540_000, callIdleLimitMs: 300_000 }),
+  ).toMatchObject({
+    maxCallDurationMs: 540_000,
+    callIdleLimitMs: 300_000,
+  });
+  for (const bad of ['540000', -1, 1.5, null])
+    expect(modelOfferSchema.parse({ ...offer, maxCallDurationMs: bad }).maxCallDurationMs).toBe(
+      undefined,
+    );
   expect(modelOfferSchema.safeParse(offer).success).toBe(true);
   expect(modelOfferSchema.safeParse({ ...offer, model: 'other-model' }).success).toBe(false);
   expect(
@@ -1007,6 +1019,40 @@ it.each([
     expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'invalid_offer' });
   },
 );
+
+// The optional offer fields a job's calls rely on must reach the stored job record, which is
+// what a worker, a held follow-up and a reload read: the parse once stripped what it did not
+// declare, so a real job always waited the constant.
+it('keeps the optional offer fields in the stored job, and the call wait reads them from there', async () => {
+  const f = await routedFixture();
+  const extras = {
+    maxCallDurationMs: 900_000,
+    callIdleLimitMs: 300_000,
+    maxOutputTokens: 256_000,
+    maxResultBytes: 4_000_000,
+    callLimit: { max: 120, windowSeconds: 60 },
+  };
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+    ...extras,
+  }));
+  const made = await f.model.capture(f.session, 'extras', { prompt: 'Read the fixture.' });
+  // Read back from the store, as a later process reads it.
+  const job = await f.model.store.owned(offerId(made), 'root');
+  expect(job?.decision).toMatchObject(extras);
+  expect(paidCallTimeoutMs(job!.decision)).toBe(960_000);
+  expect(offeredOutputTokens(job!.decision)).toBe(256_000);
+  expect(advertisedCallLimit(job!.decision)).toEqual({ max: 120, windowMs: 60_000 });
+  // An offer that names none gets the constant.
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+  }));
+  const plain = await f.model.capture(f.session, 'plain', { prompt: 'Read the fixture again.' });
+  const bare = await f.model.store.owned(offerId(plain), 'root');
+  expect(paidCallTimeoutMs(bare!.decision)).toBe(600_000);
+});
 
 it('takes the authorization from the call, never from a field the offer carries', async () => {
   const f = await routedFixture();

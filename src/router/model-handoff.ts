@@ -75,6 +75,11 @@ export const modelOfferSchema = z.object({
   /** The wallet's model-call rate over all its jobs and processes, counted at the unpaid
    *  quote. A router that does not say so counts after the signature. */
   callLimit: callLimitSchema,
+  /** The router's total deadline for one paid model call, in ms. A router that does not say
+   *  so is waited on for the constant. */
+  maxCallDurationMs: z.number().int().nonnegative().optional().catch(undefined),
+  /** The router's idle limit for one call, in ms. Kept with the job; no wait derives from it. */
+  callIdleLimitMs: z.number().int().nonnegative().optional().catch(undefined),
 });
 export interface ModelSession {
   sessionId: string;
