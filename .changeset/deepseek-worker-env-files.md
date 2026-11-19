@@ -1,5 +1,0 @@
----
-'tenjin-cli': patch
----
-
-A DeepSeek worker in Claude Code reads `.env` files in its working directories as a native subagent does, so tests and scripts that load `.env.local` work in a worker. Editing or writing one follows the native rules of the accepted mode, and env files outside the working directories stay unreadable. Their values never reach Tenjin or DeepSeek: each becomes `[env:NAME]` in what the worker forwards, in its result and in its activity, including the local progress file. Values under 8 characters, bare words and numbers under 16 characters, and other forms than the value as parsed, as written, line by line, URL-encoded, JSON-escaped or base64-encoded whole are sent as written; the subagent guide lists these limits. An env file is read whole whatever its size up to 16 MiB; a larger one is denied at job start, and one that appears during the job ends it with `env_file_unscanned` before anything more is forwarded. A scan that cannot finish keeps every env file denied for that job. The consent text now says what a worker reads and what is withheld. Charges, quotes and settlement are unchanged.

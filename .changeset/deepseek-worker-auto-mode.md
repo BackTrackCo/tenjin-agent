@@ -1,5 +1,0 @@
----
-'tenjin-cli': patch
----
-
-A DeepSeek worker in Claude Code keeps the permission mode the parent had when its offer was accepted for the whole job, so typing or switching mode in the parent no longer stops it. In auto mode a worker never waits on you: its native classifier judges each call, and a call that would still need a person is denied with its reason. In default mode its permission dialog shows the command and the reason, with Allow once, Allow for this job or Deny. Bypass-permissions parents now get offers too, unless settings disable bypass mode; plan mode stays native. Pushes, merges and every other action go through the accepted mode's own permission flow, as a native subagent's do. In every mode a worker is refused only the credential probes its sandbox cannot stop by path: the keychain, git's credential helpers and a GitHub token printed by `gh auth`. A worker that stops early hands its last text and recent activity back to the parent. Charges, quotes and settlement are unchanged.

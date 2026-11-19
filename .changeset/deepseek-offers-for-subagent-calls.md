@@ -1,5 +1,0 @@
----
-'tenjin-cli': patch
----
-
-An Agent (or legacy Task) call that a native Claude subagent makes, at any depth of native agents, can now get a DeepSeek offer as a call from the main conversation can, instead of always running natively. The routing request carries the session's context followed by that subagent's own conversation, the subagent accepts the offer with `subagent({offer_id})` or keeps it native by sending the call again unchanged, and the free repeat counts only for the agent the offer was made to. The call stays native, with no routing fee, when that subagent's tools leave out the `subagent` tool, when it or an agent above it may run in a permission mode of its own, or when it works in a folder of its own such as a worktree. `tenjin config subagents why` marks such a call `from a subagent` and names those reasons `caller_unqualified:tools`, `caller_unqualified:mode` and `caller_unqualified:folder`. A DeepSeek worker's own calls still get no offer. Routing fees, job ceilings and spend limits are unchanged.
