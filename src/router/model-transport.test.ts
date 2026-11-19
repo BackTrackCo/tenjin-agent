@@ -2161,3 +2161,90 @@ it('keeps a signed call the router refuses for rate as uncertain, and never trie
   expect(signed).toBe(1);
   expect((await f.make().summary(f.job)).uncertain).toHaveLength(1);
 });
+
+// A router that counts a call at its quote keeps that quote's place for 120 s. A call that
+// waits longer for its channel would be counted again after its signature.
+it.each(['advertised', 'unadvertised', 'changed'] as const)(
+  'asks for the quote again before signing when a call waited past 100 s for its channel (%s rate)',
+  async (rate) => {
+    const f = await fixture({ quote: '120000', refundCapability: 'enabled' });
+    const job: ModelJob =
+      rate === 'unadvertised'
+        ? f.job
+        : { ...f.job, decision: { ...f.job.decision, callLimit: { max: 120, windowSeconds: 60 } } };
+    const paced = pacedBy(() => f.vouchers.length);
+    const asked: unknown[] = [];
+    const real = f.deps.fetchImpl!;
+    f.deps.fetchImpl = async (input, init) => {
+      const request = new Request(input, init);
+      if (request.method === 'POST')
+        asked.push([
+          ((await request.clone().json()) as { invocationId: string }).invocationId,
+          request.headers.has('payment-signature') ? 'paid' : 'quote',
+        ]);
+      return real(request);
+    };
+    const signal = new AbortController().signal;
+    const held = deferred();
+    const entered = deferred();
+    f.router.hold = held.promise;
+    f.router.onDelayArmed = entered.resolve;
+    const timings: Record<string, unknown>[] = [];
+    const failure = (error: unknown) => error as ModelCallFailed;
+    const outcome = await new ModelTransport({
+      dataDir: f.dir,
+      baseUrl: BASE,
+      payerDeps: f.deps,
+      paceClock: paced.paceClock,
+    }).withInferenceRun(job.id, signal, async (worker) => {
+      // Two calls of one run: the second waits for the run's channel behind the first.
+      const first = worker.messages(job, say('A long call'), signal);
+      await entered.promise;
+      f.router.hold = null;
+      const channel = watchPaymentLock();
+      const second = worker
+        .messages(job, say('Waits for the channel'), signal, undefined, (timing) =>
+          timings.push({ ...timing }),
+        )
+        .catch(failure);
+      await channel.waiting;
+      channel.restore();
+      // It has its quote. The first call then runs on for 101 s.
+      paced.state.now += 101_000;
+      if (rate === 'changed') f.router.requirement.amount = '130000';
+      held.resolve();
+      return [await first, await second] as const;
+    });
+    const [one, two] = [asked[0], asked[2]].map((entry) => (entry as string[])[0]);
+    expect(two).not.toBe(one);
+    expect(outcome[0]).toEqual(f.message);
+    if (rate === 'advertised') {
+      // The same invocation is quoted again, then signed once.
+      expect(asked).toEqual([
+        [one, 'quote'],
+        [one, 'paid'],
+        [two, 'quote'],
+        [two, 'quote'],
+        [two, 'paid'],
+      ]);
+      expect(outcome[1]).toEqual(f.message);
+      expect(timings[0]!.requoteMs).toBeGreaterThanOrEqual(0);
+    } else if (rate === 'unadvertised') {
+      // That router counts after the signature: an older quote is no different to it.
+      expect(asked).toHaveLength(4);
+      expect(outcome[1]).toEqual(f.message);
+      expect(timings[0]).not.toHaveProperty('requoteMs');
+    } else {
+      // The fresh quote names another amount than the one reserved: nothing is signed,
+      // the reservation is released, and the retry rule may take the call up again.
+      expect(asked.filter((entry) => (entry as string[])[1] === 'paid')).toHaveLength(1);
+      expect(failure(outcome[1]).detail).toEqual({ cause: 'failed', uncharged: true });
+      expect(retryableModelCall(outcome[1])).toBe(true);
+      expect(await f.make().summary(job)).toEqual({
+        actualAtomic: '4000',
+        reservedAtomic: '4000',
+        uncertain: [],
+      });
+    }
+  },
+);

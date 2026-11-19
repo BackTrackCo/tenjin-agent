@@ -175,6 +175,11 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 /** A reserved quote that no longer fits the job's cap as it stands when its turn to pay comes. */
 class QuoteOverCap extends Error {}
+/**
+ * How old a quote may be when its paid request is signed, for a router that counts calls
+ * at the quote: it keeps the place of a counted quote for 120 s.
+ */
+const QUOTE_FRESH_MS = 100_000;
 
 export class ModelTransport {
   private routing: Payer;
@@ -467,7 +472,7 @@ export class ModelTransport {
     const step = (
       name: Exclude<
         keyof ModelCallTiming,
-        'slot' | 'fetches' | 'requestBytes' | 'laneMoved' | 'waitedOn' | 'paceWaitMs'
+        'slot' | 'fetches' | 'requestBytes' | 'laneMoved' | 'waitedOn' | 'paceWaitMs' | 'requoteMs'
       >,
     ) => {
       const now = performance.now();
@@ -614,49 +619,60 @@ export class ModelTransport {
     await assertCanTransmit();
     const wire = JSON.stringify(body);
     timing.requestBytes = Buffer.byteLength(wire);
-    if (advertised) await paced('quote');
-    stepFrom = performance.now();
-    const challenge = await fetchFn(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: wire,
-      redirect: 'error',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-    }).catch((error: unknown) => {
-      if (signal.aborted) throw error;
-      // Nothing is reserved or paid yet: the router confirms nothing was charged.
-      throw new ModelCallFailed(
-        'Model proxy did not answer',
-        { cause: timedOut(error) ? 'timeout' : 'failed', uncharged: true },
-        { cause: error },
-      );
-    });
-    if (challenge.status !== 402) {
-      const wait = retryAfterMs(challenge.headers.get('retry-after'));
-      // Its fixed code says what the router refused, such as `invalid_model_request`.
-      const refused = await errorCode(boundedResponse(challenge, 65_536));
-      await challenge.body?.cancel().catch(() => undefined);
-      throw new ModelCallFailed('Model proxy did not return a payment quote', {
-        cause: 'failed',
-        status: challenge.status,
-        uncharged: true,
-        ...refused,
-        ...(wait !== undefined ? { retryAfterMs: wait } : {}),
+    const now = this.options.paceClock?.now ?? Date.now;
+    /** The unpaid request: the router's quote for this call, and the amount it names. */
+    const askQuote = async (): Promise<{ challenge: Response; amount: bigint }> => {
+      if (advertised) {
+        const from = performance.now();
+        await paced('quote');
+        // The wait is `paceWaitMs`, not the round trip's time.
+        stepFrom += performance.now() - from;
+      }
+      const challenge = await fetchFn(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: wire,
+        redirect: 'error',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      }).catch((error: unknown) => {
+        if (signal.aborted) throw error;
+        // Nothing is reserved or paid yet: the router confirms nothing was charged.
+        throw new ModelCallFailed(
+          'Model proxy did not answer',
+          { cause: timedOut(error) ? 'timeout' : 'failed', uncharged: true },
+          { cause: error },
+        );
       });
-    }
+      if (challenge.status !== 402) {
+        const wait = retryAfterMs(challenge.headers.get('retry-after'));
+        // Its fixed code says what the router refused, such as `invalid_model_request`.
+        const refused = await errorCode(boundedResponse(challenge, 65_536));
+        await challenge.body?.cancel().catch(() => undefined);
+        throw new ModelCallFailed('Model proxy did not return a payment quote', {
+          cause: 'failed',
+          status: challenge.status,
+          uncharged: true,
+          ...refused,
+          ...(wait !== undefined ? { retryAfterMs: wait } : {}),
+        });
+      }
+      const header = challenge.headers.get('payment-required');
+      if (!header) {
+        await challenge.body?.cancel();
+        throw new Error('Model proxy has no quote');
+      }
+      const required = decodePaymentRequiredHeader(header);
+      const offers = required.accepts.filter((r) => r.scheme === 'batch-settlement');
+      if (offers.length !== 1 || !/^\d+$/.test(offers[0]!.amount)) {
+        await challenge.body?.cancel();
+        throw new Error('Unsupported model payment quote');
+      }
+      return { challenge, amount: BigInt(offers[0]!.amount) };
+    };
+    stepFrom = performance.now();
+    const { challenge, amount: quote } = await askQuote();
+    let quotedAt = now();
     step('quoteMs');
-    const header = challenge.headers.get('payment-required');
-    if (!header) {
-      await challenge.body?.cancel();
-      throw new Error('Model proxy has no quote');
-    }
-    const required = decodePaymentRequiredHeader(header);
-    const offers = required.accepts.filter((r) => r.scheme === 'batch-settlement');
-    if (offers.length !== 1 || !/^\d+$/.test(offers[0]!.amount)) {
-      await challenge.body?.cancel();
-      throw new Error('Unsupported model payment quote');
-    }
-    const quote = BigInt(offers[0]!.amount);
     let reservation: Call | undefined;
     try {
       reservation = await modelLock(`${path}.lock`, async () => {
@@ -710,15 +726,18 @@ export class ModelTransport {
       localBlock?: LocalSendBlocked;
       paidError?: { status: number; code?: string };
       overCap?: QuoteOverCap;
+      /** The fresh quote a long wait called for could not be had, or named another amount. */
+      requote?: ModelCallFailed;
     };
-    const payOn = async (slots: readonly ModelInferenceSlot[], quoted: Response): Promise<Paid> => {
+    const payOn = async (slots: readonly ModelInferenceSlot[]): Promise<Paid> => {
       const paid: Paid = { slot: slots[0]!, signingStarted: false, paymentSent: false };
+      let answer = quoted();
       let first = true;
       const cachedFetch: typeof fetch = async (input, init) => {
         if (first) {
           signal.throwIfAborted();
           first = false;
-          return quoted;
+          return answer;
         }
         const headers = new Headers(
           init?.headers ?? (input instanceof Request ? input.headers : undefined),
@@ -833,6 +852,33 @@ export class ModelTransport {
                 ? current.maxJobAtomic
                 : BigInt(job.capAtomic);
             if (BigInt((await load()).charged) > cap) throw (paid.overCap = new QuoteOverCap());
+            // A QUOTE THE ROUTER NO LONGER HOLDS A PLACE FOR. A router that counts a call
+            // at its quote serves the paid request that follows within 120 s whatever the
+            // rate is by then; a later one it counts again, after the signature. This call
+            // waited for its channel past that, so it asks for the quote again, with the
+            // same invocation, before it signs. A fresh quote that cannot be had, or that
+            // names another amount than the one reserved, ends this try unsigned and
+            // uncharged, for the retry rule to take up with a new reservation.
+            if (advertised && now() - quotedAt > QUOTE_FRESH_MS) {
+              const from = performance.now();
+              const fresh = await askQuote().catch((error: unknown) => {
+                if (error instanceof ModelCallFailed) paid.requote = error;
+                throw error;
+              });
+              if (fresh.amount !== quote) {
+                await fresh.challenge.body?.cancel().catch(() => undefined);
+                throw (paid.requote = new ModelCallFailed(
+                  'Model quote changed while the call waited for its channel',
+                  { cause: 'failed', uncharged: true },
+                ));
+              }
+              await answer.body?.cancel().catch(() => undefined);
+              quoted = await kept(fresh.challenge);
+              answer = quoted();
+              quotedAt = now();
+              timing.requoteMs = (timing.requoteMs ?? 0) + performance.now() - from;
+              stepFrom = performance.now();
+            }
             signal.throwIfAborted();
             paymentTurn = true;
             step('gateMs');
@@ -875,7 +921,7 @@ export class ModelTransport {
         paid.failure = cause;
         if (!paymentTurn) paid.localBlock = new LocalSendBlocked(cause);
       } finally {
-        if (first) await quoted.body?.cancel().catch(() => undefined);
+        if (first) await answer.body?.cancel().catch(() => undefined);
       }
       return paid;
     };
@@ -906,22 +952,23 @@ export class ModelTransport {
     // The quote is answered to the payer once per try. A call that may try twice keeps the
     // quote's bytes and answers each try from them (a clone would hold the first try's
     // cancel until the second was cancelled too).
-    let quoted = () => challenge;
-    if (!inferenceRun) {
-      const bytes = await boundedResponse(challenge, 65_536)
+    const kept = async (challenged: Response): Promise<() => Response> => {
+      if (inferenceRun) return () => challenged;
+      const bytes = await boundedResponse(challenged, 65_536)
         .arrayBuffer()
         .catch(() => undefined);
       if (bytes === undefined) {
         await release();
         throw new Error('Unsupported model payment quote');
       }
-      quoted = () =>
+      return () =>
         new Response(bytes.byteLength > 0 ? bytes : null, {
-          status: challenge.status,
-          headers: challenge.headers,
+          status: challenged.status,
+          headers: challenged.headers,
         });
-    }
-    let paid = await payOn(inferenceRun ? [own] : [own, other], quoted());
+    };
+    let quoted = await kept(challenge);
+    let paid = await payOn(inferenceRun ? [own] : [own, other]);
     // THE OTHER LANE REFUSED BEFORE ANYTHING WAS SIGNED (its channel needs a deposit that
     // the person's limits do not allow, say): the call waits for its own lane, as it did
     // before lanes were shared out, so a call that its own lane can pay is never lost to
@@ -934,7 +981,7 @@ export class ModelTransport {
       !paid.paymentSent &&
       !paid.localBlock
     )
-      paid = await payOn([own], quoted());
+      paid = await payOn([own]);
     timing.slot = paid.slot;
     if (paid.slot !== own) timing.laneMoved = true;
     const { result, failure, paymentSent, signingStarted, localBlock, paidError, overCap } = paid;
@@ -947,6 +994,7 @@ export class ModelTransport {
           throw new ModelCallFailed('Model quote exceeds remaining job ceiling', {
             cause: 'budget',
           });
+        if (paid.requote) throw paid.requote;
         throw new ModelCallFailed(
           localBlock
             ? 'Model payment refused before transmission'
