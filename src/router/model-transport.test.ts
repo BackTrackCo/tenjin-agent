@@ -92,7 +92,7 @@ async function fixture(
     root: repo,
     task: 'Read the fixture',
     native: {},
-    decision: { jobId: randomUUID(), routingFeeAtomic: '3000' },
+    decision: { jobId: randomUUID(), routingFeeAtomic: '3000', routingAuthorizedAtomic: '3000' },
     capAtomic: '1000000',
     state: 'running',
     expiresAt: Date.now() + 60_000,
@@ -1755,6 +1755,41 @@ it.each(['0', '1', '999999999'])(
     expect(f.router.paidRequests()).toBe(0);
   },
 );
+
+it.each([
+  ['8100', '8100'],
+  ['250000', '250000'],
+  ['0', '0'],
+])('starts a job budget from the %s its routing call authorized', async (authorized, seeded) => {
+  const f = await fixture({ cap: '1000000' });
+  f.job.decision.routingAuthorizedAtomic = authorized;
+  f.job.decision.routingFeeAtomic = '1';
+  expect(await f.make().summary(f.job)).toMatchObject({
+    reservedAtomic: seeded,
+    actualAtomic: seeded,
+  });
+  await f.make().messages(f.job, { messages: [] }, new AbortController().signal);
+  expect(
+    JSON.parse(await readFile(join(f.dir, 'model-jobs', `${f.job.id}.budget.json`), 'utf8'))
+      .charged,
+  ).toBe((BigInt(seeded) + 1000n).toString());
+});
+
+it('holds a job that records no authorization at the most a routing call may pay', async () => {
+  const f = await fixture({ cap: '1000000' });
+  delete f.job.decision.routingAuthorizedAtomic;
+  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '250000' });
+});
+
+it('refuses a call that would pass the cap by the authorized fee, whatever the offer said', async () => {
+  const f = await fixture({ cap: '508099' });
+  f.job.decision.routingAuthorizedAtomic = '8100';
+  f.job.decision.routingFeeAtomic = '3000';
+  await expect(
+    f.make().messages(f.job, { messages: [] }, new AbortController().signal),
+  ).rejects.toThrow(/remaining job ceiling/);
+  expect(f.router.paidRequests()).toBe(0);
+});
 
 it('settles concurrent owner recoveries once without subtracting the same reservation twice', async () => {
   const f = await fixture({ drop: true });

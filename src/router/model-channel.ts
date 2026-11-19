@@ -2,9 +2,6 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { payerDir, ROUTING_DEPOSIT_KEY } from './fee';
 
-/** Once-per-job model routing is independent of variable tool-routing quotes. */
-export const MODEL_ROUTING_FEE_CEILING_ATOMIC = 3_000n;
-
 export type ModelPaymentPath =
   '/api/model-router/route' | '/api/model-proxy/messages' | '/api/model-proxy/responses';
 export type ModelChannelLane = 'model-routing' | 'model-inference';

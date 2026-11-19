@@ -49,8 +49,6 @@ export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): nu
  * router is still serving, and its charge would be uncertain.
  */
 export const MODEL_PAID_CALL_TIMEOUT_MS = 600_000;
-/** The routing fee's ceiling, which a job's ceiling also covers. */
-export const MODEL_ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /**
  * The router's peak Messages quote, as its `quoteAtomic` makes it (tariff
  * deepseek-flash-1017-2026-11-13): `bytes` of request body plus 4096 framing, at most the
@@ -83,10 +81,6 @@ export function fittingOutputTokens(bytes: number, asked: number, remaining: big
 }
 /** The least quote a worker's request can have: no body, the output cap every router takes. */
 export const MODEL_MINIMUM_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_TOKENS);
-/** Necessary floor: one such call and the routing fee. Actual system/tools/history increase
- *  the quote; this is not a sufficiency guarantee. Derived from the cap, so the two move together. */
-export const MODEL_MINIMUM_JOB_ATOMIC =
-  MODEL_MINIMUM_CALL_ATOMIC + MODEL_ROUTING_FEE_CEILING_ATOMIC;
 /** A floor in dollars as the CLI prints it: `$0.086866`. */
 export const usdOfAtomic = (atomic: bigint): string => '$' + (Number(atomic) / 1e6).toFixed(6);
 /** Full hosted POST receipt or owner-GET JSON envelope, including escaped wire and metadata. */

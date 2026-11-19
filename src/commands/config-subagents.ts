@@ -8,7 +8,6 @@ import { modelConsent, modelConsentSchema, namedDirectories } from '../router/mo
 import { loadRawConfig } from '../lib/config';
 import {
   MODEL_MINIMUM_CALL_ATOMIC,
-  MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_OUTPUT_TOKENS,
   usdOfAtomic,
 } from '../router/model-limits';
@@ -85,7 +84,7 @@ function whyReason(entry: NoOffer): string {
         ? 'The assignment is over the router’s size limit'
         : `The assignment is over the router’s size limit (${entry.bytes.toLocaleString('en-US')} of ${entry.limit?.toLocaleString('en-US') ?? '?'} bytes)`;
     case 'job_cap_too_low':
-      return `The job cap is below one model call and its routing fee (${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)}); raise it with \`tenjin config set maxAutoSpend <usd>\``;
+      return `The job cap leaves no room for the routing fee above one model call (${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}); raise it with \`tenjin config set maxAutoSpend <usd>\``;
     case 'job_cap_lowered':
       return 'The job cap was lowered after the call was held; send the call again for an offer at the new cap';
     case 'capture_error':
@@ -242,15 +241,15 @@ export async function runConfigSubagents(
   // each offer. `--max-job` names a lower ceiling and never lifts the cap above the limit.
   const perCall = settings.policy.maxAutoSpendAtomic;
   const named = flags.maxJob === undefined ? undefined : BigInt(parseUsdToAtomic(flags.maxJob));
-  if (named !== undefined && named < MODEL_MINIMUM_JOB_ATOMIC)
+  if (named !== undefined && named <= MODEL_MINIMUM_CALL_ATOMIC)
     throw new CliError(
       'USAGE',
-      `The job ceiling must be at least ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} for the current minimum Messages reservation and routing fee. Actual input can require more.`,
+      `The job ceiling must be above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the current minimum Messages reservation, with the routing fee on top. Actual input can require more.`,
     );
-  if (perCall < MODEL_MINIMUM_JOB_ATOMIC)
+  if (perCall <= MODEL_MINIMUM_CALL_ATOMIC)
     throw new CliError(
       'USAGE',
-      `Your per-call spend limit, ${usd(perCall)}, is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} that one model call and its routing fee need, so no job would be offered. Nothing was changed.`,
+      `Your per-call spend limit, ${usd(perCall)}, is not above the ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} that one model call needs before its routing fee, so no job would be offered. Nothing was changed.`,
       {
         fix: 'Raise the limit with `tenjin config set maxAutoSpend <usd>`, then run this command again.',
       },

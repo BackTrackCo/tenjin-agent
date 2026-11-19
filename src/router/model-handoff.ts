@@ -1,7 +1,6 @@
 import {
   MODEL_CODEX_TASK_BYTES,
   MODEL_MINIMUM_CALL_ATOMIC,
-  MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
 } from './model-limits';
@@ -10,7 +9,7 @@ import { qualifiedModelWorker } from './model-worker';
 import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
-import { ModelJobStore, type NoOffer } from './model-job';
+import { ModelJobStore, routingAuthorizedAtomic, type NoOffer } from './model-job';
 import { disclosureCovers, modelSettings, type ModelSettings } from './model-settings';
 import { modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
@@ -77,11 +76,6 @@ export const modelOfferSchema = z.object({
    *  quote. A router that does not say so counts after the signature. */
   callLimit: callLimitSchema,
 });
-/** What a job's routing call was authorized to charge, as this client recorded it. */
-function savedAuthorized(decision: Record<string, unknown>): bigint {
-  const value = decision.routingAuthorizedAtomic;
-  return typeof value === 'string' && /^\d{1,30}$/.test(value) ? BigInt(value) : 0n;
-}
 export interface ModelSession {
   sessionId: string;
   turnId: string;
@@ -650,7 +644,7 @@ export class ModelHandoff {
     const bytes = Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES;
     if (bytes > MODEL_ROUTE_BODY_BYTES)
       return native('over_size_limit', { bytes, limit: MODEL_ROUTE_BODY_BYTES });
-    if (settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC) return native('job_cap_too_low');
+    if (settings.maxJobAtomic <= MODEL_MINIMUM_CALL_ATOMIC) return native('job_cap_too_low');
     const input = { ...admission, jobId: job.id };
     // What a consent read later must still say for this job, or the code that says why not.
     // A cap under the one the job was held at is the person lowering their per-call limit,
@@ -699,7 +693,7 @@ export class ModelHandoff {
       if (timing) timing.marks.routeSent = Date.now();
       const answered =
         job.state === 'offered'
-          ? { json: job.decision, authorizedAtomic: savedAuthorized(job.decision) }
+          ? { json: job.decision, authorizedAtomic: routingAuthorizedAtomic(job.decision) ?? 0n }
           : await transport.route(
               input,
               signal,
@@ -734,11 +728,15 @@ export class ModelHandoff {
       signal?.throwIfAborted();
     } catch (error) {
       // A fee stated above what may be paid is skipped, as the tool router skips such an answer.
-      if (error instanceof RouteSkipped && error.why === FEE_ABOVE_CEILING)
-        await native('fee_above_ceiling', {
-          ...(error.quotedAtomic !== undefined ? { detail: error.quotedAtomic.toString() } : {}),
-        });
-      else await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
+      if (error instanceof RouteSkipped && error.why === FEE_ABOVE_CEILING) {
+        // Within the fee ceiling, the fee is skipped for want of room in the job's cap.
+        if (error.quotedAtomic !== undefined && error.quotedAtomic <= ROUTING_FEE_CEILING_ATOMIC)
+          await native('job_cap_too_low');
+        else
+          await native('fee_above_ceiling', {
+            ...(error.quotedAtomic !== undefined ? { detail: error.quotedAtomic.toString() } : {}),
+          });
+      } else await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
       return { action: 'native', reason: 'Routing failed or interrupted; retry native unchanged' };
     }
     const parsed = modelOfferSchema.safeParse(raw);

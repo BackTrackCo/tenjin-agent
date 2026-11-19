@@ -10,9 +10,8 @@ import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
-import { modelLock, type ModelJob } from './model-job';
+import { modelLock, routingAuthorizedAtomic, type ModelJob } from './model-job';
 import {
-  MODEL_ROUTING_FEE_CEILING_ATOMIC,
   modelChannelScope,
   modelInferenceRunScope,
   type ModelInferenceSlot,
@@ -189,6 +188,14 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', stop));
   });
 }
+
+/**
+ * WHAT A JOB'S ROUTING CALL COULD HAVE CHARGED, which its budget starts from: the amount this
+ * client authorized for that call, recorded when it was made. An offer's own fee cannot lower
+ * it. A job that carries none is held at the most a routing call may pay.
+ */
+const routingExposure = (job: ModelJob): bigint =>
+  routingAuthorizedAtomic(job.decision) ?? ROUTING_FEE_CEILING_ATOMIC;
 
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 /** A reserved quote that no longer fits the job's cap as it stands when its turn to pay comes. */
@@ -1111,13 +1118,7 @@ export class ModelTransport {
       throw new Error('Original model budget is unavailable; refusing continuation');
     if (!parsed.success && (await lstat(path).catch(() => null)))
       throw new Error('Unreadable model budget; refusing another authorization');
-    // The route's payment ceiling is trusted locally; an offer cannot reduce it.
-    return parsed.success
-      ? parsed.data
-      : {
-          charged: MODEL_ROUTING_FEE_CEILING_ATOMIC.toString(),
-          calls: {},
-        };
+    return parsed.success ? parsed.data : { charged: routingExposure(job).toString(), calls: {} };
   }
 
   /** The consent the job runs under, still in force for this router. */
@@ -1298,7 +1299,7 @@ export class ModelTransport {
   async summary(job: ModelJob) {
     const path = join(this.options.dataDir, 'model-jobs', `${job.id}.budget.json`);
     const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
-    const routing = MODEL_ROUTING_FEE_CEILING_ATOMIC.toString();
+    const routing = routingExposure(job).toString();
     if (!parsed.success && (await lstat(path).catch(() => null)))
       throw new Error('Model accounting is unreadable; exposure is unknown');
     if (!parsed.success)

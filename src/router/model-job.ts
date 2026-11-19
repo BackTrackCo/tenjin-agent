@@ -81,6 +81,14 @@ const unresolved = (job: ModelJob) =>
   (job.expiresAt > Date.now() || ['running', 'cancelling'].includes(job.state));
 
 /** Why a subagent call the hook saw got no offer. Codes only: never the assignment. */
+/**
+ * What a job's routing call was authorized to charge, as this client recorded it when the
+ * call was made: null for a decision that carries none.
+ */
+export function routingAuthorizedAtomic(decision: Record<string, unknown>): bigint | null {
+  const value = decision.routingAuthorizedAtomic;
+  return typeof value === 'string' && /^\d{1,30}$/.test(value) ? BigInt(value) : null;
+}
 export const NO_OFFER_CODES = [
   'kept_native',
   'no_session',

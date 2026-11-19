@@ -11,7 +11,7 @@ import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/confi
 import { selectOne } from '../lib/clack';
 import { hasCode } from '../lib/errno';
 import type { QuestionStep } from './install';
-import { MODEL_MINIMUM_JOB_ATOMIC, usdOfAtomic } from './model-limits';
+import { MODEL_MINIMUM_CALL_ATOMIC, usdOfAtomic } from './model-limits';
 import {
   modelConsent,
   modelConsentSchema,
@@ -266,9 +266,9 @@ export async function finishNewInstall(
               {
                 terms: saved,
                 notes:
-                  saved && perCall < MODEL_MINIMUM_JOB_ATOMIC
+                  saved && perCall <= MODEL_MINIMUM_CALL_ATOMIC
                     ? [
-                        `No job is offered while that limit is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} one model call and its routing fee need. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
+                        `No job is offered while that limit is not above the ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} one model call needs before its routing fee. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
                       ]
                     : [],
               },

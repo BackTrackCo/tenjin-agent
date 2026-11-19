@@ -16,7 +16,11 @@ import {
   type ModelCaller,
   type ModelSession,
 } from './model-handoff';
-import { MODEL_ROUTE_BODY_BYTES, MODEL_ROUTE_ENVELOPE_BYTES } from './model-limits';
+import {
+  MODEL_MINIMUM_CALL_ATOMIC,
+  MODEL_ROUTE_BODY_BYTES,
+  MODEL_ROUTE_ENVELOPE_BYTES,
+} from './model-limits';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
@@ -1016,6 +1020,22 @@ it('takes the authorization from the call, never from a field the offer carries'
   expect((await f.model.store.owned(offerId(made), 'root'))?.decision).toMatchObject({
     routingAuthorizedAtomic: '3000',
   });
+});
+
+it('lets the routing call pay only what the job cap leaves beside one model call, and says so when the quote is over it', async () => {
+  const f = await routedFixture();
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ ...config, maxAutoSpend: (MODEL_MINIMUM_CALL_ATOMIC + 8100n).toString() }),
+  );
+  await f.model.capture(f.session, 'room-call', { prompt: 'Read the fixture.' });
+  expect(f.route.mock.calls[0]![4]).toBe(8100n);
+  f.route.mockRejectedValueOnce(new RouteSkipped(FEE_ABOVE_CEILING, { quotedAtomic: 8101n }));
+  expect(await f.model.capture(f.session, 'room-over', { prompt: 'Read another.' })).toMatchObject({
+    action: 'native',
+  });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'job_cap_too_low' });
 });
 
 it('offers a call made while another job of the session runs, in a turn no prompt started', async () => {
