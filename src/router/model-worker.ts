@@ -429,15 +429,24 @@ async function runQualifiedWorker(
   const resumedEnv = early ? WorkerEnvSecrets.resume(envRoots, envTemp) : undefined;
   const agentType = String(job.native.subagent_type ?? 'general-purpose');
   // The temp folder is a working directory, so the file tools take its literal paths.
+  // The linked worktrees are granted through the worker's settings, not `--add-dir`: a
+  // directory passed as a flag has its `.claude` folder loaded (skills, agents, commands),
+  // which a native subagent of the session does not do for its worktrees (92 of them here
+  // cost 0.5 s of the child's start and put 160 duplicate skills in its list), and a
+  // directory the settings name is a working directory of the session all the same, so the
+  // sandbox lets git write that worktree's administrative folder. Windows keeps the flag.
+  const settingsDirectories = binary.windows ? [] : worktrees;
   const additionalDirectories = [
     ...workspace.workingDirectories.slice(1),
-    ...worktrees,
+    ...(binary.windows ? worktrees : []),
     ...(temp ? [temp.directory] : []),
   ];
+  // What the start key stamps, as at the accept: every directory the worker may use.
+  const keyedDirectories = [...workspace.workingDirectories.slice(1), ...worktrees];
   const agentInput = {
     binary: binary.path,
     cwd: job.root,
-    additionalDirectories: additionalDirectories.filter((dir) => dir !== temp?.directory),
+    additionalDirectories: keyedDirectories,
     agentType,
     ...(binary.windows ? { windows: binary.windows } : {}),
     ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
@@ -954,6 +963,7 @@ async function runQualifiedWorker(
             ...(temp ? { CLAUDE_CODE_TMPDIR: temp.directory } : {}),
           },
           permissions: {
+            ...(settingsDirectories.length ? { additionalDirectories: settingsDirectories } : {}),
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
             workingDirectoriesAsGiven: [

@@ -739,8 +739,13 @@ it('gives the worker every consented repository and its worktrees, and denies a 
     options(),
   );
   const call = vi.mocked(query).mock.calls[0]![0];
-  // The sandbox keeps a worktree's git metadata read-only unless the worktree is named.
-  expect(call.options?.additionalDirectories).toEqual(['/workspace', '/workspace/.worktrees/fix']);
+  // The sandbox keeps a worktree's git metadata read-only unless the worktree is a working
+  // directory. It is one through the settings, not a flag: a flag makes Claude Code load the
+  // worktree's `.claude` folder (skills, agents, commands), which a native subagent does not.
+  expect(call.options?.additionalDirectories).toEqual(['/workspace']);
+  expect(given(call.options).settings).toHaveProperty('permissions.additionalDirectories', [
+    '/workspace/.worktrees/fix',
+  ]);
   expect(given(call.options).settings).toHaveProperty(
     'permissions.deny',
     expect.arrayContaining([
@@ -3052,9 +3057,10 @@ it('starts without the CLAUDE.md files its native subagent starts without, and k
   await runModelWorker({ ...job, native: { subagent_type: 'Explore' } } as unknown as ModelJob, {
     ...options(),
   });
-  // Read with the worker's own working directories, whose CLAUDE.md files it may start with.
+  // Read with the worker's own flag directories. A worktree is a settings grant: Claude Code
+  // loads no CLAUDE.md or `.claude` folder from it (checked on 2.1.325 and 2.1.328).
   expect(vi.mocked(readNativeAgentPrompt).mock.calls[0]![0]).toMatchObject({
-    additionalDirectories: ['/repo-feature'],
+    additionalDirectories: [],
   });
   expect(given(vi.mocked(query).mock.calls[0]![0].options).settings).toMatchObject({
     claudeMdExcludes: files,
