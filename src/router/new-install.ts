@@ -6,15 +6,26 @@ import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/confi
 import { selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
+import { paint } from '../lib/output';
 import type { QuestionStep } from './install';
 import { nativeWorkspaceModelConsent } from './model-settings';
 
 export type InstallSubagentChoice = 'on' | 'off';
 
+/** Said once, to a person who has just turned subagents on: who receives what, and the fees. */
 export const DEEPSEEK_INSTALL_TERMS =
   'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto and a $1 job limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, and Exa searches cost $0.004 each. Your spend limits apply.';
 
-const SUBAGENT_QUESTION = `Turn on DeepSeek subagents? ${DEEPSEEK_INSTALL_TERMS}`;
+/** The page the question sends a person to for the recipients, the reads, the fees and the cap. */
+export const SUBAGENT_DETAILS_URL =
+  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md';
+
+/** The whole fresh-setup question, in a terminal and through an agent: its wording changes here alone. */
+export const SUBAGENT_QUESTION = [
+  'Use a cheap model for eligible subagent jobs?',
+  'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results.',
+  `Each job costs up to your per-call spend limit. Details: ${SUBAGENT_DETAILS_URL}`,
+].join('\n');
 const SUBAGENT_OPTIONS = [
   { value: 'off', label: 'Keep off' },
   { value: 'on', label: 'Turn on' },
@@ -279,14 +290,24 @@ export async function finishNewInstall(
     data: {
       ...(result.data as Record<string, unknown>),
       subagents: enabled
-        ? { enabled, scope: 'native-workspace', maxJobAtomic: '1000000' }
+        ? {
+            enabled,
+            scope: 'native-workspace',
+            maxJobAtomic: '1000000',
+            terms: DEEPSEEK_INSTALL_TERMS,
+          }
         : { enabled },
     },
+    // The terms follow the one answer they inform. The question links to them, and the
+    // receipt's disclosure does not repeat them after either answer.
     humanLines: [
       ...(result.humanLines ?? []),
-      enabled
-        ? 'DeepSeek subagent routing is enabled with parent veto and a $1 job limit. Turn it off with `tenjin config subagents off`.'
-        : 'DeepSeek subagent routing is off.',
+      ...(enabled
+        ? [
+            'DeepSeek subagent routing is enabled with parent veto and a $1 job limit. Turn it off with `tenjin config subagents off`.',
+            paint(ctx.io, 'dim', DEEPSEEK_INSTALL_TERMS),
+          ]
+        : ['DeepSeek subagent routing is off.']),
     ],
   };
 }

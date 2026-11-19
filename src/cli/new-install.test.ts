@@ -9,6 +9,7 @@ import { loadRawConfig } from '../lib/config';
 import type { RuntimeSetup } from '../lib/runtime';
 import { runCodexInstall } from '../router/codex-install';
 import { runRouterInstall } from '../router/install';
+import { DEEPSEEK_INSTALL_TERMS } from '../router/new-install';
 import { CODEX_PLUGIN } from '../router/codex-host';
 
 // Real core, host installers, config locks, registration files and receipts.
@@ -196,7 +197,12 @@ it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][]
     );
     expect(subagentSteps).toMatchObject([
       {
-        question: expect.stringContaining('Turn on DeepSeek subagents?'),
+        // The consent question, whole: an agent relays it word for word.
+        question: [
+          'Use a cheap model for eligible subagent jobs?',
+          'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results.',
+          'Each job costs up to your per-call spend limit. Details: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
+        ].join('\n'),
         options: [
           { id: 'off', recommended: true, command: expect.stringMatching(/ --subagents off$/) },
           { id: 'on', recommended: false, command: expect.stringMatching(/ --subagents on$/) },
@@ -206,7 +212,7 @@ it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][]
     const optedIn = await install(['--subagents', 'on']);
     expect(optedIn.code).toBe(0);
     expectEnabled(optedIn.config);
-    expect(optedIn.output).not.toContain('Turn on DeepSeek subagents?');
+    expect(optedIn.output).not.toContain('Use a cheap model for eligible subagent jobs?');
   },
 );
 
@@ -218,7 +224,7 @@ it('saves off without consent and does not ask again on reinstall', async () => 
   expect(JSON.parse(off.output).data.subagents).toEqual({ enabled: false });
   const repeated = await install();
   expect(repeated.config.router).toEqual({ subagents: false });
-  expect(repeated.output).not.toContain('Turn on DeepSeek subagents?');
+  expect(repeated.output).not.toContain('Use a cheap model for eligible subagent jobs?');
 });
 
 it('accepts custom limits on continuation without changing the DeepSeek job ceiling', async () => {
@@ -230,6 +236,25 @@ it('accepts custom limits on continuation without changing the DeepSeek job ceil
   expect(out.config.maxAutoSpend).toBe('0');
   expect(out.config.sessionBudget).toBe('none');
 });
+
+// The terms paragraph was in every receipt's disclosure, so it came back after Keep off
+// and a second time after the question that held it.
+it.each(['claude', 'codex'] as const)(
+  'says the DeepSeek terms once after on, and not at all after off, on %s',
+  async (host) => {
+    const run = host === 'claude' ? runRouterInstall : runCodexInstall;
+    const count = (text: string) => text.split(DEEPSEEK_INSTALL_TERMS).length - 1;
+    const said = async (subagents: 'on' | 'off') => {
+      await rm(seams.data, { recursive: true, force: true });
+      const out = await run({ yes: true, subagents }, testCtx(seams.data, { json: false }));
+      const human = [...(out.humanLines ?? []), ...(out.humanTail ?? [])].join('\n');
+      return count(human) + count(JSON.stringify(out.data));
+    };
+    // Once for a person and once in the data an agent reads.
+    expect(await said('on')).toBe(2);
+    expect(await said('off')).toBe(0);
+  },
+);
 
 it.each(['claude', 'codex'] as const)(
   'supports the standalone %s installer entrypoint',
