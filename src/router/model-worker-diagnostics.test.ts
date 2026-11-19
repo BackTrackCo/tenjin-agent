@@ -210,7 +210,7 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
     // The worker's own record keeps it, and counts its two ends from the accept.
     const record = new WorkerDiagnosticsRecord('/no/such/repo', 786_432, 65_536);
     record.accepted(15_000);
-    record.fact('envKept', true);
+    record.fact('promptAhead', true);
     record.fact('promptReadMs', 3.6);
     record.childMark('before_sandbox_init', 15_300);
     record.childMark('before_sandbox_init', 15_900);
@@ -223,7 +223,7 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
     });
     const kept = JSON.parse(await readFile(path, 'utf8'));
     expect(kept.offer).toEqual(offer);
-    expect(kept.start).toEqual({ envKept: true, promptReadMs: 4 });
+    expect(kept.start).toEqual({ promptAhead: true, promptReadMs: 4 });
     // Once each, from the accept, as the phases are.
     expect(kept.childMarks).toEqual({ before_sandbox_init: 300 });
     expect(kept.phases).toEqual({

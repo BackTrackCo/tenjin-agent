@@ -663,7 +663,7 @@ it('never names a page on this machine, or an address holding a secret value, to
   ).toBeNull();
   const secret = await workerFetchFallback(
     { input: { url: 'https://x402.org/?key=Zq8v3rys3cretvalue', prompt: 'x' }, ...failed },
-    { ...deps, redact: (text) => text.replace('Zq8v3rys3cretvalue', '[env:KEY]') },
+    { ...deps, redact: (text) => text.replace('Zq8v3rys3cretvalue', '[redacted GitHub token]') },
   );
   expect(secret).toContain('its address holds a secret value');
   expect(seen).toEqual([]);

@@ -1916,8 +1916,8 @@ test("each viewer step is one worker reply: its text, and its calls answered as 
       name: 'Bash',
       inputSummary: '{"command":"[text: 9 chars]"}',
       command: 'pnpm lint',
-      // The CLI's preview, its values already replaced; terminal controls go here too.
-      outputPreview: 'ok \u001b[31mDEEP=[env:DEEP]\nline 2\nline 3\nPRIVATE_FOURTH_LINE',
+      // The CLI's preview; terminal controls go here too.
+      outputPreview: 'ok \u001b[31mDEEP=on\nline 2\nline 3\nPRIVATE_FOURTH_LINE',
     }),
     // The next reply is still running: not a step yet.
     {
@@ -1984,7 +1984,7 @@ test("each viewer step is one worker reply: its text, and its calls answered as 
     agentId: 'native-viewer-1',
   });
   expect(lint.result).toEqual({
-    stdout: 'ok  [31mDEEP=[env:DEEP]\nline 2\nline 3',
+    stdout: 'ok  [31mDEEP=on\nline 2\nline 3',
     stderr: '',
     interrupted: false,
   });

@@ -10,7 +10,6 @@ import {
   CLAUDE_WORKER_SETTINGS,
   claudePrivatePaths,
   secretHomePaths,
-  settingsFileEnv,
 } from './model-worker-privacy';
 
 /** Only the owned conversation controller supplies native session identities. */
@@ -169,27 +168,19 @@ export async function claudeWorkerPrivatePaths(
   ];
   // Session transcripts, memory, prompt history, the user's settings files and each
   // working directory's own `.claude/settings.json` stay readable, as for a native
-  // subagent. A settings file opens only when its env block could be read, so its values
-  // are known and replaced before anything leaves. A repository's `settings.local.json`
-  // and `.mcp.json` stay closed, and so does a project settings file outside the working
-  // directories.
+  // subagent. A repository's `settings.local.json` and `.mcp.json` stay closed, and so
+  // does a project settings file outside the working directories.
   const configs = [
     ...new Set(
       [env, { ...env, ...settingsEnv }].map((source) => claudeWorkerConfigDir(cwd, source)),
     ),
   ];
-  const settings = await Promise.all(
-    [
-      ...new Set([
-        ...configs.flatMap((config) => CLAUDE_WORKER_SETTINGS.map((name) => join(config, name))),
-        ...working.map((root) => join(root, '.claude', 'settings.json')),
-      ]),
-    ].map(async (path) => ({ path, env: await settingsFileEnv(path) })),
-  );
-  const known = settings.filter((file) => file.env !== undefined);
   const opened = [
-    ...configs.flatMap((config) => CLAUDE_WORKER_READABLE.map((name) => join(config, name))),
-    ...known.map((file) => file.path),
+    ...new Set([
+      ...configs.flatMap((config) => CLAUDE_WORKER_READABLE.map((name) => join(config, name))),
+      ...configs.flatMap((config) => CLAUDE_WORKER_SETTINGS.map((name) => join(config, name))),
+      ...working.map((root) => join(root, '.claude', 'settings.json')),
+    ]),
   ];
   // PROTECTION WINS OVER OPENNESS. The opened names are taken out of the protected set by
   // their own spelling only. One that is a link to, into or over anything protected (a
@@ -231,9 +222,5 @@ export async function claudeWorkerPrivatePaths(
     paths: protectedPaths,
     deny,
     readable,
-    // A settings file that stayed closed is still scanned: Claude Code hands its env block
-    // to the worker's commands whether or not the worker can open the file.
-    settingsFiles: known.map((file) => file.path),
-    settingsEnv: known.map((file) => file.env),
   };
 }

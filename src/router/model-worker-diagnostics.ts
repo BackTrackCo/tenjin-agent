@@ -231,9 +231,8 @@ export type WorkerDiagnostics = {
    * init), `firstRequest` (the bridge's first model request, before its quote round trip),
    * `firstAnswer` (that call answered), `firstActivity` (the first worker reply observed,
    * which the viewer's first row draws from). A worker's preparation: `workerStart`,
-   * `envReady` (the env file scan, or an earlier one taken up), `workspaceRead` (settings
-   * and private paths), `sdkInitialized` (the SDK's initialize answer), `envVerified` (a
-   * warm worker's own scan agreed), `released` (the checks after the accept). The run's
+   * `workspaceRead` (settings and private paths), `sdkInitialized` (the SDK's initialize
+   * answer), `released` (the checks after the accept). The run's
    * ends: `refundProbed` (the router's refund-support answer), `lastAnswer` (the last
    * model answer sent to the worker), `resultMessage` (the SDK's result), `childClosed`
    * (its process gone), `workerReturned`, `refundClosed` (the run's channel closed),
@@ -247,7 +246,7 @@ export type WorkerDiagnostics = {
    * the split of the child's start shows in a live record.
    */
   childMarks: Record<string, number>;
-  /** Facts of the start: whether an earlier env scan was taken up, and a kept prompt read. */
+  /** Facts of the start: a prompt read made ahead, and how long it took. */
   start: Record<string, boolean | number>;
   /** The time before the offer, written by the capture. */
   offer?: OfferTiming;

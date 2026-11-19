@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -18,7 +18,7 @@ import offer from './fixtures/model-offer.json';
 /**
  * THE REAL WORKER RUNTIME UNDER THE REAL ACCEPT CALL, with only the SDK child,
  * the host lookups and the network stubbed: what the accept call writes to
- * Tenjin's data folder went through the runtime's own value replacement.
+ * Tenjin's data folder, and who may read it.
  */
 vi.mock('./worker-github', async (original) => ({
   ...(await original<typeof import('./worker-github')>()),
@@ -80,17 +80,14 @@ async function filesUnder(dir: string): Promise<string[]> {
 }
 
 it.each(['completed', 'stopped'] as const)(
-  'stores a %s handback with env values replaced by their names, in files only the user can read',
+  'stores a %s handback in files only the user can read',
   async (ending) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-repo-')));
     const dataDir = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-data-')));
     // The worker's Claude config folder is part of who owns a job: one that exists, on any machine.
     const configDir = await realpath(await mkdtemp(join(tmpdir(), 'stored-handback-config-')));
     vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
-    const password = 'Zq8-v3ry-s3cret-pw';
-    const url = `postgres://app:${password}@db.internal:5432/app`;
     try {
-      await writeFile(join(root, '.env.local'), `POSTGRES_URL="${url}"\n`);
       const settings = {
         version: 2,
         scope: 'repositories',
@@ -130,7 +127,7 @@ it.each(['completed', 'stopped'] as const)(
                 id: 'message-1',
                 role: 'assistant',
                 usage: { input_tokens: 10, output_tokens: 5 },
-                content: [{ type: 'text', text: `connecting to ${url}` }],
+                content: [{ type: 'text', text: 'connecting to the staging database' }],
               },
             };
             yield ending === 'completed'
@@ -138,7 +135,7 @@ it.each(['completed', 'stopped'] as const)(
                   type: 'result',
                   subtype: 'success',
                   session_id,
-                  result: `connected with ${password}`,
+                  result: 'connected to the staging database',
                 }
               : { type: 'result', subtype: 'error_max_turns', session_id, num_turns: 3 };
           },
@@ -215,10 +212,7 @@ it.each(['completed', 'stopped'] as const)(
         });
         // What the parent read, and what a later accept reads back from disk.
         const again = await call();
-        for (const text of [first, again]) {
-          expect(text).toContain('[env:POSTGRES_URL]');
-          expect(text).not.toContain(password);
-        }
+        expect(first).toContain('the staging database');
         expect(JSON.parse(again)).toEqual(JSON.parse(first));
         // HOW IT ENDED, for its row: the job's own status, time and counts. Here beside the
         // live view; in a process that holds none (a restart, a resumed session) from the
@@ -264,13 +258,12 @@ it.each(['completed', 'stopped'] as const)(
         expect(JSON.parse((live.content as Array<{ text: string }>)[0]!.text).ended).toEqual(ended);
         const restarted = await read('root');
         expect(JSON.parse(restarted)).toEqual({ status: 'ended', ended });
-        expect(restarted).not.toMatch(/connect|env:|database/i);
+        expect(restarted).not.toMatch(/connect|database/i);
         expect(JSON.parse(await read('another-session'))).toEqual({ status: 'unavailable' });
         await model.shutdown();
         const files = await filesUnder(dataDir);
         const stored = await Promise.all(files.map((file) => readFile(file, 'utf8')));
-        expect(stored.some((text) => text.includes('[env:POSTGRES_URL]'))).toBe(true);
-        expect(stored.some((text) => text.includes(password))).toBe(false);
+        expect(stored.some((text) => text.includes('the staging database'))).toBe(true);
         for (const file of files) expect((await lstat(file)).mode & 0o777).toBe(0o600);
       } finally {
         await model.shutdown();

@@ -649,37 +649,6 @@ export class ModelWorkerActivity {
     return true;
   }
 
-  /**
-   * Applies a redaction learned after rows were made, such as the values of an
-   * env file found late, so the viewer, progress file and partial lose them too.
-   */
-  rescrub(redact: (text: string) => string): void {
-    try {
-      for (const row of this.value.rows) {
-        let changed = false;
-        for (const field of [
-          'text',
-          'inputSummary',
-          'command',
-          'target',
-          'outputPreview',
-        ] as const) {
-          const before = row[field];
-          if (before === undefined) continue;
-          const after = redact(before);
-          if (after !== before) {
-            row[field] = after;
-            changed = true;
-          }
-        }
-        if (changed) row.sequence = ++this.value.sequence;
-      }
-    } catch {
-      // Display data only; the next forwarded request is redacted regardless.
-    }
-    this.changed();
-  }
-
   private add(row: Omit<ModelWorkerActivityRow, 'sequence'>): void {
     const added = { ...row, sequence: ++this.value.sequence };
     this.applyServed(added);

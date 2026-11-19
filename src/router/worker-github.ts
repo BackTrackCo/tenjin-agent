@@ -207,10 +207,9 @@ export function redactWorkerSecrets(text: string, secrets: readonly string[]): s
 }
 
 /**
- * A literal removal over every key and string of a parsed worker request or SDK
- * message: the job's token values and its env file values. It feeds the bridge,
- * and the activity copy behind the viewer, the plugin's progress file and a
- * stopped worker's partial handback, where `mask()` knows only token shapes.
+ * A literal removal over every key and string of a parsed SDK message: the job's
+ * token values. It feeds the activity copy behind the viewer, the plugin's progress
+ * file and a stopped worker's partial handback, where `mask()` knows only token shapes.
  */
 export function redactWorkerMessage(message: unknown, redact: (text: string) => string): unknown {
   const walk = (value: unknown): unknown => {

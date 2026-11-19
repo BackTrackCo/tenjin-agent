@@ -1856,7 +1856,7 @@ it.each(['stopped', 'not_started', 'cancelled'] as const)(
           id: 'message-1',
           usage: { input_tokens: 10, output_tokens: 5 },
           content: [
-            { type: 'text', text: 'connecting to [env:POSTGRES_URL]' },
+            { type: 'text', text: 'connecting to the staging database' },
             { type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} },
           ],
         },
@@ -1879,7 +1879,7 @@ it.each(['stopped', 'not_started', 'cancelled'] as const)(
       expect(first).toMatchObject({
         status,
         toolUses: 1,
-        partial: { lastText: 'connecting to [env:POSTGRES_URL]' },
+        partial: { lastText: 'connecting to the staging database' },
       });
       // On disk: the handback the parent received, less its spend, in a file only the user reads.
       const path = join(dir, 'model-jobs', `${f.job.id}.json`);

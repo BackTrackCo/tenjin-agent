@@ -116,7 +116,6 @@ it.each([
   ['budget_guard', 'budget'],
   ['output_limit', 'output_limit'],
   ['context_limit', 'context_limit'],
-  ['env_file_unscanned', 'env_file_unscanned'],
   ['startup_timeout', 'not_started'],
   ['model_call_failed', 'model_call_failed'],
   ['model_call_timeout', 'model_call_timeout'],
