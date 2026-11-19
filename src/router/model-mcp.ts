@@ -1081,9 +1081,15 @@ export function registerModelTool(
               // and the unchanged repeat of the offered call runs native with no second fee.
               const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
               const endedBy = abort.signal.aborted ? abortedBy : workerEnd(stop);
-              // The error itself, for the person: the handback carries fixed codes only.
-              if (!abort.signal.aborted)
-                await writeWorkerFailure(options.dataDir, job.id, workerFailure(endedBy, error));
+              // The error itself, for the person: the handback carries fixed codes only. A
+              // job somebody ended (a cancel, the session's end, the host) has no error to
+              // keep, and its record still says who ended it: such a job once left no
+              // record at all when it ended before its worker did anything.
+              await writeWorkerFailure(
+                options.dataDir,
+                job.id,
+                workerFailure(endedBy, abort.signal.aborted ? undefined : error),
+              );
               const stopped = {
                 // `stopped` with its cause in `endedBy`; `unknown` only when nothing said why.
                 status: abort.signal.aborted

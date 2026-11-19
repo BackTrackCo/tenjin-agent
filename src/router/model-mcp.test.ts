@@ -2041,6 +2041,12 @@ it.each(['a cancel by its offer', "the session's end"] as const)(
           status: 'cancelled',
           endedBy: 'parent_cancel',
         });
+        // Its record says who ended it, with no error to keep (live on alpha.80: no record).
+        expect(
+          JSON.parse(
+            await readFile(join(dir, 'model-jobs', `${f.job.id}.diagnostics.json`), 'utf8'),
+          ).failure,
+        ).toEqual({ endedBy: 'parent_cancel', errors: [] });
       } else {
         closed = true;
         await f.close();
