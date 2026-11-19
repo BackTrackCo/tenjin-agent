@@ -93,36 +93,72 @@ describe('UNPAID wallet entries', () => {
     expect(unpaid('unlock_timeout')).toBeNull();
     expect(unpaidSentence('unlock_timeout')).toBeNull();
   });
+
+  it('says nothing when the balance before a deposit could not be read: nothing was paid', () => {
+    expect(unpaid('balance_unreadable')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'person')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'agent')).toBeNull();
+  });
 });
 
 describe('unpaidSentence', () => {
+  it('does not claim all routing stopped when only a payment was refused', () => {
+    for (const why of ALL_KEYS) {
+      const sentence = unpaidSentence(why);
+      if (sentence !== null) {
+        expect(sentence, why).not.toMatch(/not routing calls|routing stopped/i);
+        expect(sentence, why).toContain('Free routing still works.');
+      }
+    }
+  });
+
   it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
-    expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay the routing fee');
+    expect(unpaidSentence('wallet_low', 'agent')).toContain(
+      'balance was too low for this routing fee',
+    );
+    // Answers that need no payment still come, so it never says routing stopped.
+    expect(unpaidSentence('wallet_low')).not.toContain('not routing calls');
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
       /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
-    expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
-    expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
+    expect(unpaidSentence('wallet_low')).not.toContain('tenjin fund');
+    expect(unpaid('wallet_low')?.fix).toContain('tenjin fund 5');
   });
+
+  // A spend limit is never a funding problem: money cannot help, so neither
+  // reader is pointed at checkout. The agent gets the setting to raise; the
+  // person, who reads it in chat, is told to ask their agent.
+  it.each(['budget_reached', 'limit_below_deposit'])(
+    '%s says the balance is fine and how to raise the limit, never checkout',
+    (why) => {
+      for (const reader of ['person', 'agent'] as const) {
+        const sentence = unpaidSentence(why, reader) ?? '';
+        expect(sentence).not.toMatch(/tenjin fund|wallet fund|checkout/i);
+        expect(sentence).toContain('Your balance is fine');
+      }
+      expect(unpaidSentence(why, 'agent')).toContain('`tenjin config set ');
+      expect(unpaidSentence(why, 'person')).toMatch(/ask your agent to raise it/i);
+      expect(unpaidSentence(why, 'person')).not.toContain('tenjin config');
+    },
+  );
   // User-visible notices name the reason and its recovery action, and no fee
   // amount: only a quote above the ceiling is named, with the price the payer read.
   const EXPECTED: Record<string, string> = {
     no_wallet:
-      'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
-    wallet_low:
-      'Tenjin could not pay the routing fee (the wallet holds less than the deposit Tenjin sets aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (this machine has no wallet). Free routing still works. Run `tenjin doctor`.',
+    wallet_low: 'Your balance was too low for this routing fee. Free routing still works.',
     no_payer:
-      'Tenjin could not pay the routing fee (the router charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (the router charges it, and this session cannot pay it). Free routing still works. Run `tenjin doctor`.',
     payment_failed:
-      'Tenjin could not pay the routing fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (the routing payment failed). Free routing still works. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit). Free routing still works. Your balance is fine; this is the per-call limit. Ask your agent to raise it.',
     budget_reached:
-      'Tenjin could not pay the routing fee (the daily budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      "Tenjin could not pay the routing fee (today's spend limit is used up). Free routing still works. Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or ask your agent to raise it.",
     not_allowlisted:
-      'Tenjin could not pay the routing fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (allowlistCreators does not include the router). Free routing still works. Run `tenjin doctor`.',
     fee_above_ceiling:
-      'Tenjin could not pay the routing fee (the router asks more per call than this install agreed to pay), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (the router asks more per call than this install agreed to pay). Free routing still works. Your usual tools still work.',
   };
 
   it('keeps actionable reasons, with no funding imperative in automatic fallback', () => {
@@ -131,15 +167,20 @@ describe('unpaidSentence', () => {
     }
   });
 
-  it('names the ceiling in the deposit line, the bound every later call keeps', () => {
+  it('says nothing for a deposit the background top-up has not made yet', () => {
+    expect(unpaidSentence('topping_up')).toBeNull();
+    expect(unpaidSentence('deposit_deferred')).toBeNull();
+  });
+
+  it('names the deposit and no fee in the deposit line', () => {
     expect(depositSentence(CHANNEL_DEPOSIT_ATOMIC)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
+      'Tenjin set aside $0.05 for routing. It counts toward your spend limits.',
     );
   });
 
   it('names a repair reason with the clause that keeps the passphrase out of chat', () => {
     expect(unpaidSentence('passphrase_missing')).toBe(
-      `Tenjin could not pay the routing fee (${WALLET_REASONS.passphrase_missing.reason}), so Tenjin is not routing calls until that is fixed. ${WALLET_REASONS.passphrase_missing.fix}`,
+      `Tenjin could not pay the routing fee (${WALLET_REASONS.passphrase_missing.reason}). Free routing still works. ${WALLET_REASONS.passphrase_missing.fix}`,
     );
     expect(unpaidSentence('passphrase_missing')).toContain(REPAIR_CLAUSE);
   });

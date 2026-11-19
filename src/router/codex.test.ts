@@ -628,6 +628,11 @@ const legRow = (key: string, over: Record<string, unknown> = {}) =>
   row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
 const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
 
+/** What a person reads: the receipt, then its tail (limits, next step, disclosure). */
+function receipt(r: { humanLines?: string[]; humanTail?: string[] }): string[] {
+  return [...(r.humanLines ?? []), ...(r.humanTail ?? [])];
+}
+
 describe('Codex install, uninstall and doctor', () => {
   it('writes the wallet, the spend limits and the plugin, and no Codex config', async () => {
     const { steps, deps } = host();
@@ -641,7 +646,7 @@ describe('Codex install, uninstall and doctor', () => {
     ]);
     expect(out.data).not.toHaveProperty('grant');
     expect(out.data).not.toHaveProperty('approval');
-    expect(out.humanLines?.join('\n')).toContain('five Tenjin hooks');
+    expect(receipt(out).join('\n')).toContain('five Tenjin hooks');
   });
 
   it('keeps the defaults with no answer and hands the spend question back', async () => {
@@ -677,8 +682,8 @@ describe('Codex install, uninstall and doctor', () => {
     terminal.io.isTTY = true;
     const out = await runCodexInstall({}, terminal, deps);
     expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
-    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the five Tenjin hooks');
-    expect(out.humanLines?.join(' ')).toContain('then start a new session');
+    expect(receipt(out).join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(receipt(out).join(' ')).toContain('then start a new session');
   });
 
   it('asks nothing again once the file names a limit', async () => {
@@ -687,7 +692,7 @@ describe('Codex install, uninstall and doctor', () => {
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 
-  it('gives Codex a link-preparation command and sharing disclosure, without extra setup questions', async () => {
+  it('gives Codex the fund command and sharing disclosure, without extra setup questions', async () => {
     const { deps } = host();
     deps.env = { CODEX_SESSION_ID: 'session' };
     deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
@@ -696,8 +701,8 @@ describe('Codex install, uninstall and doctor', () => {
       nextSteps: [
         {
           id: 'fund',
-          options: [{ command: 'tenjin wallet fund 5 --no-open --no-wait' }, { command: null }],
-          next: expect.stringContaining('show checkoutUrl as a clickable link'),
+          options: [{ command: 'tenjin fund 5 --source install' }, { command: null }],
+          next: expect.stringContaining('`tenjin balance --wait` in the background'),
         },
       ],
       disclosure: [
@@ -718,9 +723,7 @@ describe('Codex install, uninstall and doctor', () => {
     const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
-    expect(out.humanLines).toContain(
-      'Automatic router: up to $0.5 per call; no daily budget limit',
-    );
+    expect(receipt(out)).toContain('Limits    $0.50 a call · no daily limit');
     expect(out.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
     });

@@ -35,6 +35,7 @@ import { hookToolInput } from './hook-tool';
 import type { OfferSpec } from './decision';
 import {
   buildRouterMcpServer,
+  createRouterMcpServer,
   MAX_RESULT_SIZE_CHARS,
   ALWAYS_LOAD_KEY,
   MAX_RESULT_SIZE_KEY,
@@ -626,6 +627,62 @@ describe('the hook tool', () => {
     }
   });
 
+  /** A session's first prompt fires before Claude Code writes its transcript:
+   *  the swap still reads it for that session's first search, once written. */
+  it('keeps the transcript path of a first prompt for the first search', async () => {
+    const homeDir = join(dir, 'home');
+    const project = join(homeDir, '.claude', 'projects', '-repo');
+    await mkdir(project, { recursive: true });
+    const transcript = join(await realpath(project), 'sess-first.jsonl');
+    const native = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'native_sufficient',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
+          },
+        },
+      })) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir: await realpath(homeDir),
+      handlerDeps: { cwd: dir },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: native, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', transcript)),
+      });
+      await writeFile(transcript, '');
+      const decided = await client.callTool({
+        name: 'request',
+        arguments: {
+          decide: {
+            tool: 'WebSearch',
+            input: { query: 'eth price' },
+            tool_use_id: 'toolu_first',
+            session_id: 'sess-first',
+          },
+        },
+      });
+      // Read, and handed back for the switch being off, not for the transcript.
+      expect(envelopeOf(decided)).toMatchObject({
+        swap: 'handback',
+        reason: 'automatic use is off',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('marks its own session when the plugin started it, and still routes there', async () => {
     const { homeDir, transcript } = await home('sess-plugin');
     const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
@@ -732,11 +789,15 @@ describe('the hook tool', () => {
         name: 'hook',
         arguments: substituted('prompt', promptEvent('sess-paid', transcript)),
       });
+      // The leg's 402, the background top-up it waited for, then its voucher.
       expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
-      expect(fake.deposits).toBe(1);
+      expect(fake.depositedOn).toEqual(['warm']);
       expect(fake.settledFees).toBe(1);
     } finally {
       await client.close();
@@ -985,13 +1046,12 @@ describe('the payer verdict and the wallet news', () => {
   });
 
   it("offers on the payer's ready verdict though the files alone would withhold", async () => {
-    const payer = new RoutingPayer(
-      payerDeps(new FakeRouter(), dir, privateKeyToAccount(generatePrivateKey())),
-    );
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
     await payer.prewarm();
     expect(payer.signVerdict().status).toBe('ready');
     // No wallet.json and no key in the hook env: the files alone say no_wallet.
-    const { answer, asked } = await promptLeg(payer, {});
+    const { answer, asked } = await promptLeg(payer, {}, observer(), fake);
     expect(asked).toBeGreaterThan(0);
     expect(answer.hookSpecificOutput?.additionalContext ?? '').toContain('CoinMarketCap fits this');
   });
@@ -1164,7 +1224,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // The router quotes the fee; the only amount written here is this CLI's ceiling.
       expect(request.description).toContain(
-        'Paid routing costs a fee the router quotes, never more than $0.003 a call;',
+        'Routing fees and tool charges paid from the Tenjin balance follow the user’s spend limits. Connected-account tools bill that account’s plan. Routing top-ups count once, when sent.',
       );
     } finally {
       await client.close();
@@ -1209,6 +1269,149 @@ describe('a free answer on a machine with no wallet', () => {
       expect(envelopeOf(called)).toMatchObject({ status: 'native' });
     } finally {
       await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * DISCOVERY AND THE SWAP'S OWN FORM (plan 36). The server instructions name
+ * `tenjin config names <word>` and `tenjin config <command> --help` for
+ * settings changes, independent of whether a host defers tool descriptions;
+ * the plugin's `decide` form runs only for a session this router's hook legs
+ * served, and only alone.
+ */
+describe('settings discovery and the decide form', () => {
+  it('names tenjin config in the server instructions and the tool description', async () => {
+    const server = buildRouterMcpServer({ dataDir: dir, handlerDeps: { cwd: dir } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const said =
+        'find the exact name with `tenjin config names <word>`, run the operation ' +
+        '(`tenjin config <command> --help` shows its flags) and tell the user its readback';
+      expect(client.getInstructions()).toContain(said);
+      expect(client.getInstructions()).toContain(
+        'block, prefer, limit, reset or switch what Tenjin uses',
+      );
+      expect(client.getInstructions()).toContain("Never change Tenjin's settings yourself.");
+      const tools = await client.listTools();
+      expect(tools.tools.find((t) => t.name === 'request')?.description).toContain(said);
+      const alone = await client.callTool({
+        name: 'request',
+        arguments: {
+          query: 'weather',
+          decide: { tool: 'WebSearch', input: { query: 'x' }, tool_use_id: 't', session_id: 's' },
+        },
+      });
+      expect(envelopeOf(alone)).toMatchObject({ status: 'needs_input' });
+      const unseen = await client.callTool({
+        name: 'request',
+        arguments: {
+          decide: { tool: 'WebSearch', input: { query: 'x' }, tool_use_id: 't', session_id: 's' },
+        },
+      });
+      expect(envelopeOf(unseen)).toMatchObject({
+        status: 'native',
+        swap: 'handback',
+        reason: 'this session has not been seen by Tenjin yet',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * THE FRESH-SESSION ACCEPTANCE CASE FOR YOUR OWN ACCOUNTS (plan 37): a new
+ * session's MCP client, before any tool description is loaded, is told where
+ * the user's own accounts are connected and where balance, spend and accounts
+ * are read, how long a sign-in may take, and never to ask for a key in chat;
+ * and the request tool takes the account the user names.
+ */
+describe('account discovery in a fresh session', () => {
+  it('names tenjin connect and tenjin status in the server instructions', async () => {
+    const { ACCOUNT_RULE } = await import('./mcp');
+    const server = buildRouterMcpServer({ dataDir: dir, handlerDeps: { cwd: dir } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'fresh', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      expect(client.getInstructions() ?? '').toContain(ACCOUNT_RULE);
+      const tools = await client.listTools();
+      const request = tools.tools.find((t) => t.name === 'request');
+      const props = request?.inputSchema.properties as Record<string, { description?: string }>;
+      expect(props.source?.description).toContain('connected accounts');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * THE SESSION'S FIRST TOP-UP: `tenjin mcp` funds a channel that
+ * cannot cover a fee once its prewarm unlock settles, so the first prompt
+ * meets no deposit; where the router is off it sends nothing.
+ */
+describe('the top-up at the start of tenjin mcp', () => {
+  const observers: RouterObserver[] = [];
+  afterEach(() => {
+    for (const o of observers.splice(0)) o.dispose();
+  });
+
+  async function started(config: Record<string, unknown>) {
+    await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
+    const observer = createRouterObserver({
+      dataDir: dir,
+      pid: process.pid,
+      startedAt: Date.now(),
+      cliVersion: 'test',
+      harness: 'claude',
+      launchedByPlugin: true,
+      cwd: dir,
+      env: {},
+    });
+    observers.push(observer);
+    const server = await createRouterMcpServer({
+      dataDir: dir,
+      flags: { baseUrl: 'https://router.test' },
+      payer,
+      observer,
+      // `router.*` resolves from this test's own git root, never the suite's cwd.
+      handlerDeps: { cwd: dir },
+      topUpAtStart: true,
+    });
+    return { fake, payer, server };
+  }
+
+  it('funds a new channel in the background, with no prompt asking, where the router is on', async () => {
+    const { fake, payer, server } = await started({ maxAutoSpend: '250000' });
+    try {
+      await vi.waitFor(() => expect(fake.depositedOn).toEqual(['warm']));
+      // Its channel write and memo clear land before the folder goes.
+      await payer.idle();
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('sends nothing where the router is off', async () => {
+    const { fake, payer, server } = await started({ router: { enabled: false } });
+    try {
+      await payer.prewarm();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await payer.idle();
+      expect(fake.log).toEqual([]);
+    } finally {
       await server.close();
     }
   });

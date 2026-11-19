@@ -41,7 +41,9 @@ import {
   runtimeData,
   runtimeLines,
   walletLines,
+  CAPABILITY_LINES,
   DISCLOSURE,
+  receiptTail,
   spendStepFor,
   type QuestionStep,
   type RouterInstallDeps,
@@ -431,7 +433,7 @@ export async function runCodexInstall(
           wallet,
           settings.rpcUrl,
           deps,
-          `${continuationCommand(rt)} wallet fund ${SUGGESTED_FUND_USD}`,
+          `${continuationCommand(rt)} fund ${SUGGESTED_FUND_USD}`,
         )
       : undefined;
   const nextSteps = [
@@ -440,10 +442,6 @@ export async function runCodexInstall(
   ];
   if (asksAgent && nextSteps.length > 0)
     next = `Follow the instructions in nextSteps, then ${next}`;
-  const daily =
-    policy.sessionBudgetAtomic === null
-      ? effective.sessionBudget
-      : `daily budget $${effective.sessionBudget} shared across chats`;
   return {
     data: {
       plugin: CODEX_PLUGIN,
@@ -459,8 +457,7 @@ export async function runCodexInstall(
       tooOld
         ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
         : 'Tenjin is installed for Codex.',
-      ...DISCLOSURE,
-      `Automatic router: up to $${effective.maxAutoSpend} per call; ${daily}`,
+      ...(tooOld ? [] : CAPABILITY_LINES.map((line) => `  ${line}`)),
       ...runtimeLines(ctx, rt, home, true),
       ...walletLines(ctx, wallet, 'Codex'),
       ...(funding?.warning !== undefined ? [funding.warning] : []),
@@ -472,8 +469,8 @@ export async function runCodexInstall(
             ),
           ]
         : []),
-      `Next: ${next}`,
     ],
+    humanTail: receiptTail(ctx, policy, next),
   };
 }
 

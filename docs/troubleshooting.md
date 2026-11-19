@@ -2,7 +2,7 @@
 
 Start with `tenjin doctor`. Read setup, current-session and paid-routing results separately: an unchecked result needs a real check, and a registered plugin can still need a new session. Follow the command it prints for the current host or project. Doctor does not buy a tool call.
 
-If checkout opened but funds are not confirmed, run `tenjin wallet balance` before paying again. An unreadable balance is not evidence that the first payment failed.
+If checkout opened but the money has not arrived, run `tenjin balance` before paying again; `tenjin balance --wait` watches until it lands. Running `tenjin fund` again while a payment is on its way waits on that payment instead of opening a second checkout. An unreadable balance is not evidence that the first payment failed.
 
 ## Tenjin cannot unlock the wallet
 

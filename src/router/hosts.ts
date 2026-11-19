@@ -187,6 +187,7 @@ export function withNote(out: CommandResult, note: string | undefined): CommandR
   const data = (out.data ?? {}) as { notices?: unknown };
   const notices = Array.isArray(data.notices) ? (data.notices as string[]) : [];
   return {
+    ...out,
     data: { ...data, notices: [...notices, note] },
     humanLines: [...(out.humanLines ?? []), note],
   };
@@ -215,7 +216,11 @@ export async function runEach(
   for (const host of hosts) {
     const out = await run(host);
     data[host] = out.data;
-    humanLines.push(`${LABEL[host]}:`, ...(out.humanLines ?? []).map((l) => `  ${l}`));
+    // Each host's whole receipt, tail included, under its name.
+    humanLines.push(
+      `${LABEL[host]}:`,
+      ...[...(out.humanLines ?? []), ...(out.humanTail ?? [])].map((l) => `  ${l}`),
+    );
   }
   return { data, humanLines };
 }

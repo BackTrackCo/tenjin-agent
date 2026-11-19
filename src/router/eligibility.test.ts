@@ -12,7 +12,7 @@ import {
   type SignFacts,
   type SignVerdict,
 } from './eligibility';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, LEGACY_ROUTING_QUOTE_ATOMIC, unpaid } from './fee';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 const READY: SignVerdict = { status: 'ready', source: 'keychain' };
@@ -151,17 +151,17 @@ describe('canPayRouting (section 2.4)', () => {
     ['2. a sign block is that block', { sign: BLOCKED }, BLOCKED],
     [
       '3. credit with sign ready is ready',
-      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, balanceAtomic: 0n },
+      { creditAtomic: LEGACY_ROUTING_QUOTE_ATOMIC, balanceAtomic: 0n },
       READY,
     ],
     [
       '3. credit with sign unknown is unknown',
-      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, sign: UNKNOWN, balanceAtomic: 0n },
+      { creditAtomic: LEGACY_ROUTING_QUOTE_ATOMIC, sign: UNKNOWN, balanceAtomic: 0n },
       UNKNOWN,
     ],
     [
       '3. credit skips a deposit refusal',
-      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, depositRefusal: 'budget_reached' },
+      { creditAtomic: LEGACY_ROUTING_QUOTE_ATOMIC, depositRefusal: 'budget_reached' },
       READY,
     ],
     [
@@ -196,7 +196,7 @@ describe('canPayRouting (section 2.4)', () => {
     expect(
       canPayRouting({
         ...ROUTING,
-        creditAtomic: ROUTING_FEE_CEILING_ATOMIC * 10n,
+        creditAtomic: LEGACY_ROUTING_QUOTE_ATOMIC * 10n,
         balanceAtomic: 0n,
       }),
     ).toMatchObject({ status: 'ready' });
@@ -341,7 +341,7 @@ describe('the invariants, over a seeded random sweep', () => {
     null,
     0n,
     1n,
-    ROUTING_FEE_CEILING_ATOMIC,
+    LEGACY_ROUTING_QUOTE_ATOMIC,
     CHANNEL_DEPOSIT_ATOMIC - 1n,
     CHANNEL_DEPOSIT_ATOMIC,
     10n ** 9n,

@@ -4,10 +4,10 @@ name: audit
 # schedule, not ours: CI's audit is warn-only so drift can't red unrelated PRs,
 # and Dependabot opens no PR for a pnpm transitive dependency held by an
 # override, so without this the first hard failure was release.yml's
-# pre-publish gate, on release day. A hit opens (or updates) one fix PR
-# (scripts/open-audit-fix-pr.sh). The run SUCCEEDS once that PR is open and
-# fails only when pnpm can't fix the advisory by itself, which is the case that
-# needs a person.
+# pre-publish gate, on release day. A hit opens (or updates) one fix PR, and a
+# clean run closes it (scripts/open-audit-fix-pr.sh). The run SUCCEEDS once that
+# PR is open and fails only when pnpm can't fix the advisory by itself, which is
+# the case that needs a person.
 on:
   schedule:
     - cron: '41 7 * * *' # 07:41 UTC daily, off the top-of-hour congestion.
