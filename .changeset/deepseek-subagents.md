@@ -4,7 +4,7 @@
 
 Add DeepSeek subagents for Claude Code, off by default. When they are on, Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible subagent job, and Claude accepts or declines each offer. A call that gets no offer, or whose offer Claude declines, runs natively.
 
-Who sees what: before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, which include what the worker reads in `~/.claude` (session transcripts, prompt history and settings). The worker's web searches go to Exa. Known secrets are masked, which is not a guarantee.
+Who sees what: before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, which include what the worker reads in `~/.claude` (session transcripts, prompt history and settings). The worker's web searches go to Exa. Nothing a worker reads or prints is masked, env files and credential command output included; the task and parent context sent for routing before an offer are masked for known secrets, which is not a guarantee.
 
 Cost: a job's routing, inference and web searches together cost up to your per-call limit ($1 by default), or a lower ceiling you name with `--max-job`, within your daily budget. Routing costs 15% of the expected cost of a job, the same rule as tool routing, an offer at a time, also when Claude declines it. Inference is the reported usage plus 5%. On a router that supports refunds, a run's unused inference deposit returns to your wallet when its worker ends.
 
