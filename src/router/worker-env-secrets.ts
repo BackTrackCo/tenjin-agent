@@ -288,20 +288,6 @@ export type EnvScanLimits = {
 const lastScans = new Map<string, WorkerEnvSecrets>();
 /** One session works in one set of roots; a few more cover a changed worktree list. */
 const MAX_KEPT_SCANS = 4;
-/**
- * A VERIFICATION SCAN THAT IS RUNNING, for workers that start together to share (`resume`).
- * Its `events` are the covered files the first worker's watcher saw since before the walk
- * began: a worker that joins later reads that file state through the walk and everything that
- * changed after the walk began through these, so its scan is as new as one of its own.
- */
-type Verification = {
-  /** The first worker's watcher failed: nothing records what the walk missed, so none may take it. */
-  broken?: boolean;
-  roots: string[];
-  result: Promise<WorkerEnvSecrets>;
-  events: Set<string>;
-};
-const verifications = new Set<Verification>();
 const scanKey = (roots: readonly string[]) =>
   JSON.stringify([...new Set(roots.map((root) => resolve(root)))].sort());
 
@@ -339,10 +325,6 @@ export class WorkerEnvSecrets {
   get watching(): boolean {
     return this.watchers.length > 0;
   }
-  /** Where this worker's watcher also reports covered files, for workers that join its scan. */
-  private feed: Set<string> | undefined;
-  /** The walk this worker started and its watcher feeds: joinable only while that watcher lives. */
-  private shared: Verification | undefined;
   private running: Promise<void> | undefined;
   private queued: Promise<void> | undefined;
   /** Set while the running check still waits for file events: when that wait ends. */
@@ -403,23 +385,7 @@ export class WorkerEnvSecrets {
       return undefined;
     }
     for (const root of fresh) env.hot.add(resolve(root));
-    // A walk of these roots that is running already, and began before this worker's watcher
-    // did, is shared: the files that changed since it began arrive as its events.
-    const running = [...verifications].find((scan) =>
-      held.roots.every((root) => scan.roots.some((top) => inside(top, root))),
-    );
-    if (running)
-      return { env, verified: env.verifyAgainst(running, held.roots).catch(() => false) };
-    const scan: Verification = {
-      roots: held.roots,
-      events: new Set(),
-      result: WorkerEnvSecrets.start(held.roots, { watch: false, keep: true }),
-    };
-    env.feed = scan.events;
-    env.shared = scan;
-    verifications.add(scan);
-    void scan.result.finally(() => verifications.delete(scan));
-    return { env, verified: env.verifyAgainst(scan, held.roots).catch(() => false) };
+    return { env, verified: env.refreshBeforeAssignment(held.roots, true).catch(() => false) };
   }
 
   /** Forgets the scans kept for later workers; for tests. */
@@ -466,33 +432,6 @@ export class WorkerEnvSecrets {
     for (const [path, signature] of current.files) this.files.set(path, signature);
     for (const directory of current.hot) this.hot.add(directory);
     return true;
-  }
-
-  /**
-   * A shared walk's findings, taken as this worker's own full scan of `roots`: as
-   * `refreshBeforeAssignment`, and every covered file the first worker's watcher saw since the
-   * walk began is read again. False when something now needs a deny this worker did not
-   * start with, so nothing is sent on the older scan's word.
-   */
-  private async verifyAgainst(scan: Verification, roots: readonly string[]): Promise<boolean> {
-    const current = await scan.result;
-    if (scan.broken) return false;
-    const mine = (path: string) => roots.some((root) => inside(root, path));
-    if (
-      current.scanned !== this.scanned ||
-      current.withheld.some((path) => mine(path) && !this.withheld.includes(path)) ||
-      current.unlisted.some((path) => mine(path) && !this.unlisted.includes(path))
-    )
-      return false;
-    for (const [value, name] of current.placeholders)
-      this.remember(value, name, current.derived.has(value));
-    for (const [path, signature] of current.files) if (mine(path)) this.files.set(path, signature);
-    for (const directory of current.hot) if (mine(directory)) this.hot.add(directory);
-    // What the first worker's watcher saw since the walk began, and a listing of every folder
-    // that held an env file: the OS may report a change as the folder's alone.
-    for (const path of scan.events) if (mine(path)) this.dirty.add(path);
-    await this.refresh();
-    return this.uncovered.size === 0;
   }
 
   /** How many distinct strings are replaced; never the strings. */
@@ -569,8 +508,6 @@ export class WorkerEnvSecrets {
   }
 
   close(): void {
-    // Its watcher stops feeding the walk's events: a worker starting later must walk for itself.
-    if (this.shared) verifications.delete(this.shared);
     for (const watcher of this.watchers.splice(0)) watcher.close();
   }
 
@@ -675,21 +612,10 @@ export class WorkerEnvSecrets {
     )) {
       try {
         const watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => {
-          if (name && covered(join(root, String(name)))) {
-            this.dirty.add(join(root, String(name)));
-            this.feed?.add(join(root, String(name)));
-          }
+          if (name && covered(join(root, String(name)))) this.dirty.add(join(root, String(name)));
         });
         // A watcher that fails leaves the per-request checks of known folders.
-        watcher.on('error', () => {
-          watcher.close();
-          // A shared walk this watcher fed has nothing recording what it missed: every
-          // worker that took it must walk for itself, as before the walk was shared.
-          if (this.shared) {
-            this.shared.broken = true;
-            verifications.delete(this.shared);
-          }
-        });
+        watcher.on('error', () => watcher.close());
         this.watchers.push(watcher);
       } catch {
         // No native recursive watching here.
