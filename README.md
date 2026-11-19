@@ -143,7 +143,7 @@ A new chat does not reset the daily budget. Routing fees vary by answer. Tool ch
 | `tenjin update`           | Update Tenjin                                     |
 | `tenjin uninstall`        | Remove Tenjin from your agent; your balance stays |
 
-`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
+`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work. Have a code? Run `tenjin fund` and enter it under **Have a code?** on the page.
 
 Calls on your own account bill its plan, not your Tenjin balance. [Your own accounts →](./docs/agent-permissions.md#your-own-accounts)
 
