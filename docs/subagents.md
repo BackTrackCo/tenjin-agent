@@ -232,10 +232,17 @@ These run natively:
 
 `tenjin config subagents why` lists why recent subagent calls got no offer, newest first: the local time, the tool (with `from a subagent` when a native subagent made the call) and the reason in plain words, such as `The session was in plan mode`. `--json` adds the session id and the reason code, such as `input_filter:name`, `permission_mode:plan`, `caller_unqualified:tools`, `over_size_limit` with the byte count, `job_cap_too_low`, `job_cap_lowered`, `server_declined` with the router's code, or `kept_native`. The record holds no assignment text, is kept for 7 days in a file only your user can read, and is sent nowhere. It is written only while DeepSeek subagents are on.
 
+### Write to a running worker
+
+- An offer names the worker's address, `tenjin-worker-…`, before it is accepted, and an accepted background job says it again. While the worker runs, `SendMessage` to that address reaches it at its next turn, as a message to a native subagent does, and it answers as a native send does. Several messages arrive in order.
+- It is the same job: no new offer, no routing fee and no new question, and the job's ceiling and your limits hold at each payment as before. Only the session that accepted the worker can write to it.
+- A message sent after the worker has reported is not delivered and the parent is told so; it sends it again once the result has arrived.
+
 ### Continue a finished worker
 
 - Completed Claude workers return a `tenjin-worker-…` handle. The same parent can continue with native `SendMessage`, or compatible `Agent.resume`. A worker handle is never sent to native tools.
-- Each full follow-up is held until the parent runs it with one `subagent({offer_id})` call or stops it with `subagent({cancel: offer_id})`. The parent does not judge again whether the worker suits it, as a native follow-up resumes its subagent with no confirmation.
+- In the session that accepted the worker, a follow-up is one call: the worker continues at once in the background, as a native subagent resumed by a message does, and its result arrives by itself. The same consent, directory scope and permission mode checks run as for an accept.
+- Where Tenjin did not accept the worker itself (a resumed session, a reloaded plugin), each full follow-up is held until the parent runs it with one `subagent({offer_id})` call or stops it with `subagent({cancel: offer_id})`. The parent does not judge again whether the worker suits it, as a native follow-up resumes its subagent with no confirmation. A job whose ceiling is used up refuses the follow-up.
 - Because the text goes to DeepSeek, what binds an assignment still binds a follow-up: your own instructions that restrict the worker's model, privacy, disclosure or paid inference, and planning, which stays native. The parent cancels a follow-up that would break one.
 - A follow-up pays no routing fee, and its inference is charged to what is left of the original job's ceiling.
 - It reopens the same history, for up to 7 days after the worker's last run, including after the same session is resumed. Current instructions and permissions refresh. Continuations retain the full worker history.
