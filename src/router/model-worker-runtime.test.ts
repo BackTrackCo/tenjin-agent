@@ -763,6 +763,22 @@ it('denies the env and settings files in node_modules and .git, which the env sc
   expect([...deny, ...denyRead].filter(skippedOther)).toEqual([]);
 });
 
+// The env scan follows no link to a folder, and widening it past the consented directories is
+// not wanted: a link inside them that leads outside must give the worker nothing. Claude
+// Code's read block checks a path's real place, for its file tools and, on macOS (Seatbelt),
+// for commands (checked under its own sandbox, 2.1.328: Read of link/.env, `cat link/.env`,
+// `grep -R`, `find -L` and a script's open are all refused). Without the block a native
+// sandboxed command reads through such a link freely.
+it('blocks reads outside the working directories, so a link that leads outside gives nothing', async () => {
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(job, options());
+  const sent = given(vi.mocked(query).mock.calls[0]![0].options);
+  expect(sent.settings).toMatchObject({
+    permissions: { blockReadsOutsideWorkingDirectories: true },
+  });
+  expect(sent.sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false });
+});
+
 it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
   vi.mocked(modelSettings).mockResolvedValue({
     root: '/repo',

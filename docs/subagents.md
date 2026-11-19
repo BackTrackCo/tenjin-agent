@@ -165,7 +165,7 @@ A new env file in a folder that is not a working directory's top level and held 
 - **macOS.** A network share can report a folder's new entries late, so a file made there can be missed until a later request, or until the worker opens it with the Read tool.
 - **Windows.** A request waits 120 ms for reports of changes. A file whose report comes later is found before the request after it.
 
-Anywhere, an env file reached only through a link to a folder is not scanned: the worker's Read tool loads it when it opens it, and a command that reads it sends its values as written. On Windows a command can read an env file inside `node_modules` or `.git`, which the scan skips: one there at job start sends its values as written, and one written there during the job is read once the watcher reports it.
+The scan follows no link to a folder. Through a link to a folder inside the working directories an env file is read at its real place, which the scan covers. A link whose real place is outside them gives the worker nothing: its file tools refuse the read, and on Linux and macOS so does the sandbox for its commands, as for any other path outside the working directories. On Windows a command can read an env file inside `node_modules` or `.git`, which the scan skips: one there at job start sends its values as written, and one written there during the job is read once the watcher reports it.
 
 ### GitHub access
 
