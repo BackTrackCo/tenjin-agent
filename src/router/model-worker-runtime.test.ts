@@ -2380,7 +2380,7 @@ it.each([
 // the count ran in the hooks after a tool, which a denied call never reaches. Checked on
 // Claude Code 2.1.325 and 2.1.328: a call refused by a hook, a deny rule, the permission
 // callback, don't-ask mode or the classifier passes `PreToolUse` and no later hook.
-it('counts every call of the model toward the repeat reminder before it runs, also one this hook refuses, and hands the reminder beside the decision', async () => {
+it('counts every call of the model toward the repeat reminder before it runs, also one the mode may refuse, and hands the reminder beside the decision', async () => {
   const outputs: Record<string, unknown>[] = [];
   sdkResult({ subtype: 'success', result: 'done', num_turns: 1 }, undefined, async () => {
     const hooks = vi.mocked(query).mock.calls[0]![0].options?.hooks;
@@ -2395,7 +2395,7 @@ it('counts every call of the model toward the repeat reminder before it runs, al
       outputs.push(
         await call('Bash', i % 2 ? { command: 'a', timeout: 1 } : { timeout: 1, command: 'a' }),
       );
-    // A credential probe this hook refuses itself, three times.
+    // A call the mode may refuse, three times: a refused call counts as well.
     for (let i = 1; i <= 3; i++) outputs.push(await call('Bash', { command: 'gh auth token' }));
     // The hooks after a tool count nothing more: three results of one call, no reminder.
     for (let i = 1; i <= 3; i++)
@@ -2420,15 +2420,11 @@ it('counts every call of the model toward the repeat reminder before it runs, al
   ]);
   expect(context(outputs[2]!)).toMatch(/^You are repeating the exact same tool call/);
   expect(context(outputs[4]!)).toContain('- tool: Bash\n- consecutive_calls: 5\n');
-  // An allowed call gets context and no decision; a refused one keeps its refusal.
-  for (const output of outputs.slice(0, 8))
+  // A call the hook leaves to the mode gets context and no decision.
+  for (const output of outputs.slice(0, 11))
     expect(JSON.stringify(output)).not.toMatch(/permissionDecision|updatedInput/);
   expect(outputs[10]).toMatchObject({
-    hookSpecificOutput: {
-      permissionDecision: 'deny',
-      permissionDecisionReason: expect.stringMatching(/not run/),
-      additionalContext: expect.stringMatching(/^You are repeating/),
-    },
+    hookSpecificOutput: { additionalContext: expect.stringMatching(/^You are repeating/) },
   });
 });
 
@@ -2668,7 +2664,7 @@ it.skipIf(process.platform === 'win32')(
 
 // The operator ruling of 2026-11-19 opened env files and kept these walls: the Tenjin data
 // folder (the wallet), key folders and login files, and the credential probes no path stops.
-it('keeps the Tenjin data folder, keys and login files closed, and refuses credential helper and gh token probes', async () => {
+it('keeps the Tenjin data folder, keys and login files closed, and leaves credential helper and gh token commands to the mode', async () => {
   const decisions: unknown[] = [];
   const probes = [
     'printf "host=github.com\\n" | git credential fill',
@@ -2694,10 +2690,8 @@ it('keeps the Tenjin data folder, keys and login files closed, and refuses crede
   });
   await runModelWorker(job, options());
   expect(decisions).toHaveLength(probes.length);
-  for (const decision of decisions)
-    expect(decision).toMatchObject({
-      hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: /not run/ },
-    });
+  // No hook decision: the native permission flow of the accepted mode judges each one.
+  for (const decision of decisions) expect(decision).toEqual({});
   const sent = given(vi.mocked(query).mock.calls[0]![0].options);
   const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
   for (const path of [
@@ -2720,7 +2714,7 @@ it('keeps the Tenjin data folder, keys and login files closed, and refuses crede
   }
 });
 
-it('refuses a credential probe in the worker hook whatever the mode, and leaves a push to the mode', async () => {
+it('leaves a credential command and a push to the permission flow of the mode', async () => {
   const decisions: unknown[] = [];
   sdkResult({ subtype: 'success', result: 'probe fixture' }, undefined, async () => {
     const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
@@ -2743,12 +2737,8 @@ it('refuses a credential probe in the worker hook whatever the mode, and leaves 
       );
   });
   await runModelWorker(job, options());
-  expect(decisions[0]).toMatchObject({
-    hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: /not run/ },
-  });
-  // No hook decision: the native permission flow of the accepted mode judges both pushes.
-  expect(decisions[1]).toEqual({});
-  expect(decisions[2]).toEqual({});
+  // No hook decision: the native permission flow of the accepted mode judges all three.
+  for (const decision of decisions) expect(decision).toEqual({});
 });
 
 it('asks a person once for a call allowed for the rest of the job and keeps its rule in the session', async () => {

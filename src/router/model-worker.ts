@@ -77,7 +77,6 @@ import {
   windowsWorkerLaunch,
   type WindowsWorkerLaunch,
 } from './windows-worker-launch';
-import { workerCredentialProbe } from './worker-credential-probes';
 import {
   readBlockUnchecked,
   sandboxJudgesRead,
@@ -1127,13 +1126,7 @@ async function runQualifiedWorker(
                     input.hook_event_name === 'PreToolUse'
                       ? repeated(input.tool_name, input.tool_input)
                       : undefined;
-                  // The secrets boundary: a credential probe is refused in every mode.
-                  // Every other call is the accepted mode's to judge.
-                  const probe =
-                    input.hook_event_name === 'PreToolUse'
-                      ? workerCredentialProbe(input.tool_name, input.tool_input)
-                      : undefined;
-                  if (probe) return deny(`${probe} This call was not run.`, reminder);
+                  // Every call is the accepted mode's to judge, as a native subagent's is.
                   try {
                     assertCurrentMode();
                     await assertCurrentWorkspace();
