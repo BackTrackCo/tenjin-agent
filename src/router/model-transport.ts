@@ -1063,7 +1063,9 @@ export class ModelTransport {
         if (server && free(server)) {
           await release();
           throw new ModelCallFailed(
-            'The model provider failed the call; nothing was charged for it',
+            paidError.code === MODEL_REFUSED_CODE
+              ? 'DeepSeek refused to answer this request, so the job ends here; nothing was charged for it'
+              : 'The model provider failed the call; nothing was charged for it',
             { cause: 'provider', status: paidError.status, uncharged: true, code: paidError.code },
             { cause: failure },
           );

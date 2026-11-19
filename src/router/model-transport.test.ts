@@ -1878,6 +1878,37 @@ it.each([
   },
 );
 
+// A model reply that stops with `refusal` is 502 `model_refused` on a server that names it: the
+// same request would be refused again, so it is released at no charge and never tried again,
+// and the job ends with a reason a person can read. `incomplete_model_response` stays tried.
+it('releases a refused reply at no charge, never retries it, and says so plainly', async () => {
+  const f = await fixture();
+  const real = f.deps.fetchImpl!;
+  f.setRecoveryState('unknown');
+  f.setVoucher('cancelled');
+  f.setRecoveryActual('0');
+  f.deps.fetchImpl = async (input, init) =>
+    new Request(input, init).headers.has('payment-signature')
+      ? Response.json({ error: { code: 'model_refused' } }, { status: 502 })
+      : real(input, init);
+  const failed = await f
+    .make()
+    .messages(f.job, { messages: [] }, new AbortController().signal)
+    .catch((error: unknown) => error as ModelCallFailed);
+  expect(failed).toBeInstanceOf(ModelCallFailed);
+  expect(failed?.detail).toEqual({
+    cause: 'provider',
+    status: 502,
+    uncharged: true,
+    code: 'model_refused',
+  });
+  expect(failed?.message).toBe(
+    'DeepSeek refused to answer this request, so the job ends here; nothing was charged for it',
+  );
+  expect(retryableModelCall(failed)).toBe(false);
+  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
+});
+
 // A reply of thinking alone is a legal end of a turn: the router delivers and charges it.
 // A client that took it for an empty reply would buy the same request again.
 it('takes a reply of thinking alone as a completed, charged call', async () => {
