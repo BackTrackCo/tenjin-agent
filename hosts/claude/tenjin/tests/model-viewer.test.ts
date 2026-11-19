@@ -3688,7 +3688,7 @@ test('an accept batch draws only the workers whose held call has no row of its o
 // execution." under the DeepSeek row. Operator ruling 2026-11-18: the line should not be
 // there. Claude Code's block reads `Not run` for a held call, and the DeepSeek row or the
 // native Agent row says what became of it.
-test('no line of Tenjin’s own is written for the held calls of a parallel Agent summary, whatever the parent does with them', async ($, on) => {
+test('the held calls of a parallel Agent summary get a notice above the prompt only while they wait, and no transcript line', async ($, on) => {
   const f = setup($, on);
   const notices: string[] = [];
   on('ui.log', (_$, e) => {
@@ -3732,31 +3732,69 @@ test('no line of Tenjin’s own is written for the held calls of a parallel Agen
     await endTurn();
     return notices.splice(0);
   };
-  // Accept all.
+  // WHILE THE CALLS ARE HELD, one line above the prompt says so (operator ruling
+  // 2026-11-18: a held notice for the parallel case that goes away once a row starts). It
+  // is never written into the transcript, and at 7c1f177a nothing was shown at all.
+  const bandNow = async () => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      // The main view: no agent is open.
+      props: { ...band(), view: {} },
+    });
+    const lines = await shownLines(ui);
+    await ui.unmount();
+    return lines;
+  };
+  const SHOWN = ['Tenjin offered DeepSeek for 2 Agent calls'];
+  const gone = await bandNow();
+  expect(gone).not.toEqual(SHOWN);
+  // Accept all: gone at the accept, before the turn ends.
   await hold('held_a', 'held_b');
+  expect(await bandNow()).toEqual(SHOWN);
   await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
+  expect(await bandNow()).toEqual(gone);
   expect(await taken()).toEqual([]);
-  // Repeat all.
+  // Repeat: gone when the first native row starts.
   await hold('held_c', 'held_d');
+  expect(await bandNow()).toEqual(SHOWN);
   await repeat('native_c', OFFER);
+  expect(await bandNow()).toEqual(gone);
   await repeat('native_d', SECOND_OFFER);
   expect(await taken()).toEqual([]);
-  // The live case: one accepted and one repeated, in the same response.
+  // The live case, one accepted and one repeated in the same response: gone at the first
+  // answer, so no count that the rows contradict is ever shown.
   await hold('held_e', 'held_f');
+  expect(await bandNow()).toEqual(SHOWN);
   await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
+  expect(await bandNow()).toEqual(gone);
   await repeat('native_f', SECOND_OFFER);
+  expect(await bandNow()).toEqual(gone);
   expect(await taken()).toEqual([]);
   // The same mix across two responses.
   await hold('held_g', 'held_h');
-  await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
-  await batch('unrelated');
-  await repeat('native_h', SECOND_OFFER);
+  await repeat('native_g', OFFER);
+  await batch('native_g');
+  expect(await bandNow()).toEqual(gone);
+  await $.tool.call({ tool: ACCEPT, offer_id: SECOND_OFFER });
   expect(await taken()).toEqual([]);
-  // A cancel.
-  await hold('held_i', 'held_j');
+  // A subagent's own cancel and a viewer's turn that ends are not the parent's answer.
+  await hold('held_s', 'held_t');
+  await complete($, 'earlier-viewer', 'answer');
+  await $.tool.call({ tool: ACCEPT, cancel: THIRD_OFFER, agentId: 'a-subagent' });
+  expect(await bandNow()).toEqual(SHOWN);
+  // A cancel by the parent.
   await $.tool.call({ tool: ACCEPT, cancel: OFFER });
+  expect(await bandNow()).toEqual(gone);
   expect(await taken()).toEqual([]);
   // A turn that ends with both offers unanswered.
   await hold('held_k', 'held_l');
+  expect(await bandNow()).toEqual(SHOWN);
   expect(await taken()).toEqual([]);
+  expect(await bandNow()).toEqual(gone);
+  // A single held call keeps its own offer row and gets no notice.
+  await remember($, { ...INPUT, tool_use_id: 'held_single' });
+  await batch('held_single');
+  expect(await bandNow()).toEqual(gone);
 });

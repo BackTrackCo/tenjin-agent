@@ -185,6 +185,26 @@ const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
 let sessionEnding = false;
 /**
+ * THE HELD NOTICE OF A PARALLEL AGENT SUMMARY. Claude Code draws two or more Agent calls of
+ * one response as a block of its own, which reads `Not run` for a held call and takes no
+ * text of ours. While those calls wait for the parent's answer, one line in the band above
+ * the prompt says Tenjin offered DeepSeek for them. It is taken back at the first answer
+ * to any of them (an accept, the call sent again, a cancel) and when the parent's turn or
+ * the session ends: the rows that start then say the rest, and a count that an answer made
+ * wrong is never left on screen. It is this module's memory alone, never the transcript's
+ * or the session's state, so a resumed session shows none.
+ */
+let heldGroup = 0;
+function showHeldGroup($: Dollar, calls: number): void {
+  if (heldGroup === calls) return;
+  heldGroup = calls;
+  try {
+    $.ui.invalidate('ui.render');
+  } catch {
+    /* Display only. */
+  }
+}
+/**
  * A turn that starts is a live session: `/clear` keeps this module for the session that
  * follows (Claude Code 2.1.328 ends the old one, then gives the process a new session id).
  */
@@ -504,6 +524,7 @@ export async function rememberModelOffer(
 export async function keptNative($: Dollar, offerId: unknown): Promise<void> {
   try {
     if (!short(offerId) || !UUID.test(offerId)) return;
+    showHeldGroup($, 0);
     const ref = { ...OFFERS, id: offerId };
     const offer = (await $.state.get(ref)).value;
     if (offer?.state === 'offered') await $.state.set(ref, { ...offer, state: 'native' });
@@ -1861,6 +1882,7 @@ export function registerModelViewer(on: On): void {
   });
   on('session.end', async ($, e, next) => {
     sessionEnding = true;
+    showHeldGroup($, 0);
     try {
       // The event names the session that closed.
       const closed = (e as { sessionId?: unknown }).sessionId;
@@ -1991,6 +2013,15 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
+    // The parent's first answer to a held group, an accept or a cancel, takes its notice
+    // back. The plugin's own calls are no answer, and neither is a subagent's own call.
+    if (
+      e.capture === undefined &&
+      e.end_session === undefined &&
+      e.agentId === undefined &&
+      !raisedByThisPlugin(next.origin)
+    )
+      showHeldGroup($, 0);
     // A cancelled offer is settled too: its row has nothing left to offer. A native
     // subagent's cancel of the offer it got settles it as the main loop's does.
     if (short(e.cancel) && UUID.test(e.cancel)) {
@@ -2122,6 +2153,7 @@ export function registerModelViewer(on: On): void {
   });
   on('turn.complete', async ($, e, next) => {
     // The main loop's turn alone: a viewer's turn that ends meanwhile says nothing of it.
+    if (!e.agentId) showHeldGroup($, 0);
     if (!e.agentId && undelivered.size) deliverLater($);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
@@ -2199,6 +2231,17 @@ export function registerModelViewer(on: On): void {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { view, hasSurvey, isCollapsed, maxRows, bodyColumns } = e.props;
+    if (!view.agentId && heldGroup > 0 && !hasSurvey && !isCollapsed && maxRows >= 1) {
+      // The main view, while a parallel summary's held calls wait for the parent's answer.
+      const { Box, Text } = $.ui.resolve(e);
+      return (
+        <Box flexDirection="column">
+          <Text dimColor wrap="truncate-end">
+            {`Tenjin offered DeepSeek for ${heldGroup} Agent calls`}
+          </Text>
+        </Box>
+      );
+    }
     if (!view.agentId || hasSurvey || isCollapsed || maxRows < 1 || bodyColumns < 1) return next(e);
     const [parentSessionId, held] = await Promise.all([$.session.id(), $.state.get(STATE)]);
     const state = held.value;
@@ -2250,6 +2293,8 @@ export function registerModelViewer(on: On): void {
     // PostToolBatch sees model-facing text. Claude omits the agent id from
     // Explore and Plan handbacks, so identify holds before it formats them.
     const held = heldOffer(answer.deny ?? answer.result);
+    // An Agent call of the main loop that ran is a row that started.
+    if (!held && e.agentId === undefined) showHeldGroup($, 0);
     if (held) {
       heldCalls.set(e.tool_use_id, held === 'unavailable' ? undefined : held.offerId.toLowerCase());
       if (heldCalls.size > 512) heldCalls.delete(heldCalls.keys().next().value!);
@@ -2258,12 +2303,14 @@ export function registerModelViewer(on: On): void {
   });
   on('classic.PostToolBatch', ($, e, next) => {
     if (heldCalls.size === 0) return next(e);
+    let offered = 0;
     for (const tool of ['Agent', 'Task']) {
       const calls = e.tool_calls.filter((call) => call.tool_name === tool);
       for (const call of calls.filter((held) => heldCalls.has(held.tool_use_id))) {
         const offer = heldCalls.get(call.tool_use_id);
         heldCalls.delete(call.tool_use_id);
         // One of several Agent calls of the response: the host's block is its row.
+        if (offer && calls.length > 1) offered++;
         if (offer && calls.length > 1 && !groupedOffers.has(offer)) {
           groupedOffers.add(offer);
           if (groupedOffers.size > DRAWN_MAX)
@@ -2272,6 +2319,7 @@ export function registerModelViewer(on: On): void {
         }
       }
     }
+    if (offered > 0) showHeldGroup($, offered);
     return next(e);
   });
 
