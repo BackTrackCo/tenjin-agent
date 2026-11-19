@@ -319,7 +319,8 @@ export class ModelRefundJournal {
   /**
    * Whether the router refunds a run's own channel. A request that failed or timed out, a
    * rate limit and a server error are no answer (`RefundProbeUnanswered`): the caller asks
-   * again. Any other answer that is not a zero-quote challenge is refused.
+   * again. Any other answer that is not a zero-quote challenge means no refunds: nothing
+   * is signed for the probe, so the run keeps the shared channels.
    */
   async requireSupport(url: string, signal?: AbortSignal, timeoutMs = PROBE_TIMEOUT_MS) {
     const endpoint = exactEndpoint(this.origin, url);
@@ -335,10 +336,13 @@ export class ModelRefundJournal {
       throw new RefundProbeUnanswered(undefined, { cause: error });
     }
     try {
-      if (response.status === 404 || response.status === 405) return false;
       if (response.status === 429 || response.status >= 500)
         throw new RefundProbeUnanswered(response.status);
-      verifyChallenge(response);
+      try {
+        verifyChallenge(response);
+      } catch {
+        return false;
+      }
       return response.headers.get('tenjin-inference-refunds') === 'worker-v1';
     } finally {
       void response.body?.cancel().catch(() => undefined);

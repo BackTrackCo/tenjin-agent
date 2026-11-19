@@ -288,6 +288,25 @@ it('asks again when the refund-support question gets no answer, then runs the wo
   expect(asked).toBe(2);
 });
 
+// The probe signs nothing, so an answer that is neither a refund challenge nor a retryable
+// status means no refunds. It used to end the job `unknown` after the routing fee was paid.
+it.each([200, 400, 401, 403])(
+  'runs the worker on the shared channels when the refund-support question is answered %i',
+  async (status) => {
+    const f = await fixture();
+    let asked = 0;
+    f.deps.fetchImpl = async () => {
+      asked++;
+      return new Response('{}', { status });
+    };
+    const transport = f.make();
+    await expect(
+      transport.withInferenceRun('odd-answer', new AbortController().signal, async (run) => run),
+    ).resolves.toBe(transport);
+    expect(asked).toBe(1);
+  },
+);
+
 it('ends a run as not started, with the router as the cause, when that question is never answered', async () => {
   const f = await fixture();
   let asked = 0;

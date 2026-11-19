@@ -219,8 +219,9 @@ it('opens a run-scoped channel only when the zero-quote route opts in', async ()
   await expect(journal.requireSupport(url)).resolves.toBe(false);
   state.probe = () => new Response(null, { status: 405 });
   await expect(journal.requireSupport(url)).resolves.toBe(false);
+  // Nothing is signed for the probe, so an answer that is no zero-quote challenge means no refunds.
   state.probe = () => challenge(requirements);
-  await expect(journal.requireSupport(url)).rejects.toThrow('incompatible');
+  await expect(journal.requireSupport(url)).resolves.toBe(false);
   await expect(
     journal.requireSupport('https://other.test/api/model-proxy/messages'),
   ).rejects.toThrow('Invalid inference refund URL');
