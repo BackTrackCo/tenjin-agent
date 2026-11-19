@@ -246,7 +246,7 @@ echo "pack-smoke: config -> exit 0, JSON envelope with schemaVersion (ok)"
 # Load the discover command from the published chunks, with no network or wallet.
 mkdir -p "$DATA_DIR/discovery"
 printf '%s\n' '{"bazaarRegistries":[]}' > "$DATA_DIR/discovery/config.json"
-DISCOVERY_OUT="$(TENJIN_DATA_DIR="$DATA_DIR/discovery" "$BIN" discover 'speech synthesis' --sources registries --json)"
+DISCOVERY_OUT="$(TENJIN_DATA_DIR="$DATA_DIR/discovery" "$BIN" discover 'speech synthesis' --json)"
 printf '%s' "$DISCOVERY_OUT" | node -e '
   let s = "";
   process.stdin.on("data", (d) => (s += d)).on("end", () => {

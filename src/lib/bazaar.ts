@@ -79,7 +79,7 @@ interface Listings {
 }
 
 /** A registry controls its response size as well as its latency. */
-export async function boundedJson(res: Response): Promise<unknown> {
+async function boundedJson(res: Response): Promise<unknown> {
   const reader = res.body?.getReader();
   if (!reader) throw new Error('Registry response has no body');
   const chunks: Uint8Array[] = [];

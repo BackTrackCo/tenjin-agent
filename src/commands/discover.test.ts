@@ -80,60 +80,6 @@ async function writeConfig(over: Record<string, unknown> = {}): Promise<void> {
 }
 
 describe('runDiscover', () => {
-  it('checks registries and Orthogonal on an explicit default CLI search', async () => {
-    await writeConfig();
-    vi.stubEnv('TENJIN_DATA_DIR', dir);
-    vi.stubEnv('CI', '1');
-    const registry = stubRegistry((raw) => {
-      const url = new URL(raw);
-      if (url.origin === 'https://api.orthogonal.com')
-        return json({
-          success: true,
-          apis: [
-            {
-              name: 'Voice',
-              endpoints: [
-                {
-                  name: 'Speech synthesis',
-                  method: 'POST',
-                  price: 0.01,
-                  payment: { x402: { url: 'https://x402.orthogonal.com/voice/tts' } },
-                },
-              ],
-            },
-          ],
-          pagination: { hasMore: false },
-        });
-      expect(url.origin).toBe(REGISTRY);
-      return json({
-        x402Version: 2,
-        resources: [item('https://seller.example/speech', 'http')],
-      });
-    });
-    const { ctx, stdout } = makeCtx();
-    expect(await main(['discover', 'speech synthesis', '--json'], ctx.io)).toBe(0);
-    expect(registry.urls).toHaveLength(2);
-    expect(JSON.parse(stdout())).toMatchObject({
-      data: {
-        sources: ['registries', 'orthogonal'],
-        resources: [{ url: 'https://seller.example/speech' }],
-        catalogs: [
-          { source: 'orthogonal', endpoints: [{ url: 'https://x402.orthogonal.com/voice/tts' }] },
-        ],
-      },
-    });
-  });
-
-  it('refuses unknown source names before any request', async () => {
-    const registry = stubRegistry(() => {
-      throw new Error('must not be called');
-    });
-    await expect(
-      runDiscover({ sources: ['https://evil.test'] }, makeCtx().ctx),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    expect(registry.urls).toEqual([]);
-  });
-
   it('refuses a credential-shaped query before any request', async () => {
     await writeConfig();
     const registry = stubRegistry(() => {
@@ -153,9 +99,7 @@ describe('runDiscover', () => {
       json({ x402Version: 2, resources: [item('https://seller.example/speech', 'http')] }),
     );
     const { ctx, stdout } = makeCtx();
-    expect(
-      await main(['discover', 'speech synthesis', '--sources', 'registries', '--json'], ctx.io),
-    ).toBe(0);
+    expect(await main(['discover', 'speech synthesis', '--json'], ctx.io)).toBe(0);
     expect(JSON.parse(stdout())).toMatchObject({
       ok: true,
       command: 'discover',
@@ -182,7 +126,7 @@ describe('runDiscover', () => {
       }),
     );
     const { ctx } = makeCtx();
-    const result = await runDiscover({ query: 'speech', sources: ['registries'] }, ctx);
+    const result = await runDiscover({ query: 'speech' }, ctx);
     expect(result.data).toMatchObject({
       resources: [{ serviceName: 'Speech API', extensions }],
       errors: [{ registry: REGISTRY, message: expect.stringContaining('partial') }],
@@ -203,7 +147,7 @@ describe('runDiscover', () => {
       }),
     );
     const { ctx } = makeCtx();
-    const result = await runDiscover({ query: 'speech', sources: ['registries'] }, ctx);
+    const result = await runDiscover({ query: 'speech' }, ctx);
     expect(result.humanLines!.join('\n')).not.toContain('USD');
   });
 
@@ -217,7 +161,7 @@ describe('runDiscover', () => {
       }),
     );
     const { ctx, stderr } = makeCtx();
-    const result = await runDiscover({ sources: ['registries'] }, ctx);
+    const result = await runDiscover({}, ctx);
     const data = result.data as {
       resources: { url: string; registry: string }[];
       skippedNonHttp: number;
@@ -240,7 +184,7 @@ describe('runDiscover', () => {
       json({ x402Version: 2, resources: [item('https://seller.example/b', 'http')] }),
     );
     const { ctx, stderr } = makeCtx();
-    const result = await runDiscover({ query: 'enrichment', sources: ['registries'] }, ctx);
+    const result = await runDiscover({ query: 'enrichment' }, ctx);
     const data = result.data as { resources: { url: string }[]; query: string };
     expect(data.query).toBe('enrichment');
     expect(data.resources[0]!.url).toBe('https://seller.example/b');
@@ -254,7 +198,7 @@ describe('runDiscover', () => {
       throw new Error('connection refused');
     });
     const { ctx } = makeCtx();
-    const result = await runDiscover({ sources: ['registries'] }, ctx);
+    const result = await runDiscover({}, ctx);
     const data = result.data as { resources: unknown[]; errors: { registry: string }[] };
     expect(data.resources).toEqual([]);
     expect(data.errors[0]!.registry).toBe(REGISTRY);

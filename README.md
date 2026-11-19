@@ -118,7 +118,7 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 
 Browsing and inspection are free. A selected tool pays only its provider; selected Context7 docs need no wallet or routing fee.
 
-To look outside Tenjin's catalog, `tenjin discover "<need>"` searches public x402 registries and Orthogonal's catalog and pays no one. [How discovery works →](./docs/router-reference.md#endpoint-discovery)
+To look outside Tenjin's catalog, `tenjin discover "<need>"` searches the public x402 Bazaar registries and pays no one. [How discovery works →](./docs/router-reference.md#endpoint-discovery)
 
 ## Wallet and limits
 
