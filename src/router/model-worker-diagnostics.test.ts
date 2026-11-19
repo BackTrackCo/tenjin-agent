@@ -42,7 +42,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
         },
       ],
     });
-    record.repeat('Bash', 'the same tool and arguments have repeated 3 times consecutively.');
+    record.repeat('Bash', 3);
     record.repeat('Read', undefined);
     record.retry(1, { cause: 'provider', status: 500 });
     // Start phases, from the accept on, each the first time it is reached.

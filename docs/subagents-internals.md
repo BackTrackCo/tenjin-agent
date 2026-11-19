@@ -20,6 +20,7 @@ Notes for contributors on how a DeepSeek worker is built. What a person needs to
 - The worker's tool, permission and stop events run your hooks and the plugins' hooks as your session does, with the same matchers, order, timeouts and blocks.
 - It runs no `SessionStart` hook when it starts or resumes, and no `UserPromptSubmit` hook for its prompts, as a native subagent runs none, so the context those hooks add stays out of it.
 - A `SessionStart` after a compaction still runs, as it does in a native subagent, and so does every hook in managed settings.
+- Tenjin's own hook before each tool call counts repeats as the DeepSeek harness's reminder does: the same tool with the same arguments 3, 5 and 8 times in a row, every tool included and a call counted also when it is then refused. At 3 the worker reads the harness's short reminder, at 5 and 8 its detailed one with the tool, the count and the first 500 characters of the arguments. The reminder is advice: no call is blocked or changed.
 
 ## Tenjin's server inside a worker
 

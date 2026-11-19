@@ -819,8 +819,8 @@ async function runQualifiedWorker(
   diagnostics.fact('envKept', resumedEnv !== undefined);
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
-    diagnostics.repeat(tool, reminder);
-    return reminder;
+    diagnostics.repeat(tool, reminder?.count);
+    return reminder?.text;
   };
   // Calls a person allowed for the rest of this job; never persisted.
   const allowedForJob = new Set<string>();
@@ -1097,14 +1097,26 @@ async function runQualifiedWorker(
             {
               hooks: [
                 async (input) => {
-                  if (!released)
-                    return {
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse',
-                        permissionDecision: 'deny',
-                        permissionDecisionReason: 'The DeepSeek job has not been accepted.',
-                      },
-                    };
+                  const deny = (permissionDecisionReason: string, additionalContext?: string) => ({
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse' as const,
+                      permissionDecision: 'deny' as const,
+                      permissionDecisionReason,
+                      ...(additionalContext ? { additionalContext } : {}),
+                    },
+                  });
+                  if (!released) return deny('The DeepSeek job has not been accepted.');
+                  // THE REPEAT REMINDER COUNTS HERE, the one place every call of the model
+                  // passes, whoever refuses it afterwards: this hook, a deny rule, the
+                  // permission callback, don't-ask mode or the auto-mode classifier. None
+                  // of those reaches a hook that runs after a tool (checked on Claude Code
+                  // 2.1.325 and 2.1.328), and the classifier's own `PermissionDenied` hook
+                  // can hand the model nothing. The context given here reaches the model
+                  // with the call's result or its refusal.
+                  const reminder =
+                    input.hook_event_name === 'PreToolUse'
+                      ? repeated(input.tool_name, input.tool_input)
+                      : undefined;
                   // An env file read by name is known before its content can be forwarded.
                   if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'Read')
                     await envFiles
@@ -1116,36 +1128,26 @@ async function runQualifiedWorker(
                     input.hook_event_name === 'PreToolUse'
                       ? workerCredentialProbe(input.tool_name, input.tool_input)
                       : undefined;
-                  if (probe)
-                    return {
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse',
-                        permissionDecision: 'deny',
-                        permissionDecisionReason: `${probe} This call was not run.`,
-                      },
-                    };
+                  if (probe) return deny(`${probe} This call was not run.`, reminder);
                   try {
                     assertCurrentMode();
                     await assertCurrentWorkspace();
                   } catch {
-                    return {
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse',
-                        permissionDecision: 'deny',
-                        permissionDecisionReason:
-                          'Owned permission mode or workspace scope changed or is unavailable',
-                      },
-                    };
+                    return deny(
+                      'Owned permission mode or workspace scope changed or is unavailable',
+                      reminder,
+                    );
                   }
-                  return !controller.signal.aborted
-                    ? {}
-                    : {
+                  if (controller.signal.aborted)
+                    return deny('Model access revoked or job cancelled', reminder);
+                  return reminder
+                    ? {
                         hookSpecificOutput: {
-                          hookEventName: 'PreToolUse',
-                          permissionDecision: 'deny',
-                          permissionDecisionReason: 'Model access revoked or job cancelled',
+                          hookEventName: 'PreToolUse' as const,
+                          additionalContext: reminder,
                         },
-                      };
+                      }
+                    : {};
                 },
               ],
             },
@@ -1158,7 +1160,6 @@ async function runQualifiedWorker(
                   if (input.tool_name === 'WebSearch')
                     served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
-                    repeated(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch'
                       ? await fetchFallback(
                           { input: input.tool_input, response: input.tool_response },
@@ -1186,7 +1187,6 @@ async function runQualifiedWorker(
                   if (input.tool_name === 'WebSearch')
                     served(input.tool_use_id, WORKER_SEARCH_LABEL);
                   const context = [
-                    repeated(input.tool_name, input.tool_input),
                     input.tool_name === 'WebFetch' && input.is_interrupt !== true
                       ? await fetchFallback(
                           { input: input.tool_input, error: input.error },

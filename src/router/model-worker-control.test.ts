@@ -15,34 +15,56 @@ import {
 
 afterEach(() => vi.useRealTimers());
 
-it('warns softly at three, five and eight identical calls, independent of argument key order', () => {
+// The DeepSeek harness's own two texts: one weak text at every count named no tool, no
+// arguments and no way out ("finish the task").
+it('reminds gently at three identical calls, then in detail at five and eight, whatever the argument key order', () => {
   const repeats = new WorkerRepeatReminder();
-  const warned: number[] = [];
+  const reminded = new Map<number, string>();
   for (let call = 1; call <= 10; call++) {
     const reminder = repeats.observe(
       'Read',
       call % 2 ? { path: 'a', offset: 1 } : { offset: 1, path: 'a' },
     );
     if (reminder) {
-      warned.push(call);
-      expect(reminder).toContain('permission denials');
-      expect(reminder).not.toContain('path');
+      expect(reminder.count).toBe(call);
+      reminded.set(call, reminder.text);
     }
   }
-  expect(warned).toEqual([3, 5, 8]);
+  expect([...reminded.keys()]).toEqual([3, 5, 8]);
+  expect(reminded.get(3)).toBe(
+    'You are repeating the exact same tool call with identical arguments. Carefully analyze the previous result before calling again: if the task is not complete, try a different approach or different arguments instead of repeating the call.',
+  );
+  expect(reminded.get(5)).toBe(
+    'Repeated tool call detected:\n- tool: Read\n- consecutive_calls: 5\n- arguments: {"offset":1,"path":"a"}\nThe repeated calls are not making progress. Do not call this tool with these exact arguments again. Inspect the latest result and choose a different action, different arguments, or finish the task if enough evidence has been gathered.',
+  );
+  expect(reminded.get(8)).toContain('- consecutive_calls: 8\n');
   expect(repeats.observe('Read', { path: 'b', offset: 1 })).toBeUndefined();
   expect(repeats.observe('Read', { path: 'a', offset: 1 })).toBeUndefined();
   expect(repeats.observe('Write', { path: 'a', offset: 1 })).toBeUndefined();
 });
 
-// As in the DeepSeek harness: a to-do list update neither counts nor breaks a streak.
-it('lets a to-do list update between repeats neither count nor reset them', () => {
+it('quotes at most 500 characters of the arguments, and still tells long calls apart in full', () => {
+  const repeats = new WorkerRepeatReminder();
+  const long = (tail: string) => ({ command: 'x'.repeat(600) + tail });
+  for (let call = 1; call <= 4; call++) repeats.observe('Bash', long('a'));
+  const detailed = repeats.observe('Bash', long('a'))?.text;
+  expect(detailed).toContain(`- arguments: {"command":"${'x'.repeat(488)}… (+115 more chars)\n`);
+  // Another ending past the quoted part is another call.
+  expect(repeats.observe('Bash', long('b'))).toBeUndefined();
+});
+
+// The DeepSeek harness ships with no tool excluded: a to-do list update counts, and it
+// breaks a run of repeats. It once did neither here.
+it('counts a to-do list update as any other call', () => {
   const repeats = new WorkerRepeatReminder();
   repeats.observe('Bash', { command: 'pnpm test' });
   repeats.observe('TodoWrite', { todos: [] });
   repeats.observe('Bash', { command: 'pnpm test' });
-  expect(repeats.observe('TodoWrite', { todos: [] })).toBeUndefined();
-  expect(repeats.observe('Bash', { command: 'pnpm test' })).toContain('repeated 3 times');
+  expect(repeats.observe('Bash', { command: 'pnpm test' })).toBeUndefined();
+  const updates = new WorkerRepeatReminder();
+  updates.observe('TodoWrite', { todos: [] });
+  updates.observe('TodoWrite', { todos: [] });
+  expect(updates.observe('TodoWrite', { todos: [] })?.count).toBe(3);
 });
 
 it('does not fail execution or keep a repeat streak for an unhashable input', () => {

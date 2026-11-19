@@ -464,10 +464,9 @@ export class WorkerDiagnosticsRecord {
   }
 
   /** A repeat reminder that fired: which tool, at which count. */
-  repeat(tool: string, reminder: string | undefined): void {
-    const count = /repeated (\d+) times/.exec(reminder ?? '')?.[1];
-    if (!count || this.value.repeats.length >= MAX_REPEATS) return;
-    this.value.repeats.push({ tool: tool.slice(0, 200), count: Number(count) });
+  repeat(tool: string, count: number | undefined): void {
+    if (count === undefined || this.value.repeats.length >= MAX_REPEATS) return;
+    this.value.repeats.push({ tool: tool.slice(0, 200), count });
   }
 
   /** Times from the accept on: the accept's own time and the marks made before the run. */

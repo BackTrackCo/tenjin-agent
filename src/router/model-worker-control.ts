@@ -1,4 +1,4 @@
-import { canonicalHash } from '../lib/request-schema';
+import { stable } from '../lib/request-schema';
 
 /** Resource bounds, not a model-fit decision or an ordinary task turn budget. */
 export const WORKER_WALL_MS = 40 * 60 * 1000;
@@ -310,26 +310,62 @@ export async function withWorkerDeadline<T>(
 }
 
 /**
- * Evaluated 3/5/8 reminder cadence; native tools still execute normally. A to-do list
- * update neither counts nor breaks a run of repeats, as in the DeepSeek harness.
+ * THE REPEAT REMINDER OF THE DEEPSEEK HARNESS (its `repeat-tool-reminder` guard, as
+ * shipped): the same tool with the same arguments, key order aside, 3, 5 and 8 times in a
+ * row. Advisory only: no call is blocked, delayed or changed. Every call the model makes
+ * counts, also one that is then denied, and no tool is left out: the harness ships with
+ * an empty exclude list, so a to-do list update counts and breaks a run of repeats as any
+ * other call does. Past 8 a run is silent. The two texts are the harness's own: the
+ * gentle one at the first count, then the detailed one with the tool, the run's length
+ * and the first 500 characters of the arguments.
  */
+const REPEAT_COUNTS = [3, 5, 8];
+const REPEAT_ARGUMENT_CHARS = 500;
+const GENTLE_REPEAT_REMINDER =
+  'You are repeating the exact same tool call with identical arguments. ' +
+  'Carefully analyze the previous result before calling again: if the task is ' +
+  'not complete, try a different approach or different arguments instead of ' +
+  'repeating the call.';
+function detailedRepeatReminder(tool: string, count: number, canonical: string): string {
+  const shown =
+    canonical.length <= REPEAT_ARGUMENT_CHARS
+      ? canonical
+      : `${canonical.slice(0, REPEAT_ARGUMENT_CHARS)}… (+${canonical.length - REPEAT_ARGUMENT_CHARS} more chars)`;
+  return (
+    'Repeated tool call detected:\n' +
+    `- tool: ${tool}\n` +
+    `- consecutive_calls: ${count}\n` +
+    `- arguments: ${shown}\n` +
+    'The repeated calls are not making progress. Do not call this tool with ' +
+    'these exact arguments again. Inspect the latest result and choose a ' +
+    'different action, different arguments, or finish the task if enough ' +
+    'evidence has been gathered.'
+  );
+}
 export class WorkerRepeatReminder {
   private previous: string | undefined;
   private count = 0;
 
-  observe(tool: string, input: unknown): string | undefined {
-    if (tool === 'TodoWrite') return;
-    let identity: string;
+  /** One call the model made: the reminder to hand it at a count of 3, 5 or 8. */
+  observe(tool: string, input: unknown): { count: number; text: string } | undefined {
+    let canonical: string;
     try {
-      identity = canonicalHash({ tool, input });
+      canonical = stable(input);
     } catch {
       this.previous = undefined;
       this.count = 0;
       return;
     }
+    const identity = JSON.stringify([tool, canonical]);
     this.count = identity === this.previous ? this.count + 1 : 1;
     this.previous = identity;
-    if (![3, 5, 8].includes(this.count)) return;
-    return `Local worker reminder: the same tool and arguments have repeated ${this.count} times consecutively. Review the previous results and change approach if they are not making progress. Respect the assignment and all permission denials. This is progress feedback; permissions and tool results are unchanged.`;
+    if (!REPEAT_COUNTS.includes(this.count)) return;
+    return {
+      count: this.count,
+      text:
+        this.count === REPEAT_COUNTS[0]
+          ? GENTLE_REPEAT_REMINDER
+          : detailedRepeatReminder(tool, this.count, canonical),
+    };
   }
 }

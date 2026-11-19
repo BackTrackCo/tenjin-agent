@@ -2535,39 +2535,60 @@ it.each([
   },
 );
 
-it('routes successful and failed identical calls through soft native hook context without changing permissions or outputs', async () => {
-  sdkResult({ subtype: 'success', result: 'done', num_turns: 1 });
-  await runModelWorker(job, options());
-  const hooks = vi.mocked(query).mock.calls[0]![0].options?.hooks;
-  const success = hooks?.PostToolUse?.[0]?.hooks[0];
-  const failure = hooks?.PostToolUseFailure?.[0]?.hooks[0];
-  expect(success).toBeTypeOf('function');
-  expect(failure).toBeTypeOf('function');
-  const contexts = [];
-  for (let i = 1; i <= 8; i++) {
-    const failed = i % 2 === 0;
-    const hook = failed ? failure! : success!;
-    contexts.push(
-      await hook(
-        {
-          hook_event_name: failed ? 'PostToolUseFailure' : 'PostToolUse',
-          tool_name: 'Read',
-          tool_input: i % 2 ? { path: 'a', offset: 1 } : { offset: 1, path: 'a' },
-          tool_use_id: `call-${i}`,
-        } as never,
+// A worker in auto mode could hammer a refused call until the wall or the money ran out:
+// the count ran in the hooks after a tool, which a denied call never reaches. Checked on
+// Claude Code 2.1.325 and 2.1.328: a call refused by a hook, a deny rule, the permission
+// callback, don't-ask mode or the classifier passes `PreToolUse` and no later hook.
+it('counts every call of the model toward the repeat reminder before it runs, also one this hook refuses, and hands the reminder beside the decision', async () => {
+  const outputs: Record<string, unknown>[] = [];
+  sdkResult({ subtype: 'success', result: 'done', num_turns: 1 }, undefined, async () => {
+    const hooks = vi.mocked(query).mock.calls[0]![0].options?.hooks;
+    const call = (tool_name: string, tool_input: unknown) =>
+      hooks!.PreToolUse![0]!.hooks[0]!(
+        { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'call' } as never,
         undefined,
         { signal: new AbortController().signal },
-      ),
-    );
-  }
-  expect(
-    contexts.map((value, i) => ('hookSpecificOutput' in value ? i + 1 : null)).filter(Boolean),
-  ).toEqual([3, 5, 8]);
-  for (const value of contexts) {
-    expect(JSON.stringify(value)).not.toMatch(
-      /permissionDecision|updatedToolOutput|classifierContext/,
-    );
-  }
+      ) as Promise<Record<string, unknown>>;
+    // A call the mode judges, eight times: whether it then runs or is refused is not known here.
+    for (let i = 1; i <= 8; i++)
+      outputs.push(
+        await call('Bash', i % 2 ? { command: 'a', timeout: 1 } : { timeout: 1, command: 'a' }),
+      );
+    // A credential probe this hook refuses itself, three times.
+    for (let i = 1; i <= 3; i++) outputs.push(await call('Bash', { command: 'gh auth token' }));
+    // The hooks after a tool count nothing more: three results of one call, no reminder.
+    for (let i = 1; i <= 3; i++)
+      outputs.push(
+        (await hooks!.PostToolUse![0]!.hooks[0]!(
+          {
+            hook_event_name: 'PostToolUse',
+            tool_name: 'Read',
+            tool_input: { file_path: 'a' },
+            tool_use_id: `r${i}`,
+          } as never,
+          undefined,
+          { signal: new AbortController().signal },
+        )) as Record<string, unknown>,
+      );
+  });
+  await runModelWorker(job, options());
+  const context = (output: Record<string, unknown>) =>
+    (output.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
+  expect(outputs.map((output, i) => (context(output) ? i + 1 : null)).filter(Boolean)).toEqual([
+    3, 5, 8, 11,
+  ]);
+  expect(context(outputs[2]!)).toMatch(/^You are repeating the exact same tool call/);
+  expect(context(outputs[4]!)).toContain('- tool: Bash\n- consecutive_calls: 5\n');
+  // An allowed call gets context and no decision; a refused one keeps its refusal.
+  for (const output of outputs.slice(0, 8))
+    expect(JSON.stringify(output)).not.toMatch(/permissionDecision|updatedInput/);
+  expect(outputs[10]).toMatchObject({
+    hookSpecificOutput: {
+      permissionDecision: 'deny',
+      permissionDecisionReason: expect.stringMatching(/not run/),
+      additionalContext: expect.stringMatching(/^You are repeating/),
+    },
+  });
 });
 
 it('keeps native turn-limit diagnostics separate from model capability and never exposes SDK error text', async () => {
