@@ -3683,7 +3683,11 @@ test('an accept batch draws only the workers whose held call has no row of its o
 
 // Live on alpha.70: two held Explore calls were accepted together, and the line stayed as a
 // row of its own between Claude Code's `2 Explore agents finished` and the DeepSeek group.
-test('the held notice of a parallel Agent summary is dropped by an accept and written for any other answer', async ($, on) => {
+// Live on alpha.83: of two held calls of one response, one was accepted and one sent again
+// and run natively, in the same response, and the line read "Held 2 of 2 Agent calls before
+// native execution." Operator ruling: an accepted call never counts in that line. A call
+// kept native gets none either, as a held web search that is let through gets none.
+test('the held line is written only for held calls that never ran, and counts those alone', async ($, on) => {
   const f = setup($, on);
   const notices: string[] = [];
   on('ui.log', (_$, e) => {
@@ -3707,20 +3711,48 @@ test('the held notice of a parallel Agent summary is dropped by an accept and wr
     f.state.offer = OFFER;
     await batch(first, second);
   };
-  const HELD = 'Held 2 of 2 Agent calls before native execution.';
-  // Accepted together: the DeepSeek group is the batch's display, and no line is written,
-  // then or when the turn ends.
+  /** The same call sent again, which the CLI lets run and whose open offer it names. */
+  const repeat = async (id: string, offer: string) => {
+    f.state.keepNative = true;
+    f.state.offer = offer;
+    await remember($, { ...INPUT, tool_use_id: id });
+    f.state.keepNative = false;
+    f.state.offer = OFFER;
+  };
+  const endTurn = () =>
+    $.turn.complete({
+      reason: 'answer',
+      turnId: 'parent-turn',
+      isAborted: false,
+      answer: '',
+      durationMs: 1,
+    } as never);
+  const taken = async () => {
+    await endTurn();
+    return notices.splice(0);
+  };
+  // Accept all: the DeepSeek rows are the display, and no line is written.
   await hold('held_a', 'held_b');
-  expect(notices).toEqual([]);
   await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
-  await $.turn.complete({
-    reason: 'answer',
-    turnId: 'parent-turn',
-    isAborted: false,
-    answer: '',
-    durationMs: 1,
-  } as never);
+  expect(await taken()).toEqual([]);
+  // Repeat all: each repeat draws its own native row, and no line is written.
+  await hold('held_c', 'held_d');
+  await repeat('native_c', OFFER);
+  await repeat('native_d', SECOND_OFFER);
+  expect(await taken()).toEqual([]);
+  // The live case: one accepted and one repeated, in the same response.
+  await hold('held_e', 'held_f');
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
+  await repeat('native_f', SECOND_OFFER);
   expect(notices).toEqual([]);
+  expect(await taken()).toEqual([]);
+  // The same mix across two responses, with an unrelated native call between them.
+  await hold('held_g', 'held_h');
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
+  await batch('unrelated');
+  expect(notices).toEqual([]);
+  await repeat('native_h', SECOND_OFFER);
+  expect(await taken()).toEqual([]);
   // Live on alpha.73: auto mode refused one call of the response, the parent sent it again
   // (held again, with a new offer), then accepted both offers: no line.
   await remember($, { ...INPUT, tool_use_id: 'held_r1' });
@@ -3728,85 +3760,29 @@ test('the held notice of a parallel Agent summary is dropped by an accept and wr
   f.state.offer = THIRD_OFFER;
   await remember($, { ...INPUT, tool_use_id: 'repeat_r2' });
   f.state.offer = OFFER;
-  expect(notices).toEqual([]);
   await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, THIRD_OFFER] });
-  await $.turn.complete({
-    reason: 'answer',
-    turnId: 'parent-turn',
-    isAborted: false,
-    answer: '',
-    durationMs: 1,
-  } as never);
-  expect(notices).toEqual([]);
-  // A subagent's turn that ends while the pair waits, such as an earlier worker's viewer,
-  // and a subagent's own accept, are not the parent's answer: the pair is then accepted.
+  expect(await taken()).toEqual([]);
+  // A subagent's turn that ends while the pair waits, and a subagent's own cancel, are not
+  // the parent's answer: nothing is written, and the pair is then accepted.
   await hold('held_s', 'held_t');
   await complete($, 'earlier-viewer', 'answer');
   await $.tool.call({ tool: ACCEPT, cancel: THIRD_OFFER, agentId: 'a-subagent' });
   expect(notices).toEqual([]);
   await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
-  expect(notices).toEqual([]);
-  // Kept native: the line is written before the repeated call runs.
-  await hold('held_c', 'held_d');
-  f.state.keepNative = true;
-  await remember($, { ...INPUT, tool_use_id: 'native_c' });
-  expect(notices).toEqual([HELD]);
-  f.state.keepNative = false;
-  // Cancelled: the line is written.
-  await hold('held_e', 'held_f');
+  expect(await taken()).toEqual([]);
+  // Cancelled: that call never ran. The accepted one beside it is not counted.
+  await hold('held_i', 'held_j');
   await $.tool.call({ tool: ACCEPT, cancel: OFFER });
-  expect(notices).toEqual([HELD, HELD]);
-  // Neither: the line is written when the turn ends.
-  await hold('held_g', 'held_h');
-  expect(notices).toEqual([HELD, HELD]);
-  await $.turn.complete({
-    reason: 'answer',
-    turnId: 'parent-turn',
-    isAborted: false,
-    answer: '',
-    durationMs: 1,
-  } as never);
-  expect(notices).toEqual([HELD, HELD, HELD]);
-});
-
-test('the held notice counts only held Agent calls in the batch', async ($, on) => {
-  const f = setup($, on);
-  const notices: string[] = [];
-  on('ui.log', (_$, e) => {
-    notices.push(e.text);
-    return { value: undefined };
-  });
-  on('classic.PostToolBatch', () => ({}));
-  const batch = (...ids: string[]) =>
-    $.classic.PostToolBatch({
-      tool_calls: ids.map((id) => ({
-        tool_name: 'Agent',
-        tool_input: INPUT,
-        tool_use_id: id,
-      })),
-    });
-  // Each line is written when a later Agent call runs natively: the offers were not accepted.
-  const native = async (id: string) => {
-    f.state.keepNative = true;
-    await remember($, { ...INPUT, tool_use_id: id });
-    f.state.keepNative = false;
-  };
-  await remember($, { ...INPUT, tool_use_id: 'held_a' });
-  await remember($, { ...INPUT, tool_use_id: 'held_b' });
-  await batch('held_a', 'held_b');
-  await native('native_0');
-  expect(notices).toEqual(['Held 2 of 2 Agent calls before native execution.']);
-
-  await remember($, { ...INPUT, tool_use_id: 'held_c' });
-  await native('native_a');
-  await batch('held_c', 'native_a');
-  await batch('native_a', 'native_b');
-  await remember($, { ...INPUT, tool_use_id: 'held_d' });
-  await batch('held_d');
-  await batch('held_d', 'native_a');
-  await native('native_e');
-  expect(notices).toEqual([
-    'Held 2 of 2 Agent calls before native execution.',
-    'Held 1 of 2 Agent calls before native execution.',
+  await $.tool.call({ tool: ACCEPT, offer_id: SECOND_OFFER });
+  expect(notices).toEqual([]);
+  expect(await taken()).toEqual([
+    'Tenjin held 1 Agent call that did not run: its DeepSeek offer was not accepted.',
   ]);
+  // A turn that ends with both offers unanswered.
+  await hold('held_k', 'held_l');
+  expect(await taken()).toEqual([
+    'Tenjin held 2 Agent calls that did not run: their DeepSeek offers were not accepted.',
+  ]);
+  // Written once: the next turn's end says nothing more.
+  expect(await taken()).toEqual([]);
 });
