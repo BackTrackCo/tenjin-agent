@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
@@ -785,32 +785,36 @@ it.runIf(MACOS)(
   },
 );
 
-it.runIf(MACOS)(
-  'learns the env files in node_modules and .git, at start and when written during the job',
-  async () => {
-    const root = await trialRoot('skipped');
-    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
-    mkdirSync(join(root, '.git', 'hooks'), { recursive: true });
-    writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'SHIPPED=shipped-value-0x3c3c3c');
-    aged();
-    const env = await WorkerEnvSecrets.start([root]);
-    try {
-      expect(env.redact('shipped-value-0x3c3c3c')).toBe('[env:SHIPPED]');
-      mkdirSync(join(root, 'node_modules', 'other'));
-      writeFileSync(
-        join(root, 'node_modules', 'other', '.env.local'),
-        'IN=installed-value-0x3d3d3d',
-      );
-      writeFileSync(join(root, '.git', 'hooks', '.env'), 'HOOK=hook-value-0x3e3e3e');
-      await env.refresh();
-      expect(env.redact('installed-value-0x3d3d3d hook-value-0x3e3e3e')).toBe(
-        '[env:IN] [env:HOOK]',
-      );
-    } finally {
-      env.close();
-    }
-  },
-);
+// They hold most of a workspace's folders: walking them made the start 9.7 s and each send
+// 1.82 s over 142,842 such folders. Their env files are denied to the worker instead.
+it('never lists or stats a folder in node_modules or .git, at the start or before a send', async () => {
+  const root = await trialRoot('skipped');
+  mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+  mkdirSync(join(root, '.git', 'hooks'), { recursive: true });
+  writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'SHIPPED=shipped-value-0x3c3c3c');
+  aged();
+  walks.listed.length = 0;
+  walks.stated.length = 0;
+  const env = await WorkerEnvSecrets.start([root], { learning: 'relist' });
+  try {
+    // A folder the start listed gains a node_modules during the job: the folder is listed
+    // again before the send, and what is new inside it is not walked.
+    mkdirSync(join(root, 'pkg', 'node_modules', 'dep'), { recursive: true });
+    writeFileSync(join(root, 'pkg', 'node_modules', 'dep', '.env'), 'DEP=dep-value-0x3d3d3d');
+    const before = walks.listed.length;
+    await env.refresh();
+    expect(walks.listed.slice(before)).toContain(join(root, 'pkg'));
+    const skipped = (path: string) =>
+      path.split(sep).some((part) => part === 'node_modules' || part === '.git');
+    expect(walks.listed.filter(skipped)).toEqual([]);
+    expect(walks.stated.filter(skipped)).toEqual([]);
+    expect(env.redact('shipped-value-0x3c3c3c dep-value-0x3d3d3d')).toBe(
+      'shipped-value-0x3c3c3c dep-value-0x3d3d3d',
+    );
+  } finally {
+    env.close();
+  }
+});
 
 it.runIf(MACOS)(
   "lists a folder whose new entry's times a command set back, by its change time",

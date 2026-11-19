@@ -114,7 +114,7 @@ import {
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
-import { envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
+import { envDeniedRoots, skippedEnvPatterns, WorkerEnvSecrets } from './worker-env-secrets';
 import {
   modelCallStop,
   withModelRetry,
@@ -1010,14 +1010,15 @@ async function runQualifiedWorker(
                 const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 const patterns = [
                   // Inside the working directories env files are the native defaults' to
-                  // judge; their values never leave. Outside them they stay private.
+                  // judge; their values never leave. Outside them they stay private, and so
+                  // do those in `node_modules` and `.git`, which the env scan skips.
                   ...(envDenied.has(root)
                     ? [
                         `${absolute}/.env*`,
                         `${absolute}/**/.env*`,
                         ...(basename(root).startsWith('.env') ? [absolute] : []),
                       ]
-                    : []),
+                    : skippedEnvPatterns(absolute)),
                   // A consented workspace holds other repositories' native settings too.
                   ...NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`),
                 ];
@@ -1084,7 +1085,7 @@ async function runQualifiedWorker(
                               `${root}/**/.env*`,
                               ...(basename(root).startsWith('.env') ? [root] : []),
                             ]
-                          : []),
+                          : skippedEnvPatterns(root)),
                         ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
                         ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
                       ]),

@@ -624,6 +624,9 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
   expect(native.bridgeClose).toHaveBeenCalled();
 });
 
+/** A rule for a path inside a `node_modules` or `.git` folder, which the env scan skips. */
+const SKIPPED_FOLDER = /\/(node_modules|\.git)\//;
+
 it('keeps native sibling working directories distinct from read-only and shell-write exceptions', async () => {
   const workspace = {
     version: 1,
@@ -669,14 +672,21 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   // Env files in a working directory follow the native defaults; in an exception they stay private.
   const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
     .deny;
-  expect(deny.filter((rule) => rule.startsWith('Read(//sibling') && rule.includes('.env'))).toEqual(
-    [],
-  );
+  expect(
+    deny.filter(
+      (rule) =>
+        rule.startsWith('Read(//sibling') && rule.includes('.env') && !SKIPPED_FOLDER.test(rule),
+    ),
+  ).toEqual([]);
   expect(deny).toEqual(
     expect.arrayContaining(['Read(//read-only/**/.env*)', 'Write(//shell-write/**/.env*)']),
   );
   const denyRead = given(call.options).sandbox?.filesystem?.denyRead ?? [];
-  expect(denyRead.filter((path) => /^\/(repo|sibling)\/.*\.env/.test(path))).toEqual([]);
+  expect(
+    denyRead.filter(
+      (path) => /^\/(repo|sibling)\/.*\.env/.test(path) && !SKIPPED_FOLDER.test(path),
+    ),
+  ).toEqual([]);
   expect(denyRead).toEqual(expect.arrayContaining(['/read-only/**/.env*', '/shell-write/.env*']));
   // So are other repositories' `.claude/settings.json`: read where the scan learns their
   // env values, never written; closed outside. Local settings and MCP config stay closed.
@@ -713,6 +723,44 @@ it('keeps native sibling working directories distinct from read-only and shell-w
     '/sibling/**/.claude/settings.json',
   );
   watching.mockRestore();
+});
+
+it('denies the env and settings files in node_modules and .git, which the env scan skips, and nothing else there', async () => {
+  const workspace = {
+    version: 1,
+    root: '/repo',
+    workingDirectories: ['/repo', '/sibling'],
+    workingDirectorySpellings: ['/repo', '/sibling'],
+    readExceptions: [],
+    writeExceptions: [],
+  };
+  vi.mocked(modelSettings).mockResolvedValue({
+    root: '/repo',
+    repositories: ['/repo', '/sibling'],
+  } as never);
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+    options(),
+  );
+  const sent = given(vi.mocked(query).mock.calls[0]![0].options);
+  const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
+  const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
+  for (const root of ['/repo', '/sibling'])
+    for (const folder of ['node_modules', '.git'])
+      for (const name of ['.env*', '.claude/settings.json']) {
+        // A command can neither read nor write one (checked under Claude Code's own sandbox).
+        expect(denyRead).toContain(`${root}/**/${folder}/**/${name}`);
+        expect(deny).toEqual(
+          expect.arrayContaining(
+            ['Read', 'Edit', 'Write'].map((tool) => `${tool}(/${root}/**/${folder}/**/${name})`),
+          ),
+        );
+      }
+  // Everything else there stays readable: git and the installed packages work.
+  const skippedOther = (rule: string) =>
+    SKIPPED_FOLDER.test(rule) && !/(\.env\*|\.claude\/settings\.json)\)?$/.test(rule);
+  expect([...deny, ...denyRead].filter(skippedOther)).toEqual([]);
 });
 
 it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
@@ -1290,12 +1338,10 @@ it("reads its working directories' env files natively, and only their placeholde
     // The worker and its commands read the file; native Edit and Write rules decide writes.
     const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
       .deny;
-    expect(deny.filter((rule) => rule.includes('.env'))).toEqual([]);
-    expect(
-      (given(call.options).sandbox?.filesystem?.denyRead ?? []).filter((path) =>
-        path.includes('.env'),
-      ),
-    ).toEqual([]);
+    // Apart from those in node_modules and .git, which the scan skips.
+    const unskipped = (rule: string) => rule.includes('.env') && !SKIPPED_FOLDER.test(rule);
+    expect(deny.filter(unskipped)).toEqual([]);
+    expect((given(call.options).sandbox?.filesystem?.denyRead ?? []).filter(unskipped)).toEqual([]);
     // Tenjin and DeepSeek, the parent and the activity rows see names, never values.
     const forwarded = JSON.stringify(messages.mock.calls);
     const observed = JSON.stringify(activity.observe.mock.calls);

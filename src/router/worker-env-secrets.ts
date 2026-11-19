@@ -30,9 +30,13 @@ export const MAX_ENV_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_UNLISTED = 64;
 /** A file this user may not read is closed to the worker's commands as well. */
 const UNREADABLE_BY_ANYONE = new Set(['EACCES', 'EPERM']);
-const SKIP = new Set(['node_modules', '.git']);
-/** macOS walks these folders too: a command can read an env file there (`relist`). */
-const NO_SKIP: ReadonlySet<string> = new Set();
+/**
+ * Folders no walk enters, nor the stat pass before each send: they hold most of a workspace's
+ * folders (a pnpm install about 3,000 per repository). Their env and settings files are denied to
+ * the worker instead, by `skippedEnvPatterns`, so none is read unscanned.
+ */
+export const SKIPPED_FOLDERS = ['node_modules', '.git'] as const;
+const SKIP: ReadonlySet<string> = new Set(SKIPPED_FOLDERS);
 /** How long a check waits for file events still in flight, where it trusts a watcher (Windows). */
 const SETTLE_MS = 120;
 /** Paths a watcher named since the last check, past which the next check walks every root. */
@@ -44,6 +48,18 @@ const MAX_NAMED = 10_000;
 const RACY_MS = 2_000;
 
 export type EnvAssignment = { key: string; value: string; written: string };
+
+/**
+ * The env and settings files inside the folders no walk enters (`SKIPPED_FOLDERS`) under
+ * `root`, as deny patterns by the scan's own name rule (`covered`): none of them is read
+ * unscanned, whether it was there at the start or written during the job.
+ */
+export function skippedEnvPatterns(root: string): string[] {
+  return SKIPPED_FOLDERS.flatMap((folder) => [
+    `${root}/**/${folder}/**/.env*`,
+    `${root}/**/${folder}/**/.claude/settings.json`,
+  ]);
+}
 
 /**
  * A repository's Claude Code settings file, `.claude/settings.json`, at any depth. The
@@ -378,7 +394,6 @@ async function walkTree(
   limits: WalkLimits,
   fatal: readonly string[],
   folders?: Map<string, Folder>,
-  skip: ReadonlySet<string> = SKIP,
 ): Promise<{ found: string[]; unlisted: string[]; complete: boolean }> {
   const maxDirectories = limits.maxDirectories ?? 400_000;
   const maxFiles = limits.maxFiles ?? 5_000;
@@ -416,7 +431,7 @@ async function walkTree(
               for (const entry of entries) {
                 const path = join(directory, entry.name);
                 if (entry.isDirectory()) {
-                  if (!skip.has(entry.name)) queue.push(path);
+                  if (!SKIP.has(entry.name)) queue.push(path);
                 } else if (covered(path)) found.push(path);
               }
               if (found.length > maxFiles) complete = false;
@@ -856,7 +871,7 @@ export class WorkerEnvSecrets {
         for (const entry of entries) {
           const child = join(path, entry.name);
           if (entry.isDirectory()) {
-            if (!this.folders.has(child)) starts.push(child);
+            if (!SKIP.has(entry.name) && !this.folders.has(child)) starts.push(child);
           } else if (covered(child)) found.push(child);
         }
       });
@@ -901,7 +916,7 @@ export class WorkerEnvSecrets {
     folders?: Map<string, Folder>,
   ): Promise<string[]> {
     if (!starts.length) return [];
-    const walk = await walkTree(starts, this.limits, tops, folders, folders ? NO_SKIP : SKIP);
+    const walk = await walkTree(starts, this.limits, tops, folders);
     if (!walk.complete) for (const start of starts) this.uncovered.add(start);
     for (const folder of walk.unlisted) this.unlistable(folder);
     return walk.found;
@@ -927,13 +942,7 @@ export class WorkerEnvSecrets {
     const tops = topRoots(this.roots);
     for (const root of this.roots) this.hot.add(root);
     const relist = this.learning === 'relist';
-    const walk = await walkTree(
-      tops,
-      limits,
-      tops,
-      relist ? this.folders : undefined,
-      relist ? NO_SKIP : SKIP,
-    );
+    const walk = await walkTree(tops, limits, tops, relist ? this.folders : undefined);
     if (relist) await this.trust();
     this.unlisted.push(...walk.unlisted);
     await Promise.all(walk.found.map((path) => this.load(path, true)));
