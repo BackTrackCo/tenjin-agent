@@ -44,6 +44,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
     });
     record.repeat('Bash', 3);
     record.repeat('Read', undefined);
+    record.omitted(2);
     record.retry(1, { cause: 'provider', status: 500 });
     // Start phases, from the accept on, each the first time it is reached.
     record.accepted(1_000, { cliProcess: 400, checked: 1_020, qualified: 1_350 });
@@ -66,6 +67,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
         thinking: ['adaptive'],
         maxTurns: null,
       },
+      omitted: 2,
       reasoning: { turns: 2, withThinking: 2, textTurns: 1, textWithThinking: 1 },
       repeats: [{ tool: 'Bash', count: 3 }],
       retries: [{ attempt: 1, cause: 'provider', status: 500 }],

@@ -268,6 +268,8 @@ export async function runModelWorker(
     webIdentities?: () => Promise<Identities | undefined>;
     /** Where a worker that starts without its native agent prompt says why. Default: stderr. */
     warn?: (line: string) => void;
+    /** The image and document blocks the job sent as text; the worker adds one each. */
+    omitted?: Set<string>;
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
@@ -721,9 +723,10 @@ async function runQualifiedWorker(
         }
         let messages: ReturnType<typeof workerMessages>;
         try {
-          messages = workerMessages(raw, outputCap);
+          messages = workerMessages(raw, outputCap, options.omitted);
           diagnostics.mark('firstRequest');
           diagnostics.request(raw);
+          diagnostics.omitted(options.omitted?.size ?? 0);
           timed.prepared();
         } catch (error) {
           // The router would refuse it, and every call after it that offers as many.
@@ -744,7 +747,10 @@ async function runQualifiedWorker(
         let timing: ModelCallTiming | undefined;
         const message = await withModelRetry(
           async () => {
-            if (attempts++ > 0) messages = workerMessages(await outgoing(), outputCap);
+            if (attempts++ > 0) {
+              messages = workerMessages(await outgoing(), outputCap, options.omitted);
+              diagnostics.omitted(options.omitted?.size ?? 0);
+            }
             return options.transport.messages(
               job,
               messages,

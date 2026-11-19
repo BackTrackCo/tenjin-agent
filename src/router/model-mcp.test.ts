@@ -1608,6 +1608,32 @@ it('reports native tool-use and token counts and keeps the live file only while 
   }
 });
 
+it('tells the parent how many image or document blocks its worker did not see, and nothing when none', async () => {
+  const f = await ownedClaudeFixture();
+  worker.run.mockImplementation(async (_job, options) => {
+    options.omitted.add('image:one');
+    options.omitted.add('document:two');
+    return 'completed fixture';
+  });
+  try {
+    const answer = (await f.call({ offer_id: f.job.id })) as {
+      omitted?: { blocks: number; note: string };
+    };
+    expect(answer.omitted?.blocks).toBe(2);
+    expect(answer.omitted?.note).toContain('did not see 2 image or document blocks');
+    expect(answer.omitted?.note).toContain('run this job natively');
+  } finally {
+    await f.close();
+  }
+  const g = await ownedClaudeFixture();
+  worker.run.mockResolvedValue('completed fixture');
+  try {
+    expect(await g.call({ offer_id: g.job.id })).not.toHaveProperty('omitted');
+  } finally {
+    await g.close();
+  }
+});
+
 it('hands back a worker that never started as not started, with the free native repeat next', async () => {
   const f = await ownedClaudeFixture('general-purpose', true);
   worker.run.mockRejectedValue(

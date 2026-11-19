@@ -997,6 +997,17 @@ export function registerModelTool(
               // Display only.
             }
           }
+          // THE IMAGE OR DOCUMENT CONTENT THE WORKER DID NOT SEE: the router takes text
+          // only, so Tenjin sends a placeholder. The parent needs the count to decide
+          // whether to run the job natively.
+          const omittedNote = (blocks: number) =>
+            `The worker did not see ${blocks} image or document ${
+              blocks === 1 ? 'block' : 'blocks'
+            } that Tenjin replaced with a text placeholder, so run this job natively if it needed that content.`;
+          const omittedBlocks = (omitted: Set<string>) =>
+            omitted.size > 0
+              ? { omitted: { blocks: omitted.size, note: omittedNote(omitted.size) } }
+              : {};
           // What a native subagent's result reports, beside the time and spend.
           const counts = () => {
             try {
@@ -1015,6 +1026,7 @@ export function registerModelTool(
           const endMarks: Record<string, number> = {};
           const done = (async () => {
             let inference: InferenceLease | undefined;
+            const omitted = new Set<string>();
             try {
               signal.throwIfAborted();
               // One worker alone keeps the first channel, as before.
@@ -1024,6 +1036,7 @@ export function registerModelTool(
                 accepted: { at: acceptedAt, marks: startMarks },
                 transport: inference?.slot ? transport.forInferenceSlot(inference.slot) : transport,
                 signal: abort.signal,
+                omitted,
                 ...(activity ? { activity } : {}),
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
                 ...(options.harness === 'claude'
@@ -1091,6 +1104,7 @@ export function registerModelTool(
                 elapsedMs: Date.now() - started,
                 ...counts(),
                 ...(await refundOutcome()),
+                ...omittedBlocks(omitted),
                 spend: await transport
                   .summary(executionJob)
                   .catch(() => ({ accounting: 'unknown' })),
@@ -1175,6 +1189,7 @@ export function registerModelTool(
                 elapsedMs: Date.now() - started,
                 ...counts(),
                 ...(await refundOutcome()),
+                ...omittedBlocks(omitted),
                 ...(partial ? { partial } : {}),
                 // An initial offer's held call has a free repeat. A continuation has none,
                 // though it runs with the original job's fields.

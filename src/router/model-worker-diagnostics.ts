@@ -213,6 +213,8 @@ export type WorkerDiagnostics = {
     /** None: the job's wall time and money ceiling bound a run. */
     maxTurns: null;
   };
+  /** The image and document blocks the job sent as text: the worker did not see them. */
+  omitted?: number;
   /** The latest request's history: assistant turns, and how many carried their reasoning back. */
   reasoning: { turns: number; withThinking: number; textTurns: number; textWithThinking: number };
   repeats: { tool: string; count: number }[];
@@ -471,6 +473,12 @@ export class WorkerDiagnosticsRecord {
       }
     }
     this.value.reasoning = reasoning;
+  }
+
+  /** The image and document blocks the job sent as text: how many the worker did not see. */
+  omitted(count: number): void {
+    const value = whole(count, MAX_CALLS * 64);
+    if (value !== undefined) this.value.omitted = value;
   }
 
   /** A repeat reminder that fired: which tool, at which count. */
