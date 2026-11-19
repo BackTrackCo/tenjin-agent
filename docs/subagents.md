@@ -111,6 +111,7 @@ On native Windows a worker has no shell sandbox:
 - **No questions, no subagents.** As a native subagent, it has no tool for asking you questions in any mode. A worker that needs something from you ends with its report, and the parent continues it. A worker starts no subagent, native or DeepSeek, and none of its calls is held or offered.
 - **No Tenjin tools.** Unlike a native subagent, it has none of Tenjin's own tools (`request`, `approve`, `subagent`). What a worker pays for is its model calls and its web searches, which count in its job's budget, and a Tenjin lookup of its own would not.
 - **Thinking.** The worker thinks on every turn, at high effort, as the DeepSeek harness does. Your own Claude Code settings do not turn that off for a worker: `MAX_THINKING_TOKENS=0`, `CLAUDE_CODE_DISABLE_THINKING` and `alwaysThinkingEnabled: false` are set aside for it, and a turn that still arrives without thinking is sent with thinking on. The auto-mode classifier's own short requests carry no thinking, as Claude Code sends them.
+- **Images and PDFs.** Unlike a native subagent, the worker cannot see an image or a PDF: Tenjin's router takes text only. An image or document block, in the assignment or in what a tool returns, goes to the model as one line of text that says it was omitted, and the worker works on.
 - **Stopping early.** A worker that stops early returns its last text and recent activity to the parent.
 
 ### Your `~/.claude` folder

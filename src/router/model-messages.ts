@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { isRecord } from '../lib/guards';
 import { MODEL_MESSAGES_MAX_TOOLS, MODEL_OUTPUT_TOKENS } from './model-limits';
@@ -119,6 +120,27 @@ const toolChange = z.object({
   ]),
 });
 
+/**
+ * AN IMAGE OR A DOCUMENT BLOCK, IN A MESSAGE OR A TOOL RESULT, AS TEXT. The router's
+ * Messages contract takes text only there and refused the whole request with
+ * `invalid_model_request` (400): one image a tool returned, or a PDF a worker read, ended
+ * the job, and a follow-up carried the same block. The DeepSeek harness gives a text-only
+ * route a stable placeholder in the block's place ("[image omitted because this model
+ * accepts text only; attachment sha256:...]"); this is that text for this route. The same
+ * block always reads the same, so the request's prefix does not change between turns.
+ */
+function omittedText(block: Record<string, unknown>): { type: 'text'; text: string } {
+  const data = isRecord(block.source) ? block.source.data : undefined;
+  const attachment =
+    typeof data === 'string'
+      ? `; attachment sha256:${createHash('sha256').update(data).digest('hex').slice(0, 8)}`
+      : '';
+  return {
+    type: 'text',
+    text: `[${String(block.type)} omitted because this model route accepts text only${attachment}]`,
+  };
+}
+
 /** A request that offers more tools than the router takes: every model call would fail. */
 export class TooManyTools extends Error {
   constructor(readonly count: number) {
@@ -204,6 +226,7 @@ export function workerMessages(raw: Record<string, unknown>) {
     return value
       .filter((b) => !isToolChange(b))
       .map((b) => {
+        if (isRecord(b) && (b.type === 'image' || b.type === 'document')) return omittedText(b);
         if (
           !b ||
           typeof b !== 'object' ||

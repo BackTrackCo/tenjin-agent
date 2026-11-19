@@ -106,6 +106,79 @@ it('keeps worker adaptive thinking enabled and rejects unknown thinking instead 
     workerMessages({ model: 'deepseek-flash', stop_sequences: ['x'.repeat(257)] }),
   ).toThrow();
 });
+// The router's Messages contract takes text only in a message and in a tool result
+// (checked against its schema, production's and the next one's): a request with one image
+// or document block was refused whole with 400 `invalid_model_request`, which is not tried
+// again, so the job ended, and a follow-up carried the same block.
+it('sends an image or a document block as a stable text placeholder, in a tool result and beside one', () => {
+  const png = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' },
+    cache_control: { type: 'ephemeral' },
+  };
+  const pdf = {
+    type: 'document',
+    source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' },
+  };
+  const byUrl = { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } };
+  const request = () => ({
+    model: 'deepseek-flash',
+    max_tokens: 1000,
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'What is in the screenshot?' }, png] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a.png' } }],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't1',
+            content: [{ type: 'text', text: 'Read image' }, png, pdf],
+          },
+          byUrl,
+        ],
+      },
+    ],
+  });
+  const sent = workerMessages(request());
+  const image = '[image omitted because this model route accepts text only; attachment sha256:';
+  expect(sent.messages).toEqual([
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'What is in the screenshot?' },
+        { type: 'text', text: expect.stringContaining(image) },
+      ],
+    },
+    request().messages[1],
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 't1',
+          content: [
+            { type: 'text', text: 'Read image' },
+            { type: 'text', text: expect.stringContaining(image) },
+            {
+              type: 'text',
+              text: expect.stringMatching(
+                /^\[document omitted because this model route accepts text only; attachment sha256:[0-9a-f]{8}\]$/,
+              ),
+            },
+          ],
+        },
+        { type: 'text', text: '[image omitted because this model route accepts text only]' },
+      ],
+    },
+  ]);
+  // No image bytes leave, and the same block reads the same on the next turn.
+  expect(JSON.stringify(sent)).not.toContain('iVBORw0KGgo=');
+  expect(workerMessages(request()).messages).toEqual(sent.messages);
+});
 it('preserves the native worker output allowance instead of silently halving it', () => {
   expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000 }).max_tokens).toBe(32000);
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
