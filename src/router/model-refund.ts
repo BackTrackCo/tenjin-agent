@@ -215,17 +215,24 @@ export async function hasModelRefundRecords(dataDir: string) {
   return false;
 }
 
+/**
+ * This wallet's refunds at the configured router, and the pending ones recorded for any
+ * other router (`pendingElsewhere`), which a base URL change leaves behind. Those are
+ * counted and never retried: a refund request carries a wallet proof, and it goes only to
+ * the router the person has configured. The journal holds no amount for a pending refund.
+ */
 export async function readModelRefundSummary(dataDir: string, origin: string, wallet: string) {
   const canonicalOrigin = new URL(origin).origin;
   let pending = 0;
   let refunded = 0n;
+  const elsewhere = new Map<string, number>();
   for await (const path of recordFiles(dataDir)) {
     const candidate = await readRecord(path).catch(() => null);
-    if (
-      candidate === null ||
-      new URL(candidate.url).origin !== canonicalOrigin ||
-      candidate.channel.payer !== wallet.toLowerCase()
-    ) {
+    if (candidate === null || candidate.channel.payer !== wallet.toLowerCase()) continue;
+    const recorded = new URL(candidate.url).origin;
+    if (recorded !== canonicalOrigin) {
+      if (candidate.state === 'pending')
+        elsewhere.set(recorded, (elsewhere.get(recorded) ?? 0) + 1);
       continue;
     }
     if (candidate.state === 'pending') pending++;
@@ -233,7 +240,27 @@ export async function readModelRefundSummary(dataDir: string, origin: string, wa
       refunded += BigInt(candidate.submitted.amountAtomic);
     }
   }
-  return { pending, refundedAtomic: refunded.toString() };
+  return {
+    pending,
+    refundedAtomic: refunded.toString(),
+    pendingElsewhere: [...elsewhere]
+      .map(([recorded, count]) => ({ origin: recorded, pending: count }))
+      .sort((a, b) => a.origin.localeCompare(b.origin)),
+  };
+}
+export type ModelRefundSummary = Awaited<ReturnType<typeof readModelRefundSummary>>;
+export const NO_MODEL_REFUNDS: ModelRefundSummary = {
+  pending: 0,
+  refundedAtomic: '0',
+  pendingElsewhere: [],
+};
+
+/** What `tenjin balance` and `tenjin status` say of refunds left at another router. */
+export function refundsElsewhereLines(summary: ModelRefundSummary): string[] {
+  return summary.pendingElsewhere.map(
+    ({ origin, pending }) =>
+      `${pending} subagent channel refunds pending at ${origin}, retried only while that is the configured router`,
+  );
 }
 
 function verifyOffer(value: z.infer<typeof offer>, config: z.infer<typeof channel>) {

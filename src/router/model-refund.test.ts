@@ -250,12 +250,14 @@ it('journals only channel metadata and refunds the unspent amount with the pinne
   await expect(readModelRefundSummary(dataDir, origin, signer.address)).resolves.toEqual({
     pending: 0,
     refundedAtomic: '700',
+    pendingElsewhere: [],
   });
   await expect(
     readModelRefundSummary(dataDir, 'https://different.test', signer.address),
   ).resolves.toEqual({
     pending: 0,
     refundedAtomic: '0',
+    pendingElsewhere: [],
   });
   await journal.recoverPending();
   await expect(journal.close(runId)).resolves.toEqual(result);
@@ -274,6 +276,24 @@ it('skips a live run, and later refuses a changed router identity', async () => 
   state.probe = () => challenge({ ...requirements, amount: '0', payTo: requirements.asset });
   await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
   expect(fetchImpl).toHaveBeenCalledTimes(1);
+});
+
+// After a base URL change `tenjin balance` showed nothing of these. A refund request carries
+// a wallet proof, so one for a router the person no longer configured is counted, not sent.
+it('counts a pending refund recorded for an earlier router origin, and sends that router nothing', async () => {
+  const { dataDir, record, signer, fetchImpl } = await fixture();
+  await record();
+  const moved = 'https://moved.test';
+  await expect(readModelRefundSummary(dataDir, moved, signer.address)).resolves.toEqual({
+    pending: 0,
+    refundedAtomic: '0',
+    pendingElsewhere: [{ origin, pending: 1 }],
+  });
+  await new ModelRefundJournal(dataDir, moved, {
+    getSigner: async () => signer,
+    fetchImpl,
+  }).recoverPending();
+  expect(fetchImpl).not.toHaveBeenCalled();
 });
 
 it('refunds a recorded channel after the worker process exits with its run lock', async () => {
@@ -346,6 +366,7 @@ it('does not report a discrepant refund receipt as verified', async () => {
   await expect(readModelRefundSummary(dataDir, origin, signer.address)).resolves.toEqual({
     pending: 0,
     refundedAtomic: '0',
+    pendingElsewhere: [],
   });
 });
 
