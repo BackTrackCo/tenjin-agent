@@ -302,11 +302,17 @@ export async function runConfigSubagents(
   let repositories: string[] | null = null;
   // The scope this turn-on replaced, where it narrowed or widened one: said on the scope row.
   let was: SubagentsShown['was'];
+  // The cap the saved consent held at this router, which this turn-on may have changed.
+  let wasCap: bigint | undefined;
   await persist(ctx.dataDir, (c) => {
     const prior = modelConsentSchema.safeParse(c.router?.subagentConsent);
     const here = prior.success && prior.data.routerOrigin === routerOrigin;
     // The directories named earlier at this router, which another `--repository` keeps.
     const before = namedDirectories(c.router?.subagentConsent, routerOrigin);
+    if (here) {
+      const earlier = prior.data.maxJobAtomic;
+      wasCap = earlier !== undefined && BigInt(earlier) < perCall ? BigInt(earlier) : perCall;
+    }
     repositories = limited ? [...new Set([...(before ?? []), ...chosen])] : null;
     was = !here
       ? undefined
@@ -328,6 +334,7 @@ export async function runConfigSubagents(
   const shown: SubagentsShown = {
     directories: repositories,
     ...(was === undefined ? {} : { was }),
+    ...(wasCap === undefined ? {} : { wasCap }),
     perCall,
     ...(named === undefined ? {} : { named }),
     daily: settings.policy.sessionBudgetAtomic !== null,
