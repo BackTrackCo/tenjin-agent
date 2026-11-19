@@ -120,7 +120,7 @@ it('--subagents on turns the same consent on that the config command writes, wit
   expect(result.data).toMatchObject({ subagents: { enabled: true, jobCapAtomic: '1000000' } });
   expect((await loadRawConfig(dir)).router).toEqual({ subagents: true, subagentConsent: CONSENT });
   // It covers a session wherever it starts.
-  expect(await modelSettings(dir, parent)).toMatchObject({ repositories: [] });
+  expect(await modelSettings(dir, parent)).toMatchObject({ scope: 'native-workspace' });
 });
 
 it.each([{ router: { subagents: false } }, { router: { subagents: true } }])(

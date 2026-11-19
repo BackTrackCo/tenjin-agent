@@ -709,16 +709,11 @@ it('keeps native sibling working directories distinct from read-only and shell-w
   watching.mockRestore();
 });
 
-it('gives the worker every named directory and its worktrees, and denies a dropped directory', async () => {
+it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
   vi.mocked(modelSettings).mockResolvedValue({
     root: '/repo',
     repositories: ['/repo', '/workspace'],
   } as never);
-  // A native additional directory that is gone: dropped, and denied to the worker.
-  vi.mocked(realpath).mockImplementation(async (path) => {
-    if (String(path) === '/elsewhere') throw new Error('ENOENT');
-    return String(path);
-  });
   vi.mocked(resolveSettings).mockResolvedValue({
     effective: { permissions: { additionalDirectories: ['/elsewhere'] } },
   } as never);
@@ -754,11 +749,7 @@ it('gives the worker every named directory and its worktrees, and denies a dropp
 
 it('runs gh and git with a per-job token and config, an allowlisted network and a token-free bridge', async () => {
   const messages = vi.fn(async () => ({ fixture: true }));
-  // A native directory that is gone and so dropped: the child still lists it to its model.
-  vi.mocked(realpath).mockImplementation(async (path) => {
-    if (String(path) === '/elsewhere') throw new Error('ENOENT');
-    return String(path);
-  });
+  // A native directory outside consent: the child still lists it to its model.
   vi.mocked(resolveSettings).mockResolvedValue({
     effective: { permissions: { additionalDirectories: ['/elsewhere'] } },
   } as never);

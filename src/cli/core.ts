@@ -264,11 +264,11 @@ Examples:
         return runConfigList(ctx, this.opts().all === true ? { all: true } : {});
       });
     });
-  addGlobalFlags(config.command('subagents <mode>'))
-    .summary('turn DeepSeek subagents on or off, or list why calls got no offer')
+  addGlobalFlags(config.command('subagents [mode]'))
+    .summary('show DeepSeek subagents, turn them on or off, or list why calls got no offer')
     .option(
-      '--repository <path>',
-      'also name a directory: a session inside a named one gives its worker every named one',
+      '--repository <path...>',
+      'limit the consent to these directories and their subfolders; without it, on covers every workspace',
     )
     .option(
       '--max-job <USD>',
@@ -289,16 +289,17 @@ Examples:
       'after',
       configExamples(
         [
+          'subagents',
           'subagents on',
           'subagents on --max-job 0.50',
-          'subagents on --repository ~/work',
+          'subagents on --repository ~/work ~/notes',
           'subagents off',
           'subagents why',
         ],
         'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
       ),
     )
-    .action(async function (this: Command, mode: string, options: SubagentConfigFlags) {
+    .action(async function (this: Command, mode: string | undefined, options: SubagentConfigFlags) {
       await runCommand('config subagents', this, async (ctx) =>
         (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
       );
@@ -681,7 +682,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
-  subagents on|off|why          DeepSeek for eligible subagent jobs; why: calls with no offer
+  subagents [on|off|why]        DeepSeek for eligible subagent jobs; why: calls with no offer
 
 Values
   get <key> / set <key> <value>

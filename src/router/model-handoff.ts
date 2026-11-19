@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, type NoOffer } from './model-job';
-import { modelSettings, type ModelSettings } from './model-settings';
+import { disclosureCovers, modelSettings, type ModelSettings } from './model-settings';
 import { modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
@@ -22,6 +22,7 @@ import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { ModelConversationStore } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
+  modelClaudeWorkspaceCovered,
   modelClaudeRepositories,
   savedClaudeWorkspace,
   sameClaudeWorkspace,
@@ -87,11 +88,16 @@ const held = (reason: string) => ({
   },
 });
 
-/** What the offer tells the parent of its consent: the directories are the worker's own. */
-function offerConsent(settings: ModelSettings, workerDirectories: readonly string[]) {
-  const repositories = [...workerDirectories];
+/**
+ * What the offer tells the parent of its consent: under the wide scope the directories are
+ * the worker's own, under the limited one the directories the person named.
+ */
+function offerConsent(settings: ModelSettings, nativeRepositories: readonly string[]) {
+  const repositories =
+    settings.scope === 'native-workspace' ? [...nativeRepositories] : settings.repositories;
   return {
     version: settings.version,
+    ...(settings.scope === 'native-workspace' ? { scope: settings.scope } : {}),
     repository: settings.root,
     repositories,
     githubRepositories: modelGithubRepositories(repositories),
@@ -106,7 +112,7 @@ function droppedNote(workspace: ClaudeWorkspace) {
   const dropped = savedClaudeWorkspace(workspace)?.droppedDirectories ?? [];
   return dropped.length
     ? {
-        workspaceNote: `Not a directory now, so withheld from the worker: ${dropped.join(', ')}.`,
+        workspaceNote: `Outside model consent, so withheld from the worker: ${dropped.join(', ')}.`,
       }
     : {};
 }
@@ -259,7 +265,11 @@ export class ModelHandoff {
       this.options.dataDir,
       signal,
     );
-    if (!worker?.instructionContext || !worker.disclosureRepositories?.length) return null;
+    if (
+      !worker?.instructionContext ||
+      (settings.scope === 'native-workspace' && !worker.disclosureRepositories?.length)
+    )
+      return null;
     signal?.throwIfAborted();
     const job = await this.store.offer(
       {
@@ -499,7 +509,11 @@ export class ModelHandoff {
       );
     signal?.throwIfAborted();
     const latest = await this.currentConsent(session.cwd);
-    if (!latest || latest.root !== settings.root)
+    if (
+      !latest ||
+      latest.root !== settings.root ||
+      !modelClaudeWorkspaceCovered(originalWorkspace, latest)
+    )
       return continuationRefusal('Current model consent changed during qualification');
     signal?.throwIfAborted();
     const cap =
@@ -547,7 +561,7 @@ export class ModelHandoff {
       parentPolicy: continuationPolicy,
       workspace: worker.claudeWorkspace,
       ...droppedNote(worker.claudeWorkspace),
-      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace)),
+      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
       instruction:
         "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
     };
@@ -567,9 +581,14 @@ export class ModelHandoff {
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
-    if (session.harness !== 'codex' && !claudeWorkspace) return native('scope_not_covered');
+    if (
+      session.harness !== 'codex' &&
+      (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
+    )
+      return native('scope_not_covered');
     const disclosureRepositories = nativeRepositories(job, claudeWorkspace);
-    if (!disclosureRepositories) return native('scope_not_covered');
+    if (settings.scope === 'native-workspace' && !disclosureRepositories)
+      return native('scope_not_covered');
     if (
       session.harness === 'codex' &&
       (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
@@ -604,8 +623,15 @@ export class ModelHandoff {
     // What a consent read later must still say for this job, or the code that says why not.
     // A cap under the one the job was held at is the person lowering their per-call limit,
     // or naming a lower ceiling, in between: its own reason, not a scope one.
+    const covered = (consent: ModelSettings) =>
+      claudeWorkspace
+        ? modelClaudeWorkspaceCovered(claudeWorkspace, consent)
+        : consent.scope === 'native-workspace' ||
+          (disclosureRepositories ?? []).every((path) =>
+            disclosureCovers(consent.repositories, path),
+          );
     const uncovered = (consent: ModelSettings): NoOffer['code'] | null =>
-      consent.root !== job.root || consent.context !== settings.context
+      consent.root !== job.root || consent.context !== settings.context || !covered(consent)
         ? 'scope_not_covered'
         : consent.maxJobAtomic < BigInt(job.capAtomic)
           ? 'job_cap_lowered'

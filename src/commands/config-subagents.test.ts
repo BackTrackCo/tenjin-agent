@@ -54,9 +54,9 @@ it('records explicit accepted-worker instruction consent while preserving wallet
     },
   });
   expect(JSON.stringify(result.data)).toContain('After acceptance');
-  // The consent text names what a named directory adds: more working directories for a worker.
+  // The consent text names what a named directory grants: a Claude worker's working directory.
   expect(JSON.stringify(result.data)).toContain(
-    'a session inside a named directory gives its worker every named directory',
+    'A Claude worker may read and write in every named directory',
   );
   // Review of b7974566: the text said the worker can read the skills and plugins under
   // ~/.claude. Claude Code loads them as instructions; the worker's file tools do not.
@@ -105,7 +105,10 @@ it('requires explicit Windows shell acknowledgement and clears that grant on off
         { ...flags, repository: undefined, acceptWindowsShellAccess: true },
         ctx,
       ),
-    ).rejects.toMatchObject({ message: expect.stringContaining('--repository') });
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('only under the limited scope'),
+      fix: expect.stringContaining('--repository'),
+    });
     expect(validate).not.toHaveBeenCalled();
     const configured = await runConfigSubagents(
       'on',
@@ -152,8 +155,7 @@ it('adds separately named repositories without losing earlier roots or duplicati
   expect(result.data).toMatchObject({ repository: first, repositories: [first, second] });
   expect(await modelSettings(dir, first)).toMatchObject({ maxJobAtomic: 250000n });
   expect(await modelSettings(dir, second)).toMatchObject({ maxJobAtomic: 250000n });
-  // A session outside the named directories still qualifies, with its own workspace alone.
-  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
+  expect(await modelSettings(dir, dir)).toBeNull();
 });
 
 it.each([
@@ -175,7 +177,7 @@ it.each([
   await runConfigSubagents('on', { repository: selected, maxJob: '1' }, testCtx(dir));
   const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
   expect(saved.router.subagentConsent.repositories).toEqual([selected]);
-  expect(await modelSettings(dir, old)).toMatchObject({ repositories: [] });
+  expect(await modelSettings(dir, old)).toBeNull();
 });
 
 it('canonicalizes only previously named available roots without inferring their parent', async () => {
@@ -195,16 +197,14 @@ it('canonicalizes only previously named available roots without inferring their 
   expect(saved.router.subagentConsent.repositories).toEqual([old, selected]);
 });
 
-// Review of b7974566: `on` required `--repository` and wrote a consent of its own kind, so
-// nobody who had passed the install question could reach the install's consent again.
-it('a bare on writes the consent the install question writes, and --repository only adds to it', async () => {
+// Review of b7974566: `on` required `--repository`, so nobody who had passed the install
+// question could reach the install's consent again.
+it('a bare on writes the consent the install question writes: every workspace, no directory', async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
   const path = join(dir, 'config.json');
-  const named = join(dir, 'named');
-  await mkdir(named);
   const bare = await runConfigSubagents('on', {}, testCtx(dir));
-  expect(bare.data).toMatchObject({ enabled: true, repositories: [], jobCapAtomic: '1000000' });
-  expect(bare.data).not.toHaveProperty('repository');
+  expect(bare.data).toMatchObject({ enabled: true, scope: 'every-workspace' });
+  expect(bare.data).not.toHaveProperty('repositories');
   expect(JSON.parse(await readFile(path, 'utf8')).router).toEqual({
     subagents: true,
     subagentConsent: {
@@ -215,18 +215,55 @@ it('a bare on writes the consent the install question writes, and --repository o
       routerOrigin: 'https://tenjin.sh',
     },
   });
-  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
+  expect(await modelSettings(dir, dir)).toMatchObject({ scope: 'native-workspace' });
   // Off, then on again: the same consent is back.
   await runConfigSubagents('off', {}, testCtx(dir));
   expect(await modelSettings(dir, dir)).toBeNull();
   await runConfigSubagents('on', {}, testCtx(dir));
   expect(await modelSettings(dir, dir)).not.toBeNull();
-  // A named directory joins it and replaces nothing; a later bare on keeps it.
-  await runConfigSubagents('on', { repository: named }, testCtx(dir));
-  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
-  expect(await modelSettings(dir, named)).toMatchObject({ repositories: [named] });
-  const again = await runConfigSubagents('on', {}, testCtx(dir));
-  expect(again.data).toMatchObject({ repositories: [named] });
+});
+
+// Operator ruling 2026-11-18: a saved consent never gets wider without an action by the
+// person. At 790acf79 `--repository` only added directories to a consent for every
+// workspace, so a consent saved for three directories covered every session.
+it("--repository limits the consent to the named directories, and each change of scope is the command's own word, said in its readback", async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const first = join(dir, 'first'),
+    second = join(dir, 'second');
+  await mkdir(first);
+  await mkdir(second);
+  const said = (result: { humanLines?: string[] }) => result.humanLines?.join('\n') ?? '';
+  const wide = await runConfigSubagents('on', {}, testCtx(dir));
+  expect(said(wide)).toContain('Scope: every workspace.');
+  expect(said(wide)).not.toMatch(/narrows|widens/);
+  // Over a wide consent: narrowed, and said. A session elsewhere gets no offer any more.
+  const narrowed = await runConfigSubagents('on', { repository: [first, second] }, testCtx(dir));
+  expect(narrowed.data).toMatchObject({ scope: 'directories', repositories: [first, second] });
+  expect(said(narrowed)).toContain(
+    `Scope: only these directories, each with its subfolders: ${first}, ${second}. A session outside them gets no offer. This narrows a consent that covered every workspace.`,
+  );
+  expect(await modelSettings(dir, dir)).toBeNull();
+  expect(await modelSettings(dir, first)).toMatchObject({ scope: 'repositories' });
+  // The status says the same scope, and changes nothing.
+  const before = await readFile(join(dir, 'config.json'), 'utf8');
+  const status = await runConfigSubagents(undefined, {}, testCtx(dir));
+  expect(status.data).toMatchObject({ scope: 'directories', repositories: [first, second] });
+  expect(said(status)).toContain(
+    `Scope: only these directories, each with its subfolders: ${first}, ${second}.`,
+  );
+  expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
+  // Only a bare on widens it, and it says what became of the directories.
+  const widened = await runConfigSubagents('on', {}, testCtx(dir));
+  expect(widened.data).toMatchObject({ scope: 'every-workspace' });
+  expect(said(widened)).toContain(
+    `Scope: every workspace. A session in any directory can be offered DeepSeek, and its worker gets that session’s own workspace. This widens a consent that was limited to: ${first}, ${second}. Those directories are no longer named.`,
+  );
+  expect(await modelSettings(dir, dir)).toMatchObject({ scope: 'native-workspace' });
+  expect(said(await runConfigSubagents('status', {}, testCtx(dir)))).toContain(
+    'Scope: every workspace.',
+  );
+  await runConfigSubagents('off', {}, testCtx(dir));
+  expect(said(await runConfigSubagents(undefined, {}, testCtx(dir)))).toContain('routing is off');
 });
 
 // `--max-job` was required, and the cap was that amount whatever the per-call limit said.

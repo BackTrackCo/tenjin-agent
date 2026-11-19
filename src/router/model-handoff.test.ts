@@ -350,6 +350,33 @@ it('shows every explicit disclosure anchor and refuses a continuation whose nati
   expect(f.route).not.toHaveBeenCalled();
 });
 
+it('refuses sibling disclosure revoked during qualification before routing or offering a continuation', async () => {
+  const f = await continuationFixture(true);
+  vi.mocked(qualifiedModelWorker).mockImplementation(async () => {
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+    config.router.subagentConsent.repositories = [f.session.cwd];
+    await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+    return { path: '/fixture/worker', claudeWorkspace: f.workspace };
+  });
+  expect(
+    await f.model.capture(
+      f.session,
+      'continued',
+      { to: f.conversation.handle, message: 'Continue' },
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({ action: 'refused' });
+  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
+  expect(f.route).not.toHaveBeenCalled();
+  expect(
+    await f.model.capture({ ...f.session, turnId: 'initial-new-turn' }, 'new-worker', {
+      prompt: 'Read both repositories.',
+    }),
+  ).toMatchObject({ action: 'native' });
+  expect(f.route).not.toHaveBeenCalled();
+});
+
 it('keeps the assignment and transcript local when consent is revoked during the last job read', async () => {
   const f = await continuationFixture();
   const transcript = join(dir, 'fresh.jsonl');
@@ -1190,6 +1217,11 @@ it('records one code for each reason a held call gets no offer, and never its te
   });
   vi.mocked(qualifiedModelWorker).mockResolvedValueOnce(null);
   expect(await reason()).toMatchObject({ code: 'worker_unqualified' });
+  vi.mocked(qualifiedModelWorker).mockResolvedValueOnce({
+    path: '/fixture/worker',
+    claudeWorkspace: { ...f.workspace, workingDirectories: [f.workspace.root, '/elsewhere'] },
+  });
+  expect(await reason()).toMatchObject({ code: 'scope_not_covered' });
   expect(
     await reason(call, { ...f.session, transcript: join(dir, 'missing.jsonl') }),
   ).toMatchObject({ code: 'parent_context_unavailable' });

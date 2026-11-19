@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -21,7 +21,7 @@ async function fixture(router: Record<string, unknown>, limits: Record<string, s
 const save = (data: string, router: Record<string, unknown>, limits = {}) =>
   writeFile(join(data, 'config.json'), JSON.stringify({ ...limits, router }));
 
-it('the one consent covers a session in any directory and saves no directory grant', async () => {
+it('a consent that names no directory covers a session in any directory and saves no directory grant', async () => {
   const consent = modelConsent({ routerOrigin: ORIGIN });
   expect(consent).toEqual({
     version: 2,
@@ -36,8 +36,9 @@ it('the one consent covers a session in any directory and saves no directory gra
   for (const root of [repo, other])
     expect(await modelSettings(data, root)).toEqual({
       version: 2,
+      scope: 'native-workspace',
       root,
-      repositories: [],
+      repositories: [root],
       maxJobAtomic: 1000000n,
       routerOrigin: ORIGIN,
       context: 'session',
@@ -60,34 +61,56 @@ it.each([
   expect(await modelSettings(data, repo)).toBeNull();
 });
 
-// Review of b7974566: `on --repository` wrote a second kind of consent that replaced the
-// install's and covered only the named directories.
-it('a named directory is an addition: a session inside one gets every named one, and a session elsewhere still qualifies', async () => {
+// Operator ruling 2026-11-18: a saved consent never gets wider without an action by the
+// person. At 790acf79 a consent that named directories covered every session's workspace.
+it('a consent that names directories is limited to them: a nested repository and a worktree under one are covered, a lookalike, a link out and the parent are not', async () => {
   const { data, repo } = await fixture({});
   const sibling = join(dir, 'sibling');
-  const elsewhere = join(dir, 'elsewhere');
-  const nested = join(repo, 'nested');
-  for (const path of [sibling, elsewhere, nested]) await mkdir(path);
-  const first = modelConsent({ routerOrigin: ORIGIN, repository: repo });
-  // A second turn-on keeps the first directory; one at another router does not.
-  const both = modelConsent({ routerOrigin: ORIGIN, prior: first, repository: sibling });
-  expect(both.repositories).toEqual([repo, sibling]);
-  expect(modelConsent({ routerOrigin: 'https://other.example', prior: first })).not.toHaveProperty(
-    'repositories',
-  );
-  await save(data, { subagents: true, subagentConsent: both });
-  expect(await modelSettings(data, nested)).toMatchObject({
-    root: nested,
-    repositories: [repo, sibling],
-  });
-  expect(await modelSettings(data, elsewhere)).toMatchObject({
-    root: elsewhere,
-    repositories: [],
-  });
-  // A longer sibling name is not inside the named directory.
+  const nested = join(repo, 'packages', 'nested');
+  const worktree = join(repo, '.worktrees', 'fix');
   const lookalike = `${repo}-other`;
-  await mkdir(lookalike);
-  expect(await modelSettings(data, lookalike)).toMatchObject({ repositories: [] });
+  const outside = join(dir, 'outside');
+  for (const path of [sibling, nested, worktree, lookalike, outside])
+    await mkdir(path, { recursive: true });
+  // A nested Git repository, and a linked worktree's checkout, under a named directory.
+  await mkdir(join(nested, '.git'));
+  await writeFile(join(worktree, '.git'), 'gitdir: /elsewhere/.git/worktrees/fix\n');
+  // A name under the named directory that points outside it.
+  await symlink(outside, join(repo, 'link-out'));
+  // The record as a build before the ruling saved it, with a key no longer read.
+  await save(
+    data,
+    {
+      subagents: true,
+      subagentConsent: {
+        ...modelConsent({
+          routerOrigin: ORIGIN,
+          repositories: [repo, sibling],
+          maxJobAtomic: '1000000',
+        }),
+        githubRepositories: ['Acme/repo'],
+      },
+    },
+    { maxAutoSpend: '4000000' },
+  );
+  for (const root of [repo, nested, worktree, sibling])
+    expect(await modelSettings(data, root)).toMatchObject({
+      scope: 'repositories',
+      root,
+      repositories: [repo, sibling],
+      // The amount it holds stays a named ceiling, under a higher per-call limit too.
+      maxJobAtomic: 1000000n,
+    });
+  // The real path decides: a sibling with the same prefix, a link that leaves the
+  // directory, the parent of a named directory, and any other directory get no consent.
+  for (const root of [lookalike, join(repo, 'link-out'), outside, dir])
+    expect(await modelSettings(data, root)).toBeNull();
+  // A limited consent whose directories are all gone covers nothing, never everything.
+  await save(data, {
+    subagents: true,
+    subagentConsent: modelConsent({ routerOrigin: ORIGIN, repositories: [join(dir, 'gone')] }),
+  });
+  expect(await modelSettings(data, repo)).toBeNull();
 });
 
 it('a repository cannot grant consent, and a global or project stop is immediate', async () => {
@@ -132,11 +155,6 @@ it.each([
     expect(await modelSettings(data, repo)).toMatchObject({ maxJobAtomic: cap });
   },
 );
-
-it('a turn-on without --max-job drops a ceiling named earlier', async () => {
-  const named = modelConsent({ routerOrigin: ORIGIN, maxJobAtomic: '500000' });
-  expect(modelConsent({ routerOrigin: ORIGIN, prior: named })).not.toHaveProperty('maxJobAtomic');
-});
 
 it('does not turn legacy tier routing or a boolean into inference/data consent', async () => {
   const { data, repo } = await fixture({ subagents: 'apply' });

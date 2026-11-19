@@ -142,10 +142,8 @@ export async function saveSubagentChoice(
         subagents: choice === 'on',
         ...(choice === 'on' && routerOrigin
           ? {
-              subagentConsent: modelConsent({
-                routerOrigin,
-                prior: config.router?.subagentConsent,
-              }),
+              // The question's own consent: every session's workspace, no directory.
+              subagentConsent: modelConsent({ routerOrigin }),
             }
           : {}),
       },
