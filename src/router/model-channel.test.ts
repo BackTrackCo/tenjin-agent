@@ -210,3 +210,67 @@ it('says no fee was authorized for a routing call the router answered without a 
     authorizedAtomic: 0n,
   });
 });
+
+function routingTransport(server: FakeRouter, policy = {}) {
+  const transport = new ModelTransport({
+    dataDir: dir,
+    baseUrl: 'https://router.test',
+    payerDeps: payerDeps(server, dir, privateKeyToAccount(generatePrivateKey()), {
+      policy: async () => ({ ...TEST_POLICY, ...policy }),
+    }),
+  });
+  return transport;
+}
+
+// Production states and charges $0.003; the next server states 15% of a measured job spend
+// (about 8,100 today). Nothing in the client names either number.
+it.each([
+  ['production today', '3000'],
+  ['the next server', '8100'],
+  ['a fee under the old fixed one', '1200'],
+  ['a fee at the ceiling', ROUTING_FEE_CEILING_ATOMIC.toString()],
+])('pays and records the fee %s states, and authorizes exactly it', async (_name, amount) => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-compat-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', amount, charge: amount });
+  const answered = await routingTransport(server).route({ schemaVersion: 1 });
+  expect(answered.authorizedAtomic).toBe(BigInt(amount));
+  expect(server.paidAmounts).toEqual([BigInt(amount)]);
+  expect([...server.channels.values()][0]!.charged).toBe(BigInt(amount));
+});
+
+it('keeps a channel the fee never charges: a quote the server then charges nothing for costs nothing', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-nooffer-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', amount: '8100', charge: '0' });
+  const answered = await routingTransport(server).route({ schemaVersion: 1 });
+  expect(answered.authorizedAtomic).toBe(8100n);
+  expect([...server.channels.values()][0]!.charged).toBe(0n);
+});
+
+// A batch of held offers asks for its routing calls together. Each is authorized for its own
+// stated fee; together they stay inside the routing channel and the person's limits.
+it('authorizes a batch of five routing calls fee by fee, inside the channel and the daily budget', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-batch-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', amount: '200000' });
+  const transport = routingTransport(server, { sessionBudgetAtomic: 5_000_000n });
+  const answers = await Promise.all(
+    [1, 2, 3, 4, 5].map(() => transport.route({ schemaVersion: 1 })),
+  );
+  expect(answers.map((a) => a.authorizedAtomic)).toEqual(Array(5).fill(200_000n));
+  const [channel] = [...server.channels.values()];
+  // The channel's balance covered every voucher; each top-up was within the ceiling.
+  expect(channel!.charged).toBe(1_000_000n);
+  expect(channel!.balance).toBeGreaterThanOrEqual(1_000_000n);
+  expect(server.deposits).toBeGreaterThan(1);
+});
+
+it('stops a batch at the daily budget: the call that would pass it signs nothing', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-batch-budget-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', amount: '200000' });
+  const transport = routingTransport(server, { sessionBudgetAtomic: 450_000n });
+  const settled = await Promise.allSettled(
+    [1, 2, 3].map(() => transport.route({ schemaVersion: 1 })),
+  );
+  expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+  expect(server.paidRequests()).toBe(1);
+  expect([...server.channels.values()][0]!.balance).toBeLessThanOrEqual(450_000n);
+});
