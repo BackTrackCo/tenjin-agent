@@ -282,6 +282,8 @@ export async function readNativeAgentPrompt(input: {
 
 /** Prompts read, by everything the read depends on (see {@link readNativeAgentPromptCached}). */
 const prompts = new Map<string, { at: number; native: NativeAgentPrompt }>();
+/** Reads under way, by the same key: undefined for one that was not kept. */
+const reading = new Map<string, Promise<NativeAgentPrompt | undefined>>();
 /** Bounds how old the git status a cached read carries can be, and covers a wrapper script. */
 const PROMPT_TTL_MS = 10 * 60_000;
 
@@ -393,14 +395,37 @@ export async function readNativeAgentPromptCached(
   if (!key) return read(request);
   const held = prompts.get(key);
   if (held && now() - held.at < PROMPT_TTL_MS) return structuredClone(held.native);
-  const native = await read(request);
-  const text = JSON.stringify(native);
-  if (![...ephemeral].some((dir) => text.includes(dir))) {
+  // ONE READ FOR WORKERS THAT START TOGETHER: two offers of one response each started a
+  // Claude Code to read the same prompt, side by side. The second waits for the first's
+  // read and takes it when it was kept; a read that failed, was cut by its own job's end
+  // or names that job's temp folder is the first's alone, and the second reads for itself.
+  const going = reading.get(key);
+  if (going) {
+    const shared = await going.catch(() => undefined);
+    input.signal.throwIfAborted();
+    if (shared) return structuredClone(shared);
+  }
+  const mine = (async () => {
+    const native = await read(request);
+    const text = JSON.stringify(native);
+    if ([...ephemeral].some((dir) => text.includes(dir))) return { native, kept: false };
     prompts.delete(key);
     prompts.set(key, { at: now(), native: structuredClone(native) });
     if (prompts.size > 16) prompts.delete(prompts.keys().next().value!);
+    return { native, kept: true };
+  })();
+  const offered = mine.then(({ native, kept }) => (kept ? native : undefined));
+  // Unhandled only where no other worker waits for it.
+  offered.catch(() => undefined);
+  if (!reading.has(key)) {
+    reading.set(key, offered);
+    void offered
+      .finally(() => {
+        if (reading.get(key) === offered) reading.delete(key);
+      })
+      .catch(() => undefined);
   }
-  return native;
+  return (await mine).native;
 }
 
 /** The inputs Claude used to initialize, checked again before a warm child gets an assignment. */

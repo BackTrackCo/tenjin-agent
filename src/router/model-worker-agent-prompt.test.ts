@@ -202,6 +202,25 @@ it('reads a native prompt once per binary, agent type and root, and again when a
       },
       deps,
     ).then((native) => native.prompt[0]);
+  // Two workers that start together make one read: the second waits for the first's.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  read.mockImplementationOnce(async (input) => {
+    await gate;
+    return {
+      prompt: [`${input.agentType} in ${input.cwd} #${++reads}`],
+      context: [],
+      withheldTools: [],
+      withheldInstructions: [],
+    };
+  });
+  const together = [ask(), ask({ additionalDirectories: [], ephemeralDirectories: [] })];
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  release();
+  expect(await Promise.all(together)).toEqual([`reviewer in ${root} #1`, `reviewer in ${root} #1`]);
+  expect(read).toHaveBeenCalledTimes(1);
   expect(await ask()).toBe(`reviewer in ${root} #1`);
   // The same read, though the job's temp folder is a new one.
   expect(
