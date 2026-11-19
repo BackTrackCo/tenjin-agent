@@ -842,6 +842,63 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   expect(native.githubClose).toHaveBeenCalledOnce();
 });
 
+it("reads a worker's subagent prompt while its env file scan runs, where no earlier scan lets its Claude Code start first", async () => {
+  // Operator item of 2026-11-18: a process's first worker waited for its scan (about 2 s
+  // over 95 roots), then for the prompt read (3 to 11 s), in a row. Neither needs the other.
+  const read = {
+    prompt: ['You are a file search specialist.'],
+    context: [],
+    withheldTools: [],
+    withheldInstructions: [],
+  };
+  let readStarted = false;
+  let readBeforeScanEnded: boolean | undefined;
+  vi.mocked(readNativeAgentPrompt).mockImplementationOnce(async () => {
+    readStarted = true;
+    return read;
+  });
+  const start = WorkerEnvSecrets.start.bind(WorkerEnvSecrets);
+  const scan = vi.spyOn(WorkerEnvSecrets, 'start').mockImplementation(async (roots, limits) => {
+    const env = await start(roots, { ...limits, watch: false });
+    // The scan is still under way: time for anything that does not wait for it.
+    await new Promise((done) => setTimeout(done, 50));
+    readBeforeScanEnded ??= readStarted;
+    return env;
+  });
+  sdkResult({ subtype: 'success', result: 'done' });
+  try {
+    await runModelWorker(job, options());
+  } finally {
+    scan.mockRestore();
+  }
+  expect(readBeforeScanEnded).toBe(true);
+  // One read, and its result is the worker's prompt.
+  expect(readNativeAgentPrompt).toHaveBeenCalledOnce();
+  expect(vi.mocked(query).mock.calls[0]![0].options!.systemPrompt).toMatchObject({
+    type: 'custom',
+    prompt: expect.arrayContaining(['You are a file search specialist.']),
+  });
+});
+
+it('makes no prompt read ahead of the scan when the checks that stand before the read fail', async () => {
+  // The read starts a Claude Code: a managed policy the worker cannot run under is found
+  // before any starts, as it was when the read came after the scan.
+  // The managed policy changes after the worker qualified, before its scan starts.
+  vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(async () => {
+    vi.mocked(resolveSettings).mockResolvedValue({
+      effective: {},
+      sources: [{ source: 'managed', settings: { apiKeyHelper: '/managed/helper' } }],
+    } as never);
+    throw new Error('no temp folder');
+  });
+  sdkResult({ subtype: 'success', result: 'done' });
+  await expect(runModelWorker(job, options())).rejects.toThrow(
+    'Managed Claude provider or authentication changed; keep native',
+  );
+  expect(readNativeAgentPrompt).not.toHaveBeenCalled();
+  expect(query).not.toHaveBeenCalled();
+});
+
 it("keeps each model call's timing, token counts and the worker's start and end phases in the diagnostic record", async () => {
   // Operator item of 2026-11-18: where a job's time goes. The record had the first call's
   // two marks only; a 99 s job of four tool uses could not be explained from it.

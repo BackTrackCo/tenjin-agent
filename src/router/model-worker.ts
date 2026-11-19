@@ -425,6 +425,60 @@ async function runQualifiedWorker(
   // agreed (`envVerified`), so nothing is sent on an older scan's word. The walk took
   // 4.5 s over 85 worktrees, before every worker's start.
   const resumedEnv = early ? WorkerEnvSecrets.resume(envRoots, envTemp) : undefined;
+  const agentType = String(job.native.subagent_type ?? 'general-purpose');
+  // The temp folder is a working directory, so the file tools take its literal paths.
+  const additionalDirectories = [
+    ...workspace.workingDirectories.slice(1),
+    ...worktrees,
+    ...(temp ? [temp.directory] : []),
+  ];
+  const agentInput = {
+    binary: binary.path,
+    cwd: job.root,
+    additionalDirectories: additionalDirectories.filter((dir) => dir !== temp?.directory),
+    agentType,
+    ...(binary.windows ? { windows: binary.windows } : {}),
+    ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
+  };
+  const readPrompt = (signal: AbortSignal) =>
+    readNativeAgentPromptCached({
+      ...agentInput,
+      additionalDirectories,
+      ...(temp ? { ephemeralDirectories: [temp.directory] } : {}),
+      signal,
+    });
+  const managedPolicyHolds = ({ resolved }: Awaited<ReturnType<typeof assertCurrentWorkspace>>) =>
+    claudeManagedProviderCompatible(resolved) &&
+    !(permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable') &&
+    !(
+      permissionMode === 'bypassPermissions' &&
+      resolved.effective.permissions?.disableBypassPermissionsMode === 'disable'
+    );
+  // A WORKER WITH NO EARLIER SCAN TO START FROM waits for its scan before its Claude Code
+  // may start, and its subagent prompt is read meanwhile. The read starts a Claude Code of
+  // its own that sends nothing out and needs nothing the scan finds; it came after the
+  // scan, so a process's first worker waited for the two in a row (about 2 s, then 3 to
+  // 11 s). The checks that stand before the read stand before this one too; they run
+  // again further down, where this read's result is taken or, without one, the read is made.
+  const promptStop = new AbortController();
+  const stopPrompt = () => promptStop.abort(options.signal.reason);
+  options.signal.addEventListener('abort', stopPrompt, { once: true });
+  if (options.signal.aborted) stopPrompt();
+  const promptAhead = resumedEnv
+    ? undefined
+    : (async () => {
+        try {
+          if (!managedPolicyHolds(await assertCurrentWorkspace())) return undefined;
+        } catch {
+          return undefined;
+        }
+        const from = Date.now();
+        try {
+          return { native: await readPrompt(promptStop.signal), ms: Date.now() - from };
+        } catch (error) {
+          return { error };
+        }
+      })();
   const envFiles =
     resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
   startTimes.envReady = Date.now();
@@ -474,6 +528,8 @@ async function runQualifiedWorker(
     )
       throw new Error('Cannot cover workspace env files before starting the Windows worker');
   } catch (error) {
+    options.signal.removeEventListener('abort', stopPrompt);
+    promptStop.abort(error);
     envFiles.close();
     await github?.close().catch(() => undefined);
     await temp?.close().catch(() => undefined);
@@ -483,6 +539,10 @@ async function runQualifiedWorker(
   const cancel = () => controller.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
+  // The read made ahead ends with the worker, whatever ends it.
+  controller.signal.addEventListener('abort', () => promptStop.abort(controller.signal.reason), {
+    once: true,
+  });
   // The worker's settings carry the bridge token and the job's GitHub env: in a private
   // file, never on its command line.
   const nativeProcess = claudeWorkerProcess({
@@ -789,29 +849,8 @@ async function runQualifiedWorker(
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
-    if (
-      !claudeManagedProviderCompatible(resolved) ||
-      (permissionMode === 'auto' &&
-        resolved.effective.permissions?.disableAutoMode === 'disable') ||
-      (permissionMode === 'bypassPermissions' &&
-        resolved.effective.permissions?.disableBypassPermissionsMode === 'disable')
-    )
+    if (!managedPolicyHolds({ resolved, disclosure }))
       throw new Error('Managed Claude worker policy changed; keep native');
-    const agentType = String(job.native.subagent_type ?? 'general-purpose');
-    // The temp folder is a working directory, so the file tools take its literal paths.
-    const additionalDirectories = [
-      ...workspace.workingDirectories.slice(1),
-      ...worktrees,
-      ...(temp ? [temp.directory] : []),
-    ];
-    const agentInput = {
-      binary: binary.path,
-      cwd: job.root,
-      additionalDirectories: additionalDirectories.filter((dir) => dir !== temp?.directory),
-      agentType,
-      ...(binary.windows ? { windows: binary.windows } : {}),
-      ...(binary.customAgent ? { customAgent: binary.customAgent } : {}),
-    };
     const startSettings = ({
       resolved,
       disclosure,
@@ -825,15 +864,13 @@ async function runQualifiedWorker(
     const offeredAgent = early ? await nativeAgentStartKey(agentInput) : undefined;
     const promptReadFrom = Date.now();
     try {
-      nativeAgent = await readNativeAgentPromptCached({
-        ...agentInput,
-        additionalDirectories,
-        ...(temp ? { ephemeralDirectories: [temp.directory] } : {}),
-        signal: controller.signal,
-      });
+      const ahead = await promptAhead;
+      if (ahead && 'error' in ahead) throw ahead.error;
+      nativeAgent = ahead?.native ?? (await readPrompt(controller.signal));
       diagnostics.mark('promptRead');
       // A kept read answers in a few milliseconds; a fresh one starts a Claude Code.
-      diagnostics.fact('promptReadMs', Date.now() - promptReadFrom);
+      diagnostics.fact('promptReadMs', ahead?.ms ?? Date.now() - promptReadFrom);
+      diagnostics.fact('promptAhead', ahead !== undefined);
     } catch (error) {
       if (controller.signal.aborted) throw error;
       // The worker still starts, with Claude Code's main prompt and the subagent note.
@@ -1413,6 +1450,7 @@ async function runQualifiedWorker(
     await Promise.allSettled([...pending]);
     await new Promise<void>((resolve) => bridge.close(() => resolve()));
     options.signal.removeEventListener('abort', cancel);
+    options.signal.removeEventListener('abort', stopPrompt);
     closeFailure = await processClosed;
     diagnostics.mark('childClosed');
     if (released) await diagnostics.write(options.dataDir, job.id);
