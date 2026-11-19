@@ -582,3 +582,34 @@ it('marks a call a router tool served, also when its hook runs before the call i
   });
   expect(search).toMatchObject({ via: 'Exa search' });
 });
+
+// A streamed turn reaches the viewer block by block with the usage as it then stood: the
+// row's count follows the turn as it goes, and never steps back.
+it('follows a streamed turn block by block with a count that only rises', () => {
+  const f = fixture();
+  f.activity.running();
+  const block = (output: number, content: unknown) =>
+    f.event('assistant', {
+      message: {
+        id: 'streamed',
+        usage: { input_tokens: 12_000, cache_read_input_tokens: 3_000, output_tokens: output },
+        content: [content],
+      },
+    });
+  const seen: number[] = [];
+  const rows: number[] = [];
+  for (const event of [
+    block(1, { type: 'text', text: 'Looking.' }),
+    block(60, { type: 'tool_use', id: 'r1', name: 'Read', input: {} }),
+    // A late block that carries an earlier, smaller count.
+    block(25, { type: 'tool_use', id: 'r2', name: 'Read', input: {} }),
+    block(140, { type: 'text', text: 'Done.' }),
+  ]) {
+    f.activity.observe(event);
+    seen.push(f.activity.snapshot().tokens);
+    rows.push(f.activity.snapshot().rows.length);
+  }
+  expect(seen).toEqual([15_001, 15_060, 15_060, 15_140]);
+  // Each block's row is there as its block arrives, not at the turn's end.
+  expect(rows).toEqual([1, 2, 3, 4]);
+});

@@ -251,3 +251,16 @@ it('records a child checkpoint once, by the name it stores', () => {
   expect(Object.keys(marks)).toEqual(['x'.repeat(40)]);
   expect(marks['x'.repeat(40)]).toBeLessThan(5000);
 });
+
+it('keeps the time to the first event beside the time to the last, for a streamed reply', () => {
+  const record = new WorkerDiagnosticsRecord('job', 100_000, 65_536);
+  record
+    .call(1_000)
+    .done(
+      { usage: { output_tokens: 9 }, timing: { slot: 0, ttfbMs: 350.4, answerMs: 41_000.2 } },
+      42_500,
+    );
+  const { calls, callTotals } = record.snapshot();
+  expect(calls[0]).toMatchObject({ ttfbMs: 350, answerMs: 41_000 });
+  expect(callTotals).toMatchObject({ ttfbMs: 350, answerMs: 41_000 });
+});

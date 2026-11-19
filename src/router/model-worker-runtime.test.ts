@@ -4,6 +4,7 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker, type EarlyWorkerAccept } from './model-worker';
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
+import { completedMessageSse } from './model-messages';
 import { modelSettings } from './model-settings';
 import { ModelCallFailed, workerStop } from './model-worker-control';
 import { prepareWorkerGithub } from './worker-github';
@@ -3260,4 +3261,225 @@ it("removes the job's GitHub and temp folders when its start fails before the wo
   expect(native.githubClose).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
   expect(query).not.toHaveBeenCalled();
+});
+
+// STREAMED REPLIES. A fake transport hands the bridge its provider events as they arrive.
+const streamMessage = {
+  id: 'msg_1',
+  type: 'message',
+  role: 'assistant',
+  model: 'deepseek-flash',
+  content: [{ type: 'text', text: 'Done' }],
+  stop_reason: 'end_turn',
+  stop_sequence: null,
+  usage: { input_tokens: 20, output_tokens: 5 },
+};
+const streamEvents = completedMessageSse(streamMessage)
+  .trim()
+  .split('\n\n')
+  .map((frame) => JSON.parse(frame.split('\ndata: ')[1]!) as { type: string });
+
+/** One streamed request through the running job's bridge: what it wrote, as it wrote it. */
+function streamedBridgeRequest(body: Record<string, unknown>) {
+  const call = vi.mocked(query).mock.calls.at(-1)![0];
+  const handle = native.createServer.mock.calls.at(-1)![0] as (
+    request: unknown,
+    response: unknown,
+  ) => void;
+  const seen: {
+    status?: number;
+    headers?: Record<string, string>;
+    chunks: string[];
+    ended: boolean;
+  } = { chunks: [], ended: false };
+  let finished!: () => void;
+  const done = new Promise<void>((resolve) => (finished = resolve));
+  interface FakeResponse {
+    headersSent: boolean;
+    destroyed: boolean;
+    writableEnded: boolean;
+  }
+  const response: FakeResponse & Record<string, unknown> = {
+    headersSent: false,
+    destroyed: false,
+    writableEnded: false,
+    writeHead(this: FakeResponse, status: number, headers?: Record<string, string>) {
+      seen.status = status;
+      if (headers) seen.headers = headers;
+      this.headersSent = true;
+      return this;
+    },
+    write(text: string) {
+      seen.chunks.push(text);
+      return true;
+    },
+    end(this: FakeResponse, text?: string | (() => void), after?: () => void) {
+      if (typeof text === 'string') seen.chunks.push(text);
+      seen.ended = true;
+      this.writableEnded = true;
+      (typeof text === 'function' ? text : after)?.();
+      finished();
+      return this;
+    },
+  };
+  handle(
+    {
+      method: 'POST',
+      url: '/v1/messages',
+      headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(JSON.stringify(body));
+      },
+    },
+    response,
+  );
+  return { seen, done };
+}
+const streamRequest = {
+  model: 'deepseek-flash',
+  max_tokens: 65536,
+  stream: true,
+  messages: [{ role: 'user', content: 'Go.' }],
+};
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+it('gives the child the provider events as they arrive, in order, before the stream ends', async () => {
+  const barrier = deferred();
+  const relayed = deferred();
+  let sent: ((event: { type: string }) => void) | undefined;
+  const messages = vi.fn(async (...args: unknown[]) => {
+    sent = args[5] as typeof sent;
+    sent!(streamEvents[0]!);
+    sent!(streamEvents[1]!);
+    relayed.resolve();
+    await barrier.promise;
+    for (const event of streamEvents.slice(2)) sent!(event);
+    return streamMessage;
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  let before: string[] = [];
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await relayed.promise;
+    // The first two events are with the child while the call is still running.
+    before = [...request.seen.chunks];
+    expect(request.seen.ended).toBe(false);
+    barrier.resolve();
+    await request.done;
+  });
+  await expect(
+    runModelWorker(
+      { ...job, decision: { ...job.decision, messagesStream: 1 } },
+      { ...options(), transport: { messages } as unknown as ModelTransport },
+    ),
+  ).resolves.toBe('done');
+  expect(before).toEqual(
+    [streamEvents[0]!, streamEvents[1]!].map(
+      (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+    ),
+  );
+  expect(request!.seen.status).toBe(200);
+  expect(request!.seen.headers).toMatchObject({ 'content-type': 'text/event-stream' });
+  // Whole, the events are exactly what the whole answer's stream is.
+  expect(request!.seen.chunks.join('')).toBe(completedMessageSse(streamMessage));
+});
+
+it('writes the whole answer as it always did when no event was given, whatever the transport', async () => {
+  const messages = vi.fn(async (..._args: unknown[]) => streamMessage);
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+  });
+  await runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport });
+  expect(request!.seen.headers).toEqual({ 'content-type': 'text/event-stream' });
+  expect(request!.seen.chunks).toEqual([completedMessageSse(streamMessage)]);
+});
+
+it('gives a child that did not ask for a stream no relay and a JSON message', async () => {
+  const messages = vi.fn(async (..._args: unknown[]) => streamMessage);
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest({ ...streamRequest, stream: false });
+    await request.done;
+  });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, messagesStream: 1 } },
+    { ...options(), transport: { messages } as unknown as ModelTransport },
+  );
+  expect(messages.mock.calls[0]![5]).toBeUndefined();
+  expect(request!.seen.headers).toEqual({ 'content-type': 'application/json' });
+  expect(JSON.parse(request!.seen.chunks[0]!)).toEqual(streamMessage);
+});
+
+it('ends a turn cut after its events with an error event, never a second try, and goes on when nothing was charged', async () => {
+  const messages = vi.fn(async (...args: unknown[]) => {
+    (args[5] as (event: { type: string }) => void)(streamEvents[0]!);
+    throw new ModelCallFailed('The model provider failed the call', {
+      cause: 'provider',
+      status: 504,
+      uncharged: true,
+      code: 'model_stream_idle',
+      relayed: true,
+    });
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+  });
+  await expect(
+    runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+      retryWait: async () => undefined,
+    }),
+  ).resolves.toBe('done');
+  // One call: the cut reply was not tried again as if nothing had happened.
+  expect(messages).toHaveBeenCalledTimes(1);
+  const written = request!.seen.chunks.join('');
+  expect(written.startsWith(`event: message_start\n`)).toBe(true);
+  expect(written).toContain('event: error\ndata: {"type":"error","error":{"type":"api_error"');
+});
+
+it('ends the job on a turn cut after its events when the charge is not proven away', async () => {
+  const messages = vi.fn(async (...args: unknown[]) => {
+    (args[5] as (event: { type: string }) => void)(streamEvents[0]!);
+    throw new ModelCallFailed('Model call uncertain', { cause: 'failed', relayed: true });
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'not reached' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+    await tick();
+  });
+  await expect(
+    runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+      retryWait: async () => undefined,
+    }),
+  ).rejects.toMatchObject({ stop: { reason: 'model_call_failed' } });
+  expect(messages).toHaveBeenCalledTimes(1);
+  expect(request!.seen.chunks.join('')).toContain('event: error');
+});
+
+it('tells the child when the stream ended without its last event after the reply was counted', async () => {
+  const messages = vi.fn(async (...args: unknown[]) => {
+    for (const event of streamEvents.slice(0, -1))
+      (args[5] as (e: { type: string }) => void)(event);
+    return streamMessage;
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+  });
+  await runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport });
+  expect(request!.seen.chunks.at(-1)).toContain('event: error');
 });

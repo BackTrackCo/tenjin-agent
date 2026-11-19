@@ -1,4 +1,5 @@
 import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
+import { RelayedCut, sseError, sseFrame, type StreamEvent } from './model-stream';
 import { WorkerDiagnosticsRecord, type ModelCallTiming } from './model-worker-diagnostics';
 import type { Identities } from './identities';
 import {
@@ -114,6 +115,7 @@ import {
   type WorkerGithub,
 } from './worker-github';
 import {
+  ModelCallFailed,
   modelCallStop,
   withModelRetry,
   ModelWorkerStopped,
@@ -604,6 +606,8 @@ async function runQualifiedWorker(
   const bridge = createServer((req, res) => {
     const handle = async () => {
       let timed: ReturnType<WorkerDiagnosticsRecord['call']> | undefined;
+      // A streamed reply: events have left for the child (`started`), and its last one was sent.
+      const live = { started: false, stopped: false };
       try {
         if (
           req.method !== 'POST' ||
@@ -658,6 +662,25 @@ async function runQualifiedWorker(
           else
             res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(message));
         };
+        // The provider's events go to the child as they arrive, when it asked for a stream and
+        // the job's router offers one. A child that has gone away is no longer written to; the
+        // call runs on to its receipt.
+        const relayEvent =
+          raw.stream === true
+            ? (event: StreamEvent) => {
+                if (res.destroyed || res.writableEnded) return;
+                if (!res.headersSent) {
+                  res.writeHead(200, {
+                    'content-type': 'text/event-stream',
+                    'cache-control': 'no-cache',
+                  });
+                  diagnostics.mark('firstActivity');
+                }
+                live.started = true;
+                if (event.type === 'message_stop') live.stopped = true;
+                res.write(sseFrame(event));
+              }
+            : undefined;
         // A worker's WebSearch: answered here, never sent on to the model.
         const search = workerWebSearch(raw);
         if (search) {
@@ -702,6 +725,7 @@ async function runQualifiedWorker(
               (split) => {
                 timing = split;
               },
+              relayEvent,
             );
           },
           controller.signal,
@@ -709,10 +733,27 @@ async function runQualifiedWorker(
           options.retryWait,
         ).catch((error: unknown) => {
           timed?.done({ tries: attempts, ...(timing ? { timing } : {}) });
-          throw controller.signal.aborted ? error : modelCallStop(error);
+          if (controller.signal.aborted) throw error;
+          // Cut after events reached the child, and the router proves nothing was charged:
+          // the turn ends in an error event and the job goes on. Anything else ends the job.
+          if (
+            live.started &&
+            error instanceof ModelCallFailed &&
+            error.detail.relayed === true &&
+            error.detail.uncharged === true
+          )
+            throw new RelayedCut({ cause: error });
+          throw modelCallStop(error);
         });
         diagnostics.mark('firstAnswer');
-        send(message);
+        if (live.started) {
+          // The events were the answer. One that did not reach its last event was cut after
+          // its usage was counted: the child is told, as for any reply that ends early.
+          if (!res.destroyed && !res.writableEnded) {
+            if (!live.stopped) res.write(sseError('The model reply ended before its last event'));
+            res.end();
+          }
+        } else send(message);
         timed.done({ usage: message.usage, tries: attempts, ...(timing ? { timing } : {}) });
       } catch (error) {
         // ONE REQUEST THE BRIDGE CANNOT SEND fails alone, as a provider's 400 does: nothing
@@ -731,6 +772,11 @@ async function runQualifiedWorker(
             );
           return;
         }
+        if (error instanceof RelayedCut) {
+          if (!res.destroyed && !res.writableEnded)
+            res.end(sseError('The model call was cut after its reply began; nothing was charged'));
+          return;
+        }
         proxyFailure ??= { error };
         const stop = () => {
           // Transport has already drained any signed accounting before it
@@ -741,13 +787,15 @@ async function runQualifiedWorker(
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
         if (!res.destroyed)
           res.end(
-            JSON.stringify({
-              type: 'error',
-              error: {
-                type: 'api_error',
-                message: 'Tenjin worker request stopped; inspect receipts before retrying',
-              },
-            }),
+            live.started
+              ? sseError('Tenjin worker request stopped; inspect receipts before retrying')
+              : JSON.stringify({
+                  type: 'error',
+                  error: {
+                    type: 'api_error',
+                    message: 'Tenjin worker request stopped; inspect receipts before retrying',
+                  },
+                }),
             stop,
           );
         else stop();
