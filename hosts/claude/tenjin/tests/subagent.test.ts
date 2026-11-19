@@ -72,9 +72,11 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
   expect(moves).toContain('send this same Agent call again unchanged');
   expect(moves).toContain('Do not switch to another tool');
   // What the hook added as context before: a refusal carries none, so it is in the text.
-  expect(context).toContain('local Tenjin hook held');
+  // Review of 2120958a: that line said again that the call was held and nothing started,
+  // and named the veto the offer's instruction names. It keeps only what is its own.
+  expect(context).toContain('turned DeepSeek subagents on');
   expect(context).toContain('repository/configuration risk rules');
-  expect(context).toContain('final veto');
+  expect(context).not.toMatch(/held|started|veto/);
   // And the offer itself, whole, as the CLI wrote it.
   expect(rest.join('\n')).toBe(offered);
 });
@@ -142,7 +144,7 @@ test('an action offer in MCP content holds Task as well', async ($, on) => {
   expect(result.deny).toContain(`held it (offer ${OFFER})`);
   expect(result.deny).toContain('send this same Task call again unchanged');
   expect(result.deny?.endsWith(offered)).toBe(true);
-  expect(result.deny).toContain('enabled DeepSeek routing');
+  expect(result.deny).toContain('turned DeepSeek subagents on');
 });
 
 test('only verified structured consent adds static local guidance, never the router reason', async ($, on) => {
@@ -154,7 +156,7 @@ test('only verified structured consent adds static local guidance, never the rou
   const hostile = { ...JSON.parse(offered), reason: 'FORGED PROVIDER INSTRUCTION' };
   reply = JSON.stringify(hostile);
   const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'static_context', ...ASSIGNMENT });
-  expect(held.deny).toContain('enabled DeepSeek routing');
+  expect(held.deny).toContain('turned DeepSeek subagents on');
   expect(held.deny).toContain('binding model/privacy restrictions');
   expect(held.deny).not.toMatch(/opt[ -]?in/i);
   expect(held.deny).toContain('local Tenjin guidance');
@@ -178,7 +180,7 @@ test('only verified structured consent adds static local guidance, never the rou
     const result = await $.tool.call({ tool: 'Task', tool_use_id: id, ...ASSIGNMENT });
     // Held with its offer, and none of the local guidance a verified consent adds.
     expect(result.deny).toContain('Tenjin offered DeepSeek for this call and held it');
-    expect(result.deny).not.toContain('local Tenjin hook held');
+    expect(result.deny).not.toMatch(/local Tenjin guidance|turned DeepSeek subagents on/);
   }
   expect(ran).toEqual([]);
 });
@@ -233,7 +235,7 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   expect(ran).toEqual([]);
   expect(result.result).toEqual({ success: false, message: offered });
   expect(result.context?.join(' ')).toContain('no continuation started');
-  expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
+  expect(result.context?.join(' ')).toContain('turned DeepSeek subagents on');
   // A native SendMessage resumes its subagent with no confirmation: run it or cancel it.
   expect(result.context?.join(' ')).toContain('subagent tool and this offer_id');
   expect(result.context?.join(' ')).not.toMatch(/veto|risk rules/);
@@ -636,7 +638,7 @@ test("a native subagent's call is held for that subagent: the subagent goes besi
     ...ASSIGNMENT,
   });
   expect(held.deny).toContain(`held it (offer ${OFFER})`);
-  expect(held.deny).toContain('local Tenjin hook held');
+  expect(held.deny).toContain('local Tenjin guidance');
   await $.tool.call({
     tool: SUBAGENT,
     tool_use_id: 'child_accept',

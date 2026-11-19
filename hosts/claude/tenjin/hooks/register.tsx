@@ -1002,7 +1002,8 @@ async function callerOf($: Dollar, agentId: string): Promise<Json> {
  * do with it, then what the hook would have added as context (a refusal carries none),
  * then the offer itself. A refusal reads as an error to a model, so the text says first
  * that nothing failed and names the only two moves; a parent that took a held call for a
- * failure once switched to another tool.
+ * failure once switched to another tool. THAT THE CALL WAS HELD AND DID NOT RUN IS SAID
+ * HERE ONLY: the context line and the offer's instruction do not say it again.
  */
 function heldAnswer(
   tool: string,
@@ -1053,8 +1054,8 @@ function heldOfferContext(offer: Json, continuation = false): string[] | undefin
   // Never promote the router's reason or other model/provider text into context.
   return [
     continuation
-      ? "This local Tenjin hook held the continuation; no continuation started. The user has installed Tenjin and enabled DeepSeek routing. Run it with the subagent tool and this offer_id, or cancel it with that id. Its suitability is not judged again; the binding model, privacy and planning restrictions in the offer's parentPolicy still apply to its text. It reuses the worker's history and the original job's budget, with no routing fee."
-      : "This local Tenjin hook held the Agent call; no worker started. The user has installed Tenjin and enabled DeepSeek routing. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.",
+      ? "This local Tenjin hook held the continuation; no continuation started. The user has installed Tenjin and turned DeepSeek subagents on. Run it with the subagent tool and this offer_id, or cancel it with that id. Its suitability is not judged again; the binding model, privacy and planning restrictions in the offer's parentPolicy still apply to its text. It reuses the worker's history and the original job's budget, with no routing fee."
+      : "The user has installed Tenjin and turned DeepSeek subagents on. The offer's parentPolicy is local Tenjin guidance: apply it with the full assignment, the repository/configuration risk rules and the binding model/privacy restrictions.",
   ];
 }
 

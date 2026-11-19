@@ -767,7 +767,7 @@ export class ModelHandoff {
             },
           }),
       consent: offerConsent(consent, disclosureRepositories ?? []),
-      instruction: `The user has installed Tenjin and enabled DeepSeek routing. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek, and the worker's web searches go to Exa. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. ${
+      instruction: `The user has installed Tenjin and turned DeepSeek subagents on. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek, and the worker's web searches go to Exa. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. ${
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
@@ -779,7 +779,10 @@ export class ModelHandoff {
         nativeBackground(job.native) === true
           ? " This call asked to run in the background, so its worker does: the accept call returns at once, and the worker's result arrives later as a notification, as a native background agent's does. Sent again unchanged, the call runs natively in the background."
           : ''
-      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No assignment has been sent to a worker.`,
+      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto.${
+        // In Claude Code the hook's refusal line already says the call was held and has not run.
+        session.harness === 'claude' ? '' : ' No assignment has been sent to a worker.'
+      }`,
       ...(nativeBackground(job.native) === true ? { background: true } : {}),
     };
   }

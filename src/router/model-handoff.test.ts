@@ -242,6 +242,9 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   // Either choice is one call and no narration: a parent once explained each veto in prose.
   expect(instruction).toContain('as one call with no comment on the choice');
   expect(instruction).not.toContain('tenjin-native');
+  // Review of 2120958a: in Claude Code the hook's refusal line says the call was held and
+  // has not run, so the instruction does not say it a third time.
+  expect(instruction).not.toContain('No assignment has been sent');
   expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
   // A second, different call of the same turn is judged by itself and gets its own offer,
   // while the first is still open: a native parent's calls all run.
@@ -643,9 +646,14 @@ it.each([
     instruction: expect.stringMatching(/Exa\..*binding instructions.*forbid disclosure/),
   });
   expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
+  // Codex has no refusal line above the offer, so its instruction still says it.
   expect(recommendation).toHaveProperty(
     'instruction',
-    expect.stringContaining('enabled DeepSeek routing'),
+    expect.stringContaining('No assignment has been sent to a worker.'),
+  );
+  expect(recommendation).toHaveProperty(
+    'instruction',
+    expect.stringContaining('turned DeepSeek subagents on'),
   );
   expect('instruction' in recommendation ? recommendation.instruction : '').not.toMatch(
     /opt[ -]?in/i,
