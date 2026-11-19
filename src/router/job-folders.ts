@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { lstat, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import { writeFileSync } from 'node:fs';
+import { utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pidAlive } from '../lib/lock';
@@ -29,19 +29,45 @@ const JOB_FOLDER_NAME =
 
 /** No job is still going this long after it started: the wall limit, then a long margin. */
 export const JOB_FOLDER_STALE_MS = WORKER_WALL_MS + 15 * 60_000;
-/** A folder whose owner is gone is still left this long, so a folder being made is never taken. */
-const DEAD_OWNER_FLOOR_MS = 60_000;
-/** `ps` shows a start time to the second; the process's own count of its uptime drifts a little. */
-const START_TOLERANCE_MS = 10_000;
+/**
+ * A folder whose owner looks gone is left this long after the owner's last sign of life (its
+ * marker is touched every {@link HEARTBEAT_MS} while the job runs). A late sweep costs
+ * nothing; a wrong delete loses a running job's files and the money paid for it.
+ */
+const OWNER_GONE_FLOOR_MS = 2 * 60 * 60_000;
+/**
+ * A process that holds the owner's pid counts as another one only if it started this long
+ * after the owner's last sign of life: no clock change, time zone or rounding makes that
+ * gap, and any doubt reads as the owner being alive.
+ */
+const REUSE_GAP_MS = 10 * 60_000;
+const HEARTBEAT_MS = 30_000;
 
 type Marker = { pid: number; startedAt: number };
 
 /** When this process started, in ms: what its folders' markers name it by. */
 const ownStart = () => Math.round(Date.now() - process.uptime() * 1000);
 
+/** Folders this process made and still owns, whose markers are touched while it runs. */
+const owned = new Set<string>();
+let heartbeat: ReturnType<typeof setInterval> | undefined;
+
+function beat() {
+  const at = new Date();
+  for (const folder of owned) {
+    try {
+      utimesSync(join(folder, JOB_FOLDER_MARKER), at, at);
+    } catch {
+      // The folder is gone or unwritable; the sweep reads a stale beat as an owner to check.
+    }
+  }
+}
+
 /**
- * Names the process that made a job folder. Written inside the folder with mode 0600; a
- * failed write leaves the folder to the age rule of the sweep, never fails the job.
+ * Names the process that made a job folder, and keeps its marker's modification time fresh
+ * while this process runs, so a live owner is known without any clock comparison between
+ * processes. Written inside the folder with mode 0600; a failed write leaves the folder to
+ * the age rule of the sweep, never fails the job.
  */
 export function markJobFolder(folder: string): void {
   try {
@@ -50,6 +76,10 @@ export function markJobFolder(folder: string): void {
       mode: 0o600,
       flag: 'wx',
     });
+    owned.add(folder);
+    clearInterval(heartbeat);
+    heartbeat = setInterval(beat, HEARTBEAT_MS);
+    heartbeat.unref();
   } catch {
     // The sweep treats a folder with no marker by its age.
   }
@@ -64,6 +94,8 @@ const RETRY_WAITS = [50, 150, 400];
  * changes the job's result. Returns whether the folder is gone.
  */
 export async function removeJobFolder(folder: string): Promise<boolean> {
+  owned.delete(folder);
+  if (owned.size === 0) clearInterval(heartbeat);
   for (let attempt = 0; ; attempt += 1) {
     try {
       await rm(folder, { recursive: true, force: true });
@@ -85,12 +117,29 @@ export type ProcessFacts = {
   commandLines: () => Promise<string | undefined>;
 };
 
+/**
+ * Reads a `ps -o lstart=` line that was printed with `TZ=UTC` (macOS and Linux, where
+ * `lstart` is local time with no offset and so ambiguous in a fall-back hour and missing in a
+ * spring-forward gap; in UTC it is neither). Windows has no `ps`: no start time is read there.
+ * Anything that does not read as one date is undefined, which the sweep takes as alive.
+ */
+export function parsePsStart(text: string): number | undefined {
+  const line = text.trim();
+  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d \d{4}$/.test(line)) return undefined;
+  const at = Date.parse(`${line} UTC`);
+  return Number.isFinite(at) ? at : undefined;
+}
+
 const run = (file: string, args: string[]) =>
   new Promise<string>((resolve, reject) =>
     execFile(
       file,
       args,
-      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } },
+      {
+        timeout: 10_000,
+        maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+      },
       (error, stdout) => (error ? reject(error) : resolve(String(stdout))),
     ),
   );
@@ -100,8 +149,7 @@ export const systemProcessFacts: ProcessFacts = {
   startedAt: async (pid) => {
     if (process.platform === 'win32') return undefined;
     try {
-      const at = Date.parse((await run('ps', ['-o', 'lstart=', '-p', String(pid)])).trim());
-      return Number.isFinite(at) ? at : undefined;
+      return parsePsStart(await run('ps', ['-o', 'lstart=', '-p', String(pid)]));
     } catch {
       return undefined;
     }
@@ -149,16 +197,15 @@ async function readMarker(folder: string): Promise<Marker | undefined> {
 /**
  * Removes the job folders that nothing can still use, and returns their paths. Never throws.
  *
- * A folder is stale, by facts and then by age:
- * - its marker names a process that is gone, or whose pid another process now holds (its
- *   start time differs), and the folder is over a minute old; or
- * - its marker names a process whose start cannot be read, and the folder is older than any
- *   job can be; or
- * - it has no marker (an older build made it), it is older than any job can be, and no
- *   process names it on its command line or in its environment.
- * A folder whose owner is this process, or a live process that started when the marker says,
- * is never removed, so a job of another `tenjin mcp` stays untouched. Where the process list
- * cannot be read, a folder with no marker stays.
+ * A folder with a marker is stale only when ALL hold: its owner's marker has not been touched
+ * for hours (a running owner touches it every 30 s, so a live one is known by no clock
+ * comparison between processes), and either its owner's pid is gone, or a process that holds
+ * the pid started more than ten minutes after that last touch. Every doubt reads as alive: a
+ * start time that cannot be read, is off by an hour, or lies in an ambiguous hour never
+ * leads to a delete (`ps` is read in UTC besides). A folder with no marker (an older build
+ * made it) is stale when it is older than any job can be and no process names it on its
+ * command line or in its environment; where the process list cannot be read, it stays.
+ * A folder of this process is never removed, so a job of another `tenjin mcp` stays untouched.
  */
 export async function sweepJobFolders(o: SweepOptions = {}): Promise<string[]> {
   try {
@@ -187,14 +234,19 @@ export async function sweepJobFolders(o: SweepOptions = {}): Promise<string[]> {
           let stale: boolean;
           if (marker) {
             if (marker.pid === process.pid) continue;
-            if (!facts.alive(marker.pid)) stale = age > DEAD_OWNER_FLOOR_MS;
+            // The owner's last sign of life: its marker's own time, which it touches while
+            // it runs (a marker an older build wrote is its creation).
+            const beat = (await lstat(join(folder, JOB_FOLDER_MARKER)).catch(() => undefined))
+              ?.mtimeMs;
+            if (beat === undefined) continue;
+            const quiet = now - beat;
+            if (quiet <= OWNER_GONE_FLOOR_MS) continue;
+            if (!facts.alive(marker.pid)) stale = true;
             else {
+              // The pid is held: stale only if its holder started well after the owner's
+              // last sign of life. Anything else, an unreadable start included, is alive.
               const started = await facts.startedAt(marker.pid);
-              stale =
-                started === undefined
-                  ? age > staleMs
-                  : Math.abs(started - marker.startedAt) > START_TOLERANCE_MS &&
-                    age > DEAD_OWNER_FLOOR_MS;
+              stale = started !== undefined && started > beat + REUSE_GAP_MS;
             }
           } else {
             if (age <= staleMs) continue;
