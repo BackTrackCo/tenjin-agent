@@ -1083,7 +1083,14 @@ async function runQualifiedWorker(
                     ? { enableWeakerNetworkIsolation: true }
                     : {}),
                   filesystem: {
-                    allowRead: [...(github ? [github.directory] : []), ...privatePaths.readable],
+                    // The job's own temp and GitHub folders, which `denyRead` names with every
+                    // other job's below: `allowRead` wins over `denyRead`, and deeper denies
+                    // inside them (env files in `node_modules`) still hold.
+                    allowRead: [
+                      ...(github ? [github.directory] : []),
+                      ...(temp ? [temp.directory] : []),
+                      ...privatePaths.readable,
+                    ],
                     ...(github ? { allowWrite: [github.directory] } : {}),
                     denyRead: [
                       ...privatePaths.paths,
@@ -1098,6 +1105,11 @@ async function runQualifiedWorker(
                       ...dropped,
                       // Other sessions' temp files; this job's own are in its temp folder.
                       ...(temp?.shared ?? []),
+                      // Other jobs' temp, GitHub and settings folders: their commands' output and
+                      // files as written, gh caches, and their bridge and GitHub tokens. The file
+                      // tools already refuse them, as folders outside the working directories.
+                      ...(temp?.others ?? []),
+                      ...(github?.others ?? []),
                     ],
                     denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
                   },

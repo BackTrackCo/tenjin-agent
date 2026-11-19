@@ -1,7 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+
+/** Also the start of every other per-job folder name in the temp folder (`WorkerGithub.others`). */
+const GITHUB_PREFIX = 'tenjin-worker-';
 
 /**
  * Hosts a DeepSeek worker's sandboxed commands reach without asking. Anything else is
@@ -32,6 +35,13 @@ const CREDENTIAL_HELPER =
 export type WorkerGithub = {
   /** Per-job directory; the worker's sandbox may read and write it. Removed by close. */
   directory: string;
+  /**
+   * Every job's folder that Tenjin makes in the temp folder (`tenjin-worker-*`), by each
+   * spelling of it: this directory, which holds gh caches and run logs, and the folder of the
+   * worker's settings file, which holds its bridge token and GitHub token
+   * (`claude-worker-process`). The sandbox denies them all and re-allows this job's directory.
+   */
+  others: string[];
   env: Record<string, string>;
   /** Literal token values the bridge removes from everything it forwards. */
   secrets: string[];
@@ -144,8 +154,11 @@ export async function prepareWorkerGithub(
   options: { run?: Exec } = {},
 ): Promise<WorkerGithub> {
   const run = options.run ?? exec;
-  const directory = await mkdtemp(join(tmpdir(), 'tenjin-worker-'));
+  const directory = await mkdtemp(join(tmpdir(), GITHUB_PREFIX));
   try {
+    const others = [...new Set([tmpdir(), await realpath(tmpdir())])].map((base) =>
+      join(base, `${GITHUB_PREFIX}*`),
+    );
     const [token, identity] = await Promise.all([
       workerGithubToken(parent, run),
       gitIdentity(parent, run),
@@ -158,6 +171,7 @@ export async function prepareWorkerGithub(
     await writeFile(config, gitConfig(identity, token !== null), { mode: 0o600 });
     return {
       directory,
+      others,
       env: {
         GH_CONFIG_DIR: gh,
         GIT_CONFIG_GLOBAL: config,

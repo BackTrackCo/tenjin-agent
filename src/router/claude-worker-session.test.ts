@@ -6,6 +6,7 @@ import {
   claudeWorkerConfigDir,
   claudeWorkerPrivatePaths,
   prepareClaudeWorkerSession,
+  prepareClaudeWorkerTemp,
 } from './claude-worker-session';
 import { isSecretPath } from './model-worker-privacy';
 
@@ -14,6 +15,9 @@ const files = vi.hoisted(() => ({}) as Record<string, string>);
 const links = vi.hoisted(() => ({}) as Record<string, string>);
 vi.mock('node:fs/promises', () => ({
   realpath: async (path: string) => links[path] ?? path,
+  mkdtemp: async (prefix: string) => `${prefix}AbC123`,
+  mkdir: async () => undefined,
+  rm: async () => undefined,
   readFile: async (path: string) => {
     if (path in files) return files[path];
     throw Object.assign(new Error('absent'), { code: 'ENOENT' });
@@ -250,3 +254,18 @@ it('protects exact native workspace and discovered source files without an ances
   ])
     expect(isSecretPath(file, protectedPaths.paths)).toBe(false);
 });
+
+// Another job's temp folder holds its commands' output and the files it wrote, as written.
+it.skipIf(process.platform === 'win32')(
+  "names every job's temp folder by each spelling of /tmp, for the sandbox to deny",
+  async () => {
+    links['/tmp'] = '/private/tmp';
+    links['/tmp/tenjin-job-AbC123'] = '/private/tmp/tenjin-job-AbC123';
+    const made = (await prepareClaudeWorkerTemp({}))!;
+    expect(made.directory).toBe('/private/tmp/tenjin-job-AbC123');
+    const named = (path: string) =>
+      made.others.some((glob) => glob.endsWith('*') && path.startsWith(glob.slice(0, -1)));
+    for (const other of ['/tmp/tenjin-job-Zz9Yy8', '/private/tmp/tenjin-job-Zz9Yy8'])
+      expect(named(other), other).toBe(true);
+  },
+);

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -137,4 +137,18 @@ it('redacts the job token and any inherited GitHub token everywhere they appear'
   expect(redactWorkerSecrets(`${TOKEN} and ${TOKEN}; ${inherited}; ${configured}`, secrets)).toBe(
     '[redacted GitHub token] and [redacted GitHub token]; [redacted GitHub token]; [redacted GitHub token]',
   );
+});
+
+// Another job's GitHub folder holds its gh caches and run logs.
+it("names every job's GitHub folder by each spelling of the temp folder, for the sandbox to deny", async () => {
+  prepared = await prepareWorkerGithub({}, { run: runner() });
+  const other = await prepareWorkerGithub({}, { run: runner() });
+  try {
+    const named = (path: string) =>
+      prepared!.others.some((glob) => glob.endsWith('*') && path.startsWith(glob.slice(0, -1)));
+    for (const path of [other.directory, await realpath(other.directory), prepared.directory])
+      expect(named(path), path).toBe(true);
+  } finally {
+    await other.close();
+  }
 });

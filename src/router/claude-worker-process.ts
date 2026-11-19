@@ -118,6 +118,7 @@ export function claudeWorkerProcess(
     /** The settings, in a file only this user can read: its path, for the SDK's `settings`. */
     settingsFile(settings: Settings): string {
       if (closing) throw new Error('Claude worker is already draining');
+      // Named under `tenjin-worker-`, which every worker's sandbox denies (`WorkerGithub.others`).
       const folder = mkdtempSync(join(tmpdir(), 'tenjin-worker-settings-'));
       folders.push(folder);
       try {

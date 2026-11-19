@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
@@ -2213,6 +2213,7 @@ it('finishes GitHub setup before a start-up window starts', async () => {
           release = () =>
             resolve({
               directory: '/job',
+              others: [],
               env: {},
               secrets: [],
               authenticated: false,
@@ -3039,6 +3040,61 @@ it("gives each job a private temp folder that its commands and file tools use by
   await expect(lstat(directory)).rejects.toThrow();
 });
 
+// Another job's temp folder holds its commands' output and the files it wrote, as written, and
+// its GitHub folder its gh caches. A worker's command read both (by a built name, or through a
+// link), and values its own scan never learned left as written.
+it.skipIf(process.platform === 'win32')(
+  "keeps every other job's temp and GitHub folders from the worker's commands, and its own open",
+  async () => {
+    const session =
+      await vi.importActual<typeof import('./claude-worker-session')>('./claude-worker-session');
+    const github = await vi.importActual<typeof import('./worker-github')>('./worker-github');
+    const quiet = async () => '';
+    let own: { temp?: { directory: string }; github?: { directory: string } } = {};
+    vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(async (env) => {
+      const made = await session.prepareClaudeWorkerTemp(env);
+      own = { ...own, temp: made };
+      return made;
+    });
+    vi.mocked(prepareWorkerGithub).mockImplementationOnce(async (env) => {
+      const made = await github.prepareWorkerGithub(env, { run: quiet });
+      own = { ...own, github: made };
+      return made;
+    });
+    const otherTemp = (await session.prepareClaudeWorkerTemp())!;
+    const otherGithub = await github.prepareWorkerGithub({}, { run: quiet });
+    try {
+      sdkResult({ subtype: 'success', result: 'jobs fixture' });
+      await runModelWorker(job, options());
+      const { denyRead = [], allowRead = [] } =
+        given(vi.mocked(query).mock.calls.at(-1)![0].options).sandbox?.filesystem ?? {};
+      const denied = (path: string) =>
+        denyRead.some((glob) => glob.endsWith('*') && path.startsWith(glob.slice(0, -1)));
+      for (const path of [
+        otherTemp.directory,
+        join('/tmp', otherTemp.directory.split('/').at(-1)!),
+        otherGithub.directory,
+        await realpath(otherGithub.directory),
+      ])
+        expect(denied(path), path).toBe(true);
+      // Its own match the same patterns, and are opened again: allowRead wins over denyRead.
+      for (const path of [own.temp!.directory, own.github!.directory]) {
+        expect(denied(path), path).toBe(true);
+        expect(allowRead).toContain(path);
+      }
+      // Every job's settings file, which holds its bridge token and GitHub token, stays closed.
+      const settingsFolder = dirname(
+        String(vi.mocked(query).mock.calls.at(-1)![0].options!.settings),
+      );
+      expect(denied(settingsFolder), settingsFolder).toBe(true);
+      expect(allowRead.some((path) => settingsFolder.startsWith(path))).toBe(false);
+    } finally {
+      await otherTemp.close();
+      await otherGithub.close();
+    }
+  },
+);
+
 it('replaces the values of an env file a command wrote into the job temp folder', async () => {
   // The folder is a working directory, so its env files are read like any other: a value
   // that exists only there once left for Tenjin and DeepSeek as written.
@@ -3049,6 +3105,7 @@ it('replaces the values of an env file a command wrote into the job temp folder'
     directory,
     scratchpad,
     shared: [],
+    others: [],
     close: () => rm(directory, { recursive: true, force: true }),
   });
   const fresh = 'fresh-credential-0x42-value';
@@ -3158,6 +3215,7 @@ it("runs with the native subagent's prompt, context and tools as Claude Code bui
     directory,
     scratchpad,
     shared: [],
+    others: [],
     close: () => rm(directory, { recursive: true, force: true }),
   });
   const read = {

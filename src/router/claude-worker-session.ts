@@ -65,18 +65,23 @@ export async function prepareClaudeWorkerSession(
   };
 }
 
+const JOB_TEMP_PREFIX = 'tenjin-job-';
+
 /**
  * A job's own temp folder, private to the user and removed by close. Named as the
  * worker's `CLAUDE_CODE_TMPDIR`, it holds Claude Code's temp root for this job, which is
  * the `$TMPDIR` of its commands and the scratchpad it is told of. `shared` is the temp
- * root every other Claude Code session of this user shares.
+ * root every other Claude Code session of this user shares. `others` matches every job's
+ * temp folder, this one's too, by each spelling of `/tmp`: another job's holds its
+ * commands' output and the files it wrote, as written. The sandbox denies them and
+ * re-allows this one (`allowRead` wins over `denyRead`).
  */
 export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.env) {
   const uid = process.getuid?.();
   if (uid === undefined || process.platform === 'win32') return undefined;
   // Under /tmp, not the macOS per-user temp folder: Claude Code makes sockets under it,
   // and falls back to the shared root when the path is too long for one.
-  const directory = await realpath(await mkdtemp('/tmp/tenjin-job-'));
+  const directory = await realpath(await mkdtemp(`/tmp/${JOB_TEMP_PREFIX}`));
   // Claude Code names its temp root so (2.1.326) and checks that it is private.
   const scratchpad = join(directory, `claude-${uid}`);
   const close = () => rm(directory, { recursive: true, force: true });
@@ -93,10 +98,14 @@ export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.e
       ),
     ]),
   );
+  const others = [...new Set(['/tmp', await realpath('/tmp').catch(() => '/tmp')])].map((base) =>
+    join(base, `${JOB_TEMP_PREFIX}*`),
+  );
   return {
     directory,
     scratchpad,
     shared: [...new Set(shared)],
+    others,
     close,
   };
 }
