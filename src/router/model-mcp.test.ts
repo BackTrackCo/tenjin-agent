@@ -76,6 +76,18 @@ import type { ModelJob } from './model-job';
 import { modelConsent } from './model-settings';
 import { workerProgressPath } from './model-worker-progress';
 
+/** The transport's `route` as the handoff reads it: the router's answer and what the call authorized. */
+function answering(route: (...args: never[]) => unknown) {
+  return async (...args: never[]) => {
+    const json = await route(...args);
+    const fee =
+      typeof json === 'object' && json !== null && 'routingFeeAtomic' in json
+        ? BigInt(String(json.routingFeeAtomic))
+        : 0n;
+    return { json, authorizedAtomic: fee };
+  };
+}
+
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 
 let dir: string;
@@ -162,7 +174,7 @@ it.each(
     const route = vi.fn(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
     const transport = {
       origin: 'http://localhost:3939',
-      route,
+      route: answering(route),
       askRefundSupport: async () => true,
       withInferenceRun,
       summary: async () => ({ actualAtomic: '0' }),
@@ -211,7 +223,9 @@ it.each(
       const store = new ModelJobStore(dir);
       const pending = await jobOf('turn');
       expect(pending?.decision.claudePermissionMode).toBe(mode);
-      expect(JSON.stringify(route.mock.calls)).not.toContain('permissionMode');
+      expect(JSON.stringify(route.mock.calls.map((call) => call.slice(0, 3)))).not.toContain(
+        'permissionMode',
+      );
       const accepted = await client.callTool({
         name: 'subagent',
         arguments: { offer_id: pending!.id },
@@ -525,7 +539,7 @@ async function ownedClaudeFixture(
   const askRefundSupport = vi.fn(async (_signal: AbortSignal) => true);
   const inference = {
     origin: 'http://localhost:3939',
-    route,
+    route: answering(route),
     requireResumeBudget,
     reconcile,
     summary,
