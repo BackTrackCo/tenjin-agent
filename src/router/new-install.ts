@@ -4,6 +4,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { persist } from '../commands/config';
 import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
 import { selectOne } from '../lib/clack';
+import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import type { QuestionStep } from './install';
 import { nativeWorkspaceModelConsent } from './model-settings';
@@ -117,6 +118,48 @@ export async function reserveNewInstall(
   });
 }
 
+/** Where an existing profile changes the setting `--subagents` could not change. */
+const CHOICE_FIX: Record<InstallSubagentChoice, string> = {
+  on: 'Run `tenjin config subagents on --repository <path> --max-job <USD>` to turn DeepSeek subagents on for a directory.',
+  off: 'Run `tenjin config subagents off` to turn DeepSeek subagents off.',
+};
+
+/**
+ * `--subagents` answers the question of a fresh setup and nothing else. A profile that was
+ * already here, with no unfinished setup for this router, is refused before anything is
+ * written: the flag would change nothing there, and said nothing.
+ */
+export async function requireOpenChoice(
+  session: NewInstallSession,
+  ctx: CommandContext,
+  choice: InstallSubagentChoice,
+): Promise<void> {
+  if (session.absent) return;
+  const config = await loadRawConfig(session.dataDir);
+  const pending = config.install?.pendingDeepSeekSetup;
+  if (pending && !blocked(config) && origin(config, ctx) === pending.routerOrigin) return;
+  throw new CliError(
+    'USAGE',
+    `--subagents ${choice} answers the question of a fresh setup only, and this profile already exists. Nothing was changed.`,
+    { fix: CHOICE_FIX[choice] },
+  );
+}
+
+/** A choice this run lost the right to apply (another host or writer was here first), said on its receipt. */
+function choiceNotApplied(result: CommandResult, choice: InstallSubagentChoice): CommandResult {
+  return {
+    ...result,
+    data: {
+      ...(result.data as Record<string, unknown>),
+      subagents: { applied: false, fix: CHOICE_FIX[choice] },
+    },
+    humanLines: [
+      ...(result.humanLines ?? []),
+      `--subagents ${choice} was not applied: this was not a fresh setup. ${CHOICE_FIX[choice]}`,
+    ],
+  };
+}
+
 function hostsCompleted(session: NewInstallSession): boolean {
   return session.completed.length > 0 && session.completed.every(Boolean);
 }
@@ -209,7 +252,10 @@ export async function finishNewInstall(
     promptSubagents?: () => Promise<InstallSubagentChoice | null>;
   } = {},
 ): Promise<CommandResult> {
-  if (!session.claimId || !hostsCompleted(session)) return result;
+  if (!session.claimId || !hostsCompleted(session))
+    return options.choice !== undefined && !session.claimId
+      ? choiceNotApplied(result, options.choice)
+      : result;
   const interactive =
     ctx.flags.json !== true &&
     (options.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
@@ -222,6 +268,7 @@ export async function finishNewInstall(
       : options.choice;
   const applied = await completeNewInstall(session, ctx, answer);
   if (applied === undefined) {
+    if (options.choice !== undefined) return choiceNotApplied(result, options.choice);
     if (!pending || interactive || !session.continueWith) return result;
     const harness = options.harness ? ` --harness ${options.harness}` : '';
     return addSubagentQuestion(result, session.continueWith + harness);

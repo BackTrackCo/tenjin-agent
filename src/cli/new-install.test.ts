@@ -255,6 +255,27 @@ it.each([
   expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();
 });
 
+// It used to exit 0 with no `subagents` field and no line, and change nothing.
+it.each(['on', 'off'] as const)(
+  'refuses --subagents %s on a profile that already exists, before anything is written',
+  async (choice) => {
+    await mkdir(seams.data);
+    await persist(seams.data, () => ({ maxAutoSpend: '1000000' }));
+    const captured = captureIo();
+    const code = await main(['install', '--yes', '--subagents', choice], captured.io);
+    expect(code).not.toBe(0);
+    expect(captured.stdout() + captured.stderr()).toContain(`tenjin config subagents ${choice}`);
+    expect(await loadRawConfig(seams.data)).toEqual({ maxAutoSpend: '1000000' });
+  },
+);
+
+it('refuses a second --subagents answer once the fresh setup has saved one', async () => {
+  expect((await install(['--yes', '--subagents', 'off'])).code).toBe(0);
+  const again = await install(['--yes', '--subagents', 'on']);
+  expect(again.code).not.toBe(0);
+  expect(again.config.router).toEqual({ subagents: false });
+});
+
 it('does not enable after runtime failure or a failed second host', async () => {
   seams.failRuntime = true;
   expect((await install(['--yes', '--subagents', 'on'])).code).not.toBe(0);
@@ -273,6 +294,11 @@ it('preserves an explicit off written during native registration', async () => {
   expect(out.code).toBe(0);
   expect(out.config.router).toEqual({ subagents: false });
   expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();
+  // The receipt says the answer was not applied, and where to change the setting.
+  expect(JSON.parse(out.output).data.subagents).toEqual({
+    applied: false,
+    fix: expect.stringContaining('tenjin config subagents on'),
+  });
 });
 
 it.each([

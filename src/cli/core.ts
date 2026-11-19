@@ -70,8 +70,10 @@ Learn more:
         if (o.refresh === true && o.subagents !== undefined) {
           throw new CliError('USAGE', 'Omit --refresh when choosing whether to enable subagents.');
         }
-        const { captureNewInstall, finishNewInstall } = await import('../router/new-install');
+        const { captureNewInstall, finishNewInstall, requireOpenChoice } =
+          await import('../router/new-install');
         const newInstall = await captureNewInstall(ctx.dataDir);
+        if (o.subagents !== undefined) await requireOpenChoice(newInstall, ctx, o.subagents);
         const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
         const hostArgs = {
