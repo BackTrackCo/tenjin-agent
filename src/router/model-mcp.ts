@@ -23,6 +23,7 @@ import { WORKER_ENDS, workerEnd, workerStop } from './model-worker-control';
 import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, nativeBackground, ownedModelReference } from './model-continuation';
+import { WorkerInbox } from './model-worker-inbox';
 import {
   ModelConversationStore,
   type ModelConversation,
@@ -148,6 +149,11 @@ export function registerModelTool(
   /** Accept calls of this process still going, by job: such a job's worker is not stranded. */
   const accepting = new Map<string, number>();
   const warming = new Map<string, WarmWorker>();
+  /** What a parent writes to each running worker of this process, by the worker's handle. */
+  const inboxes = new Map<
+    string,
+    { inbox: WorkerInbox; owner: ModelConversationOwner; jobId: string }
+  >();
   const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
   /** Who asked for a job to be cancelled, so its end says who or what ended it. */
   const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped' | 'session_ended'>();
@@ -719,6 +725,38 @@ export function registerModelTool(
               );
               return unavailable('Owned root or permission prompts unavailable');
             }
+            const send =
+              args.capture.tool === 'SendMessage'
+                ? ownedModelReference(args.capture.input, 'SendMessage')
+                : undefined;
+            const sentTo = send && 'handle' in send ? send : undefined;
+            const live = sentTo?.handle ? inboxes.get(sentTo.handle) : undefined;
+            if (sentTo?.handle && sentTo.task && live) {
+              // A WORKER THAT RUNS TAKES THE MESSAGE AT ITS NEXT TURN, as a native subagent does:
+              // the same job and cap, no offer, no fee, no new consent. Only the session that
+              // accepted it may write to it, and only while its consent still stands.
+              const current = await modelSettings(options.dataDir, session.cwd);
+              const transport = await options.transport();
+              if (
+                live.owner.parentSessionId !== session.sessionId ||
+                live.owner.root !== (await realpath(session.cwd).catch(() => null)) ||
+                !current ||
+                current.root !== live.owner.root ||
+                current.routerOrigin !== transport.origin
+              )
+                return unavailable(
+                  'This worker belongs to another session or its consent changed; the message was not delivered',
+                );
+              if (live.inbox.push(sentTo.task) === 'closed')
+                return unavailable(
+                  'The DeepSeek worker has already reported, so the message was not delivered. Its result arrives next; send the message again after it.',
+                );
+              return answer({
+                action: 'delivered',
+                worker_handle: sentTo.handle,
+                message: `Delivered to the DeepSeek worker ${sentTo.handle}: it reads your message at its next turn and its result will include the answer. It is the same job and budget; nothing was charged for the message.`,
+              });
+            }
             try {
               // Where the time before the offer went, for the job's diagnostic record.
               const timing: CaptureTiming = { marks: {}, routeFetchMs: [] };
@@ -1027,6 +1065,13 @@ export function registerModelTool(
           };
           // The accept call's own steps after its worker returned, for the diagnostic record.
           const endMarks: Record<string, number> = {};
+          const inbox = new WorkerInbox();
+          if (activeConversation)
+            inboxes.set(activeConversation.handle, {
+              inbox,
+              owner: activeConversation.owner,
+              jobId: job.id,
+            });
           const done = (async () => {
             let inference: InferenceLease | undefined;
             const omitted = new Set<string>();
@@ -1040,6 +1085,7 @@ export function registerModelTool(
                 transport: inference?.slot ? transport.forInferenceSlot(inference.slot) : transport,
                 signal: abort.signal,
                 omitted,
+                ...(activeConversation ? { inbox } : {}),
                 ...(activity ? { activity } : {}),
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
                 ...(options.harness === 'claude'
@@ -1210,6 +1256,9 @@ export function registerModelTool(
                 .catch(() => undefined);
               return answer({ ...stopped, spend });
             } finally {
+              if (activeConversation && inboxes.get(activeConversation.handle)?.inbox === inbox)
+                inboxes.delete(activeConversation.handle);
+              inbox.close();
               inference?.release();
               // Not awaited: removing a display file never delays the handback.
               void progress?.stop().catch(() => undefined);

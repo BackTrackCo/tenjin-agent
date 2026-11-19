@@ -1054,6 +1054,72 @@ it('rejects an unrelated activity follow without initializing transport or mutat
   }
 });
 
+// Failure caught: a parent had no way to tell a running worker anything (a stale PR head
+// ran for 100k tokens). A SendMessage to its handle reaches the same job's next turn.
+it('delivers a SendMessage to a running worker in order, and refuses another session, a reported worker and a handle nobody runs', async () => {
+  const f = await ownedClaudeFixture();
+  const heard: string[] = [];
+  let release!: () => void;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  let reported!: () => void;
+  const afterReport = new Promise<void>((resolve) => (reported = resolve));
+  worker.run.mockImplementation(async (_job, options) => {
+    options.activity.running();
+    started();
+    await blocked;
+    for (let m = await options.inbox.next(); m !== null; m = await options.inbox.next()) {
+      heard.push(m);
+      if (heard.length === 2) break;
+    }
+    // The worker reports: nothing is waiting, so the inbox closes.
+    options.inbox.closeIfEmpty();
+    reported();
+    return 'completed fixture';
+  });
+  const handle = `tenjin-worker-${f.job.id}`;
+  const send = (message: string, id: string) =>
+    f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: id,
+        tool: 'SendMessage',
+        input: { to: handle, message },
+      },
+    });
+  try {
+    // Nothing runs yet: no address to write to.
+    expect((await send('too early', 'early')).action).toBe('refused');
+    const accepted = f.call({ offer_id: f.job.id });
+    await ready;
+    expect(await send('the head moved to abc123', 'one')).toMatchObject({
+      action: 'delivered',
+      worker_handle: handle,
+      message: expect.stringMatching(/^Delivered to the DeepSeek worker tenjin-worker-/),
+    });
+    // The other session's handle is refused, with nothing queued.
+    f.session.sessionId = 'foreign';
+    expect((await send('not yours', 'foreign')).action).toBe('refused');
+    f.session.sessionId = 'root';
+    expect((await send('then rebase', 'two')).action).toBe('delivered');
+    // Held-and-offered is not the path of a running worker: no offer was made.
+    expect(f.route).not.toHaveBeenCalled();
+    release();
+    await afterReport;
+    // After the report and before the handback: not delivered, never silently dropped.
+    const late = await send('too late', 'late');
+    expect(late.action).toBe('refused');
+    expect(late.reason).toMatch(/not delivered/);
+    expect((await accepted).status).toBe('completed');
+    expect(heard).toEqual(['the head moved to abc123', 'then rebase']);
+    expect(worker.run).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
 it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
   const f = await ownedClaudeFixture();
   let release!: () => void;
