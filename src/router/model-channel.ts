@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { payerDir } from './fee';
+import { payerDir, ROUTING_DEPOSIT_KEY } from './fee';
 
 /** Once-per-job model routing is independent of variable tool-routing quotes. */
 export const MODEL_ROUTING_FEE_CEILING_ATOMIC = 3_000n;
@@ -59,4 +59,15 @@ export function modelInferenceRunDir(
     'model-inference',
     modelInferenceRunScope(origin, runId).id,
   );
+}
+
+/**
+ * THE LEDGER KEYS OF ONE RUN'S DEPOSITS. A run's own channel is refunded when the run
+ * ends, so its deposits are counted under the run (`prefix`): a confirmed refund gives
+ * back that run's own exposure and no other spend. What the run kept is then counted
+ * under `kept`, still a routing deposit to `tenjin status`.
+ */
+export function modelRunDepositKeys(origin: string, runId: string) {
+  const { id } = modelInferenceRunScope(origin, runId);
+  return { prefix: `${ROUTING_DEPOSIT_KEY}run:${id}:`, kept: `${ROUTING_DEPOSIT_KEY}kept:${id}` };
 }

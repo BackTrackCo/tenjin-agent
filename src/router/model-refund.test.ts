@@ -20,8 +20,10 @@ import { join } from 'node:path';
 import type { TypedDataDefinition } from 'viem';
 import { afterEach, expect, it, vi } from 'vitest';
 import { withFileLock } from '../lib/lock';
+import { readSpendSummary, spentOf } from '../lib/spend-ledger';
+import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { SIWX_HEADER } from '../lib/siwx';
-import { MISMATCH, testSigner } from './fee-test-utils';
+import { MISMATCH, TEST_POLICY, testSigner } from './fee-test-utils';
 import { modelInferenceRunScope } from './model-channel';
 import {
   ModelRefundJournal,
@@ -354,6 +356,64 @@ it('keeps a submitted receipt pending until on-chain reconciliation', async () =
     transaction,
   });
   expect(fetchImpl).toHaveBeenCalledTimes(2);
+});
+
+/** Counts one sent authorization in the daily budget, as the payer does for a deposit. */
+async function count(dataDir: string, nonce: string, amountAtomic: bigint) {
+  const authorizer = createLocalSpendAuthorizer({ dir: dataDir, policy: TEST_POLICY });
+  const auth = await authorizer.authorize({ amountAtomic, creator: 'router.test' });
+  await authorizer.commit(auth.reservationId, amountAtomic, { nonce });
+}
+const counted = async (dataDir: string) => spentOf((await readSpendSummary(dataDir))!);
+const runDeposit = (runId: string) =>
+  `routing-deposit:run:${modelInferenceRunScope(origin, runId).id}:first`;
+
+// Each run's first deposit counted toward the daily budget and nothing gave its refund
+// back: about twenty cheap runs used up a $5 day though most of the money had returned.
+it('gives a confirmed refund back to the daily budget, once, and never a pending one', async () => {
+  const { dataDir, runId, record, state, journal, newJournal } = await fixture();
+  await record();
+  await count(dataDir, runDeposit(runId), 1000n);
+  await count(dataDir, 'routing-deposit:another', 400n);
+  state.next = 'stale';
+  await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
+  expect(await counted(dataDir)).toBe(1400n);
+  state.balance = state.claimed;
+  await journal.recoverPending();
+  // The run cost 300 of its 1000 deposit: 700 came back, and the other spend stays.
+  expect(await counted(dataDir)).toBe(700n);
+  // A restart reads the same record and ledger, and gives nothing back twice.
+  await newJournal().recoverPending();
+  await expect(newJournal().close(runId)).resolves.toMatchObject({ state: 'refunded' });
+  expect(await counted(dataDir)).toBe(700n);
+});
+
+it("gives back no more than the run's own deposits still count, and nothing once the window rolled", async () => {
+  const { dataDir, runId, record, journal } = await fixture();
+  await record();
+  // The run deposited 1000, of which this window counted 500. The refund is 700.
+  await count(dataDir, runDeposit(runId), 500n);
+  await count(dataDir, 'routing-deposit:another', 400n);
+  await expect(journal.close(runId)).resolves.toMatchObject({ state: 'refunded' });
+  expect(await counted(dataDir)).toBe(400n);
+
+  const later = await fixture();
+  await later.record();
+  await count(later.dataDir, runDeposit(later.runId), 1000n);
+  const day = 86_400_000;
+  const rolled = new ModelRefundJournal(later.dataDir, origin, {
+    getSigner: async () => later.signer,
+    readChainId: async () => 8453,
+    readBlockTimestamp: async () => 1n,
+    readContract: async (args) =>
+      args.functionName === 'authorizationState'
+        ? true
+        : [later.state.balance, later.state.claimed],
+    fetchImpl: later.fetchImpl,
+    now: () => Date.now() + day,
+  });
+  await expect(rolled.close(later.runId)).resolves.toMatchObject({ state: 'refunded' });
+  expect(spentOf((await readSpendSummary(later.dataDir))!)).toBe(1000n);
 });
 
 it('does not report a discrepant refund receipt as verified', async () => {

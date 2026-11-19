@@ -23,6 +23,7 @@ import {
   modelChannelScope,
   modelInferenceRunDir,
   modelInferenceRunScope,
+  modelRunDepositKeys,
   MODEL_ROUTING_FEE_CEILING_ATOMIC,
   type ModelInferenceSlot,
   type ModelPaymentPath,
@@ -1336,7 +1337,12 @@ export class RoutingPayer {
       authorizer,
       reservationId: auth.reservationId,
       amountAtomic: amount,
-      key: `${ROUTING_DEPOSIT_KEY}${auth.reservationId ?? randomUUID()}`,
+      // A run's own channel is refunded at its end: its deposits are counted under the run.
+      key: `${
+        inference && this.deps.modelLane?.inferenceRun
+          ? modelRunDepositKeys(this.deps.modelLane.origin, this.deps.modelLane.inferenceRun).prefix
+          : ROUTING_DEPOSIT_KEY
+      }${auth.reservationId ?? randomUUID()}`,
       state: 'signed',
     });
     return amount;

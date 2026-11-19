@@ -9,6 +9,7 @@ import * as locks from '../lib/lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
+import { modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
 import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
@@ -229,6 +230,13 @@ it('journals each accepted run before signing requests reach the router and clos
     expect(closed).toEqual(pendingAtSend);
     expect(f.router.channels.size).toBe(2);
     expect(await f.make().summary(f.job)).toMatchObject({ actualAtomic: '5000' });
+    // Each run's deposit is counted under that run: the key its confirmed refund is
+    // given back to the daily budget by.
+    expect((await readSpendSummary(f.dir))?.exposures?.map((e) => e.nonce)).toEqual(
+      pendingAtSend.map((id) =>
+        expect.stringContaining(`routing-deposit:run:${modelInferenceRunScope(BASE, id).id}:`),
+      ),
+    );
   } finally {
     close.mockRestore();
   }

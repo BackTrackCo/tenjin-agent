@@ -22,7 +22,8 @@ import {
 import { z } from 'zod';
 import { withFileLock } from '../lib/lock';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
-import { modelInferenceRunDir, modelInferenceRunScope } from './model-channel';
+import { creditRefundedExposure } from '../lib/wallet/spend';
+import { modelInferenceRunDir, modelInferenceRunScope, modelRunDepositKeys } from './model-channel';
 import { RPC_TIMEOUT_MS, type RoutingPayerDeps } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 
@@ -628,6 +629,18 @@ export class ModelRefundJournal {
     balance: bigint,
   ): Promise<ModelRefundResult> {
     if (saved.submitted && BigInt(saved.submitted.balance) === balance) {
+      // THE DAILY BUDGET COUNTED THIS RUN'S DEPOSITS IN FULL. Only here, where the router's
+      // receipt and the chain agree, is the refund given back to it. It is given back
+      // before the record says refunded, and the ledger takes it once for a run, so a
+      // crash between the two writes credits nothing twice. A ledger that cannot take
+      // it leaves the refund pending, and the next pass asks again.
+      const credited = await creditRefundedExposure(
+        this.dataDir,
+        modelRunDepositKeys(new URL(saved.url).origin, saved.runId),
+        BigInt(saved.submitted.amountAtomic),
+        { now: () => this.now() },
+      );
+      if (credited === null) return { state: 'pending' };
       saved.state = 'refunded';
     } else {
       saved.state = saved.retryAfter > 0 ? 'closed' : 'no_balance';
