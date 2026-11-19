@@ -45,7 +45,9 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
     record.repeat('Bash', 3);
     record.repeat('Read', undefined);
     record.omitted(2);
-    record.retry(1, { cause: 'provider', status: 500 });
+    // The router's code stays in the retry, so a cut reply does not read like a provider
+    // failure the router answered.
+    record.retry(1, { cause: 'provider', status: 504, code: 'model_stream_idle' });
     // Start phases, from the accept on, each the first time it is reached.
     record.accepted(1_000, { cliProcess: 400, checked: 1_020, qualified: 1_350 });
     record.mark('childReady', 2_900);
@@ -70,7 +72,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
       omitted: 2,
       reasoning: { turns: 2, withThinking: 2, textTurns: 1, textWithThinking: 1 },
       repeats: [{ tool: 'Bash', count: 3 }],
-      retries: [{ attempt: 1, cause: 'provider', status: 500 }],
+      retries: [{ attempt: 1, cause: 'provider', status: 504, code: 'model_stream_idle' }],
       phases: { cliProcess: -600, checked: 20, qualified: 350, childReady: 1_900 },
       childMarks: {},
       start: {},

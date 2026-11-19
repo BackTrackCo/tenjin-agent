@@ -1002,6 +1002,9 @@ it.each([
       // The job's cap, and the cap each call asked for (less when the ceiling ran short).
       expect(record.settings.outputCap).toBe(cap);
       expect(record.calls).toMatchObject([{ outputCap: cap }]);
+      // The record keeps what was SENT: thinking on, and the cap the bridge set.
+      expect(record.settings.thinking).toEqual(['enabled']);
+      expect(record.settings.maxOutputTokens).toBe(cap);
       // Compaction triggers where the DeepSeek harness's does for that cap, in the child's
       // process env and in its flag settings alike.
       expect(record.settings.compactWindow).toBe(window);

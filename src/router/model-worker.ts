@@ -725,7 +725,7 @@ async function runQualifiedWorker(
         try {
           messages = workerMessages(raw, outputCap, options.omitted);
           diagnostics.mark('firstRequest');
-          diagnostics.request(raw);
+          diagnostics.request(raw, messages);
           diagnostics.omitted(options.omitted?.size ?? 0);
           timed.prepared();
         } catch (error) {
