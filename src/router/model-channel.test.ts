@@ -8,7 +8,7 @@ import { RoutingPayer } from './routing-payer';
 import { ModelTransport } from './model-transport';
 import { ROUTE_PAID_PATH } from './decision';
 import { modelChannelScope, type ModelPaymentPath } from './model-channel';
-import { FEE_ABOVE_CEILING } from './fee';
+import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 
 let dir: string;
 const payers: RoutingPayer[] = [];
@@ -97,7 +97,7 @@ it('funds independent SDK channels for tools, model routing and inference at eac
   expect(server.deposits).toBe(5);
 });
 
-it('keeps model-routing fees at $0.003 and ordinary deposit liquidity while binding a lane to its origin', async () => {
+it('pays a model-routing fee up to the tool router ceiling with ordinary deposit liquidity while binding a lane to its origin', async () => {
   dir = await mkdtemp(join(tmpdir(), 'model-route-ceiling-'));
   const server = new FakeRouter({ path: '/api/model-router/route', minDeposit: '1000000' });
   const deps = payerDeps(server, dir, privateKeyToAccount(generatePrivateKey()), {
@@ -111,8 +111,13 @@ it('keeps model-routing fees at $0.003 and ordinary deposit liquidity while bind
   await transport.route({ schemaVersion: 1 });
   expect([...server.channels.values()][0]!.balance).toBe(250000n);
   server.requirement.amount = '3001';
+  await expect(transport.route({ schemaVersion: 1 })).resolves.toMatchObject({
+    authorizedAtomic: 3001n,
+  });
+  expect(server.paidRequests()).toBe(2);
+  server.requirement.amount = (ROUTING_FEE_CEILING_ATOMIC + 1n).toString();
   await expect(transport.route({ schemaVersion: 1 })).rejects.toThrow();
-  expect(server.paidRequests()).toBe(1);
+  expect(server.paidRequests()).toBe(2);
   for (const path of [
     '/api/model-router/route',
     '/api/model-proxy/messages',
@@ -129,11 +134,14 @@ it('keeps model-routing fees at $0.003 and ordinary deposit liquidity while bind
         .send(`http://localhost:3939${path}`, { method: 'POST', jsonBody: {}, timeoutMs: 5000 }),
     ).rejects.toThrow();
   }
-  expect(server.paidRequests()).toBe(1);
+  expect(server.paidRequests()).toBe(2);
 });
-it('rejects a model-route quote above $0.003 before unlocking even when its caller supplies a larger ceiling', async () => {
+it('rejects a model-route quote above the tool router ceiling before unlocking even when its caller supplies a larger ceiling', async () => {
   dir = await mkdtemp(join(tmpdir(), 'model-route-independent-cap-'));
-  const server = new FakeRouter({ path: '/api/model-router/route', amount: '3001' });
+  const server = new FakeRouter({
+    path: '/api/model-router/route',
+    amount: (ROUTING_FEE_CEILING_ATOMIC + 1n).toString(),
+  });
   const deps = payerDeps(server, dir, privateKeyToAccount(generatePrivateKey()));
   const getSigner = vi.fn(deps.getSigner);
   const payer = new RoutingPayer({
@@ -156,7 +164,7 @@ it('rejects a model-route quote above $0.003 before unlocking even when its call
   expect(getSigner).not.toHaveBeenCalled();
   expect(server.paidRequests()).toBe(0);
 });
-it('keeps model service offer selection independent from per-answer tool-routing quotes', async () => {
+it('pays a model-route answer its own quote ahead of the fixed one, as the tool router does', async () => {
   dir = await mkdtemp(join(tmpdir(), 'model-route-offer-cap-'));
   const server = new FakeRouter({ path: '/api/model-router/route', amount: '31500', legacy: true });
   const transport = new ModelTransport({
@@ -165,6 +173,40 @@ it('keeps model service offer selection independent from per-answer tool-routing
     payerDeps: payerDeps(server, dir, privateKeyToAccount(generatePrivateKey())),
   });
   await transport.route({ schemaVersion: 1 });
-  expect(server.paidAmounts).toEqual([3000n]);
+  expect(server.paidAmounts).toEqual([31500n]);
   expect(server.warms).toBe(0);
+});
+
+it('skips a quote the job cap leaves no room for, before unlocking, and says the amount it stated', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-job-room-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', amount: '8100' });
+  const deps = payerDeps(server, dir, privateKeyToAccount(generatePrivateKey()));
+  const getSigner = vi.fn(deps.getSigner);
+  const transport = new ModelTransport({
+    dataDir: dir,
+    baseUrl: 'https://router.test',
+    payerDeps: { ...deps, getSigner },
+  });
+  await expect(
+    transport.route({ schemaVersion: 1 }, undefined, undefined, undefined, 8099n),
+  ).rejects.toMatchObject({ why: FEE_ABOVE_CEILING, quotedAtomic: 8100n });
+  expect(getSigner).not.toHaveBeenCalled();
+  expect(server.paidRequests()).toBe(0);
+  await expect(
+    transport.route({ schemaVersion: 1 }, undefined, undefined, undefined, 8100n),
+  ).resolves.toMatchObject({ authorizedAtomic: 8100n });
+  expect(server.paidAmounts).toEqual([8100n]);
+});
+
+it('says no fee was authorized for a routing call the router answered without a payment', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-route-free-'));
+  const server = new FakeRouter({ path: '/api/model-router/route', paid: false });
+  const transport = new ModelTransport({
+    dataDir: dir,
+    baseUrl: 'https://router.test',
+    payerDeps: payerDeps(server, dir, privateKeyToAccount(generatePrivateKey())),
+  });
+  await expect(transport.route({ schemaVersion: 1 })).resolves.toMatchObject({
+    authorizedAtomic: 0n,
+  });
 });

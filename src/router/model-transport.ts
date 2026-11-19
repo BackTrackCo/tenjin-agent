@@ -19,6 +19,7 @@ import {
 } from './model-channel';
 import { withFileLock, withFirstFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
+import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import {
   fittingOutputTokens,
   MODEL_MESSAGES_RESULT_BYTES,
@@ -220,7 +221,7 @@ export class ModelTransport {
       ...options.payerDeps,
       modelLane: {
         path: '/api/model-router/route',
-        ceilingAtomic: MODEL_ROUTING_FEE_CEILING_ATOMIC,
+        ceilingAtomic: ROUTING_FEE_CEILING_ATOMIC,
         origin: this.origin,
       },
     });
@@ -334,9 +335,11 @@ export class ModelTransport {
     beforeSend?: () => Promise<void>,
     /** Diagnostics only: the milliseconds of each HTTP round trip the decision call made. */
     fetchMs?: number[],
-  ) {
+    /** A lower ceiling for this call than the routing fee's own, from the job's cap. */
+    limitAtomic?: bigint,
+  ): Promise<{ json: unknown; authorizedAtomic: bigint }> {
     signal?.throwIfAborted();
-    const route = this.routing.routeFor(this.options.baseUrl);
+    const route = this.routing.routeFor(this.options.baseUrl, limitAtomic);
     let result;
     try {
       const fetchFn = this.options.payerDeps.fetchImpl ?? fetch;
@@ -380,7 +383,7 @@ export class ModelTransport {
     }
     if (!result.ok || result.status !== 200)
       throw new Error('Model router unavailable; keep native');
-    return result.json;
+    return { json: result.json, authorizedAtomic: route.authorized?.() ?? 0n };
   }
   async messages(
     job: ModelJob,

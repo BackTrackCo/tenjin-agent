@@ -97,6 +97,7 @@ export const NO_OFFER_CODES = [
   'job_cap_lowered',
   'capture_error',
   'route_error',
+  'fee_above_ceiling',
   'server_declined',
   'invalid_offer',
   'superseded',

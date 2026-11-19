@@ -21,7 +21,26 @@ import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
 import { modelConsent } from './model-settings';
+import { RouteSkipped } from './decision';
+import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 let dir: string;
+/**
+ * The transport's `route` as the handoff reads it: the router's answer, and what the call
+ * authorized, which is the offer's own fee unless a test says otherwise (`authorized`).
+ */
+function answering(route: (...args: never[]) => unknown) {
+  return async (...args: never[]) => {
+    const json = await route(...args);
+    const fee =
+      typeof json === 'object' && json !== null && 'routingFeeAtomic' in json
+        ? BigInt(String(json.routingFeeAtomic))
+        : 0n;
+    return {
+      json,
+      authorizedAtomic: (route as { authorized?: bigint }).authorized ?? fee,
+    };
+  };
+}
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -76,7 +95,7 @@ async function continuationFixture(multiple = false) {
     dataDir: dir,
     transport: {
       origin: 'http://localhost:3939',
-      route,
+      route: answering(route),
       requireResumeBudget,
       reconcile,
     } as unknown as ModelTransport,
@@ -614,7 +633,10 @@ it.each([
   const route = vi.fn(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
   const model = new ModelHandoff({
     dataDir: dir,
-    transport: { origin: 'http://localhost:3939', route } as unknown as ModelTransport,
+    transport: {
+      origin: 'http://localhost:3939',
+      route: answering(route),
+    } as unknown as ModelTransport,
   });
   const session: ModelSession = {
     sessionId: 'root',
@@ -673,6 +695,8 @@ it.each([
     }),
     undefined,
     expect.any(Function),
+    undefined,
+    ROUTING_FEE_CEILING_ATOMIC,
   );
   expect(await model.submitCodex(session, pending!.id, 'changed')).toMatchObject({
     action: 'native',
@@ -680,7 +704,7 @@ it.each([
   expect(await model.captureCodex(session, 'native-retry', native)).toBeNull();
   expect(await model.store.accept(pending!.id, 'root', 'turn')).toBeNull();
   expect(route).toHaveBeenCalledTimes(1);
-  expect(JSON.stringify(route.mock.calls[0])).not.toContain(
+  expect(JSON.stringify(route.mock.calls[0]?.slice(0, 3))).not.toContain(
     'Ask before publishing. Keep guarded Neon jobs native.',
   );
   const routed = await model.store.pending('root', 'turn');
@@ -1248,6 +1272,8 @@ it('records one code for each reason a held call gets no offer, and never its te
   expect(f.route).not.toHaveBeenCalled();
   f.route.mockRejectedValueOnce(new Error('PRIVATE-ASSIGNMENT refused'));
   expect(await reason()).toMatchObject({ code: 'route_error' });
+  f.route.mockRejectedValueOnce(new RouteSkipped(FEE_ABOVE_CEILING, { quotedAtomic: 250_001n }));
+  expect(await reason()).toMatchObject({ code: 'fee_above_ceiling', detail: '250001' });
   f.route.mockResolvedValueOnce({ schemaVersion: 1, action: 'native', reason: 'no_paid' });
   expect(await reason()).toMatchObject({ code: 'server_declined', detail: 'no_paid' });
   f.route.mockResolvedValueOnce({ ...offer, jobId: randomUUID() });

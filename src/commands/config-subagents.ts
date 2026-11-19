@@ -92,6 +92,10 @@ function whyReason(entry: NoOffer): string {
       return 'A local error before routing';
     case 'route_error':
       return 'The routing request failed, or a spend limit refused its fee';
+    case 'fee_above_ceiling':
+      return /^\d+$/.test(detail)
+        ? `The router stated a routing fee of ${usdOfAtomic(BigInt(detail))} for this offer, more than Tenjin pays for one routing call or the job cap leaves room for; nothing was paid`
+        : 'The router stated a routing fee above what Tenjin pays for one routing call or the job cap leaves room for; nothing was paid';
     case 'server_declined':
       return 'The router judged that the work stays native';
     case 'invalid_offer':

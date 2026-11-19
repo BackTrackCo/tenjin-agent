@@ -1,5 +1,6 @@
 import {
   MODEL_CODEX_TASK_BYTES,
+  MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
@@ -19,6 +20,8 @@ import { assertInstructionMetadataCurrent, savedInstructionContext } from './mod
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
 import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
+import { RouteSkipped } from './decision';
+import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { ModelConversationStore } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
@@ -662,6 +665,13 @@ export class ModelHandoff {
           ? 'job_cap_lowered'
           : null;
     let raw: unknown;
+    // What the router's 402 stated for this call, and the most the person's own job cap leaves
+    // for it beside one model call: the fee ceiling is the tool router's, with no cap of its own.
+    const capAtomic =
+      BigInt(job.capAtomic) < settings.maxJobAtomic ? BigInt(job.capAtomic) : settings.maxJobAtomic;
+    const roomAtomic = capAtomic - MODEL_MINIMUM_CALL_ATOMIC;
+    const limitAtomic =
+      roomAtomic < ROUTING_FEE_CEILING_ATOMIC ? roomAtomic : ROUTING_FEE_CEILING_ATOMIC;
     // Consent read again just before the routing fee is paid: what it then lacked.
     let changedBeforeFee: NoOffer['code'] | null = null;
     try {
@@ -681,9 +691,9 @@ export class ModelHandoff {
       if (changed) return native(changed);
       signal?.throwIfAborted();
       if (timing) timing.marks.routeSent = Date.now();
-      raw =
+      const answered =
         job.state === 'offered'
-          ? job.decision
+          ? { json: job.decision, authorizedAtomic: 0n }
           : await transport.route(
               input,
               signal,
@@ -709,12 +719,19 @@ export class ModelHandoff {
                 if (changedBeforeFee)
                   throw new Error('Model routing consent or workspace scope changed');
               },
-              ...(timing ? [timing.routeFetchMs] : []),
+              timing?.routeFetchMs,
+              limitAtomic,
             );
+      raw = answered.json;
       if (timing) timing.marks.routeAnswered = Date.now();
       signal?.throwIfAborted();
-    } catch {
-      await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
+    } catch (error) {
+      // A fee stated above what may be paid is skipped, as the tool router skips such an answer.
+      if (error instanceof RouteSkipped && error.why === FEE_ABOVE_CEILING)
+        await native('fee_above_ceiling', {
+          ...(error.quotedAtomic !== undefined ? { detail: error.quotedAtomic.toString() } : {}),
+        });
+      else await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
       return { action: 'native', reason: 'Routing failed or interrupted; retry native unchanged' };
     }
     const parsed = modelOfferSchema.safeParse(raw);

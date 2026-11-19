@@ -24,7 +24,6 @@ import {
   modelInferenceRunDir,
   modelInferenceRunScope,
   modelRunDepositKeys,
-  MODEL_ROUTING_FEE_CEILING_ATOMIC,
   type ModelInferenceSlot,
   type ModelPaymentPath,
 } from './model-channel';
@@ -391,6 +390,8 @@ interface Call {
   skipped?: string;
   /** The routing fee the router's 402 quoted, once read. */
   quoted?: bigint;
+  /** A lower ceiling for this call alone, when the job's cap leaves less than the fee ceiling. */
+  limitAtomic?: bigint;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
   /** A non-warm signed routing payment completed successfully. */
@@ -441,13 +442,29 @@ function modelOffer(offers: PaymentRequirements[], ceiling: bigint) {
 }
 
 export class RoutingPayer {
+  /**
+   * THE MOST ONE PAYMENT MAY BE. The routing lane has the tool router's own ceiling and no
+   * ceiling of its own, and a caller cannot widen it; the job's cap may narrow it for one call
+   * (`routeFor`'s `limitAtomic`). The inference lane keeps the ceiling its caller names.
+   */
   private paymentCeiling(): bigint {
     const lane = this.deps.modelLane;
     if (!lane) return ROUTING_FEE_CEILING_ATOMIC;
-    return modelChannelLane(lane.path) === 'model-routing' &&
-      lane.ceilingAtomic > MODEL_ROUTING_FEE_CEILING_ATOMIC
-      ? MODEL_ROUTING_FEE_CEILING_ATOMIC
-      : lane.ceilingAtomic;
+    if (modelChannelLane(lane.path) !== 'model-routing') return lane.ceilingAtomic;
+    const widest =
+      lane.ceilingAtomic < ROUTING_FEE_CEILING_ATOMIC
+        ? lane.ceilingAtomic
+        : ROUTING_FEE_CEILING_ATOMIC;
+    const limit = this.call?.limitAtomic;
+    return limit !== undefined && limit < widest ? limit : widest;
+  }
+
+  /** The offer the routing lane would pay, by the tool router's rule (`chosenOffer`). */
+  private routingChoice(offers: PaymentRequirements[]) {
+    const chosen = chosenOffer(offers);
+    return chosen && chosen.allowed && BigInt(chosen.offer.amount) <= this.paymentCeiling()
+      ? chosen.offer
+      : undefined;
   }
 
   private paymentQuote(headers: Headers): bigint | null {
@@ -456,10 +473,11 @@ export class RoutingPayer {
     if (!value) return null;
     try {
       const required = decodePaymentRequiredHeader(value);
-      const chosen = modelOffer(
-        routingOffers(required.x402Version, required.accepts),
-        this.paymentCeiling(),
-      );
+      const offers = routingOffers(required.x402Version, required.accepts);
+      const chosen =
+        modelChannelLane(this.deps.modelLane.path) === 'model-routing'
+          ? chosenOffer(offers)?.offer
+          : modelOffer(offers, this.paymentCeiling());
       return chosen ? BigInt(chosen.amount) : null;
     } catch {
       return null;
@@ -545,7 +563,7 @@ export class RoutingPayer {
    * anything is sent, so the routing fee's ceiling and channel never meet a
    * provider's 402.
    */
-  routeFor(baseUrl: string): DecisionRoute {
+  routeFor(baseUrl: string, limitAtomic?: bigint): DecisionRoute {
     const calls: Call[] = [];
     const route = new URL(this.deps.modelLane?.path ?? ROUTE_PAID_PATH, baseUrl);
     return {
@@ -607,7 +625,9 @@ export class RoutingPayer {
             () => {
               const first = firstChallenge;
               firstChallenge = undefined;
-              return this.noted(sent, () => this.pay(url, options, until, calls, false, first));
+              return this.noted(sent, () =>
+                this.pay(url, options, until, calls, false, first, limitAtomic),
+              );
             },
             until,
             sent,
@@ -653,6 +673,10 @@ export class RoutingPayer {
       deposited: () => settledIn(calls),
       toppedUp: () => this.takeToppedUp(),
       paid: () => calls.at(-1)?.paidAnswer === true,
+      authorized: () => {
+        const last = calls.at(-1);
+        return last?.paid === true ? (last.quoted ?? 0n) : 0n;
+      },
     };
   }
 
@@ -870,6 +894,7 @@ export class RoutingPayer {
     calls: Call[],
     carrier = false,
     firstChallenge?: Response,
+    limitAtomic?: bigint,
   ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
@@ -880,6 +905,7 @@ export class RoutingPayer {
       paid: false,
       answered: false,
       deposits: [],
+      ...(limitAtomic !== undefined ? { limitAtomic } : {}),
     };
     // The route's own record, which its `deposited` reads once the call ends.
     calls.push(call);
@@ -1597,20 +1623,19 @@ export class RoutingPayer {
       .registerPolicy(
         lane
           ? (version, requirements) => {
-              const chosen = modelOffer(
-                routingOffers(version, requirements),
-                this.paymentCeiling(),
-              );
+              const offers = routingOffers(version, requirements);
+              if (modelChannelLane(lane.path) === 'model-routing') {
+                const paid = this.routingChoice(offers);
+                return paid ? [paid] : [];
+              }
+              const chosen = modelOffer(offers, this.paymentCeiling());
               return chosen && BigInt(chosen.amount) <= this.paymentCeiling() ? [chosen] : [];
             }
           : routingPolicy,
       )
       .setSpendControls({
-        maxAmountPerPayment: lane
-          ? modelChannelLane(lane.path) === 'model-inference'
-            ? '$1'
-            : '$0.05'
-          : ROUTING_SPEND_CAP,
+        maxAmountPerPayment:
+          lane && modelChannelLane(lane.path) === 'model-inference' ? '$1' : ROUTING_SPEND_CAP,
       });
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
