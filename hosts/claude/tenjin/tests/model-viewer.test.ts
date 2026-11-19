@@ -3251,7 +3251,8 @@ test("a background worker's row reads as a native background agent's, and its re
   on('ui.render', { component: 'UserMessage' }, ($, e) =>
     $.ui.resolve(e).Text({ children: [e.props.text] }),
   );
-  const call = { ...INPUT, run_in_background: true };
+  // As Claude Code 2.1.327 handed it to the hook live: the string, not the boolean.
+  const call = { ...INPUT, run_in_background: 'true' };
   const held = (await remember($, call)).result;
   expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(
     '⏺Agent(Read selected source) · Tenjin offered DeepSeek',

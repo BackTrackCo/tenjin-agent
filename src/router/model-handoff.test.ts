@@ -171,6 +171,32 @@ it('offers a background Agent call, says its worker runs in the background, and 
   expect((await f.model.store.owned(id, 'root'))?.native).toMatchObject({
     run_in_background: true,
   });
+  // Live on alpha.78 (Claude Code 2.1.327): the host handed the field over as the STRING
+  // "true", the offer said nothing of the background and its accept ran in the foreground.
+  const spelled = await f.model.capture(session, 'string-call', {
+    ...held,
+    prompt: 'Read the other fixture.',
+    run_in_background: 'true',
+  });
+  expect(spelled).toMatchObject({ action: 'offer', background: true });
+  expect('instruction' in spelled ? spelled.instruction : '').toContain(
+    'its worker does: the accept call returns at once',
+  );
+  // "false" is a foreground call, and a value nobody understands keeps the call native.
+  const off = await f.model.capture(session, 'false-call', {
+    ...held,
+    prompt: 'Read a third fixture.',
+    run_in_background: 'false',
+  });
+  expect(off).toMatchObject({ action: 'offer' });
+  expect(off).not.toHaveProperty('background');
+  expect(
+    await f.model.capture(session, 'odd-call', { ...held, run_in_background: 'later' }),
+  ).toMatchObject({ action: 'native' });
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+    code: 'input_filter',
+    detail: 'run_in_background',
+  });
   // A foreground call's offer says nothing of the background.
   const plain = await f.model.capture(session, 'foreground-call', held);
   expect(plain).not.toHaveProperty('background');
@@ -180,7 +206,7 @@ it('offers a background Agent call, says its worker runs in the background, and 
     action: 'native',
     settled: id,
   });
-  expect(f.route).toHaveBeenCalledTimes(2);
+  expect(f.route).toHaveBeenCalledTimes(4);
 });
 
 it('names one keep-native path and runs the unchanged repeat natively with no second route', async () => {

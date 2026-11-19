@@ -1966,49 +1966,54 @@ it("keeps a worker's permission dialog open past the MCP SDK's 60 seconds, as a 
 
 // Operator ruling 2026-11-18: a background Agent call gets an offer, and its worker runs in
 // the background as a native background agent does.
-it("answers a background call's accept at once, runs its worker past the call, and keeps the result for the session", async () => {
-  const f = await ownedClaudeFixture('general-purpose', true, { run_in_background: true });
-  let finish!: (result: string) => void;
-  const finished = new Promise<string>((resolve) => {
-    finish = resolve;
-  });
-  worker.run.mockImplementation(async () => finished);
-  try {
-    const started = await f.call({ offer_id: f.job.id });
-    expect(started).toMatchObject({
-      status: 'started',
-      background: true,
-      offer_id: f.job.id,
-      worker_handle: expect.stringMatching(/^tenjin-worker-/),
+// The second spelling is the one Claude Code 2.1.327 handed the hook live (alpha.78): the
+// job then ran in the foreground and its accept blocked for 24.6 s.
+it.each([true, 'true'] as const)(
+  "answers a background call's accept at once, runs its worker past the call, and keeps the result for the session (run_in_background: %j)",
+  async (spelling) => {
+    const f = await ownedClaudeFixture('general-purpose', true, { run_in_background: spelling });
+    let finish!: (result: string) => void;
+    const finished = new Promise<string>((resolve) => {
+      finish = resolve;
     });
-    expect(started.instruction).toContain('Its result arrives by itself when it ends');
-    expect(started).not.toHaveProperty('result');
-    await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(1));
-    expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
-    // A repeat while it runs starts nothing and says where the result will come from.
-    const repeat = await f.call({ offer_id: f.job.id });
-    expect(repeat.reason).toContain('still running in the background');
-    expect((await f.activity({ offer_id: f.job.id })).activity.state).not.toBe('completed');
-    finish('background worker report');
-    await vi.waitFor(async () =>
-      expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('completed'),
-    );
-    // Its handback is the one a foreground accept returns, read by the same call.
-    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
-      status: 'completed',
-      result: 'background worker report',
-      worker_handle: started.worker_handle,
-      spend: { actualAtomic: '3000' },
-    });
-    expect(worker.run).toHaveBeenCalledTimes(1);
-    expect(f.route).not.toHaveBeenCalled();
-    // Its follow-up is held and offered by the worker's handle, as a foreground worker's is.
-    expect((await f.capture(started.worker_handle)).action).toBe('offer');
-  } finally {
-    finish('late');
-    await f.close();
-  }
-});
+    worker.run.mockImplementation(async () => finished);
+    try {
+      const started = await f.call({ offer_id: f.job.id });
+      expect(started).toMatchObject({
+        status: 'started',
+        background: true,
+        offer_id: f.job.id,
+        worker_handle: expect.stringMatching(/^tenjin-worker-/),
+      });
+      expect(started.instruction).toContain('Its result arrives by itself when it ends');
+      expect(started).not.toHaveProperty('result');
+      await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(1));
+      expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+      // A repeat while it runs starts nothing and says where the result will come from.
+      const repeat = await f.call({ offer_id: f.job.id });
+      expect(repeat.reason).toContain('still running in the background');
+      expect((await f.activity({ offer_id: f.job.id })).activity.state).not.toBe('completed');
+      finish('background worker report');
+      await vi.waitFor(async () =>
+        expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('completed'),
+      );
+      // Its handback is the one a foreground accept returns, read by the same call.
+      expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+        status: 'completed',
+        result: 'background worker report',
+        worker_handle: started.worker_handle,
+        spend: { actualAtomic: '3000' },
+      });
+      expect(worker.run).toHaveBeenCalledTimes(1);
+      expect(f.route).not.toHaveBeenCalled();
+      // Its follow-up is held and offered by the worker's handle, as a foreground worker's is.
+      expect((await f.capture(started.worker_handle)).action).toBe('offer');
+    } finally {
+      finish('late');
+      await f.close();
+    }
+  },
+);
 
 it.each(['a cancel by its offer', "the session's end"] as const)(
   'ends a running background worker on %s, with that cause in its stored handback',

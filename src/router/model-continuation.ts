@@ -3,6 +3,19 @@ import { MODEL_WORKER_HANDLE_PREFIX } from './model-conversations';
 
 export type ModelNativeTool = 'Agent' | 'Task' | 'SendMessage';
 
+/**
+ * A held call's `run_in_background`, as the host may spell it: Claude Code 2.1.327 handed
+ * the hook the STRING "true" for a call the model wrote that way, and a test that knew
+ * only the boolean let such a job run in the foreground. True and "true" are a
+ * background call, false, "false" and an absent field a foreground one; anything else is
+ * `null`, a value this code does not understand, and the call stays native.
+ */
+export function nativeBackground(native: Record<string, unknown>): boolean | null {
+  const value = native.run_in_background;
+  if (value === undefined || value === false || value === 'false') return false;
+  return value === true || value === 'true' ? true : null;
+}
+
 /** Reserve addresses, never mentions inside an ordinary assignment. */
 export function ownedModelReference(native: Record<string, unknown>, tool: ModelNativeTool) {
   const addresses = tool === 'SendMessage' ? [native.to, native.recipient] : [native.resume];
@@ -36,7 +49,7 @@ export function ownedModelReference(native: Record<string, unknown>, tool: Model
     Object.keys(native).some((key) => !allowed.includes(key)) ||
     (native.notify_when_idle !== undefined && native.notify_when_idle !== false) ||
     (tool === 'SendMessage' && native.message !== undefined && native.content !== undefined) ||
-    native.run_in_background ||
+    nativeBackground(native) !== false ||
     native.isolation ||
     native.team_name ||
     native.name

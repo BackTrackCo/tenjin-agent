@@ -489,7 +489,10 @@ export async function rememberModelOffer(
         {
           at: await $.clock.now(),
           state: 'offered',
-          ...(nativeInput.run_in_background === true ? { background: true as const } : {}),
+          // The host may hand the field over as the string "true" (2.1.327).
+          ...(nativeInput.run_in_background === true || nativeInput.run_in_background === 'true'
+            ? { background: true as const }
+            : {}),
         },
       );
       if (released) await $.state.set({ ...ASSIGNMENTS, id: released }, '');
