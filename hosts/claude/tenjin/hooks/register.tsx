@@ -17,6 +17,7 @@ import {
   raisedByThisPlugin,
   registerModelViewer,
   rememberModelOffer,
+  sessionLives,
   translateViewerContinuation,
   VIEWER_TYPE,
 } from './model-viewer';
@@ -312,6 +313,7 @@ export const register: Register = (on) => {
 
   // The CLI's prompt hook keeps the record before this existing turn surface.
   on('turn.start', async ($, e, next) => {
+    sessionLives();
     if (e.agentId === undefined) {
       const now = await $.clock.now();
       const previous = (await $.state.get(LAST_TURN_START)).value;

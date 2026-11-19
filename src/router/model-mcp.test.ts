@@ -540,6 +540,7 @@ async function ownedClaudeFixture(
       dataDir: dir,
       harness: 'claude',
       session: () => session,
+      sessionEnded,
       transport: getTransport,
     });
     const client = new Client(
@@ -551,6 +552,7 @@ async function ownedClaudeFixture(
     await client.connect(b);
     return { server, model, client };
   };
+  const sessionEnded = vi.fn();
   let { server, model, client } = await start();
   const store = new ModelJobStore(dir),
     conversations = new ModelConversationStore(dir);
@@ -624,6 +626,7 @@ async function ownedClaudeFixture(
     repo,
     configDir,
     session,
+    sessionEnded,
     model,
     store,
     conversations,
@@ -884,9 +887,12 @@ it('advertises read-only display activity and write-capable single and batch acc
       'cancel',
       'capture',
       'delegation_id',
+      // The id of the session that closed, from the plugin alone: it ends that session's
+      // background workers and nothing else.
+      'end_session',
       'offer_id',
       'offer_ids',
-      // With cancel: a label for the job's record of who ended it, one fixed value.
+      // With cancel: a label for the job's record of who ended it, fixed values.
       'reason',
       'task',
     ]);
@@ -2023,6 +2029,9 @@ it.each([
   // `/clear` ends the session and may keep this process: the plugin cancels each
   // background worker by its id, and the record says the session ended it.
   "the plugin's cancel at the session's end",
+  // The plugin then tells this process that the session closed: what it did not cancel
+  // by id ends too, and the session's record is dropped for the next session.
+  "the plugin's word that the session closed",
 ] as const)(
   'ends a running background worker on %s, with that cause in its stored handback',
   async (how) => {
@@ -2062,6 +2071,15 @@ it.each([
         const ended = await f.store.owned(f.job.id, 'root');
         expect(ended?.state).toBe('cancelled');
         expect(JSON.parse(ended?.result ?? '{}')).toMatchObject({ endedBy: 'session_ended' });
+      } else if (how === "the plugin's word that the session closed") {
+        // Another session's id ends nothing here.
+        expect(await f.call({ end_session: 'another-session' })).toEqual({ status: 'not_owned' });
+        expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+        expect(await f.call({ end_session: 'root' })).toEqual({ status: 'ended' });
+        const ended = await f.store.owned(f.job.id, 'root');
+        expect(ended?.state).toBe('cancelled');
+        expect(JSON.parse(ended?.result ?? '{}')).toMatchObject({ endedBy: 'session_ended' });
+        expect(f.sessionEnded.mock.calls).toEqual([['root']]);
       } else {
         closed = true;
         await f.close();

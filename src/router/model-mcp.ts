@@ -109,6 +109,11 @@ export function registerModelTool(
     dataDir: string;
     harness: 'claude' | 'codex';
     session: () => ModelSession | undefined;
+    /**
+     * The host said this session closed while the process goes on (`/clear` in Claude
+     * Code): its record is dropped, so the next session's first event is taken up.
+     */
+    sessionEnded?: (sessionId: string) => void;
     transport: () => Promise<ModelTransport>;
     /** This process was started inside a model worker. Default: read from the environment. */
     modelWorker?: boolean;
@@ -387,6 +392,22 @@ export function registerModelTool(
       ),
       warming.get(job.id)?.stop(),
     ]);
+  /**
+   * A SESSION THAT CLOSED WHILE THIS PROCESS GOES ON. Its background workers and the
+   * workers warming for its open offers end here, as they would have with the process: a
+   * closed session can be handed no result. A foreground worker ends with its accept call.
+   */
+  const endSession = async (sessionId: string) => {
+    const ids = new Set([...controllers.keys(), ...warming.keys()]);
+    await Promise.allSettled(
+      [...ids].map(async (id) => {
+        const job = await jobs.owned(id, sessionId);
+        if (!job || (controllers.has(id) && !backgroundJob(job))) return;
+        cancelledBy.set(id, 'session_ended');
+        await fenceJob(job);
+      }),
+    );
+  };
   // A `tenjin mcp` STARTED INSIDE A MODEL WORKER has neither tool, under whatever name the
   // worker's host registered it: a worker starts no DeepSeek worker and reads none (operator
   // ruling 2026-11-17). It once listed both under a second registration's name.
@@ -489,6 +510,8 @@ export function registerModelTool(
   const subagentInput = {
     offer_id: z.string().uuid().optional(),
     cancel: z.string().uuid().optional(),
+    // From the plugin alone, at the end of its session: the id of the session that closed.
+    end_session: z.string().min(1).max(200).optional(),
     // Mod transport only. The same MCP process has already seen the owned root hook.
     capture: z
       .object({
@@ -619,12 +642,20 @@ export function registerModelTool(
         return unavailable('Host worker permission bridge is not qualified');
       }
       if (
-        [args.offer_id, args.cancel, args.capture, args.delegation_id].filter(
+        [args.offer_id, args.cancel, args.capture, args.delegation_id, args.end_session].filter(
           (v) => v !== undefined,
         ).length !== 1
       )
         return unavailable('Use one subagent operation');
       await repaired;
+      if (args.end_session) {
+        // Only the session this process serves, and only from its own host.
+        if (options.harness !== 'claude' || args.end_session !== session.sessionId)
+          return answer({ status: 'not_owned' });
+        await endSession(session.sessionId);
+        options.sessionEnded?.(session.sessionId);
+        return answer({ status: 'ended' });
+      }
       if (args.cancel) {
         if (options.harness === 'claude') {
           // By its own id, in any turn and any process: the session's other jobs go on.

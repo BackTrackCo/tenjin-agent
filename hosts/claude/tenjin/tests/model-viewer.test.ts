@@ -3513,8 +3513,12 @@ test("the session's end cancels a background worker whose result was not handed 
   await f.clock.settle();
   await f.clock.advance(3000);
   expect(f.state.cancellations).toEqual([]);
-  await $.session.end({ reason: 'clear' });
-  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'session_ended' }]);
+  await $.session.end({ reason: 'clear', sessionId: SESSION });
+  // Each worker by its id, then the CLI is told which session closed, so it takes up the next.
+  expect(f.state.cancellations).toEqual([
+    { cancel: OFFER, reason: 'session_ended' },
+    { end_session: SESSION },
+  ]);
   // Its end is handed to nobody: the session it belonged to is closed.
   f.state.phase = 'cancelled';
   f.state.handback = JSON.stringify({ status: 'cancelled', endedBy: 'session_ended' });
@@ -3540,7 +3544,11 @@ test("the session's end leaves a foreground worker and a delivered background re
   const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'fg_accept' });
   await f.clock.settle();
   await $.session.end({ reason: 'clear' });
-  expect(f.state.cancellations).toEqual([]);
+  expect(f.state.cancellations).toEqual([{ end_session: SESSION }]);
+  // The model cannot say a session closed: that word is the host's, relayed by the plugin.
+  expect((await $.tool.call({ tool: ACCEPT, end_session: SESSION })).deny).toContain(
+    'when the session closes',
+  );
   release();
   await running;
   await f.clock.settle();

@@ -210,6 +210,13 @@ const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
 let sessionEnding = false;
 /**
+ * A turn that starts is a live session: `/clear` keeps this module for the session that
+ * follows (Claude Code 2.1.328 ends the old one, then gives the process a new session id).
+ */
+export function sessionLives(): void {
+  sessionEnding = false;
+}
+/**
  * Workers whose rows this module follows: an accept call in flight, or one it
  * took up again after a reload. A reload forgets them; a row then drawn as
  * running asks the CLI how its job stands (`adopt`).
@@ -1636,7 +1643,7 @@ const SESSION_END_WAIT_MS = 1500;
  * handed over is cancelled by its own id, with the reason its record keeps. An ended
  * job's cancel changes nothing, and its stored result stays readable on a resume.
  */
-async function endBackgroundWorkers($: Dollar): Promise<void> {
+async function endBackgroundWorkers($: Dollar, closed: string | undefined): Promise<void> {
   const ids = new Set<string>([...liveWorkers, ...undelivered.keys()]);
   try {
     for (const record of (await $.state.get(STATE)).value?.records ?? []) ids.add(record.offerId);
@@ -1658,7 +1665,18 @@ async function endBackgroundWorkers($: Dollar): Promise<void> {
       /* The Tenjin process ends its own workers when it stops. */
     }
   });
-  await Promise.race([Promise.allSettled(cancels), $.clock.sleep(SESSION_END_WAIT_MS)]);
+  // THE CLI IS TOLD THE SESSION CLOSED, after the cancels: it ends what this module did
+  // not know of (a worker warming for an open offer) and drops its record of the session,
+  // so that the next session of this Claude Code is taken up and gets offers.
+  const told = (async () => {
+    await Promise.allSettled(cancels);
+    try {
+      await $.mcp.call(SERVER, 'subagent', { end_session: closed ?? (await $.session.id()) });
+    } catch {
+      /* The Tenjin process ends its own workers when it stops. */
+    }
+  })();
+  await Promise.race([told, $.clock.sleep(SESSION_END_WAIT_MS)]);
 }
 
 async function watchAccept(
@@ -1869,7 +1887,9 @@ export function registerModelViewer(on: On): void {
   on('session.end', async ($, e, next) => {
     sessionEnding = true;
     try {
-      await endBackgroundWorkers($);
+      // The event names the session that closed.
+      const closed = (e as { sessionId?: unknown }).sessionId;
+      await endBackgroundWorkers($, typeof closed === 'string' && closed ? closed : undefined);
     } catch {
       /* The session ends as it would have. */
     }
@@ -1988,6 +2008,9 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin makes an offer only for an Agent, Task or SendMessage call it holds. Call that tool; never send capture yourself.',
       };
+    // The end of a session is the host's word, which only this plugin relays.
+    if (e.end_session !== undefined && next.origin.plugin !== 'tenjin')
+      return { deny: 'Tenjin ends a session’s workers by itself when the session closes.' };
     // `reason` says the person stopped the worker's agent, or that its session ended, so
     // only this plugin sends it.
     if (e.reason !== undefined && next.origin.plugin !== 'tenjin')

@@ -327,6 +327,11 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     dataDir: ctx.dataDir,
     harness: opts.harness ?? 'claude',
     session: () => modelSession,
+    // Claude Code keeps this process across `/clear`, which starts another session id.
+    // The record of the closed one would refuse every call of the new one (`no_session`).
+    sessionEnded: (sessionId) => {
+      if (modelSession?.sessionId === sessionId) modelSession = undefined;
+    },
     transport: async () => {
       const settings = await resolveContextSettings(ctx);
       return new ModelTransport({
