@@ -195,14 +195,14 @@ it('applies a tool change announced in a message to the tools it offers, and sen
     ...(deferred ? { defer_loading: true } : {}),
   });
   const announced =
-    'The following tools just became available and are ready to use:\nmcp__x402__request\nmcp__x402__subagent';
+    'The following tools just became available and are ready to use:\nmcp__docs__search\nmcp__docs__read';
   const result = workerMessages({
     model: 'deepseek-flash',
     tools: [
       tool('Bash'),
-      tool('mcp__x402__request', true),
+      tool('mcp__docs__search', true),
       tool('DeferredToolPlaceholder', true),
-      tool('mcp__x402__subagent', true),
+      tool('mcp__docs__read', true),
     ],
     messages: [
       { role: 'user', content: 'Find the pinned version.' },
@@ -215,10 +215,10 @@ it('applies a tool change announced in a message to the tools it offers, and sen
         role: 'system',
         content: [
           { type: 'text', text: announced },
-          { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp__x402__request' } },
+          { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp__docs__search' } },
           {
             type: 'tool_addition',
-            tool: { type: 'tool_reference', name: 'mcp__x402__subagent' },
+            tool: { type: 'tool_reference', name: 'mcp__docs__read' },
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -227,8 +227,8 @@ it('applies a tool change announced in a message to the tools it offers, and sen
   });
   expect(result.tools?.map((t) => t.name)).toEqual([
     'Bash',
-    'mcp__x402__request',
-    'mcp__x402__subagent',
+    'mcp__docs__search',
+    'mcp__docs__read',
   ]);
   expect((result.messages as unknown[]).at(-1)).toEqual({
     role: 'system',
