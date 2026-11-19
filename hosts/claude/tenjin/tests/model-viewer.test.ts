@@ -2257,7 +2257,7 @@ test("the plugin's own activity read is told from the model's by who raised it, 
   expect(raisedByThisPlugin(undefined)).toBe(false);
 });
 
-for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as const)
+for (const settled of ['kept native', 'cancelled', 'expired'] as const)
   test(
     'an offer that is ' + settled + ' draws no row of its own, so the task has one row',
     async ($, on) => {
@@ -2280,10 +2280,7 @@ for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as con
       };
       // Open: the held call reads as the offer it is.
       expect(await offerRow()).toBe('⏺Agent(Read selected source) · Tenjin offered DeepSeek');
-      if (settled === 'accepted') {
-        f.state.work = () => ({ result: 'handback', text: 'handback' });
-        await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
-      } else if (settled === 'kept native') {
+      if (settled === 'kept native') {
         // The veto is the same call again, with nothing said: the CLI lets it run native.
         f.state.keepNative = true;
         await remember($);
@@ -2291,7 +2288,7 @@ for (const settled of ['accepted', 'kept native', 'cancelled', 'expired'] as con
       } else if (settled === 'cancelled') {
         await $.tool.call({ tool: ACCEPT, cancel: OFFER, tool_use_id: 'parent_cancel' });
       } else await f.clock.advance(15 * 60_000 + 1000);
-      // Settled: only the worker's row or the native call's own row is left for the task.
+      // Settled with no worker: only the native call's own row is left for the task.
       expect(await offerRow()).toBe('');
       await f.clock.settle();
     },
@@ -2690,15 +2687,15 @@ test('two offers and two workers at once each keep their own row, viewer entry a
   const b = $.tool.call({ tool: ACCEPT, offer_id: OFFER2, tool_use_id: 'accept_b' });
   await f.clock.settle();
   await f.clock.advance(3000);
-  // Two settled offers draw nothing of their own; two workers draw two live rows.
-  expect(await heldRow($, 'held_a', INPUT, first)).toBe('');
-  expect(await heldRow($, 'held_b', INPUT2, second)).toBe('');
+  // Each worker's live row stands where its call was held; its accept call draws nothing.
   const liveA = (s: number) =>
     `⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · ${s}s · $0.0043 so far  ⎿  Read(src/example.ts)`;
   const liveB = (s: number) =>
     `⏺DeepSeek(Check the cancel path) · 7 tool uses · 9k tokens · ${s}s · $0.0012 so far  ⎿  Read(src/example.ts)`;
-  expect((await acceptRow($, 'accept_a', OFFER))[0]).toBe(liveA(8));
-  expect((await acceptRow($, 'accept_b', OFFER2))[0]).toBe(liveB(3));
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe(liveA(8));
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe(liveB(3));
+  expect((await acceptRow($, 'accept_a', OFFER))[0]).toBe('');
+  expect((await acceptRow($, 'accept_b', OFFER2))[0]).toBe('');
   // Each has its own entry in the agent list.
   expect(f.state.agents.map((agent) => [agent.type, agent.description])).toEqual([
     [TYPE, 'Read selected source'],
@@ -2714,19 +2711,19 @@ test('two offers and two workers at once each keep their own row, viewer entry a
   release[OFFER]!();
   const endedA = (await a).text;
   await f.clock.settle();
-  expect(await acceptRow($, 'accept_a', OFFER, endedA)).toEqual([
+  expect((await acceptRow($, 'accept_a', OFFER, endedA))[0]).toBe('');
+  expect(await heldRow($, 'held_a', INPUT, first)).toBe(
     '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 9s · $0.039)',
-    'success',
-  ]);
+  );
   await f.clock.advance(1000);
-  expect((await acceptRow($, 'accept_b', OFFER2))[0]).toBe(liveB(4));
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe(liveB(4));
   release[OFFER2]!();
   const endedB = (await b).text;
   await f.clock.settle();
-  expect(await acceptRow($, 'accept_b', OFFER2, endedB)).toEqual([
+  expect((await acceptRow($, 'accept_b', OFFER2, endedB))[0]).toBe('');
+  expect(await heldRow($, 'held_b', INPUT2, second)).toBe(
     '⏺DeepSeek(Check the cancel path)  ⎿  Done (7 tool uses · 41.2k tokens · 6s · $0.039)',
-    'success',
-  ]);
+  );
 });
 
 test('a repeat that keeps one of two identical offers native clears that offer’s row alone', async ($, on) => {
@@ -2766,7 +2763,7 @@ test('an offer for a custom agent type draws its row and its viewer entry as a b
   const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
   await f.clock.settle();
   await f.clock.advance(1000);
-  expect((await acceptRow($, 'parent_accept', OFFER))[0]).toBe(
+  expect(await heldRow($, 'held_agent', custom, held)).toBe(
     '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
   );
   expect(f.state.agents.map((agent) => [agent.type, agent.description])).toEqual([
@@ -3080,14 +3077,203 @@ test("the accept and cancel of an offer are allowed by the mod, and every other 
 
 // Live on alpha.68: for a split second the held Agent row and the DeepSeek row both drew,
 // between the accept row's first frame and the accept hook writing the worker's record.
-test('the held Agent row gives way the moment its accept row draws', async ($, on) => {
-  setup($, on);
-  const held = (await remember($)).result;
-  expect(await heldRow($, 'held_a', INPUT, held)).toContain('Tenjin offered DeepSeek');
-  expect((await acceptRow($, 'parent_accept', OFFER))[0]).toContain(
-    'DeepSeek(Read selected source)',
+/** A held Agent row as a surface draws it: its lines, and whether its name is struck through. */
+async function heldDrawing(
+  $: Engine,
+  toolUseId: string,
+  input: Record<string, unknown>,
+  output: unknown,
+  surface: (typeof SURFACES)[number] = 'terminal',
+  isExpanded = false,
+) {
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface,
+    component: 'ToolUse',
+    props: {
+      ...toolRow(toolUseId, 'Agent', input),
+      isRunning: false,
+      output,
+      ...(isExpanded ? { isExpanded } : {}),
+    },
+  });
+  const lines = (await shownLines(ui)).join('');
+  const [name] = await ui.findAll({ type: 'Text', text: 'Agent' });
+  const [dot] = await ui.findAll({ type: 'Text', text: '⏺' });
+  await ui.unmount();
+  return { lines, struck: name?.props.strikethrough === true, dot: dot?.props.color };
+}
+
+// Operator ruling 2026-11-18, after the alpha.73 run: the worker's row replaces the held
+// call's row in place, as the tool router's lookup replaces a held `Web Search` row, and
+// the accept adds no row of its own.
+test("an accepted offer's worker draws where its Agent call was held, live and to its end, and the accept call draws nothing", async ($, on) => {
+  const f = setup($, on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine row'] }),
   );
-  expect(await heldRow($, 'held_a', INPUT, held)).toBe('');
+  const held = (await remember($)).result;
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const handback = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 133_000,
+    toolUses: 12,
+    tokens: 41_234,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'worker report',
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: handback, text: handback };
+  };
+  for (const surface of SURFACES) {
+    // Open: the native name struck through and what Tenjin offered, as a held Web Search reads.
+    expect(await heldDrawing($, 'held_a', INPUT, held, surface)).toEqual({
+      lines: '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
+      struck: true,
+      dot: undefined,
+    });
+  }
+  f.state.liveFile = false;
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.settle();
+  const accept = async (surface: (typeof SURFACES)[number], output?: string, full = false) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...toolRow('parent_accept', ACCEPT, { offer_id: OFFER }, output),
+        ...(full ? { isExpanded: true } : {}),
+      },
+    });
+    const lines = (await shownLines(ui)).join('');
+    await ui.unmount();
+    return lines;
+  };
+  for (const surface of SURFACES) {
+    expect(await accept(surface)).toBe('');
+    expect(await heldDrawing($, 'held_a', INPUT, held, surface)).toEqual({
+      lines: '⏺DeepSeek(Read selected source) · starting · 0s',
+      struck: false,
+      dot: undefined,
+    });
+  }
+  f.state.liveFile = true;
+  await f.clock.advance(13_000);
+  const live =
+    '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 13s · $0.0043 so far  ⎿  Read(src/example.ts)';
+  for (const surface of SURFACES) {
+    expect((await heldDrawing($, 'held_a', INPUT, held, surface)).lines).toBe(live);
+    expect(await accept(surface)).toBe('');
+  }
+  // SHOWN IN FULL (ctrl+o) on one surface: the held call is the engine's row there and
+  // the accept call's row is the worker's. The other surface keeps the row in place.
+  expect((await heldDrawing($, 'held_a', INPUT, held, 'terminal', true)).lines).toBe('engine row');
+  expect(await accept('terminal', undefined, true)).toBe(live);
+  expect(await accept('desktop')).toBe('');
+  expect((await heldDrawing($, 'held_a', INPUT, held, 'terminal')).lines).toBe(live);
+  expect(await accept('terminal')).toBe('');
+  release();
+  expect((await running).text).toBe(handback);
+  await f.clock.settle();
+  for (const surface of SURFACES) {
+    expect(await accept(surface, handback)).toBe('');
+    expect(await heldDrawing($, 'held_a', INPUT, held, surface)).toEqual({
+      lines:
+        '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 2m 13s · $0.039)',
+      struck: false,
+      dot: 'success',
+    });
+  }
+});
+
+test("a held Agent row drawn after a resume ends from the accept call's own answer, and a repeated accept never replaces it", async ($, on) => {
+  setup($, on);
+  const held = {
+    status: 'completed',
+    agentId: 'tenjin-offer-' + OFFER,
+    prompt: INPUT.prompt,
+    content: [{ type: 'text', text: JSON.stringify({ action: 'offer', offer_id: OFFER }) }],
+    totalToolUseCount: 0,
+    totalDurationMs: 0,
+    totalTokens: 0,
+  };
+  const handback = JSON.stringify({
+    status: 'cancelled',
+    endedBy: 'budget',
+    elapsedMs: 61_000,
+    toolUses: 4,
+    tokens: 9000,
+    spend: { reservedAtomic: '50000', actualAtomic: '50000', uncertain: [] },
+  });
+  const refused = JSON.stringify({ action: 'native', reason: 'its worker is still running' });
+  // Nothing of the session's state is left: only the two calls and their answers.
+  expect((await heldDrawing($, 'held_a', INPUT, held)).lines).toBe(
+    '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
+  );
+  // A call sent again while the worker ran is drawn first: it started nothing.
+  expect((await acceptRow($, 'parent_again', OFFER, refused))[0]).toBe('');
+  expect((await acceptRow($, 'parent_accept', OFFER, handback))[0]).toBe('');
+  expect((await acceptRow($, 'parent_again', OFFER, refused))[0]).toBe('');
+  expect(await heldDrawing($, 'held_a', INPUT, held)).toEqual({
+    lines:
+      '⏺DeepSeek(Read selected source)  ⎿  Budget reached (4 tool uses · 9k tokens · 1m 1s · $0.05)',
+    struck: false,
+    dot: 'error',
+  });
+});
+
+// Two or more Agent calls of one response are Claude Code's own summary block, which no
+// render hook draws: their held rows never draw, so their workers draw at the accept call.
+test('an accept batch draws only the workers whose held call has no row of its own', async ($, on) => {
+  const f = setup($, on);
+  f.state.offer = OFFER;
+  await remember($, INPUT);
+  f.state.offer = OFFER2;
+  await remember($, INPUT2);
+  f.state.offer = THIRD_OFFER;
+  const alone = { ...INPUT, description: 'Sent again alone' };
+  const third = (await remember($, alone)).result;
+  f.state.offer = OFFER;
+  // The third call was the only Agent call of its response: its row is drawn.
+  expect((await heldDrawing($, 'held_c', alone, third)).lines).toContain('Tenjin offered DeepSeek');
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback', text: 'handback' };
+  };
+  const batch = async (ids: string[]) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props: toolRow('accept_' + ids.length, ACCEPT, { offer_ids: ids }),
+    });
+    const lines = (await shownLines(ui)).join('');
+    await ui.unmount();
+    return lines;
+  };
+  const all = [OFFER, OFFER2, THIRD_OFFER];
+  const running = $.tool.call({ tool: ACCEPT, offer_ids: all, tool_use_id: 'accept_3' });
+  await f.clock.settle();
+  const group = await batch(all);
+  expect(group).toContain('Running 2 DeepSeek agents…');
+  expect(group).toContain('├ Read selected source');
+  expect(group).toContain('└ Check the cancel path');
+  expect(group).not.toContain('Sent again alone');
+  expect((await heldDrawing($, 'held_c', alone, third)).lines).toContain(
+    'DeepSeek(Sent again alone)',
+  );
+  release();
+  await running;
+  await f.clock.settle();
 });
 
 // Live on alpha.70: two held Explore calls were accepted together, and the line stayed as a

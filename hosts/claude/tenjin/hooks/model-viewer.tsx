@@ -101,8 +101,72 @@ const views = new Map<string, View>();
 const viewerCalls = new Map<string, { row: Row; input: Json }>();
 /** A viewer call a router tool served, by its id: its row names that tool (`Exa search`). */
 const servedCalls = new Map<string, string>();
-/** Offers whose accept row has drawn: their held Agent row gives way at once (one row a task). */
-const drawnAccepts = new Set<string>();
+/**
+ * THE WORKER'S ROW STANDS WHERE ITS HELD AGENT CALL STOOD, as the tool router redraws a
+ * held `Web Search` row with the lookup that took it. Claude Code draws one Agent call
+ * of a response as a row of its own, which this mod redraws: the offer while it is
+ * open, then the worker. The accept call then draws nothing for that offer. Two or more
+ * Agent calls of one response are Claude Code's own summary block, which no hook
+ * redraws, so only their workers draw at the accept call.
+ *
+ * `heldRows`: the offers whose held row last drew compact, by surface. A row drawn in
+ * full (ctrl+o) is the engine's, and there the accept call draws the worker.
+ * `acceptSeen`: the accept call that runs an offer, as its row last read it; its answer
+ * is how the worker ended, which the held row has no other way to read after a resume.
+ * Facts about the drawing alone, in the module's own memory: a reload starts them over
+ * and the next drawing of each row writes them again.
+ */
+const heldRows = new Set<string>();
+type AcceptCall = { output?: unknown; isInterrupted?: boolean; isErrored?: boolean };
+type AcceptSeen = AcceptCall & { call: string; batched: boolean; started: boolean };
+const acceptSeen = new Map<string, AcceptSeen>();
+/** Kept for a session's rows: far more than one screen holds. */
+const DRAWN_MAX = 512;
+function markHeldRow($: Dollar, key: string, compact: boolean): void {
+  if (compact === heldRows.has(key)) return;
+  if (compact) heldRows.add(key);
+  else heldRows.delete(key);
+  if (heldRows.size > DRAWN_MAX) heldRows.delete(heldRows.values().next().value!);
+  $.ui.invalidate('ui.render');
+}
+/** An accept call that started nothing says so with an `action`; it never ran the worker. */
+function startedNothing(output: unknown): boolean {
+  return typeof acceptResponse(textOf(output))?.action === 'string';
+}
+/**
+ * What an accept call's row read of its offers. The call that started the worker is
+ * the offer's own (the accept hook names it); a call sent again while the worker runs
+ * started nothing and never replaces it. After a reload the first call drawn takes an
+ * offer, and one that ran its worker takes it from one that started nothing.
+ */
+function noteAccept($: Dollar, call: string | undefined, ids: string[], props: AcceptCall): void {
+  if (!short(call)) return;
+  let changed = false;
+  for (const id of ids) {
+    const held = acceptSeen.get(id);
+    const started = !startedNothing(props.output);
+    if (held && held.call !== call && (held.started || !started)) continue;
+    if (
+      held?.call === call &&
+      held.output === props.output &&
+      held.isInterrupted === props.isInterrupted &&
+      held.isErrored === props.isErrored
+    )
+      continue;
+    acceptSeen.delete(id);
+    acceptSeen.set(id, {
+      call,
+      batched: ids.length > 1,
+      started: held?.call === call ? held.started || started : started,
+      ...(props.output !== undefined ? { output: props.output } : {}),
+      ...(props.isInterrupted !== undefined ? { isInterrupted: props.isInterrupted } : {}),
+      ...(props.isErrored !== undefined ? { isErrored: props.isErrored } : {}),
+    });
+    changed = true;
+  }
+  while (acceptSeen.size > DRAWN_MAX) acceptSeen.delete(acceptSeen.keys().next().value!);
+  if (changed) $.ui.invalidate('ui.render');
+}
 /**
  * THE LINE FOR A PARALLEL AGENT SUMMARY'S HELD CALLS waits for what the parent does with
  * their offers. Claude Code draws that summary itself (`2 Explore agents finished`), with
@@ -1790,7 +1854,15 @@ export function registerModelViewer(on: On): void {
     for (const id of offerIds) {
       if (!liveWorkers.has(id)) watchers.set(id, await watchAccept($, id, e.agentId, batched));
     }
-    if (watchers.size && short(e.tool_use_id)) acceptCalls.set(e.tool_use_id, offerIds);
+    if (watchers.size && short(e.tool_use_id)) {
+      acceptCalls.set(e.tool_use_id, offerIds);
+      // This call runs these workers: its row's answer is theirs, whichever row draws it.
+      for (const id of watchers.keys()) {
+        const seen = acceptSeen.get(id);
+        if (seen?.call === e.tool_use_id) seen.started = true;
+        else acceptSeen.set(id, { call: e.tool_use_id, batched, started: true });
+      }
+    }
     let outcome: Awaited<ReturnType<typeof next>>;
     try {
       outcome = await next(e);
@@ -2072,36 +2144,57 @@ export function registerModelViewer(on: On): void {
         return next(e);
       }
       return (
-        (await acceptRows($, $.ui.resolve(e), offerIds, e.props, e.props.isExpanded)) ?? next(e)
+        (await acceptRows($, $.ui.resolve(e), e.surface, offerIds, e.props, e.props.isExpanded)) ??
+        next(e)
       );
     }
     if (tool === 'Agent' || tool === 'Task') {
       const held = heldOffer(output);
       if (!held) return next(e);
       const offerId = String(record(output)?.agentId ?? '').slice(13);
+      const ui = $.ui.resolve(e);
+      const full = e.props.isExpanded === true;
       if (held !== 'unavailable' && UUID.test(offerId)) {
         const [offer, worker, now] = await Promise.all([
           $.state.get({ ...OFFERS, id: offerId }),
           $.state.get({ ...WORKERS, id: offerId }),
           $.clock.now(),
         ]);
-        // ONE ROW A TASK. An offer that was accepted, kept native by its repeated
-        // call, cancelled or left to expire is settled: the worker's row or the
-        // native call's own row is the task's row, and this one draws nothing.
-        // ctrl+o still shows the held call and its offer.
-        if (
-          worker.value ||
-          drawnAccepts.has(offerId) ||
-          (offer.value && (offer.value.state !== 'offered' || now - offer.value.at > OFFER_MS))
-        ) {
-          if (e.props.isExpanded === true) return next(e);
-          const { Box } = $.ui.resolve(e);
-          return <Box display="none" />;
+        const key = e.surface + ':' + offerId;
+        const seen = acceptSeen.get(offerId);
+        // ONE ROW A TASK, AND IT IS THIS ONE. An accepted offer's worker draws here, where
+        // its call stood, and the accept call draws nothing for it. Shown in full
+        // (ctrl+o), this row is the held call and its offer, and the accept call's row
+        // is the worker's.
+        if (worker.value || seen) {
+          markHeldRow($, key, !full);
+          if (full) return next(e);
+          const row = await describeWorker(
+            $,
+            offerId,
+            seen ?? {},
+            seen?.batched ?? false,
+            titleOf(record(input), 'subagent'),
+          );
+          if (row) return workerRow(ui, row);
         }
+        // An offer kept native by its repeated call, cancelled or left to expire is
+        // settled with no worker: the native call's own row is the task's row, and this
+        // one draws nothing.
+        else if (
+          offer.value &&
+          (offer.value.state !== 'offered' || now - offer.value.at > OFFER_MS)
+        ) {
+          if (full) return next(e);
+          return <ui.Box display="none" />;
+        } else markHeldRow($, key, !full);
       }
-      return workerRow($.ui.resolve(e), {
+      // THE OFFER, as the tool router marks a held `Web Search` row: the native name
+      // struck through, and what Tenjin offered in its place.
+      return workerRow(ui, {
         state: 'held',
         name: tool,
+        struck: held !== 'unavailable',
         argument: titleOf(record(input), 'subagent'),
         tail:
           held === 'unavailable'
@@ -2120,7 +2213,7 @@ export function registerModelViewer(on: On): void {
     if (e.props.isCallsOnly !== false && e.props.calls.length === 1 && call?.tool === ACCEPT) {
       const ids = acceptedIds(call.input);
       if (ids && ids.length > 1) {
-        const batch = await acceptRows($, $.ui.resolve(e), ids, call, false);
+        const batch = await acceptRows($, $.ui.resolve(e), e.surface, ids, call, false);
         if (batch !== undefined) return batch;
       }
     }
@@ -2306,121 +2399,138 @@ type Elements = ReturnType<Dollar['ui']['resolve']>;
 type WorkerRow = {
   state: 'running' | 'done' | 'error' | 'held';
   name: string;
+  /** The native call's name, struck through: an offer stands in its place. */
+  struck?: boolean;
   argument?: string;
   starting?: boolean;
   tail?: string;
   under?: string;
   ending?: WorkerEnding;
 };
+/**
+ * One worker's row, from the accept call that runs it (its answer, once it has one)
+ * and the worker's own record. Undefined for an answered call that says nothing of a
+ * worker and has none: that call keeps the engine's row.
+ */
+async function describeWorker(
+  $: Dollar,
+  offerId: string,
+  { output, isInterrupted, isErrored }: AcceptCall,
+  batched: boolean,
+  described?: string,
+): Promise<WorkerRow | undefined> {
+  const said = textOf(output);
+  const answer = acceptResponse(said);
+  const ended = (batched ? batchOutcomes(answer)?.get(offerId) : undefined) ?? answer;
+  const [held, known] = await Promise.all([
+    $.state.get({ ...WORKERS, id: offerId }),
+    $.state.get(STATE),
+  ]);
+  const live = held.value;
+  // Before the accept hook has run (the host is still checking the call), the offer's
+  // own record names the task; after a resume, the held call's own description does.
+  const title =
+    live?.title ??
+    known.value?.records.find((r) => r.offerId === offerId)?.title ??
+    described ??
+    'subagent';
+  const head = { name: 'DeepSeek', argument: title };
+  const status = ended?.status;
+  if (
+    status === 'completed' ||
+    status === 'cancelled' ||
+    status === 'unknown' ||
+    status === 'stopped'
+  ) {
+    const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
+    return {
+      ...head,
+      state: status === 'completed' ? 'done' : 'error',
+      ending: { word, parts: doneParts(ended!, live) },
+    };
+  }
+  // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
+  if (status === 'not_started' || typeof ended?.action === 'string')
+    return {
+      ...head,
+      state: isErrored || status === 'not_started' ? 'error' : 'held',
+      ending: {
+        word: 'Not started',
+        parts: typeof ended?.elapsedMs === 'number' ? [duration(ended.elapsedMs)] : [],
+      },
+    };
+  // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
+  // for a call it moved to the background after two minutes. The worker's
+  // record says where it stands; a missing answer never reads as an end.
+  if (live?.ended)
+    return {
+      ...head,
+      state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
+      ending: workerEnding(live),
+    };
+  if (isInterrupted)
+    return {
+      ...head,
+      state: 'error',
+      ending: {
+        word: 'Interrupted',
+        parts: live?.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [],
+      },
+    };
+  const moved = output !== undefined && HOST_MOVED.test(said ?? '');
+  if (output !== undefined && !live && !moved) return undefined;
+  // A running row nothing here follows, after a reload or a resume: the CLI is asked.
+  if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
+  // From the moment of accept: Claude Code is still starting until the first tick says more.
+  const starting = live ? live.state !== 'running' : !moved;
+  const parts = [
+    !live && moved ? 'running in the background' : undefined,
+    live?.toolUses ? toolUses(live.toolUses) : undefined,
+    live?.tokens ? tokens(live.tokens) : undefined,
+    live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
+    live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
+  ].filter((part): part is string => part !== undefined);
+  return {
+    ...head,
+    state: 'running',
+    starting,
+    ...(parts.length ? { tail: ' · ' + parts.join(' · ') } : {}),
+    ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
+  };
+}
+/**
+ * WHAT AN ACCEPT CALL DRAWS: the workers whose held Agent row is not there to draw
+ * them (see `heldRows`), as one row or one group. Nothing where each of its workers
+ * draws on its own held row: the accept adds no row of its own, as the request call
+ * that took a held `Web Search` draws none.
+ */
 async function acceptRows(
   $: Dollar,
   ui: Elements,
+  surface: string,
   offerIds: string[],
-  {
-    output,
-    isInterrupted,
-    isErrored,
-  }: {
-    output?: unknown;
-    isInterrupted?: boolean;
-    isErrored?: boolean;
-  },
+  call: AcceptCall & { tool_use_id?: string },
   isExpanded?: boolean,
 ) {
-  const said = textOf(output);
-  const answer = acceptResponse(said);
-  const results = offerIds.length > 1 ? batchOutcomes(answer) : undefined;
-  const describeWorker = async (offerId: string): Promise<WorkerRow | undefined> => {
-    const ended = results?.get(offerId) ?? answer;
-    // The held Agent row reads this, so it never draws beside the DeepSeek row.
-    if (!drawnAccepts.has(offerId)) {
-      drawnAccepts.add(offerId);
-      if (drawnAccepts.size > 64) drawnAccepts.delete(drawnAccepts.values().next().value!);
-      $.ui.invalidate('ui.render');
-    }
-    const [held, known] = await Promise.all([
-      $.state.get({ ...WORKERS, id: offerId }),
-      $.state.get(STATE),
-    ]);
-    const live = held.value;
-    // Before the accept hook has run (the host is still checking the call), the offer's
-    // own record names the task.
-    const title =
-      live?.title ?? known.value?.records.find((r) => r.offerId === offerId)?.title ?? 'subagent';
-    const head = { name: 'DeepSeek', argument: title };
-    const status = ended?.status;
-    if (
-      status === 'completed' ||
-      status === 'cancelled' ||
-      status === 'unknown' ||
-      status === 'stopped'
-    ) {
-      const word = status === 'completed' ? 'Done' : stopWord(status, ended!.endedBy);
-      return {
-        ...head,
-        state: status === 'completed' ? 'done' : 'error',
-        ending: { word, parts: doneParts(ended!, live) },
-      };
-    }
-    // Nothing ran, and the answer says so: a start that never finished, or a refused accept.
-    if (status === 'not_started' || typeof ended?.action === 'string')
-      return {
-        ...head,
-        state: isErrored || status === 'not_started' ? 'error' : 'held',
-        ending: {
-          word: 'Not started',
-          parts: typeof ended?.elapsedMs === 'number' ? [duration(ended.elapsedMs)] : [],
-        },
-      };
-    // NOT THE WORKER'S ANSWER: nothing yet, an Esc, or the host's own notice
-    // for a call it moved to the background after two minutes. The worker's
-    // record says where it stands; a missing answer never reads as an end.
-    if (live?.ended)
-      return {
-        ...head,
-        state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
-        ending: workerEnding(live),
-      };
-    if (isInterrupted)
-      return {
-        ...head,
-        state: 'error',
-        ending: {
-          word: 'Interrupted',
-          parts: live?.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [],
-        },
-      };
-    const moved = output !== undefined && HOST_MOVED.test(said ?? '');
-    if (output !== undefined && !live && !moved) return undefined;
-    // A running row nothing here follows, after a reload or a resume: the CLI is asked.
-    if ((live || moved) && !liveWorkers.has(offerId)) adopt($, offerId, title);
-    // From the moment of accept: Claude Code is still starting until the first tick says more.
-    const starting = live ? live.state !== 'running' : !moved;
-    const parts = [
-      !live && moved ? 'running in the background' : undefined,
-      live?.toolUses ? toolUses(live.toolUses) : undefined,
-      live?.tokens ? tokens(live.tokens) : undefined,
-      live?.elapsedMs !== undefined ? duration(live.elapsedMs) : undefined,
-      live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
-    ].filter((part): part is string => part !== undefined);
-    return {
-      ...head,
-      state: 'running',
-      starting,
-      ...(parts.length ? { tail: ' · ' + parts.join(' · ') } : {}),
-      ...(starting || !live ? {} : { under: live.current ?? 'Working' }),
-    };
-  };
-  const described = await Promise.all(offerIds.map(describeWorker));
-  const rows = described.filter((row) => row !== undefined);
-  if (rows.length !== offerIds.length) return undefined;
-  if (rows.length === 1) return workerRow(ui, rows[0]!);
-  if (!isExpanded) return workerGroup(ui, rows, offerIds);
+  noteAccept($, call.tool_use_id, offerIds, call);
+  const batched = offerIds.length > 1;
+  const described = await Promise.all(
+    offerIds.map((offerId) => describeWorker($, offerId, call, batched)),
+  );
+  if (described.some((row) => row === undefined)) return undefined;
   const { Box } = ui;
+  const kept = offerIds.flatMap((offerId, index) =>
+    heldRows.has(surface + ':' + offerId) ? [] : [{ offerId, row: described[index]! }],
+  );
+  if (kept.length === 0) return <Box display="none" />;
+  const rows = kept.map((item) => item.row);
+  if (rows.length === 1) return workerRow(ui, rows[0]!);
+  const ids = kept.map((item) => item.offerId);
+  if (!isExpanded) return workerGroup(ui, rows, ids);
   return (
     <Box flexDirection="column">
       {rows.map((row, index) => (
-        <Box key={offerIds[index]}>{workerRow(ui, row)}</Box>
+        <Box key={ids[index]}>{workerRow(ui, row)}</Box>
       ))}
     </Box>
   );
@@ -2440,7 +2550,7 @@ function workerRow({ Box, Text }: Elements, row: WorkerRow) {
         <Text {...dot}>⏺</Text>
       </Box>
       <Box flexShrink={0}>
-        <Text bold wrap="truncate-end">
+        <Text bold strikethrough={row.struck === true} wrap="truncate-end">
           {row.name}
         </Text>
       </Box>
