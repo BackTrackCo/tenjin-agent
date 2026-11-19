@@ -101,7 +101,15 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
         text: 'PRIVATE_',
       },
       tries: 1,
-      timing: { slot: 1, quoteMs: 180.4, laneWaitMs: 12_000, signMs: 40, answerMs: 2_900 },
+      timing: {
+        slot: 1,
+        quoteMs: 180.4,
+        laneWaitMs: 12_000,
+        signMs: 40,
+        answerMs: 2_900,
+        laneMoved: true,
+        waitedOn: 'other_process',
+      },
     },
     17_000,
   );
@@ -109,7 +117,14 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
   // A web search the bridge answered is no model call.
   record.call(17_150).drop();
   const next = record.call(19_100);
-  next.done({ usage: { output_tokens: 5 }, timing: { slot: 1, laneWaitMs: 3 } }, 20_000);
+  next.done(
+    {
+      usage: { output_tokens: 5 },
+      // Fixed codes only: any other value is left out.
+      timing: { slot: 1, laneWaitMs: 3, waitedOn: 'PRIVATE_' as never, laneMoved: 1 as never },
+    },
+    20_000,
+  );
   const { calls, callTotals, phases } = record.snapshot();
   expect(calls).toEqual([
     {
@@ -126,6 +141,8 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
       laneWaitMs: 12_000,
       signMs: 40,
       answerMs: 2_900,
+      laneMoved: true,
+      waitedOn: 'other_process',
     },
     { at: 600, live: 1, ms: 15_500, tries: 2, failed: true },
     { at: 18_100, live: 0, gapMs: 2_000, ms: 900, outputTokens: 5, slot: 1, laneWaitMs: 3 },

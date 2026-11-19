@@ -22,8 +22,10 @@ const whole = (value: unknown, max = MAX_MS): number | undefined =>
 /**
  * WHERE ONE MODEL CALL'S TIME WENT inside the transport, in milliseconds: the first budget
  * read (`budgetMs`), the unpaid quote round trip (`quoteMs`), the reservation (`reserveMs`),
- * the wait for the inference lane's payment lock (`laneWaitMs`, on lane `slot`), the checks
- * under it (`gateMs`), the payer from its start to the paid request leaving (`signMs`:
+ * the wait for a channel's payment lock (`laneWaitMs`; `slot` is the shared lane the call
+ * paid on, `laneMoved` says it was the other lane than its worker's own, and `waitedOn`
+ * says who held its own channel when every channel it could pay on was held: this process
+ * or another one), the checks under it (`gateMs`), the payer from its start to the paid request leaving (`signMs`:
  * policy, signer, signing, a deposit; `journalMs` of it is the refund journal's write), the
  * paid request to its response headers (`answerMs`), the headers to the payer's return
  * (`bodyMs`: the body read and the payment SDK's accounting), the payer's drain (`drainMs`)
@@ -46,6 +48,10 @@ export type ModelCallTiming = {
   settleMs?: number;
   fetches?: number;
   requestBytes?: number;
+  /** The call paid on the other shared lane, because another call held its worker's own. */
+  laneMoved?: true;
+  /** Every channel the call could pay on was held when it came: who held its own. */
+  waitedOn?: 'this_process' | 'other_process' | 'unknown';
 };
 const CALL_TIMES = [
   'budgetMs',
@@ -387,6 +393,13 @@ export class WorkerDiagnosticsRecord {
         const timing = outcome.timing;
         if (timing) {
           entry.slot = whole(timing.slot, 16) ?? 0;
+          if (timing.laneMoved === true) entry.laneMoved = true;
+          if (
+            timing.waitedOn === 'this_process' ||
+            timing.waitedOn === 'other_process' ||
+            timing.waitedOn === 'unknown'
+          )
+            entry.waitedOn = timing.waitedOn;
           for (const name of [...CALL_TIMES, 'fetches', 'requestBytes'] as const) {
             const value = whole(timing[name], Number.MAX_SAFE_INTEGER);
             if (value !== undefined) entry[name] = value;

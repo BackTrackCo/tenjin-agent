@@ -14,9 +14,10 @@ import { modelLock, type ModelJob } from './model-job';
 import {
   MODEL_ROUTING_FEE_CEILING_ATOMIC,
   modelChannelScope,
+  modelInferenceRunScope,
   type ModelInferenceSlot,
 } from './model-channel';
-import { withFileLock } from '../lib/lock';
+import { withFileLock, withFirstFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import {
   MODEL_MESSAGES_RESULT_BYTES,
@@ -445,7 +446,12 @@ export class ModelTransport {
     signal.throwIfAborted();
     // Diagnostics only: each step's milliseconds, read from a monotonic clock.
     let stepFrom = performance.now();
-    const step = (name: Exclude<keyof ModelCallTiming, 'slot' | 'fetches' | 'requestBytes'>) => {
+    const step = (
+      name: Exclude<
+        keyof ModelCallTiming,
+        'slot' | 'fetches' | 'requestBytes' | 'laneMoved' | 'waitedOn'
+      >,
+    ) => {
       const now = performance.now();
       timing[name] = (timing[name] ?? 0) + now - stepFrom;
       stepFrom = now;
@@ -653,156 +659,241 @@ export class ModelTransport {
           await writePrivate(path, JSON.stringify(state));
         }
       });
-    let signingStarted = false;
-    let paymentSent = false;
-    let localBlock: LocalSendBlocked | undefined;
-    let paidError: { status: number; code?: string } | undefined;
-    let first = true;
-    const cachedFetch: typeof fetch = async (input, init) => {
-      if (first) {
-        signal.throwIfAborted();
-        first = false;
-        return challenge;
-      }
-      const headers = new Headers(
-        init?.headers ?? (input instanceof Request ? input.headers : undefined),
-      );
-      const signature = headers.get('payment-signature');
-      const paying = signature !== null;
-      try {
-        await assertCanTransmit();
-        if (signature !== null && journal && inferenceRun) {
-          const from = performance.now();
-          await journal.record(inferenceRun, url, signature, signal);
-          timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
-          await assertCanTransmit();
-        }
-        signal.throwIfAborted();
-        init?.signal?.throwIfAborted();
-      } catch (cause) {
-        // httpRequest maps fetch failures to transport outcomes. Retain the
-        // evidence that this invocation's authorization stayed local.
-        localBlock = new LocalSendBlocked(cause);
-        throw localBlock;
-      }
-      // A second signed request, or any unsigned one, is counted beside the first.
-      if (!paying || paymentSent) timing.fetches = (timing.fetches ?? 0) + 1;
-      if (paying) {
-        paymentSent = true;
-        step('signMs');
-      }
-      const response = boundedResponse(
-        await fetchFn(input, {
-          ...init,
-          signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
-        }),
-        resultLimit,
-      );
-      if (paying) step('answerMs');
-      // The router's answer to the signed request when it is an error: its status and
-      // its fixed error code, read from a copy, never its message.
-      if (paying && response.status >= 400)
-        paidError = { status: response.status, ...(await errorCode(response.clone())) };
-      return response;
+    /**
+     * ONE TRY AT PAYING, on the first of `slots` whose channel is free. What it leaves says
+     * how far it went: whether signing started, whether a signed request reached fetch, and
+     * the router's answer to it.
+     */
+    type Paid = {
+      slot: ModelInferenceSlot;
+      result?: Awaited<ReturnType<ReturnType<Payer['routeFor']>['send']>>;
+      failure?: unknown;
+      signingStarted: boolean;
+      paymentSent: boolean;
+      localBlock?: LocalSendBlocked;
+      paidError?: { status: number; code?: string };
+      overCap?: QuoteOverCap;
     };
-    const payer = new Payer({
-      ...payerDeps,
-      // A job's cap is the per-call limit or a lower named ceiling, so no deposit
-      // passes the per-call limit. The rolling budget and creator gates are unchanged.
-      policy: async () => {
-        const policy = await payerDeps.policy();
-        const current = await consent();
-        const cap =
-          current.maxJobAtomic < BigInt(job.capAtomic)
-            ? current.maxJobAtomic
-            : BigInt(job.capAtomic);
-        return {
-          ...policy,
-          maxAutoSpendAtomic: policy.maxAutoSpendAtomic < cap ? policy.maxAutoSpendAtomic : cap,
-        };
-      },
-      getSigner: async () => {
-        await assertCanTransmit();
-        const signer = await payerDeps.getSigner();
-        return {
-          address: signer.address,
-          signMessage: (args) => {
-            signingStarted = true;
-            return signer.signMessage(args);
-          },
-          signTypedData: (args) => {
-            signingStarted = true;
-            return signer.signTypedData(args);
-          },
-          signTransaction: (args) => {
-            signingStarted = true;
-            return signer.signTransaction(args);
-          },
-        };
-      },
-      modelLane: {
-        path: endpoint,
-        ceilingAtomic: quote,
-        origin: this.origin,
-        inferenceSlot: this.options.inferenceSlot,
-        ...(inferenceRun ? { inferenceRun } : {}),
-      },
-      fetchImpl: cachedFetch,
-    });
-    // Keep the two inference request lanes across local transports and
-    // processes, even when each new worker has its own channel.
-    const scope = modelChannelScope(this.origin, 'model-inference', this.options.inferenceSlot);
-    const paymentLock = join(dataDir, 'model-jobs', `${scope.id}.payment.lock`);
-    let paymentTurn = false;
-    let overCap: QuoteOverCap | undefined;
-    let result;
-    let failure: unknown;
-    stepFrom = performance.now();
-    try {
-      result = await withFileLock(
-        paymentLock,
-        async () => {
-          step('laneWaitMs');
-          await beforeSend?.();
-          // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS LANE still binds the job's total:
-          // the payer's own check below reads this one quote alone. The quote was reserved
-          // under the cap as it then stood, so what the job has reserved, this call
-          // included, is held against the cap as it stands now. Over it, nothing is signed
-          // and the reservation is released.
-          const current = await consent();
-          const cap =
-            current.maxJobAtomic < BigInt(job.capAtomic)
-              ? current.maxJobAtomic
-              : BigInt(job.capAtomic);
-          if (BigInt((await load()).charged) > cap) throw (overCap = new QuoteOverCap());
+    const payOn = async (slots: readonly ModelInferenceSlot[], quoted: Response): Promise<Paid> => {
+      const paid: Paid = { slot: slots[0]!, signingStarted: false, paymentSent: false };
+      let first = true;
+      const cachedFetch: typeof fetch = async (input, init) => {
+        if (first) {
           signal.throwIfAborted();
-          paymentTurn = true;
-          step('gateMs');
-          try {
-            const sent = await payer.routeFor(baseUrl).send(url, {
-              method: 'POST',
-              jsonBody: body,
-              timeoutMs: 360_000,
-              blockRedirects: true,
-            });
-            if (timing.answerMs !== undefined) step('bodyMs');
-            return sent;
-          } finally {
-            // Hold the channel until SDK accounting drains, including detached work.
+          first = false;
+          return quoted;
+        }
+        const headers = new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        );
+        const signature = headers.get('payment-signature');
+        const paying = signature !== null;
+        try {
+          await assertCanTransmit();
+          if (signature !== null && journal && inferenceRun) {
             const from = performance.now();
-            await payer.idle();
-            timing.drainMs = performance.now() - from;
-            stepFrom = performance.now();
+            await journal.record(inferenceRun, url, signature, signal);
+            timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
+            await assertCanTransmit();
           }
-        },
-        { signal, takeOverDead: true, timeoutMs: WORKER_WALL_MS, retryMs: 100 },
+          signal.throwIfAborted();
+          init?.signal?.throwIfAborted();
+        } catch (cause) {
+          // httpRequest maps fetch failures to transport outcomes. Retain the
+          // evidence that this invocation's authorization stayed local.
+          paid.localBlock = new LocalSendBlocked(cause);
+          throw paid.localBlock;
+        }
+        // A second signed request, or any unsigned one, is counted beside the first.
+        if (!paying || paid.paymentSent) timing.fetches = (timing.fetches ?? 0) + 1;
+        if (paying) {
+          paid.paymentSent = true;
+          step('signMs');
+        }
+        const response = boundedResponse(
+          await fetchFn(input, {
+            ...init,
+            signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
+          }),
+          resultLimit,
+        );
+        if (paying) step('answerMs');
+        // The router's answer to the signed request when it is an error: its status and
+        // its fixed error code, read from a copy, never its message.
+        if (paying && response.status >= 400)
+          paid.paidError = { status: response.status, ...(await errorCode(response.clone())) };
+        return response;
+      };
+      const payerOn = (slot: ModelInferenceSlot) =>
+        new Payer({
+          ...payerDeps,
+          // A job's cap is the per-call limit or a lower named ceiling, so no deposit
+          // passes the per-call limit. The rolling budget and creator gates are unchanged.
+          policy: async () => {
+            const policy = await payerDeps.policy();
+            const current = await consent();
+            const cap =
+              current.maxJobAtomic < BigInt(job.capAtomic)
+                ? current.maxJobAtomic
+                : BigInt(job.capAtomic);
+            return {
+              ...policy,
+              maxAutoSpendAtomic: policy.maxAutoSpendAtomic < cap ? policy.maxAutoSpendAtomic : cap,
+            };
+          },
+          getSigner: async () => {
+            await assertCanTransmit();
+            const signer = await payerDeps.getSigner();
+            return {
+              address: signer.address,
+              signMessage: (args) => {
+                paid.signingStarted = true;
+                return signer.signMessage(args);
+              },
+              signTypedData: (args) => {
+                paid.signingStarted = true;
+                return signer.signTypedData(args);
+              },
+              signTransaction: (args) => {
+                paid.signingStarted = true;
+                return signer.signTransaction(args);
+              },
+            };
+          },
+          modelLane: {
+            path: endpoint,
+            ceilingAtomic: quote,
+            origin: this.origin,
+            inferenceSlot: slot,
+            ...(inferenceRun ? { inferenceRun } : {}),
+          },
+          fetchImpl: cachedFetch,
+        });
+      let paymentTurn = false;
+      stepFrom = performance.now();
+      try {
+        paid.result = await withFirstFileLock(
+          slots.map(channelLock),
+          async (index) => {
+            paid.slot = slots[index]!;
+            step('laneWaitMs');
+            await beforeSend?.();
+            // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS CHANNEL still binds the job's
+            // total: the payer's own check below reads this one quote alone. The quote was
+            // reserved under the cap as it then stood, so what the job has reserved, this
+            // call included, is held against the cap as it stands now. Over it, nothing is
+            // signed and the reservation is released.
+            const current = await consent();
+            const cap =
+              current.maxJobAtomic < BigInt(job.capAtomic)
+                ? current.maxJobAtomic
+                : BigInt(job.capAtomic);
+            if (BigInt((await load()).charged) > cap) throw (paid.overCap = new QuoteOverCap());
+            signal.throwIfAborted();
+            paymentTurn = true;
+            step('gateMs');
+            // The payer of the channel this call holds: it reads that channel's total,
+            // signs from it and takes the router's answer into it, all under this lock.
+            const payer = payerOn(paid.slot);
+            try {
+              const sent = await payer.routeFor(baseUrl).send(url, {
+                method: 'POST',
+                jsonBody: body,
+                timeoutMs: 360_000,
+                blockRedirects: true,
+              });
+              if (timing.answerMs !== undefined) step('bodyMs');
+              return sent;
+            } finally {
+              // Hold the channel until SDK accounting drains, including detached work.
+              const from = performance.now();
+              await payer.idle();
+              timing.drainMs = (timing.drainMs ?? 0) + performance.now() - from;
+              stepFrom = performance.now();
+            }
+          },
+          {
+            signal,
+            takeOverDead: true,
+            timeoutMs: WORKER_WALL_MS,
+            retryMs: 100,
+            onHeld: (pid) => {
+              timing.waitedOn ??=
+                pid === undefined
+                  ? 'unknown'
+                  : pid === process.pid
+                    ? 'this_process'
+                    : 'other_process';
+            },
+          },
+        );
+      } catch (cause) {
+        paid.failure = cause;
+        if (!paymentTurn) paid.localBlock = new LocalSendBlocked(cause);
+      } finally {
+        if (first) await quoted.body?.cancel().catch(() => undefined);
+      }
+      return paid;
+    };
+    // THE PAYMENT LOCK IS ONE CHANNEL'S, HELD FOR THE WHOLE PAID CALL. A voucher signs the
+    // channel's charged total plus this quote. That total moves only when the router's
+    // answer to the paid request is taken in, by what the router charged, which may be
+    // less than the quote; and the router refuses a second payment on a channel whose
+    // first is still in flight (`channel_busy`). So the next voucher of a channel cannot
+    // be signed before the previous call's answer, and the lock covers the read of the
+    // total, the signature, the paid request and its answer, across every process.
+    // What it must not cover is another channel. A run with its own channel (a router
+    // that refunds) locks that channel alone, so no other job waits for it. On the two
+    // shared channels, a call takes its worker's own lane when that is free, the other
+    // lane when another call holds its own, and waits for whichever comes free first when
+    // both are held: two sessions no longer queue on one lane while the other is idle.
+    const own = this.options.inferenceSlot ?? 0;
+    const other: ModelInferenceSlot = own === 0 ? 1 : 0;
+    const channelLock = (slot: ModelInferenceSlot) =>
+      join(
+        dataDir,
+        'model-jobs',
+        `${
+          inferenceRun
+            ? modelInferenceRunScope(this.origin, inferenceRun).id
+            : modelChannelScope(this.origin, 'model-inference', slot).id
+        }.payment.lock`,
       );
-    } catch (cause) {
-      failure = cause;
-      if (!paymentTurn) localBlock = new LocalSendBlocked(cause);
-    } finally {
-      if (first) await challenge.body?.cancel().catch(() => undefined);
+    // The quote is answered to the payer once per try. A call that may try twice keeps the
+    // quote's bytes and answers each try from them (a clone would hold the first try's
+    // cancel until the second was cancelled too).
+    let quoted = () => challenge;
+    if (!inferenceRun) {
+      const bytes = await boundedResponse(challenge, 65_536)
+        .arrayBuffer()
+        .catch(() => undefined);
+      if (bytes === undefined) {
+        await release();
+        throw new Error('Unsupported model payment quote');
+      }
+      quoted = () =>
+        new Response(bytes.byteLength > 0 ? bytes : null, {
+          status: challenge.status,
+          headers: challenge.headers,
+        });
     }
+    let paid = await payOn(inferenceRun ? [own] : [own, other], quoted());
+    // THE OTHER LANE REFUSED BEFORE ANYTHING WAS SIGNED (its channel needs a deposit that
+    // the person's limits do not allow, say): the call waits for its own lane, as it did
+    // before lanes were shared out, so a call that its own lane can pay is never lost to
+    // the other lane's funding. Nothing was signed or sent, so this is no second payment.
+    if (
+      !inferenceRun &&
+      paid.slot !== own &&
+      paid.failure instanceof RouteSkipped &&
+      !paid.signingStarted &&
+      !paid.paymentSent &&
+      !paid.localBlock
+    )
+      paid = await payOn([own], quoted());
+    timing.slot = paid.slot;
+    if (paid.slot !== own) timing.laneMoved = true;
+    const { result, failure, paymentSent, signingStarted, localBlock, paidError, overCap } = paid;
     if (failure !== undefined) {
       // A refusal before signing or a proven local guard failure can release
       // the quote only when no signed leg of this invocation reached fetch.
