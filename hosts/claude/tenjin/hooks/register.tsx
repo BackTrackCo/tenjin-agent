@@ -1,5 +1,12 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
-import { asRecord, parseJson, readJson, tenjinDataDir, textOf } from './hook-data';
+import {
+  asRecord,
+  keepDelegatedHint,
+  parseJson,
+  readJson,
+  tenjinDataDir,
+  textOf,
+} from './hook-data';
 
 import type { TenjinHeld, TenjinRow } from '../types';
 import {
@@ -116,6 +123,12 @@ async function inWorker($: Dollar): Promise<boolean> {
 }
 
 export const register: Register = (on) => {
+  on('classic.PreToolUse', async ($, e, next) => {
+    const input: Json = { ...e };
+    delete input.tool;
+    delete input.tool_use_id;
+    return keepDelegatedHint($, e.tool, input, await next(e));
+  });
   on('classic.SessionStart', async ($, e, next) =>
     (e.source === 'startup' || e.source === 'resume') && (await inWorker($)) ? {} : next(e),
   );

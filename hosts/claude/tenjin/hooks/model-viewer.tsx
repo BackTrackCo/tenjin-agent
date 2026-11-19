@@ -11,6 +11,7 @@ import {
   subagentsEnabled as enabled,
   tenjinDataDir,
   textOf,
+  withDelegatedHint,
 } from './hook-data';
 import type {
   TenjinModelActivity,
@@ -1828,8 +1829,10 @@ export function registerModelViewer(on: On): void {
       } catch {
         /* The native qualification must prove this mark precedes the first step. */
       }
+      return next(e);
     }
-    return next(e);
+    // Any other subagent: the router's hint for its task, if its call had one.
+    return withDelegatedHint($, e, await next(e));
   });
   on('agent.spawn', { subagentType: TYPE }, async ($, e, next) => {
     try {
