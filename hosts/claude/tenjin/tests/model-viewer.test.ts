@@ -3333,6 +3333,14 @@ test('the held notice of a parallel Agent summary is dropped by an accept and wr
     durationMs: 1,
   } as never);
   expect(notices).toEqual([]);
+  // A subagent's turn that ends while the pair waits, such as an earlier worker's viewer,
+  // and a subagent's own accept, are not the parent's answer: the pair is then accepted.
+  await hold('held_s', 'held_t');
+  await complete($, 'earlier-viewer', 'answer');
+  await $.tool.call({ tool: ACCEPT, cancel: THIRD_OFFER, agentId: 'a-subagent' });
+  expect(notices).toEqual([]);
+  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
+  expect(notices).toEqual([]);
   // Kept native: the line is written before the repeated call runs.
   await hold('held_c', 'held_d');
   f.state.keepNative = true;

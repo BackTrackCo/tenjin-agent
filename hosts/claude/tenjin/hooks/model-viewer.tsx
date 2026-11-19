@@ -1821,8 +1821,8 @@ export function registerModelViewer(on: On): void {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
     // The parent's answer to a held batch: an accept drops its line, a cancel writes it.
-    // The plugin's own capture is no answer.
-    if (e.capture === undefined) sayHeld($, acceptedIds(e, true));
+    // The plugin's own capture is no answer, and neither is a subagent's own call.
+    if (e.capture === undefined && e.agentId === undefined) sayHeld($, acceptedIds(e, true));
     // A cancelled offer is settled too: its row has nothing left to offer. A native
     // subagent's cancel of the offer it got settles it as the main loop's does.
     if (short(e.cancel) && UUID.test(e.cancel)) {
@@ -1938,7 +1938,8 @@ export function registerModelViewer(on: On): void {
     return yield* next(e);
   });
   on('turn.complete', async ($, e, next) => {
-    sayHeld($);
+    // The main loop's turn alone: a viewer's turn that ends meanwhile says nothing of it.
+    if (!e.agentId) sayHeld($);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
       if (guard && (!guard.turnId || guard.turnId === e.turnId)) liveViewerGuards.delete(e.agentId);
