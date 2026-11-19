@@ -3684,10 +3684,11 @@ test('an accept batch draws only the workers whose held call has no row of its o
 // Live on alpha.70: two held Explore calls were accepted together, and the line stayed as a
 // row of its own between Claude Code's `2 Explore agents finished` and the DeepSeek group.
 // Live on alpha.83: of two held calls of one response, one was accepted and one sent again
-// and run natively, in the same response, and the line read "Held 2 of 2 Agent calls before
-// native execution." Operator ruling: an accepted call never counts in that line. A call
-// kept native gets none either, as a held web search that is let through gets none.
-test('the held line is written only for held calls that never ran, and counts those alone', async ($, on) => {
+// and run natively, and the transcript read "tenjin: Held 2 of 2 Agent calls before native
+// execution." under the DeepSeek row. Operator ruling 2026-11-18: the line should not be
+// there. Claude Code's block reads `Not run` for a held call, and the DeepSeek row or the
+// native Agent row says what became of it.
+test('no line of Tenjin’s own is written for the held calls of a parallel Agent summary, whatever the parent does with them', async ($, on) => {
   const f = setup($, on);
   const notices: string[] = [];
   on('ui.log', (_$, e) => {
@@ -3731,11 +3732,11 @@ test('the held line is written only for held calls that never ran, and counts th
     await endTurn();
     return notices.splice(0);
   };
-  // Accept all: the DeepSeek rows are the display, and no line is written.
+  // Accept all.
   await hold('held_a', 'held_b');
   await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
   expect(await taken()).toEqual([]);
-  // Repeat all: each repeat draws its own native row, and no line is written.
+  // Repeat all.
   await hold('held_c', 'held_d');
   await repeat('native_c', OFFER);
   await repeat('native_d', SECOND_OFFER);
@@ -3744,45 +3745,18 @@ test('the held line is written only for held calls that never ran, and counts th
   await hold('held_e', 'held_f');
   await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
   await repeat('native_f', SECOND_OFFER);
-  expect(notices).toEqual([]);
   expect(await taken()).toEqual([]);
-  // The same mix across two responses, with an unrelated native call between them.
+  // The same mix across two responses.
   await hold('held_g', 'held_h');
   await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
   await batch('unrelated');
-  expect(notices).toEqual([]);
   await repeat('native_h', SECOND_OFFER);
   expect(await taken()).toEqual([]);
-  // Live on alpha.73: auto mode refused one call of the response, the parent sent it again
-  // (held again, with a new offer), then accepted both offers: no line.
-  await remember($, { ...INPUT, tool_use_id: 'held_r1' });
-  await batch('held_r1', 'refused_r2');
-  f.state.offer = THIRD_OFFER;
-  await remember($, { ...INPUT, tool_use_id: 'repeat_r2' });
-  f.state.offer = OFFER;
-  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, THIRD_OFFER] });
-  expect(await taken()).toEqual([]);
-  // A subagent's turn that ends while the pair waits, and a subagent's own cancel, are not
-  // the parent's answer: nothing is written, and the pair is then accepted.
-  await hold('held_s', 'held_t');
-  await complete($, 'earlier-viewer', 'answer');
-  await $.tool.call({ tool: ACCEPT, cancel: THIRD_OFFER, agentId: 'a-subagent' });
-  expect(notices).toEqual([]);
-  await $.tool.call({ tool: ACCEPT, offer_ids: [OFFER, SECOND_OFFER] });
-  expect(await taken()).toEqual([]);
-  // Cancelled: that call never ran. The accepted one beside it is not counted.
+  // A cancel.
   await hold('held_i', 'held_j');
   await $.tool.call({ tool: ACCEPT, cancel: OFFER });
-  await $.tool.call({ tool: ACCEPT, offer_id: SECOND_OFFER });
-  expect(notices).toEqual([]);
-  expect(await taken()).toEqual([
-    'Tenjin held 1 Agent call that did not run: its DeepSeek offer was not accepted.',
-  ]);
+  expect(await taken()).toEqual([]);
   // A turn that ends with both offers unanswered.
   await hold('held_k', 'held_l');
-  expect(await taken()).toEqual([
-    'Tenjin held 2 Agent calls that did not run: their DeepSeek offers were not accepted.',
-  ]);
-  // Written once: the next turn's end says nothing more.
   expect(await taken()).toEqual([]);
 });

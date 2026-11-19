@@ -180,43 +180,6 @@ function noteAccept($: Dollar, call: string | undefined, ids: string[], props: A
   while (acceptSeen.size > DRAWN_MAX) acceptSeen.delete(acceptSeen.keys().next().value!);
   if (changed) $.ui.invalidate('ui.render');
 }
-/**
- * THE LINE FOR A PARALLEL AGENT SUMMARY'S HELD CALLS. Claude Code draws that summary
- * itself, with no render hook, and since a held call is answered as a refusal it reads
- * `Not run` for each. A held call the parent then ran needs no line, as a held web search
- * that is let through gets none: an accepted one has its DeepSeek row, and one kept native
- * by sending it again has its own native row. The line is only for a held call that
- * NEVER RAN in its turn (its offer was cancelled or left unanswered, or no offer could be
- * made), so the person sees why `Not run` stands. It is written when the parent's turn
- * ends and counts those calls alone; a logged line stays for good.
- */
-const heldNotice: { pending?: { offers: Set<string>; unoffered: number } } = {};
-/** The parent ran these held calls: accepted, or sent again and kept native. */
-function settleHeld(ids: readonly string[]): void {
-  const notice = heldNotice.pending;
-  if (!notice) return;
-  for (const id of ids) notice.offers.delete(id.toLowerCase());
-  if (notice.offers.size === 0 && notice.unoffered === 0) heldNotice.pending = undefined;
-}
-const callsOf = (n: number) => `${n} Agent call${n === 1 ? '' : 's'}`;
-function sayHeld($: Dollar): void {
-  const notice = heldNotice.pending;
-  if (!notice) return;
-  heldNotice.pending = undefined;
-  const open = notice.offers.size;
-  try {
-    if (open > 0)
-      $.ui.log(
-        `Tenjin held ${callsOf(open)} that did not run: ${open === 1 ? 'its DeepSeek offer was' : 'their DeepSeek offers were'} not accepted.`,
-      );
-    if (notice.unoffered > 0)
-      $.ui.log(
-        `Tenjin held ${callsOf(notice.unoffered)} that did not run: no DeepSeek offer could be made.`,
-      );
-  } catch {
-    /* The transcript line is display only. */
-  }
-}
 /** An aborted viewer turn's agent is read again once, after this, in case its stop lands late. */
 const RECHECK_MS = 1500;
 /** Set once the session ends: what ends with it is not a person stopping an agent. */
@@ -541,7 +504,6 @@ export async function rememberModelOffer(
 export async function keptNative($: Dollar, offerId: unknown): Promise<void> {
   try {
     if (!short(offerId) || !UUID.test(offerId)) return;
-    settleHeld([offerId]);
     const ref = { ...OFFERS, id: offerId };
     const offer = (await $.state.get(ref)).value;
     if (offer?.state === 'offered') await $.state.set(ref, { ...offer, state: 'native' });
@@ -2012,7 +1974,6 @@ export function registerModelViewer(on: On): void {
     e.agentId !== undefined && liveViewerGuards.has(e.agentId) ? refused : next(e),
   );
 
-  heldNotice.pending = undefined;
   on('tool.call', { tool: ACCEPT }, async ($, e, next) => {
     // ONLY A HELD CALL ASKS FOR AN OFFER. `capture` is this mod's own transport,
     // sent for an Agent, Task or SendMessage call it holds. Sent by the model it
@@ -2030,10 +1991,6 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',
       };
-    // The parent's accept of a held call settles it: an accepted call never counts in the
-    // held line. The plugin's own read is no answer, and neither is a subagent's own call.
-    if (e.capture === undefined && e.agentId === undefined && !raisedByThisPlugin(next.origin))
-      settleHeld(acceptedIds(e, true) ?? []);
     // A cancelled offer is settled too: its row has nothing left to offer. A native
     // subagent's cancel of the offer it got settles it as the main loop's does.
     if (short(e.cancel) && UUID.test(e.cancel)) {
@@ -2165,7 +2122,6 @@ export function registerModelViewer(on: On): void {
   });
   on('turn.complete', async ($, e, next) => {
     // The main loop's turn alone: a viewer's turn that ends meanwhile says nothing of it.
-    if (!e.agentId) sayHeld($);
     if (!e.agentId && undelivered.size) deliverLater($);
     if (e.agentId) {
       const guard = liveViewerGuards.get(e.agentId);
@@ -2284,8 +2240,9 @@ export function registerModelViewer(on: On): void {
     );
   });
 
-  // Claude Code's parallel Agent summary bypasses the tool render hooks. A
-  // transcript notice identifies the held calls alongside that native summary.
+  // Claude Code's parallel Agent summary bypasses the tool render hooks, and reads `Not run`
+  // for a held call, which is true. TENJIN ADDS NO LINE OF ITS OWN TO IT (operator ruling
+  // 2026-11-18): an accepted call has its DeepSeek row and a call sent again its native row.
   // By call: the offer it got, or none where Tenjin held it with no offer.
   const heldCalls = new Map<string, string | undefined>();
   on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
@@ -2301,20 +2258,11 @@ export function registerModelViewer(on: On): void {
   });
   on('classic.PostToolBatch', ($, e, next) => {
     if (heldCalls.size === 0) return next(e);
-    const offers = new Set<string>();
-    const heldOffers = new Set<string>();
-    let unoffered = 0;
-    let grouped = false;
     for (const tool of ['Agent', 'Task']) {
       const calls = e.tool_calls.filter((call) => call.tool_name === tool);
-      const held = calls.filter((call) => heldCalls.has(call.tool_use_id));
-      for (const call of held) {
+      for (const call of calls.filter((held) => heldCalls.has(held.tool_use_id))) {
         const offer = heldCalls.get(call.tool_use_id);
         heldCalls.delete(call.tool_use_id);
-        if (offer) {
-          offers.add(offer);
-          heldOffers.add(call.tool_use_id);
-        }
         // One of several Agent calls of the response: the host's block is its row.
         if (offer && calls.length > 1 && !groupedOffers.has(offer)) {
           groupedOffers.add(offer);
@@ -2323,21 +2271,6 @@ export function registerModelViewer(on: On): void {
           $.ui.invalidate('ui.render');
         }
       }
-      unoffered += held.filter((call) => !heldOffers.has(call.tool_use_id)).length;
-      grouped ||= held.length > 0 && calls.length > 1;
-    }
-    const pending = heldNotice.pending;
-    if (grouped) {
-      // Calls of an earlier response still open in this turn stay counted with these.
-      heldNotice.pending = {
-        offers: new Set([...(pending?.offers ?? []), ...offers]),
-        unoffered: (pending?.unoffered ?? 0) + unoffered,
-      };
-    } else if (pending && offers.size > 0 && pending.offers.size > 0) {
-      // ONE CALL OF THE SUMMARY SENT AGAIN AND HELD AGAIN (live: auto mode refused one call
-      // of a response, the parent sent it again): its new offer stands in for an open one.
-      pending.offers.delete(pending.offers.values().next().value!);
-      for (const offer of offers) pending.offers.add(offer);
     }
     return next(e);
   });
