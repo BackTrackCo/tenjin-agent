@@ -50,14 +50,18 @@ export interface OrthogonalCatalog {
   errors: string[];
 }
 
+/**
+ * A payment URL is shown only on a host Orthogonal runs: its two payment
+ * hosts, or the catalog's own origin under `/pay/`, where the catalog lists
+ * its endpoints (read live 2026-11-18).
+ */
 function orthogonalUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.username || url.password) return false;
     return (
-      url.protocol === 'https:' &&
-      !url.username &&
-      !url.password &&
-      ['x402.orthogonal.com', 'x402.orth.sh'].includes(url.hostname)
+      ['x402.orthogonal.com', 'x402.orth.sh'].includes(url.hostname) ||
+      (url.origin === new URL(ORTHOGONAL_CATALOG_URL).origin && url.pathname.startsWith('/pay/'))
     );
   } catch {
     return false;

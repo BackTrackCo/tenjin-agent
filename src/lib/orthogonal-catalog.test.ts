@@ -57,6 +57,21 @@ describe('manual provider catalogs', () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("lists a payment URL under the catalog's own /pay/ path, and no other path there", async () => {
+    const pay = 'https://api.orthogonal.com/pay/voice/tts';
+    vi.stubGlobal('fetch', async () =>
+      Response.json(
+        catalog([
+          { ...speech, payment: { x402: { url: pay } } },
+          { ...speech, payment: { x402: { url: 'https://api.orthogonal.com/mpp/voice/tts' } } },
+        ]),
+      ),
+    );
+    const result = await searchOrthogonal('speech', 1000);
+    expect(result.endpoints.map((endpoint) => endpoint.url)).toEqual([pay]);
+    expect(result.partial).toBe(true);
+  });
+
   it('rejects foreign payment URLs and reports malformed catalog rows', async () => {
     vi.stubGlobal('fetch', async () =>
       Response.json(
