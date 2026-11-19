@@ -8,7 +8,7 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, and on a fresh install asks whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. DeepSeek subagents and checkout each require their own choice.
 
-Turning on DeepSeek subagents during fresh setup enables them for each session's qualified native workspace. Each job costs up to your per-call spend limit, within your daily budget. Your parent keeps final accept/veto. Existing users and saved off choices keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing and `tenjin config subagents on` to start it. [Scope, sharing and worker controls →](./subagents.md)
+Turning on DeepSeek subagents during fresh setup turns them on in any workspace. Each job costs up to your per-call spend limit, within your daily budget. Claude accepts or declines each offer. Existing users and saved off choices keep their behavior through updates and refreshes. Use `tenjin config subagents off` to turn them off and `tenjin config subagents on` to turn them on. [Scope, sharing and worker controls →](./subagents.md)
 
 Use the activation step the installer returns:
 
@@ -114,7 +114,7 @@ Bash(tenjin usage:*)
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
 
-DeepSeek routing sends the held assignment and bounded parent context to Tenjin and TypeSafe before parent acceptance. Accepted work sends applicable native instructions and tool results through Tenjin to DeepSeek, and a worker's web search queries to Exa. Model replies can be replayed for 24 hours; financial and continuation metadata persist. [DeepSeek disclosure and retention →](./subagents.md#data-and-permissions)
+With DeepSeek subagents on, the held assignment and bounded parent context go to Tenjin and TypeSafe before the parent accepts. Accepted work sends applicable native instructions and tool results through Tenjin to DeepSeek, and a worker's web search queries to Exa. Model replies can be replayed for 24 hours; financial and continuation metadata persist. [DeepSeek disclosure and retention →](./subagents.md#data-and-permissions)
 
 For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
 

@@ -226,9 +226,10 @@ The encrypted wallet and credential metadata remain outside the runtime. Decrypt
 
 Update verifies npm provenance, tarball integrity and the pinned Node before activating a build. Existing sessions retain their old process until restarted; the previous runtime remains while referenced. Uninstall removes owned integrations and the shared runtime only after no installation remains, while keeping the wallet, ledger and configuration. Maintainer release procedures live in [RELEASING.md](https://github.com/BackTrackCo/tenjin-agent/blob/main/RELEASING.md).
 
-## External subagents
+## DeepSeek subagents
 
-Fresh setup asks whether to enable eligible DeepSeek subagents. An explicit opt-in follows each session's qualified native workspace and caps each job at your per-call spend limit as it stands at each offer. Non-interactive installs can pass `--subagents on` or `--subagents off`, which saves an answer wherever none is saved yet and changes nothing after that. Existing profiles and refreshes keep their settings. `tenjin config subagents` prints the state and scope, `off` stops new jobs and `on` writes the same consent the question writes, for every workspace; `on --repository <path>...` limits the consent to the named directories and their subfolders, and `--max-job <USD>` names a lower ceiling per job than the per-call limit. A saved consent is widened only by an `on` with no `--repository`. See [DeepSeek subagents](./subagents.md) for disclosure, fees, parent veto, cancellation, continuation and current host limits.
+DeepSeek subagents are off by default. `tenjin config subagents on` turns them on, `off` turns them off, and a bare `tenjin config subagents` prints the state, the scope and the cap.
+See [DeepSeek subagents](./subagents.md) for setup, sharing, fees, cancellation, continuation and host limits.
 
 Model routing and inference use separate channels from tool routing. Each paid invocation has a 360-second client deadline and a 300-second server upstream deadline; receipt recovery remains bounded and never buys a replacement inference.
 
