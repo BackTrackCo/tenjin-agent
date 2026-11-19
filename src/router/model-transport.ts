@@ -27,6 +27,7 @@ import {
 } from './model-limits';
 import {
   MODEL_CUT_REPLY_CODES,
+  MODEL_REFUSED_CODE,
   ModelCallFailed,
   ModelWorkerStopped,
   retryAfterMs,
@@ -54,14 +55,16 @@ const SUPPORT_PROBE_WAIT_MS = 500;
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
- * `incomplete_model_response` and `model_response_too_large`) or whose reply the router
- * cut (`model_stream_idle`, `model_deadline_exceeded`): it marks that call's record with
- * no charge and settles nothing on the error answer.
+ * `incomplete_model_response`, also an empty reply, and `model_response_too_large`),
+ * refused to answer (`model_refused`) or whose reply the router cut (`model_stream_idle`,
+ * `model_deadline_exceeded`): it marks that call's record with no charge and settles
+ * nothing on the error answer.
  */
 const PROVIDER_FAILURES = new Set([
   'model_inference_failed',
   'incomplete_model_response',
   'model_response_too_large',
+  MODEL_REFUSED_CODE,
   ...MODEL_CUT_REPLY_CODES,
 ]);
 

@@ -298,11 +298,22 @@ describe('a model call tried again', () => {
     expect(waits).toEqual([500, 1000, 2000]);
   });
 
-  it('stops after five tries', async () => {
+  // The DeepSeek harness makes 5 retries after the first request; this made 5 tries.
+  it('stops after five retries, six tries in all', async () => {
+    waits.length = 0;
     const failure = new ModelCallFailed('x', { cause: 'provider', uncharged: true });
-    const f = failing([failure, failure, failure, failure, failure, failure]);
-    await expect(withModelRetry(f.call, signal, () => undefined, wait)).rejects.toBe(failure);
-    expect(f.calls()).toBe(5);
+    const f = failing(Array.from({ length: 8 }, () => failure));
+    await expect(
+      withModelRetry(
+        f.call,
+        signal,
+        () => undefined,
+        wait,
+        () => 0.5,
+      ),
+    ).rejects.toBe(failure);
+    expect(f.calls()).toBe(6);
+    expect(waits).toEqual([500, 1000, 2000, 4000, 8000]);
   });
 
   it('never tries an uncertain or charged call again, nor a malformed request', async () => {
@@ -317,6 +328,14 @@ describe('a model call tried again', () => {
       ...['model_stream_idle', 'model_deadline_exceeded'].map(
         (code) => new ModelCallFailed('cut', { cause: 'failed', status: 504, code }),
       ),
+      // A reply the provider refused to give, released at no charge: it would be refused
+      // again, and the DeepSeek harness does not try a refusal again either.
+      new ModelCallFailed('refused', {
+        cause: 'provider',
+        status: 502,
+        uncharged: true,
+        code: 'model_refused',
+      }),
       new ModelCallFailed('ceiling', { cause: 'budget' }),
       new Error('Unsupported request'),
     ]) {

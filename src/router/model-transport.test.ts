@@ -1784,32 +1784,57 @@ it('says how a model call failed: the status of an answer that is not a result, 
 
 // Live case: the provider's account was empty, so the router failed every paid call; the
 // worker's job ended `unknown` and each call stayed reserved as uncertain.
-it('releases at once a call the router says the provider failed when its record says it cost nothing', async () => {
+// Also an empty reply, which the router fails as 502 `incomplete_model_response` before it
+// meters anything: zero charge, voucher cancelled, and so tried again.
+it.each([
+  ['model_inference_failed', 500],
+  ['incomplete_model_response', 502],
+] as const)(
+  'releases at once a call the router failed with %s when its record says it cost nothing, so it can be tried again',
+  async (code, status) => {
+    const f = await fixture();
+    const real = f.deps.fetchImpl!;
+    f.setRecoveryState('unknown');
+    f.setVoucher('cancelled');
+    f.setRecoveryActual('0');
+    f.deps.fetchImpl = async (input, init) =>
+      new Request(input, init).headers.has('payment-signature')
+        ? Response.json({ error: { code, message: 'Model invocation failed' } }, { status })
+        : real(input, init);
+    const failed = await f
+      .make()
+      .messages(f.job, { messages: [] }, new AbortController().signal)
+      .catch((error: unknown) => error as ModelCallFailed);
+    expect(failed).toBeInstanceOf(ModelCallFailed);
+    expect(failed?.detail).toEqual({ cause: 'provider', status, uncharged: true, code });
+    expect(retryableModelCall(failed)).toBe(true);
+    // One free read of the router's record, nothing bought again, and the quote released.
+    expect(f.signedGets()).toBe(1);
+    expect(await f.make().summary(f.job)).toMatchObject({
+      reservedAtomic: '3000',
+      uncertain: [],
+    });
+  },
+);
+
+// A reply of thinking alone is a legal end of a turn: the router delivers and charges it.
+// A client that took it for an empty reply would buy the same request again.
+it('takes a reply of thinking alone as a completed, charged call', async () => {
   const f = await fixture();
-  const real = f.deps.fetchImpl!;
-  f.setRecoveryState('unknown');
-  f.setVoucher('cancelled');
-  f.deps.fetchImpl = async (input, init) =>
-    new Request(input, init).headers.has('payment-signature')
-      ? Response.json(
-          { error: { code: 'model_inference_failed', message: 'Model invocation failed' } },
-          { status: 500 },
-        )
-      : real(input, init);
-  const failed = await f
-    .make()
-    .messages(f.job, { messages: [] }, new AbortController().signal)
-    .catch((error: unknown) => error as ModelCallFailed);
-  expect(failed).toBeInstanceOf(ModelCallFailed);
-  expect(failed?.detail).toEqual({
-    cause: 'provider',
-    status: 500,
-    uncharged: true,
-    code: 'model_inference_failed',
+  f.message.content = [
+    { type: 'thinking', thinking: 'Nothing more to say.', signature: 's' },
+  ] as never;
+  const transport = f.make();
+  const reply = await transport.messages(f.job, { messages: [] }, new AbortController().signal);
+  expect(reply.content).toEqual([
+    { type: 'thinking', thinking: 'Nothing more to say.', signature: 's' },
+  ]);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(await transport.summary(f.job)).toEqual({
+    actualAtomic: '4000',
+    reservedAtomic: '4000',
+    uncertain: [],
   });
-  // One free read of the router's record, nothing bought again, and the quote released.
-  expect(f.signedGets()).toBe(1);
-  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
 });
 
 // A REPLY THE ROUTER CUT (504 `model_stream_idle`, `model_deadline_exceeded`). Its record

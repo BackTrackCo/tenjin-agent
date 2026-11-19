@@ -58,13 +58,22 @@ export class ModelCallFailed extends Error {
 }
 
 /**
- * A MODEL CALL TRIED AGAIN, as the DeepSeek harness tries one: up to 5 tries, 500 ms
- * doubling to 10 s with 0.1 jitter, or the router's `Retry-After`. Only a call the router
- * confirms cost nothing, and only for a rate limit, a server or provider error, a timeout
- * or a call that never reached it. Never an uncertain or a charged call, never a request
- * the bridge or the router refused as malformed.
+ * A MODEL CALL TRIED AGAIN, as the DeepSeek harness tries one: up to 5 retries after the
+ * first try (6 tries), 500 ms doubling to 10 s with 0.1 jitter, or the router's
+ * `Retry-After`. Only a call the router confirms cost nothing, and only for a rate limit,
+ * a server or provider error, a timeout or a call that never reached it. Never an
+ * uncertain or a charged call, never a request the bridge or the router refused as
+ * malformed, never a reply the provider refused to give.
  */
-export const MODEL_RETRY = { tries: 5, baseMs: 500, maxMs: 10_000, jitter: 0.1, hintMs: 60_000 };
+export const MODEL_RETRY = { tries: 6, baseMs: 500, maxMs: 10_000, jitter: 0.1, hintMs: 60_000 };
+/**
+ * The router's code for a reply the provider refused to give (a `refusal` stop). The
+ * DeepSeek harness fails such a turn at once (`CONTENT_REFUSED`, outside its retried
+ * codes): the same request would be refused again. A router that names no refusal answers
+ * one as `incomplete_model_response`, which cannot be told from an empty reply and is
+ * tried again with it.
+ */
+export const MODEL_REFUSED_CODE = 'model_refused';
 /**
  * The router's codes for a reply it cut: no byte from the provider for its idle limit, or
  * the call's total deadline. Its record of such a call always reads `state: "unknown"`,
@@ -79,7 +88,8 @@ export const MODEL_CUT_REPLY_CODES: ReadonlySet<string> = new Set([
 ]);
 export function retryableModelCall(error: unknown): error is ModelCallFailed {
   if (!(error instanceof ModelCallFailed) || error.detail.uncharged !== true) return false;
-  const { cause, status } = error.detail;
+  const { cause, status, code } = error.detail;
+  if (code === MODEL_REFUSED_CODE) return false;
   if (cause === 'provider' || cause === 'timeout') return true;
   return cause === 'failed' && (status === undefined || status === 429 || status >= 500);
 }
