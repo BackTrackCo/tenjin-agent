@@ -94,6 +94,10 @@ export type TenjinModelOffer = {
   /** When the offer was made, on the plugin's clock. */
   at: number;
   state: 'offered' | 'native' | 'cancelled';
+  /** The held call asked to run in the background (`run_in_background`): its worker does. */
+  background?: true;
+  /** A background worker's result was handed to the parent, once. */
+  delivered?: true;
 };
 
 /** One accept call's live row, kept by its offer id while the worker runs. Display only. */

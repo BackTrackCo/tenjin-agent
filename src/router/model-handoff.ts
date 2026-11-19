@@ -207,22 +207,17 @@ const modeName = (mode: unknown) =>
 
 /**
  * The first field of a held Agent call that keeps it native, else null. A
- * call that names its agent starts a teammate and returns at once, as a
- * background call does, and the accept call cannot. The mod sends the loop
- * that made a call as `caller`, never in the input, so an `agentId` there is
- * the call's own field (or an older mod's), and keeps it native.
+ * call that names its agent starts a teammate, which a worker is not. A
+ * background call (`run_in_background`) is offered as a foreground one is, and
+ * its worker runs in the background. The mod sends the loop that made a call
+ * as `caller`, never in the input, so an `agentId` there is the call's own
+ * field (or an older mod's), and keeps it native.
  */
 function blockedField(native: Record<string, unknown>): string | null {
   if (typeof native.prompt !== 'string' || !native.prompt) return 'prompt';
-  const set = [
-    'agentId',
-    'agent_id',
-    'run_in_background',
-    'resume',
-    'name',
-    'team_name',
-    'isolation',
-  ].find((key) => native[key]);
+  const set = ['agentId', 'agent_id', 'resume', 'name', 'team_name', 'isolation'].find(
+    (key) => native[key],
+  );
   return set ?? null;
 }
 
@@ -746,7 +741,12 @@ export class ModelHandoff {
         session.harness === 'claude'
           ? ' When accepting several offers together, put only the chosen ids into one subagent({offer_ids: [id1, id2, ...]}) call so their workers run in parallel. Claude Code runs separate acceptance calls in order.'
           : ''
+      }${
+        job.native.run_in_background === true
+          ? " This call asked to run in the background, so its worker does: the accept call returns at once, and the worker's result arrives later as a notification, as a native background agent's does. Sent again unchanged, the call runs natively in the background."
+          : ''
       } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. No assignment has been sent to a worker.`,
+      ...(job.native.run_in_background === true ? { background: true } : {}),
     };
   }
 }

@@ -82,6 +82,9 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     ended: undefined as Record<string, unknown> | undefined,
     /** False: the CLI process holds no live view (it restarted, or the session was resumed). */
     liveView: true,
+    /** The job's stored handback, as an accept of an ended offer returns it. */
+    handback: undefined as string | undefined,
+    handbackReads: 0,
     /** Every plugin read refused, as the plugin's own hook did on alpha.52 (fault J). */
     readsRefused: false,
     work: (() => ({ result: 'actual worker result' })) as (e: {
@@ -208,6 +211,14 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
             content: [{ type: 'text' as const, text: '{"status":"waiting"}' }],
           },
         };
+    }
+    // The plugin's read of an ended offer: the stored handback, or a refusal while it runs.
+    if (e.tool === 'subagent' && typeof e.args.offer_id === 'string') {
+      state.handbackReads++;
+      const kept =
+        state.handback ??
+        JSON.stringify({ action: 'native', reason: 'its worker is still running' });
+      return { value: { isError: false, content: [{ type: 'text' as const, text: kept }] } };
     }
     if (e.tool === 'subagent') {
       state.cancellations.push(e.args);
@@ -3225,6 +3236,115 @@ test("a held Agent row drawn after a resume ends from the accept call's own answ
     struck: false,
     dot: 'error',
   });
+});
+
+// Operator ruling 2026-11-18: "background calls should get an offer". An Agent call with
+// `run_in_background` was never offered; now its worker runs in the background, the accept
+// answers at once, and the result reaches the parent when the worker ends.
+test("a background worker's row reads as a native background agent's, and its result is handed to the parent once when it ends", async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  on('ui.render', { component: 'UserMessage' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: [e.props.text] }),
+  );
+  const call = { ...INPUT, run_in_background: true };
+  const held = (await remember($, call)).result;
+  expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(
+    '⏺Agent(Read selected source) · Tenjin offered DeepSeek',
+  );
+  // The CLI answers a background call's accept at once: the worker has started and runs on.
+  const started = JSON.stringify({
+    status: 'started',
+    background: true,
+    offer_id: OFFER,
+    worker_handle: WORKER,
+    instruction: 'The DeepSeek worker is running in the background.',
+  });
+  f.state.work = () => ({ result: started, text: started });
+  expect(
+    (await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'bg_accept' })).text,
+  ).toBe(started);
+  await f.clock.settle();
+  const still = '⏺DeepSeek(Read selected source)  ⎿  Backgrounded agent (↓ to manage)';
+  expect((await acceptRow($, 'bg_accept', OFFER, started))[0]).toBe('');
+  expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(still);
+  // Its answer draws no result block either.
+  const result = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'bg_accept', tool: ACCEPT, output: started, isErrored: false },
+  });
+  expect(await shownLines(result)).toEqual([]);
+  await result.unmount();
+  // While it runs: the same still line, its progress in the agent list, and nothing sent.
+  await f.clock.advance(30_000);
+  expect((await heldDrawing($, 'held_bg', call, held)).lines).toBe(still);
+  expect(f.state.agents.map((agent) => agent.description)).toEqual(['Read selected source']);
+  expect(submitted).toEqual([]);
+  // The worker ends: its end line, and its stored handback goes to the parent as a prompt.
+  const handback = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 61_000,
+    toolUses: 12,
+    tokens: 41_234,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'the background report',
+    worker_handle: WORKER,
+  });
+  f.state.phase = 'completed';
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain(
+    `DeepSeek background worker "Read selected source" ended (offer ${OFFER}).`,
+  );
+  expect(submitted[0]!.endsWith(handback)).toBe(true);
+  expect(await heldDrawing($, 'held_bg', call, held)).toMatchObject({
+    lines:
+      '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 1m 1s · $0.039)',
+    dot: 'success',
+  });
+  // Once: nothing more is sent however long the session goes on.
+  await f.clock.advance(60_000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  // That prompt's row names its sender in one dim line, as a moved call's notice does.
+  for (const text of [submitted[0]!, 'The tenjin plugin sent a message:\n' + submitted[0]]) {
+    const row = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'UserMessage',
+      props: { text },
+    });
+    expect(await shownLines(row)).toEqual(['› Message from @DeepSeek (ctrl+o to expand)']);
+    await row.unmount();
+  }
+});
+
+test("a foreground worker's result is its accept call's own answer, and nothing is sent to the parent besides", async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  await remember($);
+  const handback = JSON.stringify({ status: 'completed', elapsedMs: 9000, result: 'report' });
+  f.state.work = () => ({ result: handback, text: handback });
+  f.state.handback = handback;
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'fg_accept' });
+  await f.clock.settle();
+  await f.clock.advance(5000);
+  await f.clock.settle();
+  expect(submitted).toEqual([]);
+  expect(f.state.handbackReads).toBe(0);
 });
 
 // Two or more Agent calls of one response are Claude Code's own summary block, which no

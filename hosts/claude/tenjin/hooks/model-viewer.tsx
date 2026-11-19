@@ -483,7 +483,14 @@ export async function rememberModelOffer(
       );
       if (assignment && current.records.some((r) => r.offerId === offerId))
         await $.state.set({ ...ASSIGNMENTS, id: offerId }, plain(assignment, ASSIGNMENT_CHARS));
-      await $.state.set({ ...OFFERS, id: offerId }, { at: await $.clock.now(), state: 'offered' });
+      await $.state.set(
+        { ...OFFERS, id: offerId },
+        {
+          at: await $.clock.now(),
+          state: 'offered',
+          ...(nativeInput.run_in_background === true ? { background: true as const } : {}),
+        },
+      );
       if (released) await $.state.set({ ...ASSIGNMENTS, id: released }, '');
     }
   } catch {
@@ -1007,6 +1014,9 @@ async function settle($: Dollar, offerId: string, title: string): Promise<void> 
         ...(current ?? { offerId, title, startedAt, state: 'unknown' }),
         ...ended,
       });
+      // A background worker this module took up again after a reload: its result is
+      // still the parent's to get, once.
+      if (ended.ended !== 'unseen') void deliverBackground($, offerId, title);
     } finally {
       liveWorkers.delete(offerId);
       $.ui.invalidate('ui.render');
@@ -1505,9 +1515,60 @@ function batchOutcomes(answer: Json | undefined): Map<string, Json> | undefined 
 function allowedAccept(input: unknown, ownCall: boolean): boolean {
   const given = record(input);
   const keys = given ? Object.keys(given) : [];
-  if (ownCall) return keys.length === 1 && record(given?.capture) !== undefined;
+  // Its own capture, and its own read of an ended background worker's stored result.
+  if (ownCall)
+    return keys.length === 1 && (record(given?.capture) !== undefined || !!acceptedIds(input));
   const id = keys.length === 1 ? given?.[keys[0]!] : undefined;
   return !!acceptedIds(input) || (keys[0] === 'cancel' && short(id) && UUID.test(id));
+}
+
+/**
+ * A BACKGROUND WORKER'S RESULT REACHES THE PARENT AS A PROMPT OF THIS PLUGIN, once the
+ * worker has ended. Its accept call answered at once, so nothing else carries it: Claude
+ * Code gives a plugin's own agent (the viewer) no completion notice in any mode (2.1.327
+ * marks it notified at launch), and no call asks the host to move an MCP call to the
+ * background at once. `$.prompt.submit` queues behind a running turn and starts a turn of
+ * its own when the session is idle, as a background agent's notice does.
+ *
+ * What is handed over is the job's stored handback, read by the accept of an ended offer,
+ * which starts nothing and charges nothing. Once per offer: the record says so, also
+ * after a reload.
+ */
+const BACKGROUND_RESULT = 'DeepSeek background worker';
+/** That prompt's first line, as its row reads it, bare or under the host's frame for a plugin's prompt. */
+const BACKGROUND_ROW =
+  /DeepSeek background worker "[^"\n]{0,80}" ended \(offer [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\)\./i;
+const delivering = new Set<string>();
+/** How long a read waits for the CLI to store an ended job's handback, at most. */
+const HANDBACK_READS = 20;
+async function deliverBackground($: Dollar, offerId: string, title: string): Promise<void> {
+  if (sessionEnding || delivering.has(offerId)) return;
+  delivering.add(offerId);
+  try {
+    const ref = { ...OFFERS, id: offerId };
+    const offer = (await $.state.get(ref)).value;
+    if (!offer?.background || offer.delivered) return;
+    let handback: string | undefined;
+    for (let read = 0; read < HANDBACK_READS && !handback; read++) {
+      const said = textOf(await $.mcp.call(SERVER, 'subagent', { offer_id: offerId }));
+      // Still closing: its record is written a moment after its display says it ended.
+      if (said && !startedNothing(said) && !startedInBackground(acceptResponse(said)))
+        handback = said;
+      else await $.clock.sleep(500);
+    }
+    await $.prompt.submit({
+      text:
+        `${BACKGROUND_RESULT} "${title}" ended (offer ${offerId}). This is the result of the background subagent call you accepted earlier, as a background agent's result arrives; nothing new started and nothing more was charged.\n` +
+        (handback ??
+          '{"status":"unknown","nextStep":"Its result could not be read here. Accept this offer again with subagent({offer_id}) to read the stored result; that starts no worker."}'),
+    });
+    const current = (await $.state.get(ref)).value;
+    if (current) await $.state.set(ref, { ...current, delivered: true });
+  } catch {
+    /* The stored result stays: accepting the offer again returns it. */
+  } finally {
+    delivering.delete(offerId);
+  }
 }
 
 async function watchAccept(
@@ -1524,6 +1585,7 @@ async function watchAccept(
     prepared = false,
     viewerStarted = false,
     background = false,
+    delivers = false,
     stopped = false,
     observed = false,
     startedAt = 0;
@@ -1553,6 +1615,11 @@ async function watchAccept(
         // Followed here no more once its end is written, so no drawing takes it for a
         // row that a reload left behind.
         if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
+        if (ended && delivers) {
+          const title = (await $.state.get({ ...WORKERS, id: offerId }).catch(() => undefined))
+            ?.value?.title;
+          void deliverBackground($, offerId, title ?? 'subagent');
+        }
         try {
           if (!prepared) return;
           // A viewer still starting binds to its running record before it retires.
@@ -1679,6 +1746,12 @@ async function watchAccept(
   return {
     stop,
     move: () => {
+      if (timer) background = true;
+      else stop();
+    },
+    /** A background call's worker: followed to its end, and its result handed to the parent then. */
+    follow: () => {
+      delivers = true;
       if (timer) background = true;
       else stop();
     },
@@ -1822,7 +1895,8 @@ export function registerModelViewer(on: On): void {
       };
     // The parent's answer to a held batch: an accept drops its line, a cancel writes it.
     // The plugin's own capture is no answer, and neither is a subagent's own call.
-    if (e.capture === undefined && e.agentId === undefined) sayHeld($, acceptedIds(e, true));
+    if (e.capture === undefined && e.agentId === undefined && !raisedByThisPlugin(next.origin))
+      sayHeld($, acceptedIds(e, true));
     // A cancelled offer is settled too: its row has nothing left to offer. A native
     // subagent's cancel of the offer it got settles it as the main loop's does.
     if (short(e.cancel) && UUID.test(e.cancel)) {
@@ -1843,6 +1917,8 @@ export function registerModelViewer(on: On): void {
     const offerIds = acceptedIds(e, true);
     if (
       !offerIds ||
+      // The plugin's own read of an ended offer's stored result starts and draws nothing.
+      raisedByThisPlugin(next.origin) ||
       (e.agentId !== undefined &&
         (liveViewerGuards.has(e.agentId) || (await knownViewer($, e.agentId).catch(() => true)))) ||
       (await $.env.get('TENJIN_MODEL_WORKER').catch(() => undefined)) === '1'
@@ -1880,7 +1956,13 @@ export function registerModelViewer(on: On): void {
       if (task && watchers.size) movedTasks.set(task, offerIds);
     } else {
       const results = batched ? batchOutcomes(answer) : undefined;
-      for (const [id, watcher] of watchers) watcher.stop(endedFrom(results?.get(id) ?? answer));
+      for (const [id, watcher] of watchers) {
+        const own = results?.get(id) ?? answer;
+        // A BACKGROUND CALL'S WORKER runs on past its accept call, which answered at once:
+        // its row follows the job until it ends, as a call the host moved is followed.
+        if (startedInBackground(own)) watcher.follow();
+        else watcher.stop(endedFrom(own));
+      }
     }
     return outcome;
   });
@@ -2312,6 +2394,17 @@ export function registerModelViewer(on: On): void {
         </Box>
       );
     }
+    // A background worker's result, handed over by this plugin: one dim line naming the
+    // sender in the compact view, as the notice of a moved call reads; in full, as sent.
+    if (!task && BACKGROUND_ROW.test(told)) {
+      if (e.props.isExpanded) return next(e);
+      const { Box, Text } = $.ui.resolve(e);
+      return (
+        <Box marginTop={1}>
+          <Text dimColor>{'› Message from @DeepSeek (ctrl+o to expand)'}</Text>
+        </Box>
+      );
+    }
     if (!told.startsWith(VIEWER_PROMPT + ' ')) return next(e);
     // `<offer id> <description>`; a viewer of an earlier build was told its description alone.
     const [, offerId, description = ''] = /^(\S{36}) ([\s\S]*)$/.exec(
@@ -2423,9 +2516,10 @@ async function describeWorker(
   const said = textOf(output);
   const answer = acceptResponse(said);
   const ended = (batched ? batchOutcomes(answer)?.get(offerId) : undefined) ?? answer;
-  const [held, known] = await Promise.all([
+  const [held, known, offer] = await Promise.all([
     $.state.get({ ...WORKERS, id: offerId }),
     $.state.get(STATE),
+    $.state.get({ ...OFFERS, id: offerId }),
   ]);
   const live = held.value;
   // Before the accept hook has run (the host is still checking the call), the offer's
@@ -2478,6 +2572,14 @@ async function describeWorker(
         parts: live?.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [],
       },
     };
+  // A BACKGROUND WORKER'S ROW READS AS A NATIVE BACKGROUND AGENT'S while it runs: one
+  // still line, its progress in the agent list. Its end line follows when it has ended,
+  // and its result arrives as a message of its own.
+  if (startedInBackground(ended) || (live && offer.value?.background)) {
+    // After a reload or a resume nothing here follows it: the CLI is asked how it stands.
+    if (!liveWorkers.has(offerId)) adopt($, offerId, title);
+    return { ...head, state: 'running', under: 'Backgrounded agent (↓ to manage)' };
+  }
   const moved = output !== undefined && HOST_MOVED.test(said ?? '');
   if (output !== undefined && !live && !moved) return undefined;
   // A running row nothing here follows, after a reload or a resume: the CLI is asked.
@@ -2635,7 +2737,15 @@ function workerGroup({ Box, Text }: Elements, rows: WorkerRow[], offerIds: strin
  *  handback (it carries `elapsedMs`) or a refusal to start one. A cancel's
  *  short status is not one, and keeps the engine's result block. */
 function acceptAnswer(answer: Json | undefined): boolean {
-  return typeof answer?.elapsedMs === 'number' || typeof answer?.action === 'string';
+  return (
+    typeof answer?.elapsedMs === 'number' ||
+    typeof answer?.action === 'string' ||
+    startedInBackground(answer)
+  );
+}
+/** An accept call's answer for a background call: its worker started and runs on (`model-mcp.ts`). */
+function startedInBackground(answer: Json | undefined): boolean {
+  return answer?.status === 'started' && answer.background === true;
 }
 /** The `Done (…)` line's counts, from the handback, as a native subagent's: uses, tokens, time, then spend. */
 function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {

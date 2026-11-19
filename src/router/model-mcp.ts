@@ -93,6 +93,11 @@ const turnWindow = (session: ModelSession) => JSON.stringify([session.sessionId,
 const jobWindow = (job: Pick<ModelJob, 'sessionId' | 'id'>) =>
   JSON.stringify([job.sessionId, 'job', job.id]);
 
+/** A held Agent call that asked to run in the background: its worker does. */
+const backgroundJob = (job: Pick<ModelJob, 'native'>) => job.native.run_in_background === true;
+/** What the parent reads when a background worker has started, as a native background agent's launch reads. */
+const BACKGROUND_STARTED =
+  'The DeepSeek worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.';
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
   await workerShutdown.get(server)?.();
@@ -187,8 +192,9 @@ export function registerModelTool(
     const ended = ['running', 'cancelling'].includes(job.state) ? await strand(job) : job;
     if (!ended)
       return {
-        refused:
-          'This offer is already accepted and its worker is still running. Its result returns from the accept call that started it. No second worker started.',
+        refused: backgroundJob(job)
+          ? 'This offer is already accepted and its worker is still running in the background. Its result arrives by itself as a notification when it ends. No second worker started.'
+          : 'This offer is already accepted and its worker is still running. Its result returns from the accept call that started it. No second worker started.',
       };
     if (ended.state !== 'cancelled' && ended.state !== 'unknown') return null;
     let stopped: Record<string, unknown> = {};
@@ -518,12 +524,26 @@ export function registerModelTool(
   const registerSubagent = (
     inWorker ? () => undefined : server.registerTool.bind(server)
   ) as typeof server.registerTool;
+  // THE TWO INFERENCE CHANNELS, for every worker of this process: a batch's workers and
+  // background workers that outlive their accept call run side by side, so each takes
+  // the channel fewer workers hold. Allocated only when a freshly accepted job is ready
+  // to run: a refused offer or a stored handback never funds another channel.
+  const occupied: [number, number] = [0, 0];
+  const leaseInferenceSlot = (): InferenceLease => {
+    const slot = occupied[0] <= occupied[1] ? 0 : 1;
+    occupied[slot]++;
+    return {
+      slot,
+      release: () => {
+        occupied[slot]--;
+      },
+    };
+  };
   const withBatchAccepts =
     (
       run: (
         args: Omit<SubagentOperation[0], 'offer_ids'>,
         extra: SubagentOperation[1],
-        leaseInferenceSlot?: () => InferenceLease,
       ) => Promise<ReturnType<typeof answer>>,
     ): ToolCallback<typeof subagentInput> =>
     async ({ offer_ids, ...args }, extra) => {
@@ -534,26 +554,9 @@ export function registerModelTool(
         return answer({ action: 'native', reason: 'Use distinct offer ids' });
       // Keep one live host request for permission prompts and interruption. Each
       // offer still goes through its own claim, worker, budget and handback.
-      // Allocate only when a freshly accepted job is ready to run. A refused
-      // offer or a stored handback should never make the batch fund another channel.
-      const occupied: [number, number] = [0, 0];
-      const leaseInferenceSlot = (): InferenceLease => {
-        const slot = occupied[0] <= occupied[1] ? 0 : 1;
-        occupied[slot]++;
-        return {
-          slot,
-          release: () => {
-            occupied[slot]--;
-          },
-        };
-      };
       const outcomes = await Promise.allSettled(
         offer_ids.map((offer_id) =>
-          run(
-            { ...args, offer_id },
-            { ...extra, signal: AbortSignal.any([extra.signal]) },
-            leaseInferenceSlot,
-          ),
+          run({ ...args, offer_id }, { ...extra, signal: AbortSignal.any([extra.signal]) }),
         ),
       );
       return answer({
@@ -576,7 +579,7 @@ export function registerModelTool(
       ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
       inputSchema: subagentInput,
     },
-    withBatchAccepts(async (args, extra, leaseInferenceSlot) => {
+    withBatchAccepts(async (args, extra) => {
       // The start phases of an accept, timed from here for the worker's diagnostic record.
       const acceptedAt = Date.now();
       const startMarks: Record<string, number> = { cliProcess: Math.round(performance.timeOrigin) };
@@ -958,7 +961,8 @@ export function registerModelTool(
             let inference: InferenceLease | undefined;
             try {
               signal.throwIfAborted();
-              inference = leaseInferenceSlot?.();
+              // One worker alone keeps the first channel, as before.
+              inference = options.harness === 'claude' ? leaseInferenceSlot() : undefined;
               const runOptions: Parameters<typeof runModelWorker>[1] = {
                 dataDir: options.dataDir,
                 accepted: { at: acceptedAt, marks: startMarks },
@@ -1130,7 +1134,29 @@ export function registerModelTool(
             session: { ...session, sessionId: job.sessionId, turnId: job.turnId },
             ...(activeConversation ? { conversation: activeConversation } : {}),
           });
-          return done;
+          if (!backgroundJob(job) || resumed || !activeConversation) return done;
+          // A BACKGROUND CALL'S WORKER OUTLIVES ITS ACCEPT CALL, as a native background
+          // agent outlives the Agent call that started it. The accept answers at once; the
+          // worker goes on as an operation of its own in the job's window, so a cancel, the
+          // session's end and this process's stop still end it, and the end of the accept
+          // call does not. Its handback is kept with the job, and the plugin hands it to
+          // the parent when the worker ends.
+          signal.removeEventListener('abort', stop);
+          void lifecycle
+            .run(window, undefined, async (own) => {
+              own.addEventListener('abort', stop, { once: true });
+              if (own.aborted) stop();
+              await done;
+            })
+            .catch(stop);
+          return answer({
+            status: 'started',
+            background: true,
+            label: 'DeepSeek V4.1 Flash 1017',
+            offer_id: job.id,
+            worker_handle: activeConversation.handle,
+            instruction: BACKGROUND_STARTED,
+          });
         })
         .catch(async () => {
           await noOffer('interrupted');

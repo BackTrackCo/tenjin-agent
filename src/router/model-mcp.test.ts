@@ -461,7 +461,12 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
   }
 });
 
-async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall = false) {
+async function ownedClaudeFixture(
+  agentType = 'general-purpose',
+  heldAgentCall = false,
+  /** More fields of the held call, such as `run_in_background`. */
+  heldFields: Record<string, unknown> = {},
+) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'owned-model-continuation-')));
   const repo = join(dir, 'repo'),
     configDir = join(dir, 'native-config');
@@ -563,6 +568,7 @@ async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall =
               model: 'sonnet',
             }
           : {}),
+        ...heldFields,
       },
       ...(heldAgentCall ? { nativeTool: 'Agent' as const } : {}),
       capAtomic: '1000000',
@@ -1955,6 +1961,138 @@ it("keeps a worker's permission dialog open past the MCP SDK's 60 seconds, as a 
     vi.useRealTimers();
     decide('deny');
     await f.close().catch(() => undefined);
+  }
+});
+
+// Operator ruling 2026-11-18: a background Agent call gets an offer, and its worker runs in
+// the background as a native background agent does.
+it("answers a background call's accept at once, runs its worker past the call, and keeps the result for the session", async () => {
+  const f = await ownedClaudeFixture('general-purpose', true, { run_in_background: true });
+  let finish!: (result: string) => void;
+  const finished = new Promise<string>((resolve) => {
+    finish = resolve;
+  });
+  worker.run.mockImplementation(async () => finished);
+  try {
+    const started = await f.call({ offer_id: f.job.id });
+    expect(started).toMatchObject({
+      status: 'started',
+      background: true,
+      offer_id: f.job.id,
+      worker_handle: expect.stringMatching(/^tenjin-worker-/),
+    });
+    expect(started.instruction).toContain('Its result arrives by itself when it ends');
+    expect(started).not.toHaveProperty('result');
+    await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(1));
+    expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+    // A repeat while it runs starts nothing and says where the result will come from.
+    const repeat = await f.call({ offer_id: f.job.id });
+    expect(repeat.reason).toContain('still running in the background');
+    expect((await f.activity({ offer_id: f.job.id })).activity.state).not.toBe('completed');
+    finish('background worker report');
+    await vi.waitFor(async () =>
+      expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('completed'),
+    );
+    // Its handback is the one a foreground accept returns, read by the same call.
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      status: 'completed',
+      result: 'background worker report',
+      worker_handle: started.worker_handle,
+      spend: { actualAtomic: '3000' },
+    });
+    expect(worker.run).toHaveBeenCalledTimes(1);
+    expect(f.route).not.toHaveBeenCalled();
+    // Its follow-up is held and offered by the worker's handle, as a foreground worker's is.
+    expect((await f.capture(started.worker_handle)).action).toBe('offer');
+  } finally {
+    finish('late');
+    await f.close();
+  }
+});
+
+it.each(['a cancel by its offer', "the session's end"] as const)(
+  'ends a running background worker on %s, with that cause in its stored handback',
+  async (how) => {
+    const f = await ownedClaudeFixture('general-purpose', true, { run_in_background: true });
+    let began!: () => void;
+    const begun = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    worker.run.mockImplementation(async (_job, options) => {
+      began();
+      await new Promise<void>((resolve) =>
+        options.signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      throw new Error('cancelled');
+    });
+    let closed = false;
+    try {
+      expect((await f.call({ offer_id: f.job.id })).status).toBe('started');
+      await begun;
+      if (how === 'a cancel by its offer') {
+        f.session.turnId = 'a-later-turn';
+        expect(await f.call({ cancel: f.job.id })).toEqual({ status: 'cancelled' });
+        expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+          status: 'cancelled',
+          endedBy: 'parent_cancel',
+        });
+      } else {
+        closed = true;
+        await f.close();
+        const ended = await f.store.owned(f.job.id, 'root');
+        expect(ended?.state).toBe('cancelled');
+        expect(JSON.parse(ended?.result ?? '{}')).toMatchObject({ endedBy: 'session_ended' });
+      }
+    } finally {
+      if (!closed) await f.close();
+    }
+  },
+);
+
+it('accepts a foreground and a background offer in one batch: the background one answers started, and both workers run side by side', async () => {
+  const f = await ownedClaudeFixture();
+  const background = await f.store.offer({
+    sessionId: 'root',
+    turnId: 'first-turn',
+    callId: 'background-call',
+    root: f.repo,
+    task: 'A background assignment.',
+    native: { prompt: 'A background assignment.', run_in_background: true },
+    nativeTool: 'Agent',
+    capAtomic: '1000000',
+    decision: { ...(await f.store.owned(f.job.id, 'root'))!.decision },
+  });
+  const finish = new Map<string, (result: string) => void>();
+  worker.run.mockImplementation(
+    (job) => new Promise<string>((resolve) => finish.set(job.id, resolve)),
+  );
+  try {
+    const batch = f.call({ offer_ids: [f.job.id, background.id] });
+    await vi.waitFor(() => expect(finish.size).toBe(2));
+    // Each on a channel of its own, as two foreground workers of one batch are.
+    expect(f.forInferenceSlot).toHaveBeenCalledWith(1);
+    finish.get(f.job.id)!('foreground report');
+    const { results } = await batch;
+    expect(results[0]).toMatchObject({
+      offer_id: f.job.id,
+      outcome: { status: 'completed', result: 'foreground report' },
+    });
+    expect(results[1]).toMatchObject({
+      offer_id: background.id,
+      outcome: { status: 'started', background: true },
+    });
+    expect((await f.store.owned(background.id, 'root'))?.state).toBe('running');
+    finish.get(background.id)!('background report');
+    await vi.waitFor(async () =>
+      expect((await f.store.owned(background.id, 'root'))?.state).toBe('completed'),
+    );
+    expect(await f.call({ offer_id: background.id })).toMatchObject({
+      status: 'completed',
+      result: 'background report',
+    });
+  } finally {
+    for (const resolve of finish.values()) resolve('late');
+    await f.close();
   }
 });
 

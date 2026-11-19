@@ -142,6 +142,47 @@ async function continuationFixture(multiple = false) {
   };
 }
 
+// Operator ruling 2026-11-18: a background Agent call gets an offer. It was kept native as
+// `input_filter:run_in_background`, so no loop worker and no background call could be routed.
+it('offers a background Agent call, says its worker runs in the background, and keeps its unchanged repeat native', async () => {
+  const f = await continuationFixture();
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the fixture in the background.' },
+    }) + '\n',
+  );
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+  }));
+  const session = { ...f.session, transcript };
+  const held = { description: 'Read the fixture', prompt: 'Read the fixture.' };
+  const background = { ...held, run_in_background: true };
+  const made = await f.model.capture(session, 'background-call', background);
+  expect(made).toMatchObject({ action: 'offer', background: true });
+  expect('instruction' in made ? made.instruction : '').toContain(
+    'its worker does: the accept call returns at once',
+  );
+  const id = 'offer_id' in made ? String(made.offer_id) : '';
+  expect((await f.model.store.owned(id, 'root'))?.native).toMatchObject({
+    run_in_background: true,
+  });
+  // A foreground call's offer says nothing of the background.
+  const plain = await f.model.capture(session, 'foreground-call', held);
+  expect(plain).not.toHaveProperty('background');
+  expect('instruction' in plain ? plain.instruction : '').not.toContain('background');
+  // The veto is the same call again: it settles the background offer alone and runs natively.
+  expect(await f.model.capture({ ...session, turnId: 'next-turn' }, 'repeat', background)).toEqual({
+    action: 'native',
+    settled: id,
+  });
+  expect(f.route).toHaveBeenCalledTimes(2);
+});
+
 it('names one keep-native path and runs the unchanged repeat natively with no second route', async () => {
   const f = await continuationFixture();
   const transcript = join(dir, 'parent.jsonl');
@@ -1109,7 +1150,7 @@ it('records one code for each reason a held call gets no offer, and never its te
   expect(await reason(call, { ...f.session, claudePermissionMode: 'plan' as never })).toMatchObject(
     { code: 'permission_mode', detail: 'plan' },
   );
-  for (const field of ['name', 'run_in_background', 'isolation', 'resume'])
+  for (const field of ['name', 'team_name', 'isolation', 'resume'])
     expect(await reason({ ...call, [field]: 'set' })).toMatchObject({
       code: 'input_filter',
       detail: field,
