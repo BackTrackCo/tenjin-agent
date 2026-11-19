@@ -1694,7 +1694,7 @@ it('rejects a Messages result above the server message ceiling even when the rec
   });
 });
 
-it('masks known secrets in native instructions/text/tool outputs while preserving opaque pairings and schemas', async () => {
+it('sends known secret shapes in native instructions/text/tool outputs as written, with opaque pairings and schemas intact', async () => {
   const f = await fixture({ protocol: 'responses' });
   const secret = 'sk-proj-abc123DEF456ghi789JKL012_mno';
   const native = {
@@ -1719,9 +1719,9 @@ it('masks known secrets in native instructions/text/tool outputs while preservin
   };
   await f.make().responses(f.job, native, new AbortController().signal);
   const sent = f.last()!.responses as typeof native;
-  expect(sent.instructions).not.toContain(secret);
-  expect((sent.input[0]!.content![0] as { text: string }).text).not.toContain(secret);
-  expect(sent.input[2]!.output).not.toContain(secret);
+  expect(sent.instructions).toContain(secret);
+  expect((sent.input[0]!.content![0] as { text: string }).text).toContain(secret);
+  expect(sent.input[2]!.output).toContain(secret);
   expect(sent.input[1]!.id).toBe(secret);
   expect(sent.input[2]!.call_id).toBe(secret);
   expect(sent.input[3]!.encrypted_content).toBe(secret);

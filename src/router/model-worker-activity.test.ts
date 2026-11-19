@@ -68,7 +68,7 @@ it('records actual tool activity and updates a result without creating another r
   expect(read?.rows[0]?.inputSummary).toContain(join(f.binding.root, 'index.ts'));
 });
 
-it('never includes thinking, authentication, system prompts or secret input values, and shows a shell command to the local display alone', () => {
+it('never includes thinking, authentication, system prompts or secret input values (known shapes in text are shown as written), and shows a shell command to the local display alone', () => {
   const f = fixture();
   f.activity.observe(f.event('system', { subtype: 'init', system: 'private-system-prompt' }));
   f.activity.observe(f.event('auth_status', { output: ['private-auth-output'] }));
@@ -92,16 +92,17 @@ it('never includes thinking, authentication, system prompts or secret input valu
     'private-system-prompt',
     'private-auth-output',
     'private-raw-thinking',
-    'ActualPrivateValue987',
     'private-environment-value',
     '873962',
     'private-nested-value',
-    'PrivateResultValue123',
   ])
     expect(serialized).not.toContain(secret);
   expect(serialized).toContain('Read the source.');
   expect(serialized).toContain('Bash');
-  expect(serialized).toContain('redacted');
+  expect(serialized).toContain('[hidden]');
+  // Shapes in text are shown as written: nothing masks them by shape any more.
+  expect(serialized).toContain('ActualPrivateValue987');
+  expect(serialized).toContain('PrivateResultValue123');
   // The command is its own row field, as a native row names a shell call, and the parent's
   // partial handback never carries it.
   const shell = () => f.activity.snapshot().rows.find((row) => row.name === 'Bash');
@@ -522,8 +523,8 @@ it('marks the reply each row belongs to, and a read’s line count from its own 
   expect(text?.message).toBe(read?.message);
   expect(done?.message).not.toBe(read?.message);
   expect(read?.lines).toBe(120);
-  // The viewer's result lines come from this preview, which never holds a token.
-  expect(read?.outputPreview).not.toContain(token);
+  // The viewer's result lines come from this preview, which shows a secret shape as written.
+  expect(read?.outputPreview).toContain(token);
 });
 
 // The viewer draws a web call as Claude Code does: `WebFetch(url)` and `Received 12KB (200 OK)`.

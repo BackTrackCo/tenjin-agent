@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { isRecord } from '../lib/guards';
-import { mask } from '../lib/redact';
 import { readJsonFile } from './store-files';
 
 const run = promisify(execFile);
@@ -290,7 +289,7 @@ export function workerFailure(endedBy: string, error: unknown): WorkerFailure {
       name: (typeof value.name === 'string' ? value.name : typeof current).slice(0, 80),
       ...(code ? { code } : {}),
       ...(status !== undefined ? { status } : {}),
-      message: mask(typeof value.message === 'string' ? value.message : String(current)).slice(
+      message: (typeof value.message === 'string' ? value.message : String(current)).slice(
         0,
         MAX_MESSAGE,
       ),

@@ -1,5 +1,4 @@
 import { lstat, mkdir } from 'node:fs/promises';
-import { mask } from '../lib/redact';
 import { modelSettings } from './model-settings';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { randomUUID } from 'node:crypto';
@@ -676,34 +675,8 @@ export class ModelTransport {
     });
     step('budgetMs');
     if (old) return existing(old);
-    const scrub = (value: unknown, field = ''): unknown => {
-      if (protocol === 'responses' && ['parameters', 'input_schema', 'format'].includes(field))
-        return value;
-      if (typeof value === 'string')
-        return (protocol === 'responses'
-          ? [
-              'signature',
-              'encrypted_content',
-              'id',
-              'call_id',
-              'tool_call_id',
-              'item_id',
-              'tool_use_id',
-              'name',
-              'namespace',
-              'type',
-              'model',
-              'role',
-            ]
-          : ['signature', 'id', 'tool_use_id', 'name', 'type', 'model', 'role']
-        ).includes(field)
-          ? value
-          : mask(value);
-      if (Array.isArray(value)) return value.map((v) => scrub(v, field));
-      if (value && typeof value === 'object')
-        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrub(v, k)]));
-      return value;
-    };
+    // The request goes as the worker wrote it: nothing is masked by shape here (the worker's
+    // own bridge and GitHub tokens are removed by value at the bridge, before this call).
     const body = {
       schemaVersion: 1,
       consent: true,
@@ -711,9 +684,7 @@ export class ModelTransport {
       invocationId: randomUUID(),
       ...(stated !== undefined ? { maxResultBytes: stated } : {}),
       ...(relay ? { stream: true as const } : {}),
-      ...(protocol === 'responses'
-        ? { protocol, responses: scrub(messages) }
-        : { messages: scrub(messages) }),
+      ...(protocol === 'responses' ? { protocol, responses: messages } : { messages }),
     };
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;

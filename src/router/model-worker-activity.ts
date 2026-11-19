@@ -1,7 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { z } from 'zod';
-import { mask } from '../lib/redact';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
 
@@ -248,7 +247,7 @@ function preview(value: string): string {
     /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g,
     '',
   );
-  const safe = mask(terminalSafe);
+  const safe = terminalSafe;
   const bytes = Buffer.from(safe);
   if (bytes.length <= MAX_FIELD_BYTES) return safe;
   // Decode a complete UTF-8 prefix; a replacement character is harmless display data.
