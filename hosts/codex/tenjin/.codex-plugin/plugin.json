@@ -12,6 +12,5 @@
     "developerName": "Tenjin",
     "category": "Productivity"
   },
-  "skills": "./skills/",
   "mcpServers": "./.mcp.json"
 }

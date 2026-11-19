@@ -8,6 +8,7 @@ Use [setup and permissions](./agent-permissions.md) for first use. This page des
 - [Your settings](#your-settings): prefer, only, block, reset, speed and automatic use.
 - [Your own accounts](#your-own-accounts): connect, disconnect, status and usage.
 - [Routing fees and accounting](#routing-fees-and-accounting): limits, deposits and approval.
+- [Endpoint discovery](#endpoint-discovery): search public registries and Orthogonal for free.
 - [Direct payments](#direct-payments): pay a specific endpoint with consent.
 - [Jobs, files and records](#jobs-files-and-records): polling and saved results.
 - [Host integration](#host-integration): Claude Code and Codex differences.
@@ -152,6 +153,21 @@ A routing payment that cannot be made is skipped without a second unpaid routing
 A wallet that cannot sign suppresses paid offers. Tenjin reads no balance when it offers a tool, admits a plan or signs a provider payment: the facilitator checks funds when it verifies each payment, and a payment it refuses as short of funds is reported as a low wallet, with no retry. The automatic routing notice says only that Tenjin could not pay for that answer and that answers needing no payment can still work. A balance check cannot prevent a concurrent transfer or guarantee settlement. `tenjin balance`, `tenjin status` and `tenjin doctor` read the balance when you run them, and a once-a-day session-start notice reads it too.
 
 Network-unreachable routing may be paused locally for 60 seconds to avoid delaying each hook. A timeout or an answered HTTP error does not establish that outage. Doctor can clear the pause after a successful reachability probe. Reachability alone proves neither an active chat nor paid execution.
+
+## Endpoint discovery
+
+`{browse}` in the [request tool](#request-tool) lists Tenjin's own catalog. `tenjin discover` is a separate terminal command that searches outside that catalog: the configured `bazaarRegistries` (Coinbase Bazaar, Ultravioleta and PayAI by default) and Orthogonal's public catalog.
+
+```bash
+tenjin discover "speech synthesis" --json
+tenjin discover "speech synthesis" --sources registries --json
+```
+
+`--sources` takes `registries`, `orthogonal` or both; the default is both. Without a query, the command lists a bounded page from each source. The query goes to each configured registry. Orthogonal receives no query: the command reads its whole public catalog, ranks the entries by keyword on this machine and keeps the first 20. The command opens no wallet, pays nothing and calls no seller. No hook or skill runs it, and it neither needs nor changes `experimental.bazaar`.
+
+The JSON result separates registry `resources` from Orthogonal `catalogs`. A resource keeps the listing's URL, registry and payment terms (`accepts`), and its `serviceName` and `extensions` (the advertised request schema) where the registry gives them. `errors` names each registry that failed or returned partial results, and `skippedNonHttp` counts listings that are not HTTP endpoints. Each catalog has its own `partial` and `errors`. A result with errors is partial: an empty one is not proof that no endpoint exists. The terminal view shows a dollar price only for supported dollar tokens.
+
+Listings are unvetted third-party data, and a listed price is advertised, not quoted. Discovery is not consent to pay. To use an endpoint, quote it first as [Direct payments](#direct-payments) describes. The command saves the registry listings it finds on this machine; for 24 hours, `tenjin pay` reads a saved listing as registry evidence for that URL before it asks the registry again.
 
 ## Direct payments
 
