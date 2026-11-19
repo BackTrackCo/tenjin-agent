@@ -1,122 +1,13 @@
 import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
-import {
-  modelConsentOutdated,
-  modelSettings,
-  nativeWorkspaceModelConsent,
-  outdatedModelConsent,
-} from './model-settings';
-import * as repositories from './model-repositories';
+import { afterEach, expect, it } from 'vitest';
+import { modelConsent, modelSettings } from './model-settings';
 let dir: string;
 afterEach(async () => {
-  vi.restoreAllMocks();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
-
-it('uses fresh-install native-workspace disclosure in separate current workspaces without saving directory grants', async () => {
-  const { data, repo } = await fixture({
-    subagents: true,
-    subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
-  });
-  const sibling = join(dir, 'another-project');
-  await mkdir(sibling);
-  for (const root of [repo, sibling])
-    expect(await modelSettings(data, root)).toMatchObject({
-      version: 3,
-      scope: 'native-workspace',
-      root,
-      repositories: [root],
-      maxJobAtomic: 1000000n,
-    });
-  const { readFile } = await import('node:fs/promises');
-  const saved = await readFile(join(data, 'config.json'), 'utf8');
-  expect(saved).not.toContain(repo);
-  expect(saved).not.toContain(sibling);
-  expect(saved).not.toContain('repositories');
-});
-
-it.each([
-  { scope: undefined },
-  { scope: 'all' },
-  { repositories: ['/'] },
-  // A named ceiling of zero. With the rule (`maxJob`), the amount is not the cap.
-  { maxJobAtomic: '0', maxJob: undefined },
-  { recipients: ['Tenjin'] },
-])('refuses incomplete or widened native-workspace consent %j', async (change) => {
-  const consent = nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' });
-  const { data, repo } = await fixture({
-    subagents: true,
-    subagentConsent: { ...consent, ...change },
-  });
-  expect(await modelSettings(data, repo)).toBeNull();
-});
-
-it('stops qualifying a consent given before a worker could read the global Claude Code folder, until it is renewed', async () => {
-  // Agreed to under the earlier disclosure: the named or current workspace, nothing of ~/.claude.
-  const earlier: Record<string, unknown> = {
-    ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
-  };
-  delete earlier.reads;
-  const { data, repo } = await fixture({ subagents: true, subagentConsent: earlier });
-  expect(await modelSettings(data, repo)).toBeNull();
-  expect(await modelConsentOutdated(data)).toBe(true);
-  expect(outdatedModelConsent(earlier)).toMatchObject({ version: 3 });
-  // Renewed, it qualifies again and is no longer out of date.
-  await writeFile(
-    join(data, 'config.json'),
-    JSON.stringify({
-      router: { subagents: true, subagentConsent: { ...earlier, reads: 'claude-home' } },
-    }),
-  );
-  expect(await modelSettings(data, repo)).toMatchObject({ version: 3 });
-  expect(await modelConsentOutdated(data)).toBe(false);
-  // A record that is wrong in another way is not an earlier consent.
-  expect(outdatedModelConsent({ ...earlier, recipients: ['Tenjin'] })).toBeNull();
-});
-
-it('stops qualifying a consent that names Tenjin and DeepSeek but not Exa, until it is renewed', async () => {
-  // The failure: a consent given before a worker's web searches went to Exa kept
-  // qualifying, so Exa received queries under terms that never named it.
-  const withoutExa: Record<string, unknown> = {
-    ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
-    recipients: ['Tenjin', 'DeepSeek'],
-  };
-  const { data, repo } = await fixture({ subagents: true, subagentConsent: withoutExa });
-  expect(await modelSettings(data, repo)).toBeNull();
-  expect(await modelConsentOutdated(data)).toBe(true);
-  // The earliest record, from before ~/.claude was named as well, is renewed the same way.
-  const earliest = { ...withoutExa };
-  delete earliest.reads;
-  expect(outdatedModelConsent(earliest)).toMatchObject({
-    reads: 'claude-home',
-    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-  });
-});
-
-it('a repository cannot create native-workspace disclosure, or override a global/project stop', async () => {
-  const consent = nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' });
-  const { data, repo } = await fixture({});
-  await mkdir(join(repo, '.tenjin'));
-  const project = join(repo, '.tenjin', 'config.json');
-  await writeFile(
-    project,
-    JSON.stringify({ router: { subagents: true, subagentConsent: consent } }),
-  );
-  expect(await modelSettings(data, repo)).toBeNull();
-  await writeFile(
-    join(data, 'config.json'),
-    JSON.stringify({ router: { subagents: false, subagentConsent: consent } }),
-  );
-  expect(await modelSettings(data, repo)).toBeNull();
-  await writeFile(
-    join(data, 'config.json'),
-    JSON.stringify({ router: { subagents: true, subagentConsent: consent } }),
-  );
-  await writeFile(project, JSON.stringify({ router: { subagents: false } }));
-  expect(await modelSettings(data, repo)).toBeNull();
-});
+const ORIGIN = 'http://localhost:3939';
 async function fixture(router: Record<string, unknown>, limits: Record<string, string> = {}) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'model-consent-')));
   const data = join(dir, 'data'),
@@ -127,25 +18,113 @@ async function fixture(router: Record<string, unknown>, limits: Record<string, s
   await writeFile(join(data, 'config.json'), JSON.stringify({ ...limits, router }));
   return { data, repo };
 }
+const save = (data: string, router: Record<string, unknown>, limits = {}) =>
+  writeFile(join(data, 'config.json'), JSON.stringify({ ...limits, router }));
+
+it('the one consent covers a session in any directory and saves no directory grant', async () => {
+  const consent = modelConsent({ routerOrigin: ORIGIN });
+  expect(consent).toEqual({
+    version: 2,
+    instructions: 'applicable',
+    reads: 'claude-home',
+    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+    routerOrigin: ORIGIN,
+  });
+  const { data, repo } = await fixture({ subagents: true, subagentConsent: consent });
+  const other = join(dir, 'other');
+  await mkdir(other);
+  for (const root of [repo, other])
+    expect(await modelSettings(data, root)).toEqual({
+      version: 2,
+      root,
+      repositories: [],
+      maxJobAtomic: 1000000n,
+      routerOrigin: ORIGIN,
+      context: 'session',
+    });
+});
+
+it.each([
+  { instructions: undefined },
+  { reads: undefined },
+  { recipients: ['Tenjin', 'DeepSeek'] },
+  { routerOrigin: 'not a url' },
+  { version: 1 },
+  { repositories: [] },
+  { maxJobAtomic: 'not-an-amount' },
+])('refuses an incomplete or malformed consent %j', async (change) => {
+  const { data, repo } = await fixture({
+    subagents: true,
+    subagentConsent: { ...modelConsent({ routerOrigin: ORIGIN }), ...change },
+  });
+  expect(await modelSettings(data, repo)).toBeNull();
+});
+
+// Review of b7974566: `on --repository` wrote a second kind of consent that replaced the
+// install's and covered only the named directories.
+it('a named directory is an addition: a session inside one gets every named one, and a session elsewhere still qualifies', async () => {
+  const { data, repo } = await fixture({});
+  const sibling = join(dir, 'sibling');
+  const elsewhere = join(dir, 'elsewhere');
+  const nested = join(repo, 'nested');
+  for (const path of [sibling, elsewhere, nested]) await mkdir(path);
+  const first = modelConsent({ routerOrigin: ORIGIN, repository: repo });
+  // A second turn-on keeps the first directory; one at another router does not.
+  const both = modelConsent({ routerOrigin: ORIGIN, prior: first, repository: sibling });
+  expect(both.repositories).toEqual([repo, sibling]);
+  expect(modelConsent({ routerOrigin: 'https://other.example', prior: first })).not.toHaveProperty(
+    'repositories',
+  );
+  await save(data, { subagents: true, subagentConsent: both });
+  expect(await modelSettings(data, nested)).toMatchObject({
+    root: nested,
+    repositories: [repo, sibling],
+  });
+  expect(await modelSettings(data, elsewhere)).toMatchObject({
+    root: elsewhere,
+    repositories: [],
+  });
+  // A longer sibling name is not inside the named directory.
+  const lookalike = `${repo}-other`;
+  await mkdir(lookalike);
+  expect(await modelSettings(data, lookalike)).toMatchObject({ repositories: [] });
+});
+
+it('a repository cannot grant consent, and a global or project stop is immediate', async () => {
+  const consent = modelConsent({ routerOrigin: ORIGIN });
+  const { data, repo } = await fixture({});
+  await mkdir(join(repo, '.tenjin'));
+  const project = join(repo, '.tenjin', 'config.json');
+  await writeFile(
+    project,
+    JSON.stringify({ router: { subagents: true, subagentConsent: consent } }),
+  );
+  expect(await modelSettings(data, repo)).toBeNull();
+  await save(data, { subagents: false, subagentConsent: consent });
+  expect(await modelSettings(data, repo)).toBeNull();
+  await save(data, { subagents: true, subagentConsent: consent });
+  expect(await modelSettings(data, repo)).not.toBeNull();
+  await writeFile(project, JSON.stringify({ router: { subagents: false } }));
+  expect(await modelSettings(data, repo)).toBeNull();
+});
 
 // A job is one call to the person. The cap was the consent's own amount, $1 from install,
 // whatever the per-call limit said: a $0.25 limit still let a job spend $1.
 it.each([
-  // [the per-call limit, the consent's amount, whether it names the rule, the cap]
-  ['250000', '1000000', true, 250000n],
-  ['3000000', '1000000', true, 3000000n],
-  ['0', '1000000', true, 0n],
-  // A named ceiling, or a consent from before the rule: the smaller of the two.
-  ['250000', '1000000', false, 250000n],
-  ['3000000', '1000000', false, 1000000n],
-  ['3000000', '500000', false, 500000n],
+  // [the per-call limit, the ceiling named with --max-job, the cap]
+  ['250000', undefined, 250000n],
+  ['4000000', undefined, 4000000n],
+  ['0', undefined, 0n],
+  // A named ceiling lowers the cap and never lifts it.
+  ['4000000', '1000000', 1000000n],
+  ['250000', '1000000', 250000n],
 ] as const)(
-  'caps a job at the per-call limit %s with a consent amount of %s (rule: %s)',
-  async (maxAutoSpend, maxJobAtomic, rule, cap) => {
-    const consent: Record<string, unknown> = {
-      ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939', maxJobAtomic }),
-    };
-    if (!rule) delete consent.maxJob;
+  'a job cap is the per-call limit %s, under a named ceiling of %s: %s',
+  async (maxAutoSpend, maxJobAtomic, cap) => {
+    const consent = modelConsent({
+      routerOrigin: ORIGIN,
+      ...(maxJobAtomic === undefined ? {} : { maxJobAtomic }),
+    });
     const { data, repo } = await fixture(
       { subagents: true, subagentConsent: consent },
       { maxAutoSpend },
@@ -154,73 +133,14 @@ it.each([
   },
 );
 
-it('caps a job at the default per-call limit where none is saved', async () => {
-  const consent = nativeWorkspaceModelConsent({
-    routerOrigin: 'http://localhost:3939',
-    maxJobAtomic: '4000000',
-  });
-  const { data, repo } = await fixture({ subagents: true, subagentConsent: consent });
-  expect(await modelSettings(data, repo)).toMatchObject({ maxJobAtomic: 1000000n });
+it('a turn-on without --max-job drops a ceiling named earlier', async () => {
+  const named = modelConsent({ routerOrigin: ORIGIN, maxJobAtomic: '500000' });
+  expect(modelConsent({ routerOrigin: ORIGIN, prior: named })).not.toHaveProperty('maxJobAtomic');
 });
+
 it('does not turn legacy tier routing or a boolean into inference/data consent', async () => {
   const { data, repo } = await fixture({ subagents: 'apply' });
   expect(await modelSettings(data, repo)).toBeNull();
-  await writeFile(
-    join(data, 'config.json'),
-    JSON.stringify({
-      router: {
-        subagents: true,
-        subagentConsent: {
-          version: 1,
-          recipients: ['Tenjin', 'DeepSeek'],
-          repositories: [repo],
-          maxJobAtomic: '1000000',
-          routerOrigin: 'http://localhost:3939',
-        },
-      },
-    }),
-  );
+  await save(data, { subagents: true });
   expect(await modelSettings(data, repo)).toBeNull();
-  await writeFile(join(data, 'config.json'), JSON.stringify({ router: { subagents: true } }));
-  expect(await modelSettings(data, repo)).toBeNull();
-});
-it('keeps the actual cwd beneath an explicitly selected workspace and lets a project revoke access immediately', async () => {
-  const { data, repo } = await fixture({});
-  await writeFile(
-    join(data, 'config.json'),
-    JSON.stringify({
-      router: {
-        subagents: true,
-        subagentConsent: {
-          version: 2,
-          instructions: 'applicable',
-          reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-          repositories: [repo],
-          maxJobAtomic: '1000000',
-          routerOrigin: 'http://localhost:3939',
-        },
-      },
-    }),
-  );
-  const discover = vi.spyOn(repositories, 'modelGithubRepositories');
-  const nested = join(repo, 'nested');
-  await mkdir(nested);
-  expect(await modelSettings(data, nested)).toMatchObject({
-    root: nested,
-    repositories: [repo],
-    maxJobAtomic: 1000000n,
-  });
-  expect(await modelSettings(data, dir)).toBeNull();
-  const sibling = `${repo}-other`;
-  await mkdir(sibling);
-  expect(await modelSettings(data, sibling)).toBeNull();
-  await mkdir(join(repo, '.tenjin'));
-  await writeFile(
-    join(repo, '.tenjin', 'config.json'),
-    JSON.stringify({ router: { subagents: false } }),
-  );
-  expect(await modelSettings(data, repo)).toBeNull();
-  expect(await modelSettings(data, nested)).toBeNull();
-  expect(discover).not.toHaveBeenCalled();
 });

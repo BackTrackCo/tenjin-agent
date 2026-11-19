@@ -111,12 +111,7 @@ export async function loadWindowsWorkerConfig(
   if (router?.subagents !== true) return null;
   const record = configSchema.safeParse(router.windowsWorker);
   const consent = modelConsentSchema.safeParse(router.subagentConsent);
-  if (
-    !record.success ||
-    !consent.success ||
-    consent.data.routerOrigin !== record.data.routerOrigin ||
-    BigInt(consent.data.maxJobAtomic) <= 0n
-  )
+  if (!record.success || !consent.success || consent.data.routerOrigin !== record.data.routerOrigin)
     return null;
   const config = await validateWindowsWorkerConfig(record.data, dataDir);
   if (

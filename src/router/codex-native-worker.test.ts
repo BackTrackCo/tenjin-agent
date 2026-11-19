@@ -15,7 +15,7 @@ import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { codexModelPolicy } from './codex-model-context';
-import { nativeWorkspaceModelConsent } from './model-settings';
+import { modelConsent } from './model-settings';
 
 const http = vi.hoisted(() => ({
   handler: undefined as undefined | ((req: unknown, res: unknown) => void),
@@ -440,22 +440,18 @@ it('rejects a fallback effective default permission profile before native startu
   expect(requests.some((request) => request.method === 'thread/start')).toBe(false);
 });
 
-it('refuses an unconsented sibling grant or runtime root before starting an app server', async () => {
-  const sibling = join(dir, 'sibling');
-  await mkdir(sibling);
-  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
-  profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
-  expect(await qualify()).toBeNull();
-  profile.file_system.entries.pop();
-  policy.parent!.runtimeWorkspaceRoots.push(sibling);
-  expect(await qualify()).toBeNull();
-  expect(withAppServer).not.toHaveBeenCalled();
-});
-
 async function repositories(paths: string[]) {
   const file = join(dataDir, 'config.json');
   const saved = JSON.parse(await readFile(file, 'utf8'));
   saved.router.subagentConsent.repositories = paths;
+  await writeFile(file, JSON.stringify(saved));
+}
+
+/** The person turns subagent routing off while a job runs. */
+async function turnOff() {
+  const file = join(dataDir, 'config.json');
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  saved.router.subagents = false;
   await writeFile(file, JSON.stringify(saved));
 }
 
@@ -465,7 +461,7 @@ async function nativeWorkspaceConsent() {
     JSON.stringify({
       router: {
         subagents: true,
-        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost' }),
+        subagentConsent: modelConsent({ routerOrigin: 'http://localhost' }),
       },
     }),
   );
@@ -548,13 +544,6 @@ it('preserves a concrete multi-root native profile only when each grant and runt
   });
 });
 
-it('does not turn applicable instruction consent into an uncovered global worker file grant', async () => {
-  await repositories([root]);
-  expect(await qualify()).toBeNull();
-  expect(withAppServer).not.toHaveBeenCalled();
-  expect(readCodexInstructionFilesOnServer).not.toHaveBeenCalled();
-});
-
 it.each(['alias', 'missing'] as const)(
   'keeps an unresolved or aliased %s grant native even with disclosure coverage',
   async (kind) => {
@@ -569,18 +558,15 @@ it.each(['alias', 'missing'] as const)(
   },
 );
 
-it.each(['minimal', 'slash_tmp', 'tmpdir'])(
-  'keeps an unknown or uncovered native %s scope native',
-  async (kind) => {
-    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
-    profile.file_system.entries.push({
-      path: { type: 'special', value: { kind } },
-      access: 'read',
-    });
-    expect(await qualify()).toBeNull();
-    expect(withAppServer).not.toHaveBeenCalled();
-  },
-);
+it.each(['minimal'])('keeps an unknown native %s scope native', async (kind) => {
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.push({
+    path: { type: 'special', value: { kind } },
+    access: 'read',
+  });
+  expect(await qualify()).toBeNull();
+  expect(withAppServer).not.toHaveBeenCalled();
+});
 
 it('resolves a native temporary-directory grant without adding it from disclosure configuration', async () => {
   const temporary = join(root, 'native-temp');
@@ -898,46 +884,30 @@ it('uses the paid Responses bridge for worker calls and defaults only the bounde
 });
 
 it.each([0, 1])(
-  'rechecks disclosure after %i successful requests before another inference purchase',
+  'rechecks consent after %i successful requests before another inference purchase',
   async (completed) => {
     const accepted = await job();
     onTurn = async () => {
       if (completed) await provider();
-      await repositories([root]);
+      await turnOff();
       await provider();
     };
     await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
-      /scope exceeds disclosure/,
+      /disclosure scope unavailable/,
     );
     expect(responses).toHaveBeenCalledTimes(completed);
     expect(http.closed).toBe(1);
   },
 );
 
-it('rejects a later uncovered positive grant before buying the next native request', async () => {
-  const accepted = await job();
-  const sibling = join(dir, 'later-sibling');
-  await mkdir(sibling);
-  onTurn = async () => {
-    await provider();
-    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
-    profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
-    await provider();
-  };
-  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
-    /scope exceeds disclosure/,
-  );
-  expect(responses).toHaveBeenCalledTimes(1);
-});
-
-it('refuses sibling disclosure revoked between request-body chunks before invoking transport', async () => {
+it('refuses consent turned off between request-body chunks before invoking transport', async () => {
   const accepted = await job();
   onTurn = async () => {
-    await provider({}, async () => repositories([root]));
+    await provider({}, async () => turnOff());
     await final();
   };
   await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
-    /scope exceeds disclosure/,
+    /disclosure scope unavailable/,
   );
   expect(responses).not.toHaveBeenCalled();
 });

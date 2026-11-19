@@ -1,13 +1,10 @@
 import { realpath } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
-import { modelConsentSchema, outdatedModelConsent } from '../router/model-settings';
-import { modelGithubRepositories } from '../router/model-repositories';
+import { modelConsent } from '../router/model-settings';
 import {
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
@@ -35,20 +32,21 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   kept_native: 'the parent sent the offered call again unchanged, which keeps it native',
   no_session: 'this Tenjin process had not seen an event of the session yet',
   host_unqualified: 'the host cannot show a worker permission prompt',
-  no_consent: 'no DeepSeek consent covers this directory at this router',
-  consent_outdated:
-    'your DeepSeek consent predates what a worker can read now, or does not name Exa as a recipient; read the current terms and renew it with tenjin config subagents on --repository <path>',
+  no_consent: 'subagent routing is off, or no DeepSeek consent is saved for this router',
   permission_mode: 'the session was in plan mode, or its mode was not seen',
   worker_unqualified:
     'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
   input_filter: 'the call set a field a worker cannot match',
   caller_unqualified:
     'the subagent that made the call cannot accept an offer (tools), or it or an agent above it may set its own permission mode (mode), or it works in a folder of its own (folder)',
-  scope_not_covered: "consent does not cover the session's working directories",
+  scope_not_covered:
+    "the session's working directory or its workspace changed after the call was held, or the workspace could not be read",
   parent_context_unavailable: "the session's transcript could not be read",
   over_size_limit: "the assignment is over the router's request limit",
   job_cap_too_low:
     'the job cap (your per-call spend limit, or a lower ceiling you named) is under what one model call and its routing fee need; raise the limit with tenjin config set maxAutoSpend <usd>',
+  job_cap_lowered:
+    'the job cap (your per-call spend limit, or a lower ceiling you named) was lowered after the call was held, under the cap it was held at; send the call again for an offer at the cap as it stands',
   capture_error: 'a local error before routing',
   route_error: 'the routing request failed, or a spend limit refused its fee',
   server_declined: 'the router judged that the work stays native',
@@ -65,27 +63,6 @@ function whyLine(entry: NoOffer): string {
   // A native subagent's own call, at any depth, is judged as the main loop's is.
   const tool = entry.from === 'subagent' ? `${entry.tool} from a subagent` : entry.tool;
   return `${new Date(entry.at).toISOString()}  ${tool}  ${code}${size}  ${NO_OFFER_REASONS[entry.code]}`;
-}
-
-function retainedRepositories(value: unknown, origin: string): string[] {
-  // A consent from before the current disclosure still names the directories to keep.
-  const parsed = modelConsentSchema.safeParse(value);
-  const prior = parsed.success ? parsed.data : outdatedModelConsent(value);
-  if (
-    !prior ||
-    prior.version !== 2 ||
-    prior.routerOrigin !== origin ||
-    BigInt(prior.maxJobAtomic) <= 0n
-  )
-    return [];
-  return prior.repositories.flatMap((path) => {
-    if (!isAbsolute(path)) return [];
-    try {
-      return [realpathSync(path)];
-    } catch {
-      return [];
-    }
-  });
 }
 
 export async function runConfigSubagents(
@@ -130,9 +107,10 @@ export async function runConfigSubagents(
           ],
     };
   }
-  if (mode !== 'on' || !flags.repository)
-    throw new CliError('USAGE', 'Use on --repository <path> [--max-job <USD>], off, or why.');
-  const repository = await realpath(flags.repository);
+  if (mode !== 'on')
+    throw new CliError('USAGE', 'Use on [--repository <path>] [--max-job <USD>], off, or why.');
+  // `--repository` is an addition: without it the consent covers each session's own workspace.
+  const repository = flags.repository === undefined ? undefined : await realpath(flags.repository);
   const settings = await resolveContextSettings(ctx);
   const routerOrigin = new URL(settings.baseUrl).origin;
   // A JOB IS ONE CALL to the person, so its cap is their per-call spend limit, read at
@@ -154,6 +132,11 @@ export async function runConfigSubagents(
       },
     );
   const cap = named !== undefined && named < perCall ? named : perCall;
+  if (configuringWindows && repository === undefined)
+    throw new CliError(
+      'USAGE',
+      'The Windows worker flags require --repository <path>: the worker account works only for sessions inside a directory you name.',
+    );
   if (configuringWindows && !flags.acceptWindowsShellAccess)
     throw new CliError('USAGE', NATIVE_WINDOWS_DISCLOSURE, {
       fix: 'Review the Windows disclosure and add --accept-windows-shell-access if you agree.',
@@ -177,37 +160,23 @@ export async function runConfigSubagents(
       fix: 'Supply a dedicated account SID, readable local launcher and Claude .exe paths, and a separate shared Claude config directory.',
     });
   const disclosure = [
-    'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results, and Exa receives the worker’s web search queries and the address of a public page its WebFetch could not fetch. Your Tenjin block and only rules apply to those Exa calls as they do to what Tenjin picks on its own.',
+    'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context from every session whose subagent calls it routes. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results, and Exa receives the worker’s web search queries and the address of a public page its WebFetch could not fetch. Your Tenjin block and only rules apply to those Exa calls as they do to what Tenjin picks on its own.',
     windowsWorker
       ? NATIVE_WINDOWS_DISCLOSURE
-      : 'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. It loads your global Claude Code configuration as a native subagent does: your personal CLAUDE.md is in its instructions, and it can read the skills, plugins, agents, commands and rules under ~/.claude, every session transcript and memory folder there, your prompt history and your settings files, so what it reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders you did not name stay unreadable; known secrets are masked, not guaranteed anonymous.',
+      : 'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in its session’s own workspace, inside its sandbox and your native permissions; your own sessions gain nothing. A directory you name with --repository is an addition: a session inside a named directory gives its worker every named directory to read and write too. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. Claude Code loads your global configuration into the worker as it does for a native subagent: your personal CLAUDE.md and the skills, plugins, agents, commands and rules under ~/.claude are among its instructions, and the worker’s file tools and commands do not read those files. Of ~/.claude they read every session transcript and memory folder, your prompt history and your settings files, so what the worker loads or reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders outside the worker’s directories stay unreadable; known secrets are masked, not guaranteed anonymous.',
     `Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. A job costs up to your per-call spend limit as it stands at each offer, or a lower ceiling you name with --max-job; the daily budget and creator allowlist still apply. A worker request, with its ${MODEL_OUTPUT_TOKENS.toLocaleString('en-US')}-token output cap, reserves at least ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.`,
   ].join('\n\n');
-  let repositories = [repository];
-  let githubRepositories: string[] = [];
+  let repositories: string[] = [];
   await persist(ctx.dataDir, (c) => {
-    // The locked merge keeps other explicitly named roots. Each is a working
-    // directory for a Claude worker; native sessions gain no permission.
-    repositories = [
-      ...new Set([...retainedRepositories(c.router?.subagentConsent, routerOrigin), repository]),
-    ];
-    githubRepositories = modelGithubRepositories(repositories);
-    const router = {
-      ...c.router,
-      subagents: true,
-      subagentConsent: {
-        version: 2,
-        instructions: 'applicable',
-        reads: 'claude-home',
-        recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-        repositories,
-        githubRepositories,
-        // The named ceiling, or the limit as it stands for a build from before the rule.
-        maxJobAtomic: (named ?? perCall).toString(),
-        ...(named === undefined ? { maxJob: 'per-call-limit' as const } : {}),
-        routerOrigin,
-      },
-    };
+    // The locked merge keeps the directories named earlier at this router.
+    const consent = modelConsent({
+      routerOrigin,
+      prior: c.router?.subagentConsent,
+      ...(repository === undefined ? {} : { repository }),
+      ...(named === undefined ? {} : { maxJobAtomic: named.toString() }),
+    });
+    repositories = consent.repositories ?? [];
+    const router = { ...c.router, subagents: true, subagentConsent: consent };
     if (windowsWorker) router.windowsWorker = windowsWorker;
     else delete router.windowsWorker;
     return { ...c, router };
@@ -215,11 +184,9 @@ export async function runConfigSubagents(
   return {
     data: {
       enabled: true,
-      repository,
+      ...(repository === undefined ? {} : { repository }),
       repositories,
-      githubRepositories,
-      maxJobAtomic: (named ?? perCall).toString(),
-      ...(named === undefined ? { maxJob: 'per-call-limit' } : {}),
+      ...(named === undefined ? {} : { maxJobAtomic: named.toString() }),
       jobCapAtomic: cap.toString(),
       perCallLimitAtomic: perCall.toString(),
       routerOrigin,
@@ -228,7 +195,9 @@ export async function runConfigSubagents(
     },
     humanLines: [
       disclosure,
-      `Enabled for ${repositories.join(', ')}, at ${routerOrigin}. ${
+      `Enabled at ${routerOrigin}, for the workspace of each session.${
+        repositories.length ? ` Named directories: ${repositories.join(', ')}.` : ''
+      } ${
         named === undefined
           ? `Each job costs up to your per-call spend limit, ${usd(perCall)} now.`
           : named < perCall

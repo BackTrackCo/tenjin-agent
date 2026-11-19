@@ -22,7 +22,7 @@ import {
   type InstructionContext,
 } from './model-instructions';
 import { nativeFlashCatalog } from './deepseek-codex-catalog';
-import { disclosureCovers, modelSettings } from './model-settings';
+import { modelSettings } from './model-settings';
 import { MCP_SERVER_NAME } from './names';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -103,11 +103,7 @@ async function assertDisclosureCurrent(options: Options) {
     const canonical = await realpath(path);
     // A broad filesystem grant and a path whose alias may retarget have not
     // been qualified as a bounded worker scope. Do not rewrite the native ACL.
-    if (
-      canonical === resolve('/') ||
-      (concrete && canonical !== resolve(path)) ||
-      (settings.scope !== 'native-workspace' && !disclosureCovers(settings.repositories, canonical))
-    )
+    if (canonical === resolve('/') || (concrete && canonical !== resolve(path)))
       throw new Error('Native worker filesystem scope exceeds disclosure');
     repositories.add(canonical);
   };
@@ -131,7 +127,7 @@ async function assertDisclosureCurrent(options: Options) {
       } else throw new Error('Native worker special filesystem scope is unsupported');
     } else throw new Error('Native worker filesystem scope is unsupported');
   }
-  return { repositories: [...repositories].sort(), scope: settings.scope };
+  return { repositories: [...repositories].sort() };
 }
 
 async function assertParentCurrent(options: Options) {
@@ -563,7 +559,7 @@ async function withNativeSession<T>(
           fingerprint: canonicalHash({
             host: current.fingerprint,
             catalog: catalog.hash,
-            ...(disclosure.scope === 'native-workspace' ? { disclosureRepositories } : {}),
+            disclosureRepositories,
           }),
           parent: options.policy.parent!.fingerprint,
           instructions: instructionContext.fingerprint,
@@ -585,9 +581,7 @@ async function withNativeSession<T>(
               canonicalHash({
                 host: (await hostSnapshot(request, options, owned, threadId)).fingerprint,
                 catalog: (await nativeFlashCatalog(options.dataDir)).hash,
-                ...(currentDisclosure.scope === 'native-workspace'
-                  ? { disclosureRepositories: currentRepositories }
-                  : {}),
+                disclosureRepositories: currentRepositories,
               }) !== snapshot.fingerprint
             )
               throw new Error('Native host configuration changed');

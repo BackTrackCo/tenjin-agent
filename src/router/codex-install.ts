@@ -389,7 +389,6 @@ export async function runCodexInstall(
     : undefined;
   await reserveNewInstall(
     newInstall,
-    ctx,
     !newInstall.absent ||
       (initialCodexConfig !== null &&
         typeof initialCodexConfig === 'object' &&

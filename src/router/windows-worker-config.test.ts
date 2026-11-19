@@ -3,7 +3,7 @@ import { access, lstat, realpath, stat } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
-import { nativeWorkspaceModelConsent } from './model-settings';
+import { modelConsent } from './model-settings';
 import {
   loadWindowsWorkerConfig,
   validateWindowsWorkerConfig,
@@ -39,7 +39,7 @@ const record: WindowsWorkerConfig = {
   routerOrigin: 'https://tenjin.test',
   shellAccess: 'native-windows',
 };
-const consent = nativeWorkspaceModelConsent({ routerOrigin: record.routerOrigin });
+const consent = modelConsent({ routerOrigin: record.routerOrigin });
 
 describe('native Windows worker opt-in', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;

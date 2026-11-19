@@ -451,7 +451,6 @@ export async function runRouterInstall(
   if (args.refresh !== true)
     await reserveNewInstall(
       newInstall,
-      ctx,
       !legacy.present &&
         (!newInstall.absent || !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))),
     );

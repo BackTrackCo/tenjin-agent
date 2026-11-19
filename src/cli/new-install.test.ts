@@ -153,26 +153,17 @@ async function install(args: string[] = []) {
   const code = await main(['install', ...args], captured.io);
   return { code, output: captured.stdout(), config: await loadRawConfig(seams.data) };
 }
-function expectEnabled(
-  config: Awaited<ReturnType<typeof loadRawConfig>>,
-  perCallAtomic = '1000000',
-) {
-  expect(config.router).toMatchObject({
-    subagents: true,
-    subagentConsent: {
-      version: 3,
-      scope: 'native-workspace',
-      instructions: 'applicable',
-      reads: 'claude-home',
-      recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-      routerOrigin: 'https://tenjin.sh',
-      // The rule the question names, and the limit as it stood for an older build.
-      maxJob: 'per-call-limit',
-      maxJobAtomic: perCallAtomic,
-    },
+function expectEnabled(config: Awaited<ReturnType<typeof loadRawConfig>>) {
+  expect(config.router).toMatchObject({ subagents: true });
+  // The one consent: no directory, and no ceiling, so the cap is the per-call limit.
+  expect(config.router?.subagentConsent).toEqual({
+    version: 2,
+    instructions: 'applicable',
+    reads: 'claude-home',
+    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+    routerOrigin: 'https://tenjin.sh',
   });
-  expect(config.router?.subagentConsent).not.toHaveProperty('repositories');
-  expect(config.install?.pendingDeepSeekSetup).toBeUndefined();
+  expect(config.install?.freshSetup).toBeUndefined();
 }
 
 it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][])(
@@ -183,7 +174,7 @@ it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][]
     expect(first.code).toBe(0);
     expect(first.config.router?.subagents).not.toBe(true);
     expect(first.config.router?.subagentConsent).toBeUndefined();
-    expect(first.config.install?.pendingDeepSeekSetup).toBeDefined();
+    expect(first.config.install?.freshSetup).toBeDefined();
     const data = JSON.parse(first.output).data;
     for (const installed of data.hosts ? data.hosts.map((host: string) => data[host]) : [data])
       expect(installed.nextSteps).toMatchObject([{ id: 'spend' }]);
@@ -225,7 +216,7 @@ it('saves off without consent and does not ask again on reinstall', async () => 
   const off = await install(['--yes', '--subagents', 'off']);
   expect(off.code).toBe(0);
   expect(off.config.router).toEqual({ subagents: false });
-  expect(off.config.install?.pendingDeepSeekSetup).toBeUndefined();
+  expect(off.config.install?.freshSetup).toBeUndefined();
   expect(JSON.parse(off.output).data.subagents).toEqual({ enabled: false });
   const repeated = await install();
   expect(repeated.config.router).toEqual({ subagents: false });
@@ -245,11 +236,10 @@ it.each([
     expect(out.code).toBe(0);
     expect(out.config.router?.subagentConsent).toBeUndefined();
     const on = await install(['--subagents', 'on']);
-    expectEnabled(on.config, atomic);
+    expectEnabled(on.config);
     expect(JSON.parse(on.output).data.subagents).toMatchObject({
       enabled: true,
-      maxJob: 'per-call-limit',
-      maxJobAtomic: atomic,
+      jobCapAtomic: atomic,
     });
     expect(on.config.maxAutoSpend).toBe(atomic);
     expect(on.config.sessionBudget).toBe('none');
@@ -282,7 +272,7 @@ it.each(['claude', 'codex'] as const)(
       ? runRouterInstall({ yes: true, subagents: 'on' }, testCtx(seams.data))
       : runCodexInstall({ yes: true, subagents: 'on' }, testCtx(seams.data)));
     expectEnabled(await loadRawConfig(seams.data));
-    expect(out.data).toMatchObject({ subagents: { enabled: true, maxJobAtomic: '1000000' } });
+    expect(out.data).toMatchObject({ subagents: { enabled: true, jobCapAtomic: '1000000' } });
   },
 );
 
@@ -296,28 +286,36 @@ it.each([
   const out = await install(['--yes']);
   expect(out.code).toBe(0);
   expect(out.config.router).toEqual(config.router);
-  expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();
+  expect(out.config.install?.freshSetup).toBeUndefined();
 });
 
-// It used to exit 0 with no `subagents` field and no line, and change nothing.
+// Review of b7974566: the flag was refused on every profile that already existed, so a
+// scripted `install --yes --subagents off` failed on its second run, and a person who had
+// passed the question could not reach the install's consent again.
 it.each(['on', 'off'] as const)(
-  'refuses --subagents %s on a profile that already exists, before anything is written',
+  'applies --subagents %s on a profile that already exists and has no answer saved',
   async (choice) => {
     await mkdir(seams.data);
     await persist(seams.data, () => ({ maxAutoSpend: '1000000' }));
-    const captured = captureIo();
-    const code = await main(['install', '--yes', '--subagents', choice], captured.io);
-    expect(code).not.toBe(0);
-    expect(captured.stdout() + captured.stderr()).toContain(`tenjin config subagents ${choice}`);
-    expect(await loadRawConfig(seams.data)).toEqual({ maxAutoSpend: '1000000' });
+    const out = await install(['--yes', '--subagents', choice]);
+    expect(out.code).toBe(0);
+    expect(out.config.router?.subagents).toBe(choice === 'on');
+    if (choice === 'on') expectEnabled(out.config);
+    else expect(out.config.router).toEqual({ subagents: false });
   },
 );
 
-it('refuses a second --subagents answer once the fresh setup has saved one', async () => {
+it('a scripted --yes --subagents off succeeds on its second run, and a later on changes nothing', async () => {
   expect((await install(['--yes', '--subagents', 'off'])).code).toBe(0);
-  const again = await install(['--yes', '--subagents', 'on']);
-  expect(again.code).not.toBe(0);
-  expect(again.config.router).toEqual({ subagents: false });
+  const second = await install(['--yes', '--subagents', 'off']);
+  expect(second.code).toBe(0);
+  expect(second.config.router).toEqual({ subagents: false });
+  expect(JSON.parse(second.output).data.subagents).toEqual({ enabled: false, changed: false });
+  // Nothing turns subagents on over a saved off but the config command.
+  const on = await install(['--yes', '--subagents', 'on']);
+  expect(on.code).toBe(0);
+  expect(on.config.router).toEqual({ subagents: false });
+  expect(JSON.parse(on.output).data.subagents).toEqual({ enabled: false, changed: false });
 });
 
 it('does not enable after runtime failure or a failed second host', async () => {
@@ -337,12 +335,9 @@ it('preserves an explicit off written during native registration', async () => {
   const out = await install(['--yes', '--subagents', 'on']);
   expect(out.code).toBe(0);
   expect(out.config.router).toEqual({ subagents: false });
-  expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();
-  // The receipt says the answer was not applied, and where to change the setting.
-  expect(JSON.parse(out.output).data.subagents).toEqual({
-    applied: false,
-    fix: expect.stringContaining('tenjin config subagents on'),
-  });
+  expect(out.config.install?.freshSetup).toBeUndefined();
+  // The receipt says the answer changed nothing.
+  expect(JSON.parse(out.output).data.subagents).toEqual({ enabled: false, changed: false });
 });
 
 it.each([
@@ -358,16 +353,16 @@ it.each([
   const out = await install(['--yes']);
   expect(out.code).toBe(0);
   expect(out.config.router?.subagentConsent).toBeUndefined();
-  expect(out.config.install?.pendingDeepSeekSetup).toBeUndefined();
+  expect(out.config.install?.freshSetup).toBeUndefined();
 });
 
 it('does not consume a pending claim on refresh', async () => {
   await install();
-  const pending = (await loadRawConfig(seams.data)).install?.pendingDeepSeekSetup;
+  const pending = (await loadRawConfig(seams.data)).install?.freshSetup;
   await install(['--refresh', '--harness', 'claude']);
   const config = await loadRawConfig(seams.data);
   expect(config.router?.subagentConsent).toBeUndefined();
-  expect(config.install?.pendingDeepSeekSetup).toEqual(pending);
+  expect(config.install?.freshSetup).toEqual(pending);
 });
 
 it.each([
@@ -381,7 +376,7 @@ it.each([
     const first = await install(['--yes']);
     expect(first.code).toBe(0);
     expect(first.config.router?.subagentConsent).toBeUndefined();
-    expect(first.config.install?.pendingDeepSeekSetup).toBeUndefined();
+    expect(first.config.install?.freshSetup).toBeUndefined();
     const second = await install(['--yes']);
     expect(second.config.router?.subagentConsent).toBeUndefined();
   },

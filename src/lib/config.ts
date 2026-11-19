@@ -255,11 +255,8 @@ const InstallConfigSchema = z.object({
    * project's settings file no longer carries our entries.
    */
   routerProjects: z.array(z.string()),
-  /** A new profile's unfinished setup; this is not consent or an enabled feature. */
-  pendingDeepSeekSetup: z
-    .object({ version: z.literal(1), id: z.uuid(), routerOrigin: z.url() })
-    .strict()
-    .optional(),
+  /** A new profile whose subagent question is still to be asked; neither consent nor an enabled feature. */
+  freshSetup: z.literal(true).optional(),
 });
 
 /**

@@ -1,19 +1,10 @@
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
-import {
-  currentModelGithubRepositories,
-  githubRepository,
-  modelGithubRepositories,
-} from './model-repositories';
+import { afterEach, expect, it } from 'vitest';
+import { githubRepository, modelGithubRepositories } from './model-repositories';
 
 let dir: string;
-vi.mock('node:fs', async (original) => {
-  const actual = await original<typeof import('node:fs')>();
-  return { ...actual, readdirSync: vi.fn(actual.readdirSync) };
-});
 afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
@@ -76,18 +67,4 @@ it('reads a linked worktree common origin, ignores other remotes and refuses ove
   expect(modelGithubRepositories([root])).toEqual(['Acme/owned']);
   await writeFile(join(common, 'config'), 'x'.repeat(65_537));
   expect(modelGithubRepositories([root])).toEqual([]);
-});
-
-it('offer aliases discard stale saved names without discovering new names into consent', async () => {
-  dir = await realpath(await mkdtemp(join(tmpdir(), 'model-offer-alias-')));
-  await mkdir(join(dir, '.git'));
-  const config = join(dir, '.git/config');
-  await writeFile(config, '[remote "origin"]\nurl = https://github.com/Acme/original.git\n');
-  const settings = { repositories: [dir], githubRepositories: ['Acme/original'] };
-  expect(currentModelGithubRepositories(settings)).toEqual(['Acme/original']);
-  await writeFile(config, '[remote "origin"]\nurl = https://github.com/Acme/changed.git\n');
-  expect(currentModelGithubRepositories(settings)).toEqual([]);
-  vi.mocked(readdirSync).mockClear();
-  expect(currentModelGithubRepositories({ ...settings, githubRepositories: [] })).toEqual([]);
-  expect(readdirSync).not.toHaveBeenCalled();
 });

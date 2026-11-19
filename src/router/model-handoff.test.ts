@@ -20,7 +20,7 @@ import { MODEL_ROUTE_BODY_BYTES, MODEL_ROUTE_ENVELOPE_BYTES } from './model-limi
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
-import { nativeWorkspaceModelConsent } from './model-settings';
+import { modelConsent } from './model-settings';
 let dir: string;
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -350,33 +350,6 @@ it('shows every explicit disclosure anchor and refuses a continuation whose nati
   expect(f.route).not.toHaveBeenCalled();
 });
 
-it('refuses sibling disclosure revoked during qualification before routing or offering a continuation', async () => {
-  const f = await continuationFixture(true);
-  vi.mocked(qualifiedModelWorker).mockImplementation(async () => {
-    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
-    config.router.subagentConsent.repositories = [f.session.cwd];
-    await writeFile(join(dir, 'config.json'), JSON.stringify(config));
-    return { path: '/fixture/worker', claudeWorkspace: f.workspace };
-  });
-  expect(
-    await f.model.capture(
-      f.session,
-      'continued',
-      { to: f.conversation.handle, message: 'Continue' },
-      undefined,
-      'SendMessage',
-    ),
-  ).toMatchObject({ action: 'refused' });
-  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
-  expect(f.route).not.toHaveBeenCalled();
-  expect(
-    await f.model.capture({ ...f.session, turnId: 'initial-new-turn' }, 'new-worker', {
-      prompt: 'Read both repositories.',
-    }),
-  ).toMatchObject({ action: 'native' });
-  expect(f.route).not.toHaveBeenCalled();
-});
-
 it('keeps the assignment and transcript local when consent is revoked during the last job read', async () => {
   const f = await continuationFixture();
   const transcript = join(dir, 'fresh.jsonl');
@@ -522,7 +495,10 @@ it('refuses a complete follow-up whose encoded private record would be unreadabl
   expect(f.route).not.toHaveBeenCalled();
 });
 
-it.each([2, 3])('routes with consent v%i and preserves parent veto', async (version) => {
+it.each([
+  ['names the repository', true],
+  ['names no directory', false],
+] as const)('routes with a consent that %s and preserves parent veto', async (_what, named) => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'model-handoff-')));
   const repo = join(dir, 'repo');
   await mkdir(repo);
@@ -557,19 +533,18 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
     JSON.stringify({
       router: {
         subagents: true,
-        subagentConsent:
-          version === 3
-            ? nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' })
-            : {
-                version: 2,
-                instructions: 'applicable',
-                reads: 'claude-home',
-                recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-                repositories: [repo],
-                githubRepositories: ['Acme/repo'],
-                maxJobAtomic: '1000000',
-                routerOrigin: 'http://localhost:3939',
-              },
+        subagentConsent: !named
+          ? modelConsent({ routerOrigin: 'http://localhost:3939' })
+          : {
+              version: 2,
+              instructions: 'applicable',
+              reads: 'claude-home',
+              recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+              repositories: [repo],
+              githubRepositories: ['Acme/repo'],
+              maxJobAtomic: '1000000',
+              routerOrigin: 'http://localhost:3939',
+            },
       },
     }),
   );
@@ -632,7 +607,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
     started: false,
     parentPolicy,
     consent: {
-      version,
+      version: 2,
       repository: repo,
       githubRepositories: ['Acme/repo'],
       routerOrigin: 'http://localhost:3939',
@@ -715,12 +690,13 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
   expect(route).toHaveBeenCalledTimes(2);
   // The consent statement is about the current endpoint and ceiling, not an
   // earlier configuration that happened to authorize classification.
-  for (const [turnId, consentChange, limits] of [
-    ['origin-changed', { routerOrigin: 'https://other-router.example' }, {}],
-    // A ceiling the person named: with the rule (`maxJob`), the amount is not the cap.
-    ['cap-lowered', { maxJobAtomic: '500000', maxJob: undefined }, {}],
+  for (const [turnId, consentChange, limits, code] of [
+    ['origin-changed', { routerOrigin: 'https://other-router.example' }, {}, 'no_consent'],
+    // A ceiling the person named meanwhile, under the cap the call was held at. Its record
+    // read `scope_not_covered`, which names no cap (review of b7974566).
+    ['cap-lowered', { maxJobAtomic: '500000' }, {}, 'job_cap_lowered'],
     // The cap is the per-call limit, so a limit lowered during routing lowers it too.
-    ['limit-lowered', {}, { maxAutoSpend: '500000' }],
+    ['limit-lowered', {}, { maxAutoSpend: '500000' }, 'job_cap_lowered'],
   ] as const) {
     await writeFile(join(dir, 'config.json'), JSON.stringify(savedConfig));
     const guarded = { ...session, turnId };
@@ -745,6 +721,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
       action: 'native',
     });
     expect(await model.store.pending('root', guarded.turnId)).toMatchObject({ state: 'native' });
+    expect((await model.store.noOffers()).at(-1)).toMatchObject({ code });
   }
   expect(route).toHaveBeenCalledTimes(5);
 });
@@ -756,7 +733,7 @@ it('native-workspace routing follows later native projects and discloses only th
     JSON.stringify({
       router: {
         subagents: true,
-        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+        subagentConsent: modelConsent({ routerOrigin: 'http://localhost:3939' }),
       },
     }),
   );
@@ -791,7 +768,7 @@ it('native-workspace routing follows later native projects and discloses only th
       started: false,
       capAtomic: '1000000',
       parentPolicy,
-      consent: { version: 3, scope: 'native-workspace', repository: root, repositories: [root] },
+      consent: { version: 2, repository: root, repositories: [root] },
       workspace,
     });
   }
@@ -807,7 +784,7 @@ it('native-workspace continuation keeps its original scope and budget with a tru
     JSON.stringify({
       router: {
         subagents: true,
-        subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' }),
+        subagentConsent: modelConsent({ routerOrigin: 'http://localhost:3939' }),
       },
     }),
   );
@@ -824,7 +801,7 @@ it('native-workspace continuation keeps its original scope and budget with a tru
     continuation: true,
     capAtomic: '900000',
     routingFeeAtomic: '0',
-    consent: { version: 3, scope: 'native-workspace', repositories: [f.session.cwd, f.sibling] },
+    consent: { version: 2, repositories: [f.session.cwd, f.sibling] },
   });
   expect(f.route).not.toHaveBeenCalled();
   expect(f.requireResumeBudget).toHaveBeenCalledWith(f.initial);
@@ -1213,11 +1190,6 @@ it('records one code for each reason a held call gets no offer, and never its te
   });
   vi.mocked(qualifiedModelWorker).mockResolvedValueOnce(null);
   expect(await reason()).toMatchObject({ code: 'worker_unqualified' });
-  vi.mocked(qualifiedModelWorker).mockResolvedValueOnce({
-    path: '/fixture/worker',
-    claudeWorkspace: { ...f.workspace, workingDirectories: [f.workspace.root, '/elsewhere'] },
-  });
-  expect(await reason()).toMatchObject({ code: 'scope_not_covered' });
   expect(
     await reason(call, { ...f.session, transcript: join(dir, 'missing.jsonl') }),
   ).toMatchObject({ code: 'parent_context_unavailable' });
@@ -1254,22 +1226,6 @@ it('records one code for each reason a held call gets no offer, and never its te
   config.router.subagentConsent.routerOrigin = 'https://elsewhere.test';
   await writeFile(join(dir, 'config.json'), JSON.stringify(config));
   expect(await reason(other)).toMatchObject({ code: 'no_consent' });
-  // A consent from before a worker could read the global Claude Code folder says so.
-  config.router.subagentConsent.routerOrigin = 'http://localhost:3939';
-  delete config.router.subagentConsent.reads;
-  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
-  expect(await reason(other)).toMatchObject({ code: 'consent_outdated' });
-  // The same when the consent goes out of date while the router is asked: the record
-  // said `no_consent`, which sent the person to a consent they already gave.
-  config.router.subagentConsent.reads = 'claude-home';
-  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
-  f.route.mockImplementationOnce(async (body: { jobId: string }) => {
-    const earlier = structuredClone(config);
-    delete earlier.router.subagentConsent.reads;
-    await writeFile(join(dir, 'config.json'), JSON.stringify(earlier));
-    return { ...offer, jobId: body.jobId };
-  });
-  expect(await reason(other)).toMatchObject({ code: 'consent_outdated' });
   expect(await readFile(join(dir, 'model-jobs', 'no-offers.json'), 'utf8')).not.toContain(
     'PRIVATE-ASSIGNMENT',
   );

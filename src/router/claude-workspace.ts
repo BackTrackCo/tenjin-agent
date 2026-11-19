@@ -3,7 +3,6 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Settings } from '@anthropic-ai/claude-agent-sdk/core';
 import { z } from 'zod';
 import { canonicalHash } from '../lib/request-schema';
-import { disclosureCovers, type ModelSettings } from './model-settings';
 
 const pathSchema = z
   .string()
@@ -16,7 +15,7 @@ const scopeSchema = z.object({
   workingDirectorySpellings: z.array(pathSchema).min(1),
   readExceptions: z.array(pathSchema),
   writeExceptions: z.array(pathSchema),
-  // Native additional directories outside consent: denied to the worker and named in the offer.
+  // Native additional directories that are no directory now: denied to the worker and named in the offer.
   droppedDirectories: z.array(pathSchema).default([]),
 });
 export type ClaudeWorkspace = z.infer<typeof scopeSchema>;
@@ -44,26 +43,11 @@ export function sameClaudeWorkspace(a: ClaudeWorkspace, b: ClaudeWorkspace): boo
   return canonical(a) === canonical(b);
 }
 
-export function claudeWorkspaceCovered(
-  scope: ClaudeWorkspace,
-  repositories: readonly string[],
-): boolean {
-  return [...scope.workingDirectories, ...scope.readExceptions, ...scope.writeExceptions].every(
-    (path) => disclosureCovers(repositories, path),
-  );
-}
-
-/** The native scope is already canonical and validated; disclosure never supplies its paths. */
-export function modelClaudeWorkspaceCovered(scope: ClaudeWorkspace, settings: ModelSettings) {
-  return (
-    settings.scope === 'native-workspace' || claudeWorkspaceCovered(scope, settings.repositories)
-  );
-}
-
-export function modelClaudeRepositories(scope: ClaudeWorkspace, settings: ModelSettings): string[] {
-  return settings.scope === 'native-workspace'
-    ? [...new Set([...scope.workingDirectories, ...scope.readExceptions, ...scope.writeExceptions])]
-    : settings.repositories;
+/** Every directory the worker reaches, as its offer names them. */
+export function modelClaudeRepositories(scope: ClaudeWorkspace): string[] {
+  return [
+    ...new Set([...scope.workingDirectories, ...scope.readExceptions, ...scope.writeExceptions]),
+  ];
 }
 
 export const WITHHELD_DIRECTORY = '[withheld directory]';
@@ -91,36 +75,27 @@ const isDirectory = async (path: string) =>
   (await stat(path).catch(() => null))?.isDirectory() === true;
 
 /**
- * Consent supplies the working directories; native settings add only what consent covers.
- * Every consented repository is a working directory, so a session in one repository of a
- * consented workspace reaches its siblings and their checkouts. A native additional
- * directory outside consent is dropped and denied to the worker rather than refusing the
- * offer. Native read and write exceptions still must fit consent: the sandbox lets an
- * allowRead entry win over a deny, so they cannot be withheld.
+ * The worker's workspace is the session's own: its root, its native additional
+ * directories and its native read and write exceptions. `named` are the directories the
+ * person named at consent, for a session inside one of them: each is a working directory
+ * too, so a session in one repository of a named workspace reaches its siblings and their
+ * checkouts. A native additional directory that is no directory now is dropped and denied
+ * to the worker rather than refusing the offer.
  */
 export async function resolveClaudeWorkspace(
   cwd: string,
   settings: Settings,
-  repositories: readonly string[] | 'native-workspace',
+  named: readonly string[],
 ): Promise<ClaudeWorkspace | null> {
   try {
     const root = await realpath(cwd);
-    if (repositories !== 'native-workspace' && !disclosureCovers(repositories, root)) return null;
-    const covered = (path: string) =>
-      repositories === 'native-workspace' || disclosureCovers(repositories, path);
     const spelled = (value: string) => {
       if (!value || value !== value.trim() || value.startsWith('~') || value.includes('\0'))
         throw new Error('Unsupported native workspace path');
       return resolve(root, value).normalize('NFC');
     };
     const exceptions = async (values: string[]) => {
-      const canonical = await Promise.all(
-        values.map(async (value) => {
-          const path = await realpath(spelled(value));
-          if (!covered(path)) throw new Error('Native workspace is outside disclosure scope');
-          return path;
-        }),
-      );
+      const canonical = await Promise.all(values.map((value) => realpath(spelled(value))));
       return [...new Set(canonical)].sort();
     };
     const nativeAdditional = settings.permissions?.additionalDirectories ?? [];
@@ -130,34 +105,22 @@ export async function resolveClaudeWorkspace(
     for (const value of nativeAdditional) {
       const spelling = spelled(value);
       const path = await realpath(spelling).catch(() => null);
-      if (path && covered(path) && (await isDirectory(path))) {
+      if (path && (await isDirectory(path))) {
         kept.push(path);
         keptSpellings.push(spelling);
       } else dropped.push(spelling, ...(path ? [path] : []));
     }
-    const consented =
-      repositories === 'native-workspace'
-        ? []
-        : (
-            await Promise.all(
-              repositories.map(async (path) =>
-                isAbsolute(path) && !hasGlob(path) && (await isDirectory(path)) ? path : null,
-              ),
-            )
-          ).filter((path): path is string => path !== null);
+    const consented = (
+      await Promise.all(
+        named.map(async (path) =>
+          isAbsolute(path) && !hasGlob(path) && (await isDirectory(path)) ? path : null,
+        ),
+      )
+    ).filter((path): path is string => path !== null);
     const readExceptions = await exceptions(settings.sandbox?.filesystem?.allowRead ?? []);
     const writeExceptions = await exceptions(settings.sandbox?.filesystem?.allowWrite ?? []);
     const additional = [...new Set([...consented, ...kept])].filter((path) => path !== root).sort();
     const droppedDirectories = [...new Set(dropped)].sort();
-    // A dropped directory that holds a kept one cannot be denied without denying both.
-    if (
-      droppedDirectories.some((path) =>
-        [root, ...additional, ...readExceptions, ...writeExceptions].some((kept) =>
-          within(path, kept),
-        ),
-      )
-    )
-      return null;
     return scopeSchema.parse({
       version: 1,
       root,
@@ -180,7 +143,7 @@ const MAX_WORKTREES = 256;
 
 /**
  * Linked git worktrees of the repositories in the workspace roots and their direct
- * children, inside those roots (so inside consent). The sandbox keeps `.git/worktrees`
+ * children, inside those roots. The sandbox keeps `.git/worktrees`
  * read-only except for a session's own worktrees, which are the ones named as working
  * directories, so a commit in a sibling checkout needs it named. Read at job start and not
  * frozen in the scope: another session adding a worktree must not stop this job.

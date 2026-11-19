@@ -10,13 +10,8 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, type NoOffer } from './model-job';
-import {
-  disclosureCovers,
-  modelConsentOutdated,
-  modelSettings,
-  type ModelSettings,
-} from './model-settings';
-import { currentModelGithubRepositories, modelGithubRepositories } from './model-repositories';
+import { modelSettings, type ModelSettings } from './model-settings';
+import { modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
@@ -27,7 +22,6 @@ import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { ModelConversationStore } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
-  modelClaudeWorkspaceCovered,
   modelClaudeRepositories,
   savedClaudeWorkspace,
   sameClaudeWorkspace,
@@ -93,18 +87,14 @@ const held = (reason: string) => ({
   },
 });
 
-function offerConsent(settings: ModelSettings, nativeRepositories: readonly string[]) {
-  const repositories =
-    settings.scope === 'native-workspace' ? [...nativeRepositories] : settings.repositories;
+/** What the offer tells the parent of its consent: the directories are the worker's own. */
+function offerConsent(settings: ModelSettings, workerDirectories: readonly string[]) {
+  const repositories = [...workerDirectories];
   return {
     version: settings.version,
-    ...(settings.scope === 'native-workspace' ? { scope: settings.scope } : {}),
     repository: settings.root,
     repositories,
-    githubRepositories:
-      settings.scope === 'native-workspace'
-        ? modelGithubRepositories(repositories)
-        : currentModelGithubRepositories(settings),
+    githubRepositories: modelGithubRepositories(repositories),
     routerOrigin: settings.routerOrigin,
     // As the consent record names them: a worker's web searches go to Exa.
     recipients: ['Tenjin', 'DeepSeek', 'Exa'],
@@ -116,7 +106,7 @@ function droppedNote(workspace: ClaudeWorkspace) {
   const dropped = savedClaudeWorkspace(workspace)?.droppedDirectories ?? [];
   return dropped.length
     ? {
-        workspaceNote: `Outside model consent, so withheld from the worker: ${dropped.join(', ')}.`,
+        workspaceNote: `Not a directory now, so withheld from the worker: ${dropped.join(', ')}.`,
       }
     : {};
 }
@@ -212,7 +202,7 @@ const modeName = (mode: unknown) =>
  * background call (`run_in_background`) is offered as a foreground one is, and
  * its worker runs in the background. The mod sends the loop that made a call
  * as `caller`, never in the input, so an `agentId` there is the call's own
- * field (or an older mod's), and keeps it native.
+ * field, and keeps it native.
  */
 function blockedField(native: Record<string, unknown>): string | null {
   if (typeof native.prompt !== 'string' || !native.prompt) return 'prompt';
@@ -229,10 +219,6 @@ export class ModelHandoff {
   constructor(private options: { dataDir: string; transport: ModelTransport }) {
     this.store = new ModelJobStore(options.dataDir);
     this.conversations = new ModelConversationStore(options.dataDir);
-  }
-  /** Why no consent applies: one given under an earlier disclosure, or none. */
-  private async absentConsent(): Promise<'consent_outdated' | 'no_consent'> {
-    return (await modelConsentOutdated(this.options.dataDir)) ? 'consent_outdated' : 'no_consent';
   }
   private async currentConsent(cwd: string) {
     const settings = await modelSettings(this.options.dataDir, cwd);
@@ -273,11 +259,7 @@ export class ModelHandoff {
       this.options.dataDir,
       signal,
     );
-    if (
-      !worker?.instructionContext ||
-      (settings.scope === 'native-workspace' && !worker.disclosureRepositories?.length)
-    )
-      return null;
+    if (!worker?.instructionContext || !worker.disclosureRepositories?.length) return null;
     signal?.throwIfAborted();
     const job = await this.store.offer(
       {
@@ -391,7 +373,7 @@ export class ModelHandoff {
     const stay = (code: NoOffer['code'], more?: Parameters<ModelHandoff['stay']>[3]) =>
       this.stay(session, nativeTool, code, { ...more, ...(caller ? { from: 'subagent' } : {}) });
     const { dataDir, transport } = this.options;
-    if (!settings) return stay(await this.absentConsent());
+    if (!settings) return stay('no_consent');
     if (!claudeWorkerPermissionMode(session.claudePermissionMode))
       return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();
@@ -517,11 +499,7 @@ export class ModelHandoff {
       );
     signal?.throwIfAborted();
     const latest = await this.currentConsent(session.cwd);
-    if (
-      !latest ||
-      latest.root !== settings.root ||
-      !modelClaudeWorkspaceCovered(originalWorkspace, latest)
-    )
+    if (!latest || latest.root !== settings.root)
       return continuationRefusal('Current model consent changed during qualification');
     signal?.throwIfAborted();
     const cap =
@@ -569,7 +547,7 @@ export class ModelHandoff {
       parentPolicy: continuationPolicy,
       workspace: worker.claudeWorkspace,
       ...droppedNote(worker.claudeWorkspace),
-      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
+      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace)),
       instruction:
         "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
     };
@@ -584,19 +562,14 @@ export class ModelHandoff {
       });
     };
     const settings = await this.currentConsent(session.cwd);
-    if (!settings) return native(await this.absentConsent());
+    if (!settings) return native('no_consent');
     if (settings.root !== job.root) return native('scope_not_covered');
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
-    if (
-      session.harness !== 'codex' &&
-      (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
-    )
-      return native('scope_not_covered');
+    if (session.harness !== 'codex' && !claudeWorkspace) return native('scope_not_covered');
     const disclosureRepositories = nativeRepositories(job, claudeWorkspace);
-    if (settings.scope === 'native-workspace' && !disclosureRepositories)
-      return native('scope_not_covered');
+    if (!disclosureRepositories) return native('scope_not_covered');
     if (
       session.harness === 'codex' &&
       (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
@@ -628,17 +601,18 @@ export class ModelHandoff {
       return native('over_size_limit', { bytes, limit: MODEL_ROUTE_BODY_BYTES });
     if (settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC) return native('job_cap_too_low');
     const input = { ...admission, jobId: job.id };
-    const coversAdmission = (consent: ModelSettings) =>
-      consent.root === job.root &&
-      consent.context === settings.context &&
-      consent.maxJobAtomic >= BigInt(job.capAtomic) &&
-      (claudeWorkspace
-        ? modelClaudeWorkspaceCovered(claudeWorkspace, consent)
-        : consent.scope === 'native-workspace' ||
-          (disclosureRepositories ?? []).every((path) =>
-            disclosureCovers(consent.repositories, path),
-          ));
+    // What a consent read later must still say for this job, or the code that says why not.
+    // A cap under the one the job was held at is the person lowering their per-call limit,
+    // or naming a lower ceiling, in between: its own reason, not a scope one.
+    const uncovered = (consent: ModelSettings): NoOffer['code'] | null =>
+      consent.root !== job.root || consent.context !== settings.context
+        ? 'scope_not_covered'
+        : consent.maxJobAtomic < BigInt(job.capAtomic)
+          ? 'job_cap_lowered'
+          : null;
     let raw: unknown;
+    // Consent read again just before the routing fee is paid: what it then lacked.
+    let changedBeforeFee: NoOffer['code'] | null = null;
     try {
       signal?.throwIfAborted();
       // By its own id on Claude: another call of the session never stands in its way.
@@ -651,8 +625,9 @@ export class ModelHandoff {
         return native('superseded');
       if (instructions) await assertInstructionMetadataCurrent(instructions);
       const consent = await this.currentConsent(session.cwd);
-      if (!consent) return native(await this.absentConsent());
-      if (!coversAdmission(consent)) return native('scope_not_covered');
+      if (!consent) return native('no_consent');
+      const changed = uncovered(consent);
+      if (changed) return native(changed);
       signal?.throwIfAborted();
       raw =
         job.state === 'offered'
@@ -675,12 +650,13 @@ export class ModelHandoff {
                   throw new Error('Native Claude workspace scope changed');
               } else if (instructions) await assertInstructionMetadataCurrent(instructions);
               const current = await this.currentConsent(session.cwd);
-              if (!current || !coversAdmission(current))
+              changedBeforeFee = current ? uncovered(current) : 'no_consent';
+              if (changedBeforeFee)
                 throw new Error('Model routing consent or workspace scope changed');
             });
       signal?.throwIfAborted();
     } catch {
-      await native(signal?.aborted ? 'interrupted' : 'route_error');
+      await native(signal?.aborted ? 'interrupted' : (changedBeforeFee ?? 'route_error'));
       return { action: 'native', reason: 'Routing failed or interrupted; retry native unchanged' };
     }
     const parsed = modelOfferSchema.safeParse(raw);
@@ -700,8 +676,8 @@ export class ModelHandoff {
         : native('invalid_offer');
     }
     const consent = await this.currentConsent(session.cwd);
-    if (!consent || !coversAdmission(consent))
-      return native(consent ? 'scope_not_covered' : await this.absentConsent());
+    const changed = consent ? uncovered(consent) : 'no_consent';
+    if (!consent || changed) return native(changed ?? 'no_consent');
     await this.store.decided(job.id, {
       ...parsed.data,
       routerOrigin: transport.origin,

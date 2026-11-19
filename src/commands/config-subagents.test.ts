@@ -6,7 +6,6 @@ import { testCtx } from '../context-test-utils';
 import { runConfigSubagents } from './config-subagents';
 import { modelSettings } from '../router/model-settings';
 import { ModelJobStore } from '../router/model-job';
-import { currentModelGithubRepositories } from '../router/model-repositories';
 import * as windowsWorkerConfig from '../router/windows-worker-config';
 
 let dir: string;
@@ -55,9 +54,15 @@ it('records explicit accepted-worker instruction consent while preserving wallet
     },
   });
   expect(JSON.stringify(result.data)).toContain('After acceptance');
-  // The consent text names what a named directory grants: a Claude worker's working directory.
+  // The consent text names what a named directory adds: more working directories for a worker.
   expect(JSON.stringify(result.data)).toContain(
-    'A Claude worker may read and write in every named directory',
+    'a session inside a named directory gives its worker every named directory',
+  );
+  // Review of b7974566: the text said the worker can read the skills and plugins under
+  // ~/.claude. Claude Code loads them as instructions; the worker's file tools do not.
+  expect(JSON.stringify(result.data)).toContain('file tools and commands do not read those files');
+  expect(JSON.stringify(result.data)).not.toContain(
+    'it can read the skills, plugins, agents, commands and rules under ~/.claude',
   );
   // And that env files there are readable while their values are withheld from Tenjin and DeepSeek.
   expect(JSON.stringify(result.data)).toContain(
@@ -93,6 +98,14 @@ it('requires explicit Windows shell acknowledgement and clears that grant on off
     await expect(runConfigSubagents('on', flags, ctx)).rejects.toMatchObject({
       fix: expect.stringContaining('--accept-windows-shell-access'),
     });
+    // The worker account is given the directories the person names, so one must be named.
+    await expect(
+      runConfigSubagents(
+        'on',
+        { ...flags, repository: undefined, acceptWindowsShellAccess: true },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ message: expect.stringContaining('--repository') });
     expect(validate).not.toHaveBeenCalled();
     const configured = await runConfigSubagents(
       'on',
@@ -139,7 +152,8 @@ it('adds separately named repositories without losing earlier roots or duplicati
   expect(result.data).toMatchObject({ repository: first, repositories: [first, second] });
   expect(await modelSettings(dir, first)).toMatchObject({ maxJobAtomic: 250000n });
   expect(await modelSettings(dir, second)).toMatchObject({ maxJobAtomic: 250000n });
-  expect(await modelSettings(dir, dir)).toBeNull();
+  // A session outside the named directories still qualifies, with its own workspace alone.
+  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
 });
 
 it.each([
@@ -161,7 +175,7 @@ it.each([
   await runConfigSubagents('on', { repository: selected, maxJob: '1' }, testCtx(dir));
   const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
   expect(saved.router.subagentConsent.repositories).toEqual([selected]);
-  expect(await modelSettings(dir, old)).toBeNull();
+  expect(await modelSettings(dir, old)).toMatchObject({ repositories: [] });
 });
 
 it('canonicalizes only previously named available roots without inferring their parent', async () => {
@@ -181,32 +195,38 @@ it('canonicalizes only previously named available roots without inferring their 
   expect(saved.router.subagentConsent.repositories).toEqual([old, selected]);
 });
 
-it('records current GitHub origins for selected folders and refreshes aliases without broadening disclosure', async () => {
+// Review of b7974566: `on` required `--repository` and wrote a consent of its own kind, so
+// nobody who had passed the install question could reach the install's consent again.
+it('a bare on writes the consent the install question writes, and --repository only adds to it', async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
-  const workspace = join(dir, 'workspace'),
-    repo = join(workspace, 'repo');
-  await mkdir(join(repo, '.git'), { recursive: true });
-  await writeFile(
-    join(repo, '.git/config'),
-    '[remote "origin"]\nurl = https://private-token@github.com/Acme/repo.git\n',
-  );
-  await runConfigSubagents('on', { repository: workspace, maxJob: '1' }, testCtx(dir));
-  expect(await modelSettings(dir, repo)).toMatchObject({
-    repositories: [workspace],
-    githubRepositories: ['Acme/repo'],
+  const path = join(dir, 'config.json');
+  const named = join(dir, 'named');
+  await mkdir(named);
+  const bare = await runConfigSubagents('on', {}, testCtx(dir));
+  expect(bare.data).toMatchObject({ enabled: true, repositories: [], jobCapAtomic: '1000000' });
+  expect(bare.data).not.toHaveProperty('repository');
+  expect(JSON.parse(await readFile(path, 'utf8')).router).toEqual({
+    subagents: true,
+    subagentConsent: {
+      version: 2,
+      instructions: 'applicable',
+      reads: 'claude-home',
+      recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+      routerOrigin: 'https://tenjin.sh',
+    },
   });
-  await writeFile(
-    join(repo, '.git/config'),
-    '[remote "origin"]\nurl = git@github.com:Acme/changed.git\n',
-  );
-  const current = (await modelSettings(dir, repo))!;
-  expect(current.repositories).toEqual([workspace]);
-  expect(currentModelGithubRepositories(current)).toEqual([]);
-  await runConfigSubagents('on', { repository: workspace, maxJob: '1' }, testCtx(dir));
-  expect(await modelSettings(dir, repo)).toMatchObject({ githubRepositories: ['Acme/changed'] });
-  const saved = await readFile(join(dir, 'config.json'), 'utf8');
-  expect(saved).not.toContain('private-token');
-  expect(JSON.parse(saved).router.subagentConsent.repositories).toEqual([workspace]);
+  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
+  // Off, then on again: the same consent is back.
+  await runConfigSubagents('off', {}, testCtx(dir));
+  expect(await modelSettings(dir, dir)).toBeNull();
+  await runConfigSubagents('on', {}, testCtx(dir));
+  expect(await modelSettings(dir, dir)).not.toBeNull();
+  // A named directory joins it and replaces nothing; a later bare on keeps it.
+  await runConfigSubagents('on', { repository: named }, testCtx(dir));
+  expect(await modelSettings(dir, dir)).toMatchObject({ repositories: [] });
+  expect(await modelSettings(dir, named)).toMatchObject({ repositories: [named] });
+  const again = await runConfigSubagents('on', {}, testCtx(dir));
+  expect(again.data).toMatchObject({ repositories: [named] });
 });
 
 // `--max-job` was required, and the cap was that amount whatever the per-call limit said.
@@ -215,21 +235,24 @@ it('takes the per-call limit as the cap where no ceiling is named, and says the 
   const path = join(dir, 'config.json');
   await writeFile(path, JSON.stringify({ maxAutoSpend: '500000' }));
   const followed = await runConfigSubagents('on', { repository: dir }, testCtx(dir));
-  expect(followed.data).toMatchObject({ maxJob: 'per-call-limit', jobCapAtomic: '500000' });
-  expect(JSON.parse(await readFile(path, 'utf8')).router.subagentConsent).toMatchObject({
-    maxJob: 'per-call-limit',
-    maxJobAtomic: '500000',
-  });
+  expect(followed.data).toMatchObject({ jobCapAtomic: '500000' });
+  expect(followed.data).not.toHaveProperty('maxJobAtomic');
+  // The consent holds no amount: no ceiling means the per-call limit.
+  expect(JSON.parse(await readFile(path, 'utf8')).router.subagentConsent).not.toHaveProperty(
+    'maxJobAtomic',
+  );
   expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 500000n });
-  // The next offer follows a changed limit, up as well as down: the consent names the rule.
+  // The next offer follows a changed limit, up as well as down.
   const saved = JSON.parse(await readFile(path, 'utf8'));
   await writeFile(path, JSON.stringify({ ...saved, maxAutoSpend: '2000000' }));
   expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 2000000n });
   // A named ceiling above the limit is kept as named and does not lift the cap.
   const named = await runConfigSubagents('on', { repository: dir, maxJob: '5' }, testCtx(dir));
   expect(named.data).toMatchObject({ maxJobAtomic: '5000000', jobCapAtomic: '2000000' });
-  expect(named.data).not.toHaveProperty('maxJob');
   expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 2000000n });
+  // The same command without --max-job drops the ceiling again.
+  const dropped = await runConfigSubagents('on', {}, testCtx(dir));
+  expect(dropped.data).not.toHaveProperty('maxJobAtomic');
 });
 
 it('refuses to turn subagents on while the per-call limit is under one model call, and says so', async () => {
@@ -254,34 +277,6 @@ it('refuses a job ceiling below the useful reservation floor before saving conse
     runConfigSubagents('on', { repository: dir, maxJob: '0.08' }, testCtx(dir)),
   ).rejects.toThrow('at least $0.086866');
   await expect(readFile(join(dir, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-});
-
-it('an explicit repository command narrows native-workspace disclosure to the named v2 scope', async () => {
-  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
-  const repository = join(dir, 'selected');
-  await mkdir(repository);
-  await writeFile(
-    join(dir, 'config.json'),
-    JSON.stringify({
-      router: {
-        subagents: true,
-        subagentConsent: {
-          version: 3,
-          scope: 'native-workspace',
-          instructions: 'applicable',
-          reads: 'claude-home',
-          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-          routerOrigin: 'https://tenjin.sh',
-          maxJobAtomic: '1000000',
-        },
-      },
-    }),
-  );
-  await runConfigSubagents('on', { repository, maxJob: '1' }, testCtx(dir));
-  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
-  expect(saved.router.subagentConsent).toMatchObject({ version: 2, repositories: [repository] });
-  expect(saved.router.subagentConsent).not.toHaveProperty('scope');
-  expect(await modelSettings(dir, dir)).toBeNull();
 });
 
 it('lists why recent subagent calls got no offer, newest first, without changing any setting', async () => {
@@ -324,34 +319,4 @@ it('says which recent calls without an offer a native subagent made, and why it 
   });
   expect(result.humanLines?.[1]).toContain('Agent from a subagent  caller_unqualified:tools');
   expect(result.humanLines?.[2]).toContain('Z  Agent  input_filter:name');
-});
-
-it.each([
-  ['before a worker could read ~/.claude', true],
-  ['before Exa was named', false],
-])('renews a consent from %s, keeping the directories it named', async (_when, noReads) => {
-  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
-  const first = join(dir, 'first'),
-    second = join(dir, 'second');
-  await mkdir(first);
-  await mkdir(second);
-  await runConfigSubagents('on', { repository: first, maxJob: '1' }, testCtx(dir));
-  const path = join(dir, 'config.json');
-  const earlier = JSON.parse(await readFile(path, 'utf8'));
-  expect(earlier.router.subagentConsent).toMatchObject({
-    reads: 'claude-home',
-    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-  });
-  // The record as the earlier terms wrote it.
-  if (noReads) delete earlier.router.subagentConsent.reads;
-  earlier.router.subagentConsent.recipients = ['Tenjin', 'DeepSeek'];
-  await writeFile(path, JSON.stringify(earlier));
-  expect(await modelSettings(dir, first)).toBeNull();
-  const renewed = await runConfigSubagents('on', { repository: second, maxJob: '1' }, testCtx(dir));
-  // The person reads what a worker can read now and who receives what, and both
-  // directories stand.
-  expect(JSON.stringify(renewed.data)).toContain('every session transcript');
-  expect(JSON.stringify(renewed.data)).toContain('Exa receives');
-  expect(await modelSettings(dir, first)).not.toBeNull();
-  expect(await modelSettings(dir, second)).not.toBeNull();
 });

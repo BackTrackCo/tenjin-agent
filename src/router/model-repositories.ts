@@ -22,18 +22,6 @@ export function modelGithubRepositories(roots: readonly string[]): string[] {
   return [...names.values()];
 }
 
-/** Offer metadata only: retain saved names still present, never infer newly added aliases. */
-export function currentModelGithubRepositories(settings: {
-  repositories: readonly string[];
-  githubRepositories: readonly string[];
-}): string[] {
-  if (!settings.githubRepositories.length) return [];
-  const current = new Set(
-    modelGithubRepositories(settings.repositories).map((name) => name.toLowerCase()),
-  );
-  return settings.githubRepositories.filter((name) => current.has(name.toLowerCase()));
-}
-
 function boundedText(path: string): string {
   const info = statSync(path);
   if (!info.isFile() || info.size > 64 * 1024) throw new Error('Unsupported Git metadata');

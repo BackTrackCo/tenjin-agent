@@ -73,7 +73,7 @@ import { ModelWorkerStopped, WORKER_ENDS } from './model-worker-control';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { MODEL_WORKER_HANDLE_PREFIX, ModelConversationStore } from './model-conversations';
 import type { ModelJob } from './model-job';
-import { nativeWorkspaceModelConsent } from './model-settings';
+import { modelConsent } from './model-settings';
 import { workerProgressPath } from './model-worker-progress';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
@@ -111,12 +111,12 @@ afterEach(async () => {
 });
 
 it.each(
-  [2, 3].flatMap((version) =>
-    (['default', 'acceptEdits', 'auto', 'dontAsk'] as const).map((mode) => ({ version, mode })),
+  [true, false].flatMap((named) =>
+    (['default', 'acceptEdits', 'auto', 'dontAsk'] as const).map((mode) => ({ named, mode })),
   ),
 )(
-  'binds Claude $mode under consent v$version independently of model-supplied claims',
-  async ({ version, mode }) => {
+  'binds Claude $mode under a consent with named directories ($named) independently of model-supplied claims',
+  async ({ named, mode }) => {
     worker.run.mockResolvedValue('completed fixture');
     dir = await realpath(await mkdtemp(join(tmpdir(), 'claude-mode-offer-')));
     await mkdir(join(dir, 'native-config'));
@@ -128,18 +128,17 @@ it.each(
       JSON.stringify({
         router: {
           subagents: true,
-          subagentConsent:
-            version === 3
-              ? nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' })
-              : {
-                  version: 2,
-                  instructions: 'applicable',
-                  reads: 'claude-home',
-                  recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-                  repositories: [repo],
-                  maxJobAtomic: '1000000',
-                  routerOrigin: 'http://localhost:3939',
-                },
+          subagentConsent: !named
+            ? modelConsent({ routerOrigin: 'http://localhost:3939' })
+            : {
+                version: 2,
+                instructions: 'applicable',
+                reads: 'claude-home',
+                recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+                repositories: [repo],
+                maxJobAtomic: '1000000',
+                routerOrigin: 'http://localhost:3939',
+              },
         },
       }),
     );
@@ -203,8 +202,11 @@ it.each(
       });
       expect(JSON.stringify(captured)).toContain('offer_id');
       const offered = JSON.parse((captured.content as Array<{ text: string }>)[0]!.text);
-      expect(offered.consent).toMatchObject({ version, repository: repo, repositories: [repo] });
-      if (version === 3) expect(offered.consent.scope).toBe('native-workspace');
+      expect(offered.consent).toMatchObject({
+        version: 2,
+        repository: repo,
+        repositories: [repo],
+      });
       const store = new ModelJobStore(dir);
       const pending = await jobOf('turn');
       expect(pending?.decision.claudePermissionMode).toBe(mode);

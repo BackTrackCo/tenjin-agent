@@ -10,14 +10,13 @@ import {
   sameClaudeWorkspace,
   withholdDroppedDirectories,
 } from './claude-workspace';
-import type { ModelSettings } from './model-settings';
 
 let dir: string;
 afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-it('native-workspace consent follows exact native roots and exceptions without granting an additional directory', async () => {
+it('with no named directory the workspace is the exact native roots and exceptions', async () => {
   const f = await fixture();
   const scope = await resolveClaudeWorkspace(
     f.root,
@@ -25,20 +24,15 @@ it('native-workspace consent follows exact native roots and exceptions without g
       permissions: { additionalDirectories: [f.sibling] },
       sandbox: { filesystem: { allowRead: [f.read], allowWrite: [f.write] } },
     },
-    'native-workspace',
+    [],
   );
   expect(scope).toMatchObject({
     workingDirectories: [f.root, f.sibling],
     readExceptions: [f.read],
     writeExceptions: [f.write],
   });
-  expect(modelClaudeRepositories(scope!, { scope: 'native-workspace' } as ModelSettings)).toEqual([
-    f.root,
-    f.sibling,
-    f.read,
-    f.write,
-  ]);
-  const removed = await resolveClaudeWorkspace(f.root, {}, 'native-workspace');
+  expect(modelClaudeRepositories(scope!)).toEqual([f.root, f.sibling, f.read, f.write]);
+  const removed = await resolveClaudeWorkspace(f.root, {}, []);
   expect(removed?.workingDirectories).toEqual([f.root]);
   expect(sameClaudeWorkspace(scope!, removed!)).toBe(false);
   // A missing native directory no longer costs the offer; the worker is denied it.
@@ -46,7 +40,7 @@ it('native-workspace consent follows exact native roots and exceptions without g
     await resolveClaudeWorkspace(
       f.root,
       { permissions: { additionalDirectories: [join(dir, 'missing')] } },
-      'native-workspace',
+      [],
     ),
   ).toMatchObject({ workingDirectories: [f.root], droppedDirectories: [join(dir, 'missing')] });
 });
@@ -62,7 +56,7 @@ async function fixture() {
   return { root: paths[0]!, sibling: paths[1]!, read: paths[2]!, write: paths[3]! };
 }
 
-it('preserves distinct native working, read and write scopes without deriving grants from disclosure', async () => {
+it('adds named directories to the native working, read and write scopes, and narrows none of them', async () => {
   const f = await fixture();
   const scope = await resolveClaudeWorkspace(
     f.root,
@@ -86,38 +80,28 @@ it('preserves distinct native working, read and write scopes without deriving gr
     readExceptions: [],
     writeExceptions: [],
   });
-  // Outside consent: dropped and named for the offer, instead of losing the offer.
+  // Review of b7974566: a named directory was a second kind of consent that withheld the
+  // session's own native directories and exceptions outside it. It only adds now.
   expect(
     await resolveClaudeWorkspace(f.root, { permissions: { additionalDirectories: [f.sibling] } }, [
       f.root,
     ]),
-  ).toMatchObject({ workingDirectories: [f.root], droppedDirectories: [f.sibling] });
-  // A read exception outside consent still refuses: the sandbox lets allowRead beat a deny.
+  ).toMatchObject({ workingDirectories: [f.root, f.sibling], droppedDirectories: [] });
   expect(
     await resolveClaudeWorkspace(f.root, { sandbox: { filesystem: { allowRead: [f.read] } } }, [
       f.root,
     ]),
-  ).toBeNull();
+  ).toMatchObject({ workingDirectories: [f.root], readExceptions: [f.read] });
 });
 
-it('makes every consented repository a working directory, so a session reaches its workspace siblings', async () => {
+it('makes every named directory a working directory, so a session reaches its workspace siblings', async () => {
   const f = await fixture();
   const scope = await resolveClaudeWorkspace(f.root, {}, [dir, f.sibling]);
   expect(scope?.workingDirectories).toEqual([f.root, dir, f.sibling]);
-  // A consented root that is gone is skipped; it cannot become a working directory.
+  // A named directory that is gone is skipped; it cannot become a working directory.
   expect(
     (await resolveClaudeWorkspace(f.root, {}, [f.root, join(dir, 'gone')]))?.workingDirectories,
   ).toEqual([f.root]);
-});
-
-it('refuses rather than deny a dropped native directory that holds the session', async () => {
-  const f = await fixture();
-  // Denying the parent would deny the repository too, so no worker can be scoped.
-  expect(
-    await resolveClaudeWorkspace(f.root, { permissions: { additionalDirectories: [dir] } }, [
-      f.root,
-    ]),
-  ).toBeNull();
 });
 
 it('names consented linked worktrees, including a checkout outside the repository, and skips others', async () => {
@@ -186,20 +170,18 @@ it('canonicalizes explicitly configured aliases and rejects unavailable or chang
   ).toBeNull();
 });
 
-it('native-workspace disclosure cannot retain a raw native alias after its target changes', async () => {
+it('a raw native alias is not retained after its target changes', async () => {
   const f = await fixture();
   const alias = join(dir, 'native-alias');
   await symlink(f.sibling, alias);
   const settings = { permissions: { additionalDirectories: [alias] } };
-  const first = await resolveClaudeWorkspace(f.root, settings, 'native-workspace');
+  const first = await resolveClaudeWorkspace(f.root, settings, []);
   await rm(alias);
   await symlink(f.read, alias);
-  const changed = await resolveClaudeWorkspace(f.root, settings, 'native-workspace');
+  const changed = await resolveClaudeWorkspace(f.root, settings, []);
   expect(first?.workingDirectorySpellings).toContain(alias);
   expect(changed?.workingDirectorySpellings).toContain(alias);
   expect(sameClaudeWorkspace(first!, changed!)).toBe(false);
-  expect(await resolveClaudeWorkspace(f.root, {}, undefined as never)).toBeNull();
-  expect(await resolveClaudeWorkspace(f.root, {}, 'all' as never)).toBeNull();
 });
 
 it('withholds a dropped directory as a whole path, in plain and JSON-escaped text', () => {

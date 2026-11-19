@@ -176,16 +176,15 @@ export async function qualifiedModelWorker(
     return null;
   const disclosure = await modelSettings(dataDir, cwd);
   const claudeWorkspace =
-    disclosure &&
-    (await resolveClaudeWorkspace(
-      cwd,
-      effective,
-      disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
-    ));
+    disclosure && (await resolveClaudeWorkspace(cwd, effective, disclosure.repositories));
   if (
     !claudeWorkspace ||
+    // THE WINDOWS WORKER HAS NO SHELL SANDBOX and runs as another account, which was given
+    // the directories the person named at that opt-in: only a session inside one qualifies.
     !(windows
-      ? disclosure?.routerOrigin === windows.routerOrigin && nativeWindowsShellPolicy(resolved)
+      ? disclosure?.routerOrigin === windows.routerOrigin &&
+        disclosure.repositories.length > 0 &&
+        nativeWindowsShellPolicy(resolved)
       : claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved))
   )
     return null;
@@ -362,16 +361,13 @@ async function runQualifiedWorker(
       throw new Error('Managed Claude provider or authentication changed; keep native');
     const current =
       disclosure &&
-      (await resolveClaudeWorkspace(
-        job.root,
-        resolved.effective,
-        disclosure.scope === 'native-workspace' ? disclosure.scope : disclosure.repositories,
-      ));
+      (await resolveClaudeWorkspace(job.root, resolved.effective, disclosure.repositories));
     if (
       !current ||
       !(binary.windows
         ? windows?.fingerprint === binary.windows.fingerprint &&
           windows.routerOrigin === disclosure?.routerOrigin &&
+          disclosure.repositories.length > 0 &&
           windows.routerOrigin === options.transport.origin &&
           nativeWindowsShellPolicy(resolved)
         : claudeWorkerSandboxCompatible([job.root, current.root], resolved)) ||

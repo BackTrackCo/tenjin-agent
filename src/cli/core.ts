@@ -32,7 +32,7 @@ export function registerCore(reg: Registration): void {
     .addOption(
       new Option(
         '--subagents <on|off>',
-        'turn DeepSeek subagents on or off during fresh setup',
+        'answer the DeepSeek subagent question, where no answer is saved yet',
       ).choices(['on', 'off']),
     )
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
@@ -70,10 +70,8 @@ Learn more:
         if (o.refresh === true && o.subagents !== undefined) {
           throw new CliError('USAGE', 'Omit --refresh when choosing whether to enable subagents.');
         }
-        const { captureNewInstall, finishNewInstall, requireOpenChoice } =
-          await import('../router/new-install');
+        const { captureNewInstall, finishNewInstall } = await import('../router/new-install');
         const newInstall = await captureNewInstall(ctx.dataDir);
-        if (o.subagents !== undefined) await requireOpenChoice(newInstall, ctx, o.subagents);
         const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
         const hostArgs = {
@@ -267,10 +265,11 @@ Examples:
       });
     });
   addGlobalFlags(config.command('subagents <mode>'))
-    .summary(
-      'enable DeepSeek for repositories or a containing folder, turn it off, or list why calls got no offer',
+    .summary('turn DeepSeek subagents on or off, or list why calls got no offer')
+    .option(
+      '--repository <path>',
+      'also name a directory: a session inside a named one gives its worker every named one',
     )
-    .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
     .option(
       '--max-job <USD>',
       'a lower ceiling per job than your per-call spend limit, which is the default cap',
@@ -290,8 +289,9 @@ Examples:
       'after',
       configExamples(
         [
-          'subagents on --repository .',
-          'subagents on --repository . --max-job 0.50',
+          'subagents on',
+          'subagents on --max-job 0.50',
+          'subagents on --repository ~/work',
           'subagents off',
           'subagents why',
         ],
@@ -681,7 +681,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
-  subagents on|off|why          enable DeepSeek for repositories or a folder; why: calls with no offer
+  subagents on|off|why          DeepSeek for eligible subagent jobs; why: calls with no offer
 
 Values
   get <key> / set <key> <value>

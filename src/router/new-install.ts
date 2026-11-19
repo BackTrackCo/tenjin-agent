@@ -1,16 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { lstat, mkdir } from 'node:fs/promises';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from '../commands/config';
 import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
 import { selectOne } from '../lib/clack';
-import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
 import { formatUsdDisplay } from '../lib/money';
 import { paint } from '../lib/output';
 import type { QuestionStep } from './install';
 import { MODEL_MINIMUM_JOB_ATOMIC, usdOfAtomic } from './model-limits';
-import { nativeWorkspaceModelConsent, perCallLimitAtomic } from './model-settings';
+import { modelConsent, perCallLimitAtomic } from './model-settings';
 
 export type InstallSubagentChoice = 'on' | 'off';
 
@@ -36,7 +34,8 @@ const SUBAGENT_OPTIONS = [
 export type NewInstallSession = {
   readonly dataDir: string;
   readonly absent: boolean;
-  claimId?: string;
+  /** This run holds the fresh-setup marker, so it may ask the question. */
+  fresh?: boolean;
   continueWith?: string;
   completed: boolean[];
   disqualified?: boolean;
@@ -64,37 +63,33 @@ function origin(config: PartialConfig, ctx: CommandContext): string | undefined 
   }
 }
 
-function blocked(config: PartialConfig): boolean {
-  const router = config.router;
-  return (
-    router?.enabled === false ||
-    (router !== undefined &&
-      (Object.hasOwn(router, 'subagents') || Object.hasOwn(router, 'subagentConsent')))
-  );
-}
+/** Whether the person has answered: on or off, by the question, the flag or the config command. */
+const answered = (config: PartialConfig) =>
+  config.router !== undefined && Object.hasOwn(config.router, 'subagents');
 
-function withoutClaim(config: PartialConfig): PartialConfig {
+function withoutMarker(config: PartialConfig): PartialConfig {
   const install = { ...config.install };
-  delete install.pendingDeepSeekSetup;
+  delete install.freshSetup;
   return { ...config, install };
 }
 
-/** A durable unfinished-install claim grants no sharing or spending authority. */
+/**
+ * Marks a profile this run created as a fresh setup. The marker is on disk because the
+ * question spans the rerun that answers the spending question. It grants no sharing or
+ * spending authority: it only says the question is still to be asked.
+ */
 export async function reserveNewInstall(
   session: NewInstallSession,
-  ctx: CommandContext,
   eligible = true,
 ): Promise<void> {
   session.disqualified ||= !eligible;
   if (session.disqualified) {
-    // A preexisting host surface disqualifies the entire shared setup. Do not
-    // leave another host's claim available to enable it on a later invocation.
-    if (session.claimId || !session.absent) {
+    // A preexisting host surface makes this no fresh setup, for the other host of the run too.
+    if (session.fresh || !session.absent)
       await persist(session.dataDir, (config) =>
-        config.install?.pendingDeepSeekSetup ? withoutClaim(config) : config,
+        config.install?.freshSetup ? withoutMarker(config) : config,
       );
-    }
-    session.claimId = undefined;
+    session.fresh = false;
     return;
   }
   let created = false;
@@ -108,117 +103,55 @@ export async function reserveNewInstall(
     }
   }
   await persist(session.dataDir, (config) => {
-    const pending = config.install?.pendingDeepSeekSetup;
-    const routerOrigin = origin(config, ctx);
-    if (blocked(config) || !routerOrigin || (pending && pending.routerOrigin !== routerOrigin)) {
-      session.claimId = undefined;
-      return pending ? withoutClaim(config) : config;
+    if (config.install?.freshSetup) {
+      session.fresh = !answered(config) && config.router?.enabled !== false;
+      return session.fresh ? config : withoutMarker(config);
     }
-    if (pending) {
-      session.claimId = pending.id;
-      return config;
-    }
-    // Another config writer or an older profile always wins over a fresh-install choice.
-    if (!created || Object.keys(config).length !== 0) return config;
-    session.claimId = randomUUID();
-    return {
-      ...config,
-      install: {
-        ...config.install,
-        pendingDeepSeekSetup: { version: 1, id: session.claimId, routerOrigin },
-      },
-    };
+    // Another config writer or an older profile always wins over a fresh-install question.
+    session.fresh = created && Object.keys(config).length === 0;
+    return session.fresh ? { ...config, install: { ...config.install, freshSetup: true } } : config;
   });
-}
-
-/** Where an existing profile changes the setting `--subagents` could not change. */
-const CHOICE_FIX: Record<InstallSubagentChoice, string> = {
-  on: 'Run `tenjin config subagents on --repository <path> --max-job <USD>` to turn DeepSeek subagents on for a directory.',
-  off: 'Run `tenjin config subagents off` to turn DeepSeek subagents off.',
-};
-
-/**
- * `--subagents` answers the question of a fresh setup and nothing else. A profile that was
- * already here, with no unfinished setup for this router, is refused before anything is
- * written: the flag would change nothing there, and said nothing.
- */
-export async function requireOpenChoice(
-  session: NewInstallSession,
-  ctx: CommandContext,
-  choice: InstallSubagentChoice,
-): Promise<void> {
-  if (session.absent) return;
-  const config = await loadRawConfig(session.dataDir);
-  const pending = config.install?.pendingDeepSeekSetup;
-  if (pending && !blocked(config) && origin(config, ctx) === pending.routerOrigin) return;
-  throw new CliError(
-    'USAGE',
-    `--subagents ${choice} answers the question of a fresh setup only, and this profile already exists. Nothing was changed.`,
-    { fix: CHOICE_FIX[choice] },
-  );
-}
-
-/** A choice this run lost the right to apply (another host or writer was here first), said on its receipt. */
-function choiceNotApplied(result: CommandResult, choice: InstallSubagentChoice): CommandResult {
-  return {
-    ...result,
-    data: {
-      ...(result.data as Record<string, unknown>),
-      subagents: { applied: false, fix: CHOICE_FIX[choice] },
-    },
-    humanLines: [
-      ...(result.humanLines ?? []),
-      `--subagents ${choice} was not applied: this was not a fresh setup. ${CHOICE_FIX[choice]}`,
-    ],
-  };
 }
 
 function hostsCompleted(session: NewInstallSession): boolean {
   return session.completed.length > 0 && session.completed.every(Boolean);
 }
 
-function matchesClaim(session: NewInstallSession, config: PartialConfig, ctx: CommandContext) {
-  const pending = config.install?.pendingDeepSeekSetup;
-  return (
-    pending !== undefined &&
-    pending.id === session.claimId &&
-    !blocked(config) &&
-    origin(config, ctx) === pending.routerOrigin
-  );
-}
-
-/** Apply one explicit choice after all hosts are installed, under the config lock. */
-export async function completeNewInstall(
-  session: NewInstallSession,
+/**
+ * Saves the person's answer, under the config lock, where none is saved yet: by the
+ * question or by `--subagents`, on a fresh profile or an existing one. `on` writes the same
+ * consent `tenjin config subagents on` writes. An answer already saved is never replaced
+ * here; the config command changes it. Returns whether this call saved the answer.
+ */
+export async function saveSubagentChoice(
+  dataDir: string,
   ctx: CommandContext,
-  choice?: InstallSubagentChoice,
-): Promise<InstallSubagentChoice | undefined> {
-  if (!session.claimId || !hostsCompleted(session)) return undefined;
-  let applied: InstallSubagentChoice | undefined;
-  await persist(session.dataDir, (config) => {
-    const pending = config.install?.pendingDeepSeekSetup;
-    if (!pending || pending.id !== session.claimId) return config;
-    const next = withoutClaim(config);
-    if (!matchesClaim(session, config, ctx)) return next;
-    if (choice === undefined) return config;
-    applied = choice;
+  choice: InstallSubagentChoice,
+): Promise<boolean> {
+  let saved = false;
+  await persist(dataDir, (config) => {
+    saved = false;
+    if (answered(config)) return config.install?.freshSetup ? withoutMarker(config) : config;
+    const routerOrigin = origin(config, ctx);
+    if (choice === 'on' && !routerOrigin) return config;
+    saved = true;
     return {
-      ...next,
+      ...withoutMarker(config),
       router: {
         ...config.router,
         subagents: choice === 'on',
-        ...(choice === 'on'
+        ...(choice === 'on' && routerOrigin
           ? {
-              subagentConsent: nativeWorkspaceModelConsent({
-                routerOrigin: pending.routerOrigin,
-                maxJobAtomic: perCallLimitAtomic(config).toString(),
+              subagentConsent: modelConsent({
+                routerOrigin,
+                prior: config.router?.subagentConsent,
               }),
             }
           : {}),
       },
     };
   });
-  return applied;
+  return saved;
 }
 
 type InstallReceipt = {
@@ -270,43 +203,45 @@ export async function finishNewInstall(
     promptSubagents?: () => Promise<InstallSubagentChoice | null>;
   } = {},
 ): Promise<CommandResult> {
-  if (!session.claimId || !hostsCompleted(session))
-    return options.choice !== undefined && !session.claimId
-      ? choiceNotApplied(result, options.choice)
-      : result;
-  const interactive =
-    ctx.flags.json !== true &&
-    (options.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  const pending =
-    options.choice === undefined &&
-    matchesClaim(session, await loadRawConfig(session.dataDir), ctx);
-  const answer =
-    pending && interactive && !options.yes
-      ? ((await (options.promptSubagents ?? askSubagents)()) ?? 'off')
-      : options.choice;
-  const applied = await completeNewInstall(session, ctx, answer);
-  if (applied === undefined) {
-    if (options.choice !== undefined) return choiceNotApplied(result, options.choice);
-    if (!pending || interactive || !session.continueWith) return result;
-    const harness = options.harness ? ` --harness ${options.harness}` : '';
-    return addSubagentQuestion(result, session.continueWith + harness);
+  // A failed or unfinished host setup saves no answer and asks nothing.
+  if (!hostsCompleted(session)) return result;
+  let answer = options.choice;
+  if (answer === undefined) {
+    // No flag: the question, on a fresh setup, asked once.
+    if (!session.fresh) return result;
+    const config = await loadRawConfig(session.dataDir);
+    if (!config.install?.freshSetup || answered(config)) return result;
+    const interactive =
+      ctx.flags.json !== true &&
+      (options.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
+    if (!interactive) {
+      if (!session.continueWith) return result;
+      const harness = options.harness ? ` --harness ${options.harness}` : '';
+      return addSubagentQuestion(result, session.continueWith + harness);
+    }
+    if (options.yes) return result;
+    answer = (await (options.promptSubagents ?? askSubagents)()) ?? 'off';
   }
-  const enabled = applied === 'on';
+  const saved = await saveSubagentChoice(session.dataDir, ctx, answer);
+  const config = await loadRawConfig(session.dataDir);
+  const enabled = config.router?.subagents === true;
   // The cap is the per-call limit at each offer. What it is now is said with the answer.
-  const perCall = perCallLimitAtomic(await loadRawConfig(session.dataDir));
+  const perCall = perCallLimitAtomic(config);
+  // An answer saved earlier stands: the flag changed nothing, and the receipt says so.
+  const stands =
+    !saved && enabled !== (answer === 'on')
+      ? [
+          `That was already saved, so --subagents ${answer} changed nothing. Change it with \`tenjin config subagents ${answer}\`.`,
+        ]
+      : [];
   return {
     ...result,
     data: {
       ...(result.data as Record<string, unknown>),
-      subagents: enabled
-        ? {
-            enabled,
-            scope: 'native-workspace',
-            maxJob: 'per-call-limit',
-            maxJobAtomic: perCall.toString(),
-            terms: DEEPSEEK_INSTALL_TERMS,
-          }
-        : { enabled },
+      subagents:
+        saved && enabled
+          ? { enabled, jobCapAtomic: perCall.toString(), terms: DEEPSEEK_INSTALL_TERMS }
+          : { enabled, ...(saved ? {} : { changed: false }) },
     },
     // The terms follow the one answer they inform. The question links to them, and the
     // receipt's disclosure does not repeat them after either answer.
@@ -315,14 +250,15 @@ export async function finishNewInstall(
       ...(enabled
         ? [
             `DeepSeek subagent routing is enabled with parent veto. Each job costs up to your per-call spend limit, $${formatUsdDisplay(perCall.toString())} now. Turn it off with \`tenjin config subagents off\`.`,
-            ...(perCall < MODEL_MINIMUM_JOB_ATOMIC
+            ...(saved && perCall < MODEL_MINIMUM_JOB_ATOMIC
               ? [
                   `No job is offered while that limit is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} one model call and its routing fee need. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
                 ]
               : []),
-            paint(ctx.io, 'dim', DEEPSEEK_INSTALL_TERMS),
+            ...(saved ? [paint(ctx.io, 'dim', DEEPSEEK_INSTALL_TERMS)] : []),
           ]
         : ['DeepSeek subagent routing is off.']),
+      ...stands,
     ],
   };
 }
