@@ -3481,6 +3481,51 @@ it('gives the child the provider events as they arrive, in order, before the str
   expect(request!.seen.chunks.join('')).toBe(completedMessageSse(streamMessage));
 });
 
+// Failure caught: a reply cut after `message_delta` (its usage counted, the call settled and
+// charged) ended with an error event, so the child showed a failed turn and could resend it.
+// Only `message_stop` was missing, and it carries no content: it is written, nothing made up.
+it('ends a settled reply that stopped after message_delta with message_stop and no error event', async () => {
+  const types = streamEvents.map((event) => event.type);
+  const cutAt = types.indexOf('message_stop');
+  expect(cutAt).toBeGreaterThan(types.indexOf('message_delta'));
+  const messages = vi.fn(async (...args: unknown[]) => {
+    for (const event of streamEvents.slice(0, cutAt))
+      (args[5] as (event: { type: string }) => void)(event);
+    return streamMessage;
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+  });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, messagesStream: 1 } },
+    { ...options(), transport: { messages } as unknown as ModelTransport },
+  );
+  expect(request!.seen.chunks.join('')).toBe(completedMessageSse(streamMessage));
+  expect(request!.seen.chunks.join('')).not.toContain('"type":"error"');
+});
+
+// A reply that never reached `message_delta` was not counted: the child is told.
+it('tells the child with an error event when a settled reply ended before message_delta', async () => {
+  const messages = vi.fn(async (...args: unknown[]) => {
+    (args[5] as (event: { type: string }) => void)(streamEvents[0]!);
+    return streamMessage;
+  });
+  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    request = streamedBridgeRequest(streamRequest);
+    await request.done;
+  });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, messagesStream: 1 } },
+    { ...options(), transport: { messages } as unknown as ModelTransport },
+  );
+  const written = request!.seen.chunks.join('');
+  expect(written).toContain('"type":"error"');
+  expect(written).not.toContain('message_stop');
+});
+
 it('writes the whole answer as it always did when no event was given, whatever the transport', async () => {
   const messages = vi.fn(async (..._args: unknown[]) => streamMessage);
   let request: ReturnType<typeof streamedBridgeRequest> | undefined;

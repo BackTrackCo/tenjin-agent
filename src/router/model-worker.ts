@@ -622,7 +622,7 @@ async function runQualifiedWorker(
     const handle = async () => {
       let timed: ReturnType<WorkerDiagnosticsRecord['call']> | undefined;
       // A streamed reply: events have left for the child (`started`), and its last one was sent.
-      const live = { started: false, stopped: false };
+      const live = { started: false, stopped: false, counted: false };
       try {
         if (
           req.method !== 'POST' ||
@@ -692,6 +692,7 @@ async function runQualifiedWorker(
                   diagnostics.mark('firstActivity');
                 }
                 live.started = true;
+                if (event.type === 'message_delta') live.counted = true;
                 if (event.type === 'message_stop') live.stopped = true;
                 res.write(sseFrame(event));
               }
@@ -762,10 +763,16 @@ async function runQualifiedWorker(
         });
         diagnostics.mark('firstAnswer');
         if (live.started) {
-          // The events were the answer. One that did not reach its last event was cut after
-          // its usage was counted: the child is told, as for any reply that ends early.
+          // The events were the answer, and the call is settled: the receipt is checked and
+          // charged. After `message_delta` (the usage was counted) only `message_stop` is
+          // left to come, and it carries no content, so the reply is complete and ends with
+          // that event, nothing made up. A reply that ended before `message_delta` was not
+          // counted that way: the child is told, as for any reply that ends early.
           if (!res.destroyed && !res.writableEnded) {
-            if (!live.stopped) res.write(sseError('The model reply ended before its last event'));
+            if (!live.stopped) {
+              if (live.counted) res.write(sseFrame({ type: 'message_stop' }));
+              else res.write(sseError('The model reply ended before its last event'));
+            }
             res.end();
           }
         } else send(message);
