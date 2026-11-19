@@ -70,6 +70,7 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
       repeats: [{ tool: 'Bash', count: 3 }],
       retries: [{ attempt: 1, cause: 'provider', status: 500 }],
       phases: { cliProcess: -600, checked: 20, qualified: 350, childReady: 1_900 },
+      childMarks: {},
       start: {},
       calls: [],
       callTotals: { count: 0 },
@@ -207,6 +208,8 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
     record.accepted(15_000);
     record.fact('envKept', true);
     record.fact('promptReadMs', 3.6);
+    record.childMark('before_sandbox_init', 15_300);
+    record.childMark('before_sandbox_init', 15_900);
     await record.write(dataDir, 'job-2');
     await writeWorkerPhases(dataDir, 'job-2', 15_000, {
       workerReturned: 40_000,
@@ -217,6 +220,8 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
     const kept = JSON.parse(await readFile(path, 'utf8'));
     expect(kept.offer).toEqual(offer);
     expect(kept.start).toEqual({ envKept: true, promptReadMs: 4 });
+    // Once each, from the accept, as the phases are.
+    expect(kept.childMarks).toEqual({ before_sandbox_init: 300 });
     expect(kept.phases).toEqual({
       offerCaptured: -5_000,
       offerReturned: -2_579,

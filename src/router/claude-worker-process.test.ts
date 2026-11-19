@@ -160,3 +160,33 @@ it.skipIf(process.platform === 'win32')(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+it('reports the start-up checkpoints Claude Code writes before its initialize answer, and reads nothing after', () => {
+  // Failure caught: the worker's start could not be split into Claude Code's own steps and
+  // ours, so a slow start could not be placed from a live record.
+  const child = new Child();
+  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  const seen: string[] = [];
+  const process = claudeWorkerProcess({ onStartupMark: (name) => seen.push(name) });
+  process.spawn(options());
+  // Claude Code reports checkpoints only when asked, by this variable.
+  expect(vi.mocked(spawn).mock.calls[0]![2]?.env).toMatchObject({
+    CLAUDE_CODE_SDK_READS_STARTUP_MARKS: '1',
+    HOME: '/fixture/home',
+  });
+  // A line may arrive in two chunks.
+  child.stdout.write('{"type":"keep_alive","startup_mark":"before_sandbox_init"}\n{"type":"keep_a');
+  child.stdout.write('live","startup_mark":"after_sandbox_init"}\n');
+  child.stdout.write('{"type":"control_response","response":{}}\n');
+  child.stdout.write('{"type":"keep_alive","startup_mark":"after_the_answer"}\n');
+  expect(seen).toEqual(['before_sandbox_init', 'after_sandbox_init']);
+});
+
+it('leaves the child environment as given when no one asks for checkpoints', () => {
+  const child = new Child();
+  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  claudeWorkerProcess().spawn(options());
+  expect(vi.mocked(spawn).mock.calls[0]![2]?.env).not.toHaveProperty(
+    'CLAUDE_CODE_SDK_READS_STARTUP_MARKS',
+  );
+});

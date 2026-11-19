@@ -235,6 +235,12 @@ export type WorkerDiagnostics = {
    * an `offer`: `offerCaptured` and `offerReturned`.
    */
   phases: Record<string, number>;
+  /**
+   * Claude Code's own start-up checkpoints (`before_sandbox_init`, `action_after_setup`,
+   * `stdin_listen_started`), each in milliseconds from the accept as this process saw it, so
+   * the split of the child's start shows in a live record.
+   */
+  childMarks: Record<string, number>;
   /** Facts of the start: whether an earlier env scan was taken up, and a kept prompt read. */
   start: Record<string, boolean | number>;
   /** The time before the offer, written by the capture. */
@@ -327,6 +333,7 @@ export class WorkerDiagnosticsRecord {
       repeats: [],
       retries: [],
       phases: {},
+      childMarks: {},
       start: {},
       calls: [],
       callTotals: { count: 0 },
@@ -478,6 +485,8 @@ export class WorkerDiagnosticsRecord {
     // are moved to count from the accept too, so they read negative.
     for (const name of Object.keys(this.value.phases))
       this.value.phases[name] = this.value.phases[name]! + Math.round(this.acceptedAt - at);
+    for (const name of Object.keys(this.value.childMarks))
+      this.value.childMarks[name] = this.value.childMarks[name]! + Math.round(this.acceptedAt - at);
     for (const call of this.value.calls) call.at += Math.round(this.acceptedAt - at);
     this.acceptedAt = at;
     for (const [name, when] of Object.entries(marks).slice(0, 16)) this.mark(name, when);
@@ -487,6 +496,13 @@ export class WorkerDiagnosticsRecord {
   mark(name: string, at = Date.now()): void {
     if (name in this.value.phases || Object.keys(this.value.phases).length >= MAX_PHASES) return;
     this.value.phases[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
+  }
+
+  /** A start-up checkpoint of the child, once: milliseconds since the accept. */
+  childMark(name: string, at = Date.now()): void {
+    const marks = this.value.childMarks;
+    if (name in marks || Object.keys(marks).length >= MAX_PHASES) return;
+    marks[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
   }
 
   /** A model call tried again: which try failed, and why (fixed codes). */

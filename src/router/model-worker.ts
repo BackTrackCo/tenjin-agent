@@ -559,6 +559,7 @@ async function runQualifiedWorker(
   const nativeProcess = claudeWorkerProcess({
     secrets: () => [token, ...secrets],
     windows: binary.windows,
+    onStartupMark: (name, at) => diagnostics.childMark(name, at),
   });
   const pending = new Set<Promise<void>>();
   let worker: ReturnType<typeof query> | undefined;

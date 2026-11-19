@@ -25,8 +25,19 @@ export type WindowsWorkerProcess = {
  * the SDK is given only its path. The folder is removed once every child has closed.
  */
 export function claudeWorkerProcess(
-  o: { secrets?: () => readonly string[]; windows?: WindowsWorkerProcess } = {},
+  o: {
+    secrets?: () => readonly string[];
+    windows?: WindowsWorkerProcess;
+    /**
+     * Each start-up checkpoint Claude Code reports before its initialize answer, by name and
+     * the time this process saw it. Claude Code writes them as `keep_alive` lines when
+     * `CLAUDE_CODE_SDK_READS_STARTUP_MARKS` is set, which the SDK ignores outside its own
+     * `startup()`; they hold a checkpoint's name and nothing else.
+     */
+    onStartupMark?: (name: string, at: number) => void;
+  } = {},
 ) {
+  const MARKS = 'CLAUDE_CODE_SDK_READS_STARTUP_MARKS';
   const children: Array<{
     child: ReturnType<typeof spawn>;
     closed: Promise<void>;
@@ -122,6 +133,9 @@ export function claudeWorkerProcess(
     spawn(options: SpawnOptions) {
       if (closing) throw new Error('Claude worker is already draining');
       const { args } = options;
+      const spawnOptions = o.onStartupMark
+        ? { ...options, env: { ...options.env, [MARKS]: '1' } }
+        : options;
       const secrets = (o.secrets?.() ?? []).filter((secret) => secret.length > 0);
       if (args.some((arg) => secrets.some((secret) => arg.includes(secret))))
         throw new Error('A Claude worker secret would be on its command line');
@@ -152,7 +166,7 @@ export function claudeWorkerProcess(
                 {
                   cwd: options.cwd,
                   env: {
-                    ...options.env,
+                    ...spawnOptions.env,
                     TENJIN_WINDOWS_PROFILE: windows.configDir,
                     TENJIN_WINDOWS_PROTECTED_PATHS: JSON.stringify(windows.protectedPaths),
                   },
@@ -163,7 +177,7 @@ export function claudeWorkerProcess(
               )
             : spawn(options.command, args, {
                 cwd: options.cwd,
-                env: options.env,
+                env: spawnOptions.env,
                 signal: options.signal,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 windowsHide: true,
@@ -193,6 +207,7 @@ export function claudeWorkerProcess(
             void rm(cancelFolder, { recursive: true, force: true }).catch(() => undefined);
         });
       }
+      if (o.onStartupMark) tapStartupMarks(child, o.onStartupMark);
       // The custom-spawn interface leaves stderr to its caller. Drain it without
       // retaining tool output, credentials or native diagnostic text.
       child.stderr.on('error', () => {});
@@ -231,4 +246,38 @@ export function claudeWorkerProcess(
       }
     },
   };
+}
+
+/**
+ * Reads the checkpoint lines at the start of a child's output and stops at its first other
+ * line: nothing after the initialize answer is looked at, so no model output is scanned.
+ */
+function tapStartupMarks(
+  child: ChildProcessWithoutNullStreams,
+  report: (name: string, at: number) => void,
+): void {
+  let pending = '';
+  const read = (chunk: Buffer | string) => {
+    pending += String(chunk);
+    for (let end = pending.indexOf('\n'); end >= 0; end = pending.indexOf('\n')) {
+      const line = pending.slice(0, end);
+      pending = pending.slice(end + 1);
+      let name: unknown;
+      try {
+        const parsed = JSON.parse(line) as { type?: unknown; startup_mark?: unknown };
+        if (parsed.type === 'keep_alive') name = parsed.startup_mark;
+        else return stop();
+      } catch {
+        return stop();
+      }
+      if (typeof name === 'string') report(name.slice(0, 40), Date.now());
+    }
+    // A line this long is not a checkpoint.
+    if (pending.length > 4096) stop();
+  };
+  const stop = () => {
+    child.stdout.off('data', read);
+    pending = '';
+  };
+  child.stdout.on('data', read);
 }
