@@ -31,7 +31,9 @@ export const SUBAGENT_TERMS: readonly string[] = [
 
 const OFF_HINT = 'Run `tenjin config subagents off` to turn them off.';
 export const ON_HINT = 'Run `tenjin config subagents on` to turn them on.';
-/** After `off`, and after "Keep off" in setup. */
+/** After "Keep off" in setup: it is off, and how to turn it on. A job has never started there. */
+export const SUBAGENTS_KEPT_OFF_LINES = ['○ DeepSeek subagents are off', '', ON_HINT] as const;
+/** After `off`. */
 export const SUBAGENTS_OFF_LINE = '○ DeepSeek subagents are off. No new jobs will start.';
 
 /**

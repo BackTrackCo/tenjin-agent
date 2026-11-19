@@ -4,7 +4,7 @@ import { persist } from '../commands/config';
 import {
   SUBAGENT_DETAILS_URL,
   SUBAGENT_TERMS,
-  SUBAGENTS_OFF_LINE,
+  SUBAGENTS_KEPT_OFF_LINES,
   subagentsOnLines,
 } from './subagents-shown';
 import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
@@ -274,7 +274,7 @@ export async function finishNewInstall(
               },
             ),
           ]
-        : [SUBAGENTS_OFF_LINE]),
+        : ['', ...SUBAGENTS_KEPT_OFF_LINES]),
       ...stands,
     ],
   };
