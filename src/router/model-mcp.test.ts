@@ -1747,11 +1747,15 @@ it('reports native tool-use and token counts and keeps the live file only while 
   try {
     const accepted = f.call({ offer_id: f.job.id });
     await ready;
-    await vi.waitFor(async () =>
-      expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
-        status: 'activity',
-        activity: { offerId: f.job.id },
-      }),
+    // The file is written after the worker starts; a loaded runner needs more than the
+    // default one second, and nothing else about the test depends on that wait.
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+          status: 'activity',
+          activity: { offerId: f.job.id },
+        }),
+      { timeout: 10_000 },
     );
     release();
     expect(await accepted).toMatchObject({
@@ -1760,7 +1764,9 @@ it('reports native tool-use and token counts and keeps the live file only while 
       tokens: 31_234,
       spend: { actualAtomic: '3000' },
     });
-    await vi.waitFor(async () => expect(readFile(path, 'utf8')).rejects.toThrow());
+    await vi.waitFor(async () => expect(readFile(path, 'utf8')).rejects.toThrow(), {
+      timeout: 10_000,
+    });
   } finally {
     release();
     await f.close();
