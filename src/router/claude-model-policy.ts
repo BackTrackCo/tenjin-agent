@@ -101,6 +101,19 @@ export function claudeDeepSeekWorkerApiKeyHelper(platform = process.platform): s
   return platform === 'win32' ? 'echo %ANTHROPIC_API_KEY%' : `printf '%s' "$ANTHROPIC_API_KEY"`;
 }
 
+/**
+ * THE PERSON'S OWN WAYS TO TURN THINKING OFF IN CLAUDE CODE, cleared for the worker: with
+ * either set (`MAX_THINKING_TOKENS=0`, say) Claude Code sends its turns with no
+ * `thinking` field. An empty value in the worker's flag settings clears one from the
+ * person's settings env and from the process env alike (checked on Claude Code 2.1.328).
+ * Not part of the fixed provider env a managed policy may not set: a policy that sets one
+ * keeps its offers, and the bridge still sends the worker's turns with thinking on.
+ */
+export const CLAUDE_WORKER_THINKING_ENV = {
+  MAX_THINKING_TOKENS: '',
+  CLAUDE_CODE_DISABLE_THINKING: '',
+} as const;
+
 /** All overrides belong to the disposable worker, including its native auto classifier. */
 export function claudeDeepSeekWorkerEnv(
   parent: NodeJS.ProcessEnv,
@@ -111,7 +124,8 @@ export function claudeDeepSeekWorkerEnv(
     ...parent,
     ...claudeDeepSeekWorkerSettingsEnv(baseUrl, token),
   };
-  for (const key of CLEARED_ENV) env[key] = undefined;
+  for (const key of [...CLEARED_ENV, ...Object.keys(CLAUDE_WORKER_THINKING_ENV)])
+    env[key] = undefined;
   return env;
 }
 

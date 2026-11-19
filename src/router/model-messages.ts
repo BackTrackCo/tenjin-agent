@@ -129,13 +129,20 @@ export class TooManyTools extends Error {
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
 export function workerMessages(raw: Record<string, unknown>) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
-  // Native worker turns request adaptive thinking; auto-mode classifier turns
-  // omit it. Preserve that distinction so a small review budget is not spent
-  // on hidden thinking instead of the native classifier's verdict.
-  const mode =
+  // THINKING IS ON FOR EVERY TURN OF THE WORKER, as the DeepSeek harness has it, whatever
+  // the request asks: Claude Code sends a turn with no `thinking` field when the person's
+  // own settings or env turn thinking off (`MAX_THINKING_TOKENS=0`,
+  // `alwaysThinkingEnabled: false`, `CLAUDE_CODE_DISABLE_THINKING`), and the worker's
+  // settings cannot outrank a managed policy that does. A worker's turn is streamed or
+  // offers tools. A SIDE REQUEST does neither, such as the auto-mode classifier's two
+  // (2,112 output tokens with the `</block>` stop sequence, then 10,240): it stays as it
+  // asks, without thinking unless it asks for it, so a small review budget is not spent
+  // on hidden thinking instead of the classifier's verdict.
+  const asked =
     raw.thinking === undefined
       ? 'disabled'
       : z.object({ type: z.enum(['enabled', 'adaptive', 'disabled']) }).parse(raw.thinking).type;
+  const mode = raw.stream === true || raw.tools !== undefined ? 'enabled' : asked;
   const stopSequences =
     raw.stop_sequences === undefined
       ? undefined

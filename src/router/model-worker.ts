@@ -56,6 +56,7 @@ import {
   claudeWorkerAuthCompatible,
   CLAUDE_DEEPSEEK_COMPACT_WINDOW,
   CLAUDE_DEEPSEEK_WORKER_MODEL,
+  CLAUDE_WORKER_THINKING_ENV,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
 import type { InstructionContext } from './model-instructions';
@@ -929,6 +930,8 @@ async function runQualifiedWorker(
           // Auto memory is undeclared input outside this job's disclosure scope.
           // Native settings, instruction files and owned session history still load.
           autoMemoryEnabled: false,
+          // Above an `alwaysThinkingEnabled: false` in the person's own settings.
+          alwaysThinkingEnabled: true,
           // The CLAUDE.md files a native subagent of this type starts without (all of them
           // for `Explore`). Claude Code puts them in a main thread's first request, which
           // the worker is, whatever its agent says.
@@ -938,6 +941,7 @@ async function runQualifiedWorker(
           ...(!binary.windows ? { apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper() } : {}),
           env: {
             ...claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
+            ...CLAUDE_WORKER_THINKING_ENV,
             // Above a GitHub token in the person's settings env, which Claude Code would
             // otherwise hand the worker's commands in place of the job's own, or of none.
             ...githubEnv,

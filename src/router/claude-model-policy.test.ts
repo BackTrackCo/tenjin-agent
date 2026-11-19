@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import {
   assertClaudeWorkerMode,
   claudeDeepSeekWorkerEnv,
+  CLAUDE_WORKER_THINKING_ENV,
   claudeDeepSeekWorkerApiKeyHelper,
   claudeDeepSeekWorkerSettingsEnv,
   claudeManagedProviderCompatible,
@@ -112,6 +113,28 @@ it('keeps provider, aliases and the native auto classifier inside the disposable
   expect(parent.CLAUDE_CODE_AUTO_MODE_SERVER).toBe('1');
   expect(parent.DEEPSEEK_KEY).toBe('provider-alias-secret');
   expect(parent.CLAUDE_CODE_ENTRYPOINT).toBe('claude-desktop');
+});
+
+// A person's `MAX_THINKING_TOKENS=0` or `CLAUDE_CODE_DISABLE_THINKING=1` reached the worker
+// through its process env, and its Claude Code then asked for no thinking.
+it("clears the person's ways to turn thinking off from the worker's env, and from its flag settings by an empty value", () => {
+  const env = claudeDeepSeekWorkerEnv(
+    { MAX_THINKING_TOKENS: '0', CLAUDE_CODE_DISABLE_THINKING: '1' },
+    'http://127.0.0.1:1234',
+    'worker-token',
+  );
+  expect(env.MAX_THINKING_TOKENS).toBeUndefined();
+  expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined();
+  expect(JSON.parse(JSON.stringify(CLAUDE_WORKER_THINKING_ENV))).toEqual({
+    MAX_THINKING_TOKENS: '',
+    CLAUDE_CODE_DISABLE_THINKING: '',
+  });
+  // A managed policy that sets one still gets offers: the bridge keeps thinking on.
+  expect(
+    claudeManagedProviderCompatible({
+      sources: [{ source: 'managed', settings: { env: { MAX_THINKING_TOKENS: '0' } } }],
+    } as never),
+  ).toBe(true);
 });
 
 it('pins the native settings flag layer and clears inherited provider credentials in JSON', () => {

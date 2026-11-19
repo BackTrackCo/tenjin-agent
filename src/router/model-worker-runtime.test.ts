@@ -567,6 +567,12 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
     apiKeyHelper: expect.any(String),
     env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   });
+  // Thinking stays on above the person's own settings: `alwaysThinkingEnabled: false`,
+  // or `MAX_THINKING_TOKENS=0` in their settings env, sent each worker turn without it.
+  expect(given(call.options).settings).toMatchObject({
+    alwaysThinkingEnabled: true,
+    env: { MAX_THINKING_TOKENS: '', CLAUDE_CODE_DISABLE_THINKING: '' },
+  });
   // No subagent tool, native or Tenjin's, and no Tenjin tool under either name Tenjin
   // registers its server by: the plugin's, and the settings install's `x402`, which once
   // left `mcp__x402__subagent` in a worker's reach.

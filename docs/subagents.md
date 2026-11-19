@@ -110,6 +110,7 @@ On native Windows a worker has no shell sandbox:
 - **`Explore`.** An `Explore` worker starts without your CLAUDE.md and rules files, global, project and local, as a native `Explore` subagent does. One in a folder below the working directory still reaches it when it reads a file there.
 - **No questions, no subagents.** As a native subagent, it has no tool for asking you questions in any mode. A worker that needs something from you ends with its report, and the parent continues it. A worker starts no subagent, native or DeepSeek, and none of its calls is held or offered.
 - **No Tenjin tools.** Unlike a native subagent, it has none of Tenjin's own tools (`request`, `approve`, `subagent`). What a worker pays for is its model calls and its web searches, which count in its job's budget, and a Tenjin lookup of its own would not.
+- **Thinking.** The worker thinks on every turn, at high effort, as the DeepSeek harness does. Your own Claude Code settings do not turn that off for a worker: `MAX_THINKING_TOKENS=0`, `CLAUDE_CODE_DISABLE_THINKING` and `alwaysThinkingEnabled: false` are set aside for it, and a turn that still arrives without thinking is sent with thinking on. The auto-mode classifier's own short requests carry no thinking, as Claude Code sends them.
 - **Stopping early.** A worker that stops early returns its last text and recent activity to the parent.
 
 ### Your `~/.claude` folder

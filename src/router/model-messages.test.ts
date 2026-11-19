@@ -76,6 +76,22 @@ it('preserves the native auto classifier stop sequence and non-thinking request'
   });
   expect(result).not.toHaveProperty('tools');
 });
+// A person with thinking off in Claude Code (`MAX_THINKING_TOKENS=0`,
+// `alwaysThinkingEnabled: false`) got every worker turn without thinking: Claude Code
+// 2.1.328 then sends the turn with no `thinking` field, which went out as disabled.
+it("sends a worker's own turn with thinking on, whatever the request asks", () => {
+  const tools = [{ name: 'Read', input_schema: { type: 'object' } }];
+  for (const turn of [
+    { stream: true, tools },
+    { stream: true, tools, thinking: { type: 'disabled' } },
+    // Either mark alone makes it a turn of the worker.
+    { stream: true },
+    { tools },
+  ])
+    expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000, ...turn })).toMatchObject({
+      thinking: { type: 'enabled' },
+    });
+});
 it('keeps worker adaptive thinking enabled and rejects unknown thinking instead of changing it', () => {
   expect(
     workerMessages({ model: 'deepseek-flash', thinking: { type: 'adaptive', display: 'updates' } }),
