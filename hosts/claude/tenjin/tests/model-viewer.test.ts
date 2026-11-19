@@ -335,7 +335,7 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
 }
 const remember = ($: Engine, input: Record<string, unknown> = INPUT) =>
   $.tool.call({ tool: 'Agent', ...input });
-/** What a held call was answered with: the refusal's text (an earlier build's completed result). */
+/** What a held call was answered with: the refusal's text. */
 const heldAnswer = (answer: { deny?: string; result?: unknown }): unknown =>
   answer.deny ?? answer.result;
 const translate = ($: Engine, targetTool: string, input: Record<string, unknown>) =>
@@ -1180,7 +1180,7 @@ test(
 
 // The CLI's `endedBy` codes, each in a native-sounding word.
 // A stop with a known cause reads `stopped`, the CLI's word since a failed model call
-// read `unknown` (live case); an older CLI's `unknown` still draws.
+// read `unknown` (live case).
 for (const [endedBy, word, status] of [
   ['agent_stopped', 'Stopped by you', 'cancelled'],
   ['parent_cancel', 'Cancelled by the parent', 'cancelled'],
@@ -2062,10 +2062,6 @@ test("the viewer's first message draws the worker's real assignment, and a short
   expect(await message(told + OFFER + ' Read selected source')).toBe(INPUT.prompt);
   // No record for it in this session, as after a restart: never the internal line.
   expect(await message(told + OFFER2 + ' Earlier job')).toBe('DeepSeek worker for: Earlier job');
-  // A viewer an earlier build started was told its description alone.
-  expect(await message(told + 'DeepSeek #9 · Earlier job')).toBe(
-    'DeepSeek worker for: Earlier job',
-  );
   // Any other message is the engine's own.
   expect(await message('Read src/example.ts.')).toBe('Read src/example.ts.');
 });
@@ -3221,15 +3217,12 @@ test("an accepted offer's worker draws where its Agent call was held, live and t
 
 test("a held Agent row drawn after a resume ends from the accept call's own answer, and a repeated accept never replaces it", async ($, on) => {
   setup($, on);
-  const held = {
-    status: 'completed',
-    agentId: 'tenjin-offer-' + OFFER,
-    prompt: INPUT.prompt,
-    content: [{ type: 'text', text: JSON.stringify({ action: 'offer', offer_id: OFFER }) }],
-    totalToolUseCount: 0,
-    totalDurationMs: 0,
-    totalTokens: 0,
-  };
+  // As the transcript keeps a held call: the refusal's text, which names the offer.
+  const held =
+    'Error: Tenjin offered DeepSeek for this call and held it (offer ' +
+    OFFER +
+    '). It has not run.\n' +
+    JSON.stringify({ action: 'offer', offer_id: OFFER });
   const handback = JSON.stringify({
     status: 'cancelled',
     endedBy: 'budget',

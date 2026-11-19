@@ -1090,7 +1090,10 @@ const ENDED_BY: Record<string, string> = {
 function endedByOf(code: unknown): code is string {
   return typeof code === 'string' && Object.hasOwn(ENDED_BY, code);
 }
-/** The end word of a worker that did not complete; an older CLI sends no code. */
+/**
+ * The end word of a worker that did not complete: from the job's end code, which a read
+ * carries once the job's record holds its handback, and from its state until then.
+ */
 function stopWord(status: unknown, endedBy: unknown): string {
   if (endedByOf(endedBy)) return ENDED_BY[endedBy]!;
   return status === 'cancelled' ? 'Interrupted' : 'Stopped';
@@ -2548,13 +2551,11 @@ export function registerModelViewer(on: On): void {
       );
     }
     if (!told.startsWith(VIEWER_PROMPT + ' ')) return next(e);
-    // `<offer id> <description>`; a viewer of an earlier build was told its description alone.
-    const [, offerId, description = ''] = /^(\S{36}) ([\s\S]*)$/.exec(
-      told.slice(VIEWER_PROMPT.length + 1),
-    ) ?? [undefined, undefined, told.slice(VIEWER_PROMPT.length + 1)];
-    const item = (await $.state.get(STATE)).value?.records.find((r) =>
-      offerId ? r.offerId === offerId : r.description === description,
-    );
+    // `<offer id> <description>`, as the viewer was told.
+    const [, offerId, description = ''] =
+      /^(\S{36}) ([\s\S]*)$/.exec(told.slice(VIEWER_PROMPT.length + 1)) ?? [];
+    if (!offerId) return next(e);
+    const item = (await $.state.get(STATE)).value?.records.find((r) => r.offerId === offerId);
     const assignment = item
       ? (await $.state.get({ ...ASSIGNMENTS, id: item.offerId })).value
       : undefined;
@@ -2916,9 +2917,7 @@ function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {
 /**
  * A held Agent call, as the local hook answered it (`register.tsx`): refused with an
  * offer, whose id and cap are read from the refusal's text, or held and not started.
- * Told by the text's first line. A call held by an earlier build was answered as a
- * completed result with the offer in it, and is still read, so a session resumed across
- * the update draws its rows.
+ * Told by the text's first line.
  */
 function heldOffer(
   output: unknown,
@@ -2946,15 +2945,5 @@ function heldOffer(
     }
     if (said.includes(HELD_NOT_STARTED)) return 'unavailable';
   }
-  const result = record(output);
-  if (
-    result?.status !== 'completed' ||
-    result.totalToolUseCount !== 0 ||
-    typeof result.agentId !== 'string'
-  )
-    return undefined;
-  if (result.agentId === 'tenjin-unavailable') return 'unavailable';
-  if (!/^tenjin-offer-/.test(result.agentId) || !UUID.test(result.agentId.slice(13)))
-    return undefined;
-  return { offerId: result.agentId.slice(13), ...capOf(json(textOf(result.content))) };
+  return undefined;
 }
