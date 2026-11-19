@@ -2015,7 +2015,13 @@ it.each([true, 'true'] as const)(
   },
 );
 
-it.each(['a cancel by its offer', "the session's end"] as const)(
+it.each([
+  'a cancel by its offer',
+  "the session's end",
+  // `/clear` ends the session and may keep this process: the plugin cancels each
+  // background worker by its id, and the record says the session ended it.
+  "the plugin's cancel at the session's end",
+] as const)(
   'ends a running background worker on %s, with that cause in its stored handback',
   async (how) => {
     const f = await ownedClaudeFixture('general-purpose', true, { run_in_background: true });
@@ -2047,6 +2053,13 @@ it.each(['a cancel by its offer', "the session's end"] as const)(
             await readFile(join(dir, 'model-jobs', `${f.job.id}.diagnostics.json`), 'utf8'),
           ).failure,
         ).toEqual({ endedBy: 'parent_cancel', errors: [] });
+      } else if (how === "the plugin's cancel at the session's end") {
+        expect(await f.call({ cancel: f.job.id, reason: 'session_ended' })).toEqual({
+          status: 'cancelled',
+        });
+        const ended = await f.store.owned(f.job.id, 'root');
+        expect(ended?.state).toBe('cancelled');
+        expect(JSON.parse(ended?.result ?? '{}')).toMatchObject({ endedBy: 'session_ended' });
       } else {
         closed = true;
         await f.close();

@@ -137,7 +137,7 @@ export function registerModelTool(
   const warming = new Map<string, WarmWorker>();
   const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
   /** Who asked for a job to be cancelled, so its end says who or what ended it. */
-  const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped'>();
+  const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped' | 'session_ended'>();
   let sessionEnding = false;
   const conversationOf = (job: ModelJob) =>
     typeof job.decision.workerHandle === 'string'
@@ -513,9 +513,10 @@ export function registerModelTool(
       .optional(),
     delegation_id: z.string().uuid().optional(),
     task: z.string().optional(),
-    // With cancel, from the plugin alone: the person stopped the worker's agent. A
-    // label for the job's record, never a permission.
-    reason: z.enum(['agent_stopped']).optional(),
+    // With cancel, from the plugin alone: the person stopped the worker's agent, or the
+    // session ended (`/clear` too) with a background worker still running. A label for the
+    // job's record, never a permission.
+    reason: z.enum(['agent_stopped', 'session_ended']).optional(),
     ...(options.harness === 'claude'
       ? { offer_ids: z.array(z.string().uuid()).min(2).optional() }
       : {}),

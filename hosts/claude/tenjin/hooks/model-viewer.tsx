@@ -1623,6 +1623,41 @@ async function deliverBackground($: Dollar, offerId: string, title: string): Pro
   }
 }
 
+/** How long the session's end waits for its cancels to be taken, at most. */
+const SESSION_END_WAIT_MS = 1500;
+/**
+ * THE SESSION'S END ENDS ITS BACKGROUND WORKERS. A foreground worker ends with its accept
+ * call. A background worker is tied to the Tenjin process alone, which the host may keep
+ * across `/clear`: it would run on and spend up to its cap, for a session that can no
+ * longer be handed its result. Each offer of a background call whose result was not
+ * handed over is cancelled by its own id, with the reason its record keeps. An ended
+ * job's cancel changes nothing, and its stored result stays readable on a resume.
+ */
+async function endBackgroundWorkers($: Dollar): Promise<void> {
+  const ids = new Set<string>([...liveWorkers, ...undelivered.keys()]);
+  try {
+    for (const record of (await $.state.get(STATE)).value?.records ?? []) ids.add(record.offerId);
+  } catch {
+    /* The workers this module follows are still named. */
+  }
+  const cancels = [...ids].map(async (offerId) => {
+    try {
+      const offer = (await $.state.get({ ...OFFERS, id: offerId })).value;
+      if (
+        !offer?.background ||
+        offer.delivered ||
+        offer.state === 'native' ||
+        offer.state === 'cancelled'
+      )
+        return;
+      await $.mcp.call(SERVER, 'subagent', { cancel: offerId, reason: 'session_ended' });
+    } catch {
+      /* The Tenjin process ends its own workers when it stops. */
+    }
+  });
+  await Promise.race([Promise.allSettled(cancels), $.clock.sleep(SESSION_END_WAIT_MS)]);
+}
+
 async function watchAccept(
   $: Dollar,
   offerId: string,
@@ -1819,6 +1854,8 @@ export function raisedByThisPlugin(origin: { plugin?: string } | undefined): boo
 export function registerModelViewer(on: On): void {
   on('agent.offer', { agent: TYPE }, () => ({ isOffered: false }));
   on('session.start', async ($, e, next) => {
+    // A module the host keeps across `/clear` serves the next session too.
+    sessionEnding = false;
     try {
       if (await enabled($)) await registerType($);
     } catch {
@@ -1826,8 +1863,13 @@ export function registerModelViewer(on: On): void {
     }
     return next(e);
   });
-  on('session.end', (_$, e, next) => {
+  on('session.end', async ($, e, next) => {
     sessionEnding = true;
+    try {
+      await endBackgroundWorkers($);
+    } catch {
+      /* The session ends as it would have. */
+    }
     return next(e);
   });
   // A STEP THAT ENDED AT ITS BOUND while its worker runs: the viewer's stop is held,
@@ -1943,7 +1985,8 @@ export function registerModelViewer(on: On): void {
       return {
         deny: 'Tenjin makes an offer only for an Agent, Task or SendMessage call it holds. Call that tool; never send capture yourself.',
       };
-    // `reason` says the person stopped the worker's agent, so only this plugin sends it.
+    // `reason` says the person stopped the worker's agent, or that its session ended, so
+    // only this plugin sends it.
     if (e.reason !== undefined && next.origin.plugin !== 'tenjin')
       return {
         deny: 'Tenjin records why a worker stopped by itself. To stop a worker, call subagent with cancel alone.',

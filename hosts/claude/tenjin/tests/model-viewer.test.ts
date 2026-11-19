@@ -3502,6 +3502,57 @@ test('a background worker the parent cancelled sends one message, which says so 
   );
 });
 
+// Review of b7974566: a background worker is tied to the Tenjin process alone, which the
+// host may keep across `/clear`, so it ran on and spent for a session that could no longer
+// be handed its result.
+test("the session's end cancels a background worker whose result was not handed over, and no other", async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  on('session.end', () => ({ sessionId: SESSION }));
+  await remember($, { ...INPUT, run_in_background: true });
+  const started = JSON.stringify({ status: 'started', background: true, offer_id: OFFER });
+  f.state.work = () => ({ result: started, text: started });
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'bg_accept' });
+  await f.clock.settle();
+  await f.clock.advance(3000);
+  expect(f.state.cancellations).toEqual([]);
+  await $.session.end({ reason: 'clear' });
+  expect(f.state.cancellations).toEqual([{ cancel: OFFER, reason: 'session_ended' }]);
+  // Its end is handed to nobody: the session it belonged to is closed.
+  f.state.phase = 'cancelled';
+  f.state.handback = JSON.stringify({ status: 'cancelled', endedBy: 'session_ended' });
+  await f.clock.advance(60_000);
+  await f.clock.settle();
+  expect(submitted).toEqual([]);
+});
+
+test("the session's end leaves a foreground worker and a delivered background result alone", async ($, on) => {
+  const f = setup($, on);
+  on('prompt.submit', (_$, e) => ({ text: e.text }));
+  on('session.end', () => ({ sessionId: SESSION }));
+  // A foreground worker, still running: it ends with its accept call, as before.
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await remember($);
+  f.state.work = async () => {
+    await blocked;
+    return { result: 'handback' };
+  };
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'fg_accept' });
+  await f.clock.settle();
+  await $.session.end({ reason: 'clear' });
+  expect(f.state.cancellations).toEqual([]);
+  release();
+  await running;
+  await f.clock.settle();
+});
+
 // Greptile on 7c1d9550: a batch call holds until its foreground workers end, so a background
 // worker of the batch that ended first was stopped with nothing sent, and the batch's late
 // `started` answer for it sent nothing either.
