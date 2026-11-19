@@ -295,6 +295,8 @@ const MAX_KEPT_SCANS = 4;
  * changed after the walk began through these, so its scan is as new as one of its own.
  */
 type Verification = {
+  /** The first worker's watcher failed: nothing records what the walk missed, so none may take it. */
+  broken?: boolean;
   roots: string[];
   result: Promise<WorkerEnvSecrets>;
   events: Set<string>;
@@ -474,6 +476,7 @@ export class WorkerEnvSecrets {
    */
   private async verifyAgainst(scan: Verification, roots: readonly string[]): Promise<boolean> {
     const current = await scan.result;
+    if (scan.broken) return false;
     const mine = (path: string) => roots.some((root) => inside(root, path));
     if (
       current.scanned !== this.scanned ||
@@ -676,7 +679,15 @@ export class WorkerEnvSecrets {
           }
         });
         // A watcher that fails leaves the per-request checks of known folders.
-        watcher.on('error', () => watcher.close());
+        watcher.on('error', () => {
+          watcher.close();
+          // A shared walk this watcher fed has nothing recording what it missed: every
+          // worker that took it must walk for itself, as before the walk was shared.
+          if (this.shared) {
+            this.shared.broken = true;
+            verifications.delete(this.shared);
+          }
+        });
         this.watchers.push(watcher);
       } catch {
         // No native recursive watching here.
