@@ -1,20 +1,6 @@
 import { expect, it } from 'vitest';
 import { join, resolve } from 'node:path';
-import { isSecretPath, secretHomePaths, SettingsEnvValues } from './model-worker-privacy';
-
-it('replaces settings env values by name, whole and longest first, and leaves plain words', () => {
-  const values = new SettingsEnvValues();
-  values.add({
-    API_SECRET: 's3cr3t-Kq9xLm',
-    API_SECRET_OLD: 's3cr3t-Kq9xLm-2025',
-    MODE: 'production',
-  });
-  // A value added later, as when settings change during a job, is replaced too.
-  values.add({ LATER: 'later-Zx81Qp' });
-  expect(
-    values.redact('new s3cr3t-Kq9xLm old s3cr3t-Kq9xLm-2025 then later-Zx81Qp in production'),
-  ).toBe('new [env:API_SECRET] old [env:API_SECRET_OLD] then [env:LATER] in production');
-});
+import { isSecretPath, secretHomePaths } from './model-worker-privacy';
 
 it.each([
   '.env.local',

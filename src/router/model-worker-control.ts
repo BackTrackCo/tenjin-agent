@@ -10,7 +10,6 @@ export type WorkerStop = {
     | 'structured_output_guard'
     | 'output_limit'
     | 'context_limit'
-    | 'env_file_unscanned'
     | 'model_call_failed'
     | 'model_call_timeout'
     | 'payment_refused'
@@ -198,8 +197,6 @@ export const WORKER_ENDS = {
   not_started: 'Its Claude Code did not start.',
   router_unreachable:
     'The Tenjin router did not answer when the job started, so no worker ran and no inference was bought.',
-  env_file_unscanned:
-    'An env file appeared that could not be read in full, so nothing more could be forwarded.',
   model_call_failed:
     'Its model call through Tenjin returned no result; that call stays reserved until its receipt is read.',
   model_call_timeout:
@@ -220,7 +217,6 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
       return 'budget';
     case 'output_limit':
     case 'context_limit':
-    case 'env_file_unscanned':
     case 'model_call_failed':
     case 'model_call_timeout':
     case 'payment_refused':

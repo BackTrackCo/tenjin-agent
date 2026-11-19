@@ -161,30 +161,28 @@ it('protects both declared config layers and secure storage without blocking the
     '/repo/effective-profile/skills/example/settings.json',
     '/repo/parent-profile/projects/session.jsonl',
     '/repo/effective-profile/history.jsonl',
-    // Absent at start, so it holds no value the worker could forward unreplaced.
     '/repo/effective-profile/settings.json',
     '/repo/effective-profile/settings.local.json',
   ])
     expect(isSecretPath(path, protectedPaths.paths)).toBe(false);
 });
 
-it('opens a user settings file only when its env block can be read, and returns its values', async () => {
+it('opens the user settings files for reading, never for writing, whatever they hold', async () => {
+  // The failure: a settings file that did not parse was closed, which a native subagent reads.
   files['/cfg/settings.json'] = JSON.stringify({ env: { API_TOKEN: 'v-Kq9xLm-1' } });
   files['/cfg/settings.local.json'] = '{ not json';
   const result = await claudeWorkerPrivatePaths('/repo/private', '/repo', {
     CLAUDE_CONFIG_DIR: '/cfg',
   });
-  expect(result.settingsFiles).toContain('/cfg/settings.json');
-  expect(result.settingsFiles).not.toContain('/cfg/settings.local.json');
-  expect(result.settingsEnv).toContainEqual({ API_TOKEN: 'v-Kq9xLm-1' });
-  expect(result.deny).not.toContain('Read(//cfg/settings.json)');
-  expect(result.deny).toContain('Edit(//cfg/settings.json)');
-  // Its values are unknown, so nothing in it may reach the worker.
-  expect(result.paths).toContain('/cfg/settings.local.json');
-  expect(result.deny).toContain('Read(//cfg/settings.local.json)');
+  for (const file of ['/cfg/settings.json', '/cfg/settings.local.json']) {
+    expect(result.readable).toContain(file);
+    expect(result.paths).not.toContain(file);
+    expect(result.deny).not.toContain(`Read(/${file})`);
+    expect(result.deny).toContain(`Edit(/${file})`);
+  }
 });
 
-it("opens a repository's own .claude/settings.json for reading when its env block parses, never for writing", async () => {
+it("opens every working directory's own .claude/settings.json for reading, never for writing", async () => {
   // The failure: a tracked project settings file was closed, which a native subagent reads.
   files['/repo/.claude/settings.json'] = JSON.stringify({ env: { DEPLOY_KEY: 'dk-Zq81-xY7w' } });
   files['/sibling/.claude/settings.json'] = '{ "env": ';
@@ -198,23 +196,13 @@ it("opens a repository's own .claude/settings.json for reading when its env bloc
       sources: [{ source: 'project', path: '/repo/.claude/settings.json' }],
     },
   );
-  expect(result.readable).toContain('/repo/.claude/settings.json');
-  expect(result.deny).not.toContain('Read(//repo/.claude/settings.json)');
-  expect(result.deny).toEqual(
-    expect.arrayContaining([
-      'Edit(//repo/.claude/settings.json)',
-      'Write(//repo/.claude/settings.json)',
-    ]),
-  );
-  // Read again before each request, so its values are replaced before anything leaves.
-  expect(result.settingsFiles).toContain('/repo/.claude/settings.json');
-  expect(result.settingsEnv).toContainEqual({ DEPLOY_KEY: 'dk-Zq81-xY7w' });
-  // One that cannot be parsed holds values nobody knows; the local file and MCP config stay closed.
-  for (const file of [
-    '/sibling/.claude/settings.json',
-    '/repo/.claude/settings.local.json',
-    '/repo/.mcp.json',
-  ]) {
+  for (const file of ['/repo/.claude/settings.json', '/sibling/.claude/settings.json']) {
+    expect(result.readable).toContain(file);
+    expect(result.deny).not.toContain(`Read(/${file})`);
+    expect(result.deny).toEqual(expect.arrayContaining([`Edit(/${file})`, `Write(/${file})`]));
+  }
+  // The local file and MCP config stay closed.
+  for (const file of ['/repo/.claude/settings.local.json', '/repo/.mcp.json']) {
     expect(result.paths).toContain(file);
     expect(result.deny).toContain(`Read(/${file})`);
   }

@@ -6,7 +6,6 @@ import { qualifiedModelWorker, runModelWorker, type EarlyWorkerAccept } from './
 import { NATIVE_SUBAGENT_NOTE } from './model-worker-prompt';
 import { modelSettings } from './model-settings';
 import { ModelCallFailed, workerStop } from './model-worker-control';
-import { MAX_ENV_FILE_BYTES, WorkerEnvSecrets } from './worker-env-secrets';
 import { prepareWorkerGithub } from './worker-github';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -15,7 +14,17 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 
 const native = vi.hoisted(() => ({
@@ -127,11 +136,16 @@ vi.mock('node:fs/promises', async (original) => {
     realpath: vi.fn(async (path: unknown) => String(path)),
     // Real, unless a test makes a delete fail (`failDeletes`).
     rm: vi.fn(actual.rm),
+    // Real, and watched: a worker walks no folder of its workspace.
+    readdir: vi.fn(actual.readdir),
+    lstat: vi.fn(actual.lstat),
     // Fixture paths such as /repo are directories; a real temporary folder is itself.
-    stat: async (path: unknown) =>
-      String(path).startsWith(tmpdir())
-        ? actual.stat(String(path))
-        : { isDirectory: () => true, isFile: () => false },
+    stat: vi.fn(
+      async (path: unknown): Promise<Pick<import('node:fs').Stats, 'isDirectory' | 'isFile'>> =>
+        String(path).startsWith(tmpdir())
+          ? actual.stat(String(path))
+          : { isDirectory: () => true, isFile: () => false },
+    ),
   };
 });
 vi.mock('node:http', async (original) => ({
@@ -627,14 +641,6 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
   expect(native.bridgeClose).toHaveBeenCalled();
 });
 
-/** A rule for a path inside a `node_modules` or `.git` folder, which the env scan skips. */
-const SKIPPED_FOLDER = /\/(node_modules|\.git)\//;
-/**
- * An env file's name in a deny rule, in any case: `.ENV` and `.Env.local` are env files too,
- * and a case-sensitive matcher (Linux) would pass them by under `.env*`.
- */
-const ENV = '.[eE][nN][vV]*';
-
 it('keeps native sibling working directories distinct from read-only and shell-write exceptions', async () => {
   const workspace = {
     version: 1,
@@ -657,8 +663,6 @@ it('keeps native sibling working directories distinct from read-only and shell-w
     },
   } as never);
   sdkResult({ subtype: 'success', result: 'done' });
-  // Where a recursive watcher learns a settings file made during the job (macOS, Windows).
-  const watching = vi.spyOn(WorkerEnvSecrets.prototype, 'watching', 'get').mockReturnValue(true);
   await runModelWorker(
     { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
     options(),
@@ -677,28 +681,11 @@ it('keeps native sibling working directories distinct from read-only and shell-w
     'permissions.blockReadsExemptPaths',
     expect.arrayContaining(['/shell-write']),
   );
-  // Env files in a working directory follow the native defaults; in an exception they stay private.
   const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
     .deny;
-  expect(
-    deny.filter(
-      (rule) =>
-        rule.startsWith('Read(//sibling') && rule.includes(ENV) && !SKIPPED_FOLDER.test(rule),
-    ),
-  ).toEqual([]);
-  expect(deny).toEqual(
-    expect.arrayContaining([`Read(//read-only/**/${ENV})`, `Write(//shell-write/**/${ENV})`]),
-  );
   const denyRead = given(call.options).sandbox?.filesystem?.denyRead ?? [];
-  expect(
-    denyRead.filter(
-      (path) =>
-        /^\/(repo|sibling)\//.test(path) && path.includes(ENV) && !SKIPPED_FOLDER.test(path),
-    ),
-  ).toEqual([]);
-  expect(denyRead).toEqual(expect.arrayContaining([`/read-only/**/${ENV}`, `/shell-write/${ENV}`]));
-  // So are other repositories' `.claude/settings.json`: read where the scan learns their
-  // env values, never written; closed outside. Local settings and MCP config stay closed.
+  // Other repositories' `.claude/settings.json` are read as a native subagent reads them,
+  // and never written. Local settings and MCP config stay closed.
   expect(deny).not.toContain('Read(//sibling/**/.claude/settings.json)');
   expect(denyRead).not.toContain('/sibling/**/.claude/settings.json');
   expect(deny).toEqual(
@@ -707,157 +694,16 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       'Write(//sibling/**/.claude/settings.json)',
       'Read(//sibling/**/.claude/settings.local.json)',
       'Read(//sibling/**/.mcp.json)',
-      'Read(//read-only/**/.claude/settings.json)',
     ]),
   );
-  expect(denyRead).toEqual(
-    expect.arrayContaining([
-      '/sibling/**/.claude/settings.local.json',
-      '/read-only/**/.claude/settings.json',
-    ]),
-  );
-  // Review finding: with no recursive watcher (Linux), a settings file a checkout adds in a
-  // new folder is learned by no check, so a command could print its env values out. They
-  // stay closed to reads there.
-  watching.mockReturnValue(false);
-  await runModelWorker(
-    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
-    options(),
-  );
-  const unwatched = vi.mocked(query).mock.calls.at(-1)![0];
-  expect(
-    (given(unwatched.options).settings as { permissions: { deny: string[] } }).permissions.deny,
-  ).toContain('Read(//sibling/**/.claude/settings.json)');
-  expect(given(unwatched.options).sandbox?.filesystem?.denyRead).toContain(
-    '/sibling/**/.claude/settings.json',
-  );
-  watching.mockRestore();
+  expect(denyRead).toEqual(expect.arrayContaining(['/sibling/**/.claude/settings.local.json']));
 });
 
-it('denies the env and settings files in node_modules and .git, which the env scan skips, and nothing else there', async () => {
-  const workspace = {
-    version: 1,
-    root: '/repo',
-    workingDirectories: ['/repo', '/sibling'],
-    workingDirectorySpellings: ['/repo', '/sibling'],
-    readExceptions: [],
-    writeExceptions: [],
-  };
-  vi.mocked(modelSettings).mockResolvedValue({
-    root: '/repo',
-    repositories: ['/repo', '/sibling'],
-  } as never);
-  sdkResult({ subtype: 'success', result: 'done' });
-  await runModelWorker(
-    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
-    options(),
-  );
-  const sent = given(vi.mocked(query).mock.calls[0]![0].options);
-  const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
-  const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
-  for (const root of ['/repo', '/sibling'])
-    for (const folder of ['node_modules', '.git'])
-      for (const name of [ENV, '.claude/settings.json']) {
-        // A command can neither read nor write one (checked under Claude Code's own sandbox).
-        expect(denyRead).toContain(`${root}/**/${folder}/**/${name}`);
-        expect(deny).toEqual(
-          expect.arrayContaining(
-            ['Read', 'Edit', 'Write'].map((tool) => `${tool}(/${root}/**/${folder}/**/${name})`),
-          ),
-        );
-      }
-  // Everything else there stays readable: git and the installed packages work.
-  const skippedOther = (rule: string) =>
-    SKIPPED_FOLDER.test(rule) && !rule.includes(ENV) && !/\.claude\/settings\.json\)?$/.test(rule);
-  expect([...deny, ...denyRead].filter(skippedOther)).toEqual([]);
-});
-
-// Greptile P1 on b325aa3d: the scan walks the job's temp folder and skips its node_modules,
-// but the skipped-folder denies were built from the protected roots, which leave the temp
-// folder out, so `$TMPDIR/node_modules/pkg/.env.local` was readable and never scanned. Every
-// root the scan walks, whatever its kind, carries the deny of what its walk skips.
-it.skipIf(process.platform === 'win32')(
-  'denies what the scan skips under every root it walks, the job temp folder included',
-  async () => {
-    const actual =
-      await vi.importActual<typeof import('./claude-worker-session')>('./claude-worker-session');
-    vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(actual.prepareClaudeWorkerTemp);
-    native.worktrees = ['/repo/.worktrees/fix'];
-    const workspace = {
-      version: 1,
-      root: '/repo',
-      workingDirectories: ['/repo', '/sibling'],
-      workingDirectorySpellings: ['/repo', '/sibling'],
-      readExceptions: ['/read-only'],
-      writeExceptions: ['/shell-write'],
-    };
-    vi.mocked(modelSettings).mockResolvedValue({
-      scope: 'native-workspace',
-      root: '/repo',
-      repositories: ['/repo'],
-    } as never);
-    vi.mocked(resolveSettings).mockResolvedValue({
-      effective: {
-        permissions: { additionalDirectories: ['/sibling'] },
-        sandbox: { filesystem: { allowRead: ['/read-only'], allowWrite: ['/shell-write'] } },
-      },
-    } as never);
-    const scans = vi.spyOn(WorkerEnvSecrets, 'start');
-    sdkResult({ subtype: 'success', result: 'done' });
-    await runModelWorker(
-      { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
-      options(),
-    );
-    const [roots, limits] = scans.mock.calls[0]!;
-    const walked = [...roots, ...(limits?.fresh ?? [])];
-    expect(walked.length).toBeGreaterThan(3);
-    const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
-    const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
-    const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
-    // A root inside another walked root is covered by that one's patterns.
-    const covering = (root: string) => walked.find((other) => root.startsWith(`${other}/`)) ?? root;
-    for (const root of walked)
-      for (const folder of ['node_modules', '.git']) {
-        const pattern = `${covering(root)}/**/${folder}/**/${ENV}`;
-        expect(denyRead).toContain(pattern);
-        expect(deny).toContain(`Read(/${pattern})`);
-      }
-    scans.mockRestore();
-  },
-);
-
-// Review of 800c27a2, J (M20, M21): the job's GitHub folder and `~/.claude/projects` are folders
-// the worker may read that no scan walks, so an env file in them would leave as written.
-it.skipIf(process.platform === 'win32')(
-  "denies every env file in the job's GitHub folder and under ~/.claude/projects",
-  async () => {
-    const config = await mkdtemp(join(tmpdir(), 'worker-claude-config-'));
-    await mkdir(join(config, 'projects'));
-    vi.stubEnv('CLAUDE_CONFIG_DIR', config);
-    try {
-      sdkResult({ subtype: 'success', result: 'done' });
-      await runModelWorker(job, options());
-      const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
-      const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
-      const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
-      for (const folder of ['/job', join(config, 'projects')])
-        for (const pattern of [`${folder}/${ENV}`, `${folder}/**/${ENV}`]) {
-          expect(denyRead).toContain(pattern);
-          expect(deny).toContain(`Read(/${pattern})`);
-        }
-    } finally {
-      vi.unstubAllEnvs();
-      await rm(config, { recursive: true, force: true });
-    }
-  },
-);
-
-// The env scan follows no link to a folder, and widening it past the consented directories is
-// not wanted: a link inside them that leads outside must give the worker nothing. Claude
-// Code's read block checks a path's real place, for its file tools and, on macOS (Seatbelt),
-// for commands (checked under its own sandbox, 2.1.328: Read of link/.env, `cat link/.env`,
-// `grep -R`, `find -L` and a script's open are all refused). Without the block a native
-// sandboxed command reads through such a link freely.
+// A link inside the consented directories that leads outside must give the worker nothing.
+// Claude Code's read block checks a path's real place, for its file tools and, on macOS
+// (Seatbelt), for commands (checked under its own sandbox, 2.1.328: Read of link/.env, `cat
+// link/.env`, `grep -R`, `find -L` and a script's open are all refused). Without the block a
+// native sandboxed command reads through such a link freely.
 it('blocks reads outside the working directories, so a link that leads outside gives nothing', async () => {
   sdkResult({ subtype: 'success', result: 'done' });
   await runModelWorker(job, options());
@@ -1006,48 +852,10 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   expect(native.githubClose).toHaveBeenCalledOnce();
 });
 
-it("reads a worker's subagent prompt while its env file scan runs, where no earlier scan lets its Claude Code start first", async () => {
-  // Operator item of 2026-11-18: a process's first worker waited for its scan (about 2 s
-  // over 95 roots), then for the prompt read (3 to 11 s), in a row. Neither needs the other.
-  const read = {
-    prompt: ['You are a file search specialist.'],
-    context: [],
-    withheldTools: [],
-    withheldInstructions: [],
-  };
-  let readStarted = false;
-  let readBeforeScanEnded: boolean | undefined;
-  vi.mocked(readNativeAgentPrompt).mockImplementationOnce(async () => {
-    readStarted = true;
-    return read;
-  });
-  const start = WorkerEnvSecrets.start.bind(WorkerEnvSecrets);
-  const scan = vi.spyOn(WorkerEnvSecrets, 'start').mockImplementation(async (roots, limits) => {
-    const env = await start(roots, { ...limits, watch: false });
-    // The scan is still under way: time for anything that does not wait for it.
-    await new Promise((done) => setTimeout(done, 50));
-    readBeforeScanEnded ??= readStarted;
-    return env;
-  });
-  sdkResult({ subtype: 'success', result: 'done' });
-  try {
-    await runModelWorker(job, options());
-  } finally {
-    scan.mockRestore();
-  }
-  expect(readBeforeScanEnded).toBe(true);
-  // One read, and its result is the worker's prompt.
-  expect(readNativeAgentPrompt).toHaveBeenCalledOnce();
-  expect(vi.mocked(query).mock.calls[0]![0].options!.systemPrompt).toMatchObject({
-    type: 'custom',
-    prompt: expect.arrayContaining(['You are a file search specialist.']),
-  });
-});
-
-it('makes no prompt read ahead of the scan when the checks that stand before the read fail', async () => {
+it('makes no prompt read ahead when the checks that stand before the read fail', async () => {
   // The read starts a Claude Code: a managed policy the worker cannot run under is found
-  // before any starts, as it was when the read came after the scan.
-  // The managed policy changes after the worker qualified, before its scan starts.
+  // before any starts. The managed policy changes after the worker qualified, before the
+  // read ahead starts.
   vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(async () => {
     vi.mocked(resolveSettings).mockResolvedValue({
       effective: {},
@@ -1283,7 +1091,6 @@ it("keeps each model call's timing, token counts and the worker's start and end 
   expect(Object.keys(diagnostics.phases)).toEqual(
     expect.arrayContaining([
       'workerStart',
-      'envReady',
       'workspaceRead',
       'childSpawned',
       'sdkInitialized',
@@ -1295,8 +1102,6 @@ it("keeps each model call's timing, token counts and the worker's start and end 
       'childClosed',
     ]),
   );
-  // No kept env scan to take up: this worker started at its accept and scanned first.
-  expect(diagnostics.start).toMatchObject({ envKept: false });
 });
 
 it("puts the job's GitHub env above a GitHub token in the person's settings env", async () => {
@@ -1360,121 +1165,16 @@ it("clears the session's GitHub tokens for a named worker token also when the jo
   );
 });
 
-it("reads its working directories' env files natively, and only their placeholders leave", async () => {
-  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
-  const password = 'Zq8-v3ry-s3cret-pw';
-  const url = `postgres://app:${password}@db.internal:5432/app`;
-  const keyLine = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj';
-  const file = [
-    `POSTGRES_URL="${url}"`,
-    `export SIGNING_KEY="-----BEGIN PRIVATE KEY-----\n${keyLine}\n-----END PRIVATE KEY-----"`,
-    'NODE_ENV=development',
-    'PORT=3000',
-  ].join('\n');
-  try {
-    await writeFile(join(root, '.env.local'), file);
-    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-    const workspace = {
-      version: 1,
-      root,
-      workingDirectories: [root],
-      workingDirectorySpellings: [root],
-      readExceptions: [],
-      writeExceptions: [],
-    };
-    const shown = `$ cat .env.local\n${file}\nconnecting to ${url}\nlistening on localhost:3000 in development`;
-    const messages = vi.fn(async () => ({ fixture: true }));
-    vi.mocked(query).mockImplementation((call) => {
-      let complete!: () => void;
-      const forwarded = new Promise<void>((resolve) => {
-        complete = resolve;
-      });
-      const handle = native.createServer.mock.calls[0]![0] as (
-        request: unknown,
-        response: unknown,
-      ) => void;
-      const result = { type: 'tool_result', tool_use_id: 'cat', content: shown };
-      handle(
-        {
-          method: 'POST',
-          url: '/v1/messages',
-          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
-          async *[Symbol.asyncIterator]() {
-            yield Buffer.from(
-              JSON.stringify({
-                model: 'deepseek-flash',
-                max_tokens: 32000,
-                messages: [{ role: 'user', content: [result] }],
-              }),
-            );
-          },
-        },
-        {
-          headersSent: false,
-          destroyed: false,
-          writeHead() {
-            return this;
-          },
-          end(_body: string, done?: () => void) {
-            done?.();
-            complete();
-            return this;
-          },
-        },
-      );
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: root };
-          yield { type: 'user', uuid: 'cat', message: { role: 'user', content: [result] } };
-          await forwarded;
-          yield { type: 'result', subtype: 'success', result: `connected with ${password}` };
-        },
-        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
-        mcpServerStatus: async () => [],
-        close: native.close,
-      } as unknown as ReturnType<typeof query>;
-    });
-    const activity = { running: vi.fn(), observe: vi.fn() };
-    const handedBack = await runModelWorker(
-      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
-      { ...options(), transport: { messages } as unknown as ModelTransport, activity },
-    );
-    const call = vi.mocked(query).mock.calls[0]![0];
-    // The worker and its commands read the file; native Edit and Write rules decide writes.
-    const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
-      .deny;
-    // Apart from those in node_modules and .git, which the scan skips.
-    const unskipped = (rule: string) =>
-      rule.includes(`${root}/`) && rule.includes(ENV) && !SKIPPED_FOLDER.test(rule);
-    expect(deny.filter(unskipped)).toEqual([]);
-    expect((given(call.options).sandbox?.filesystem?.denyRead ?? []).filter(unskipped)).toEqual([]);
-    // Tenjin and DeepSeek, the parent and the activity rows see names, never values.
-    const forwarded = JSON.stringify(messages.mock.calls);
-    const observed = JSON.stringify(activity.observe.mock.calls);
-    for (const text of [forwarded, observed, handedBack]) {
-      expect(text).not.toContain(password);
-      expect(text).not.toContain(keyLine);
-    }
-    for (const text of [forwarded, observed]) {
-      expect(text).toContain('POSTGRES_URL=\\"[env:POSTGRES_URL]\\"');
-      expect(text).toContain('connecting to [env:POSTGRES_URL]');
-      expect(text).toContain('[env:SIGNING_KEY]');
-      // Short common values would corrupt unrelated text: left alone.
-      expect(text).toContain('listening on localhost:3000 in development');
-    }
-    expect(handedBack).toBe('connected with [env:POSTGRES_URL]');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 /** A worker whose one tool result goes out through the bridge; what left the machine. */
 async function throughBridge(
   content: string,
   result: string,
   mode: 'default' | 'auto' = 'default',
   before: () => Promise<void> = async () => {},
+  root = '/repo',
 ) {
+  if (root !== '/repo')
+    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
   const toolResult = { type: 'tool_result', tool_use_id: 'read', content };
   const messages = vi.fn(async () => ({ fixture: true }));
   vi.mocked(query).mockImplementation((call) => {
@@ -1518,7 +1218,7 @@ async function throughBridge(
     );
     return {
       async *[Symbol.asyncIterator]() {
-        yield { type: 'system', subtype: 'init', permissionMode: mode, cwd: '/repo' };
+        yield { type: 'system', subtype: 'init', permissionMode: mode, cwd: root };
         yield { type: 'user', uuid: 'read', message: { role: 'user', content: [toolResult] } };
         await forwarded;
         yield { type: 'result', subtype: 'success', result };
@@ -1529,8 +1229,20 @@ async function throughBridge(
     } as unknown as ReturnType<typeof query>;
   });
   const activity = { running: vi.fn(), observe: vi.fn() };
+  const workspace = {
+    version: 1,
+    root,
+    workingDirectories: [root],
+    workingDirectorySpellings: [root],
+    readExceptions: [],
+    writeExceptions: [],
+  };
   const handedBack = await runModelWorker(
-    { ...job, decision: { ...job.decision, claudePermissionMode: mode } } as unknown as ModelJob,
+    {
+      ...job,
+      root,
+      decision: { ...job.decision, claudePermissionMode: mode, claudeWorkspace: workspace },
+    } as unknown as ModelJob,
     {
       ...options(),
       claudePermissionMode: mode,
@@ -1547,45 +1259,123 @@ async function throughBridge(
   };
 }
 
-it("replaces a settings env value that the worker's commands print, as an env file value is", async () => {
+// Operator ruling 2026-11-19: env files and settings `env` values reach Tenjin and DeepSeek as
+// written, as a native subagent's requests carry them. Nothing replaces them.
+it('forwards an env file value a tool result holds as written, and denies the worker no env file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
+  const value = 'local-db-pass-Zq8v3ry';
+  try {
+    await mkdir(join(root, 'node_modules', 'pkg'), { recursive: true });
+    await writeFile(join(root, '.env.local'), `DB_PASSWORD=${value}\n`);
+    await writeFile(join(root, 'node_modules', 'pkg', '.env'), `PKG_KEY=${value}\n`);
+    const out = await throughBridge(
+      `$ cat .env.local\nDB_PASSWORD=${value}`,
+      `logged in with ${value}`,
+      'default',
+      async () => {},
+      root,
+    );
+    for (const text of [out.forwarded, out.observed]) {
+      expect(text).toContain(`DB_PASSWORD=${value}`);
+      expect(text).not.toContain('[env:');
+    }
+    expect(out.handedBack).toBe(`logged in with ${value}`);
+    // It reads, creates, changes and deletes one wherever a native subagent can: no rule of
+    // the file tools or the sandbox names an env file, nor what is in node_modules or .git.
+    const deny = (out.sent.settings as { permissions: { deny: string[] } }).permissions.deny;
+    const { denyRead = [], denyWrite = [] } = out.sent.sandbox?.filesystem ?? {};
+    const rules = [...deny, ...denyRead, ...denyWrite];
+    expect(rules.filter((rule) => /\.(env|\[eE\])/.test(rule))).toEqual([]);
+    expect(rules.filter((rule) => /\/(node_modules|\.git)\//.test(rule))).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("forwards a settings env value the worker's commands print as written", async () => {
   // Claude Code hands a settings file's env block to every worker command.
   const value = 'hunter2-Kq9xLm-settings';
   vi.mocked(resolveSettings).mockResolvedValue({
     effective: { env: { DB_PASSWORD: value, NODE_ENV: 'development' } },
   } as never);
-  const out = await throughBridge(
-    `DB_PASSWORD=${value}\nNODE_ENV=development`,
-    `logged in with ${value}`,
-  );
-  for (const text of [out.forwarded, out.observed]) {
-    expect(text).not.toContain(value);
-    expect(text).toContain('DB_PASSWORD=[env:DB_PASSWORD]');
-    expect(text).toContain('NODE_ENV=development');
-  }
-  expect(out.handedBack).toBe('logged in with [env:DB_PASSWORD]');
+  const out = await throughBridge(`DB_PASSWORD=${value}`, `logged in with ${value}`);
+  for (const text of [out.forwarded, out.observed]) expect(text).toContain(`DB_PASSWORD=${value}`);
+  expect(out.handedBack).toBe(`logged in with ${value}`);
 });
 
-it('lets the worker read session history and the user settings, with every settings env value replaced', async () => {
+// Operator ruling 2026-11-19: no env file scan. One walked every folder of the workspace before
+// a worker started, and a stat pass over them ran before each send.
+it('lists no folder of the workspace and stats nothing in it, at the start or before a send', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'worker-no-walk-'));
+  try {
+    await mkdir(join(root, 'services', 'api'), { recursive: true });
+    await writeFile(join(root, 'services', 'api', '.env'), 'API_KEY=local-api-key-0x51\n');
+    const out = await throughBridge('the tests pass', 'done', 'default', async () => {}, root);
+    // A request was sent.
+    expect(out.forwarded).toContain('the tests pass');
+    const below = (path: unknown) => String(path).startsWith(`${root}/`);
+    expect(
+      vi.mocked(readdir).mock.calls.filter(([path]) => String(path) === root || below(path)),
+    ).toEqual([]);
+    // The consent check stats the root itself, that it is still a folder; nothing below it.
+    for (const look of [lstat, stat])
+      expect(vi.mocked(look).mock.calls.filter(([path]) => below(path))).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// The operator ruling of 2026-11-19 keeps this: the job's own tokens never leave as written.
+it("masks the job's own bridge token and GitHub token by value in what it forwards, shows and hands back", async () => {
+  const messages = vi.fn(async () => ({ type: 'message', content: [] }));
+  const ending = { subtype: 'success', result: '' };
+  const rows: Record<string, unknown>[] = [];
+  let bridge = '';
+  sdkResult(
+    ending,
+    undefined,
+    async () => {
+      bridge = vi.mocked(query).mock.calls.at(-1)![0].options!.env!.ANTHROPIC_API_KEY!;
+      const printed = `GH_TOKEN=${GITHUB_TOKEN} ANTHROPIC_API_KEY=${bridge}`;
+      const toolResult = { type: 'tool_result', tool_use_id: 'env', content: printed };
+      rows.push({ type: 'user', uuid: 'env', message: { role: 'user', content: [toolResult] } });
+      ending.result = `pushed with ${printed}`;
+      const body = {
+        model: 'deepseek-flash',
+        max_tokens: 32_000,
+        messages: [{ role: 'user', content: [toolResult] }],
+      };
+      expect((await oneBridgeRequest(JSON.stringify(body))).status).toBe(200);
+    },
+    rows,
+  );
+  const activity = { running: vi.fn(), observe: vi.fn() };
+  const handedBack = await runModelWorker(job, {
+    ...options(),
+    transport: { messages } as unknown as ModelTransport,
+    activity,
+  });
+  expect(bridge).toMatch(/^[0-9a-f]{64}$/);
+  const forwarded = JSON.stringify(messages.mock.calls);
+  const observed = JSON.stringify(activity.observe.mock.calls);
+  for (const text of [forwarded, observed, handedBack]) {
+    expect(text).not.toContain(GITHUB_TOKEN);
+    expect(text).not.toContain(bridge);
+    expect(text).toContain('GH_TOKEN=[redacted GitHub token]');
+    expect(text).toContain('ANTHROPIC_API_KEY=[redacted GitHub token]');
+  }
+});
+
+it('lets the worker read session history and the user settings, and write neither', async () => {
   const config = await mkdtemp(join(tmpdir(), 'worker-claude-config-'));
   vi.stubEnv('CLAUDE_CONFIG_DIR', config);
-  const first = 'first-Kq9xLm-settings';
-  const later = 'later-Rt55Wx-settings';
   const settings = join(config, 'settings.json');
   try {
-    // Known only from the file: the merged settings do not hold it.
-    await writeFile(settings, JSON.stringify({ env: { FIRST_TOKEN: first } }));
+    await writeFile(settings, JSON.stringify({ env: { FIRST_TOKEN: 'first-Kq9xLm-settings' } }));
     await writeFile(join(config, 'settings.json.bak-1'), '{}');
-    const changed = JSON.stringify({ env: { FIRST_TOKEN: first, LATER_TOKEN: later } });
-    // The person adds a value during the job, and the worker reads the file after that.
-    const out = await throughBridge(changed, 'read the settings', 'auto', () =>
-      writeFile(settings, changed),
-    );
-    for (const text of [out.forwarded, out.observed]) {
-      expect(text).not.toContain(first);
-      expect(text).not.toContain(later);
-    }
-    expect(out.forwarded).toContain('[env:FIRST_TOKEN]');
-    expect(out.forwarded).toContain('[env:LATER_TOKEN]');
+    // One that does not parse is read as a native subagent reads it, too.
+    await writeFile(join(config, 'settings.local.json'), '{ "env": ');
+    const out = await throughBridge('{"env":{}}', 'read the settings', 'auto');
     const opened = ['projects', 'history.jsonl', 'settings.json', 'settings.local.json'].map(
       (name) => join(config, name),
     );
@@ -1617,169 +1407,6 @@ it('lets the worker read session history and the user settings, with every setti
   } finally {
     vi.unstubAllEnvs();
     await rm(config, { recursive: true, force: true });
-  }
-});
-
-// Root lists any folder, so there is nothing to refuse.
-it.skipIf(process.getuid?.() === 0)(
-  'denies the worker what is inside a folder its env scan could not list',
-  async () => {
-    const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
-    const locked = join(root, 'locked');
-    try {
-      await mkdir(locked);
-      await writeFile(join(root, '.env'), 'OPEN=open-value-0x07');
-      await writeFile(join(locked, '.env.local'), 'HIDDEN=hidden-value-0x08');
-      await chmod(locked, 0o111);
-      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-      const workspace = {
-        version: 1,
-        root,
-        workingDirectories: [root],
-        workingDirectorySpellings: [root],
-        readExceptions: [],
-        writeExceptions: [],
-      };
-      sdkResult({ subtype: 'success', result: 'done' });
-      await runModelWorker(
-        { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
-        options(),
-      );
-      const sent = given(vi.mocked(query).mock.calls[0]![0].options);
-      const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
-      // The file tools are refused its env files, and commands the whole folder: a
-      // command could open `locked/.env.local` by name, and its value was never learned.
-      expect(deny).toEqual(
-        expect.arrayContaining([
-          `Read(//${locked.replace(/^\/+/, '')}/${ENV})`,
-          // A repository's settings file there too: its env values were never learned.
-          `Read(//${locked.replace(/^\/+/, '')}/**/.claude/settings.json)`,
-        ]),
-      );
-      expect(sent?.sandbox?.filesystem?.denyRead).toContain(locked);
-      // The readable env file next to it stays the worker's to read.
-      expect(deny.filter((rule) => rule.includes(`${root.replace(/^\/+/, '')}/${ENV}`))).toEqual(
-        [],
-      );
-    } finally {
-      await chmod(locked, 0o755).catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
-
-it("denies by its path a repository's settings file that cannot be parsed, and leaves the others readable", async () => {
-  // Its env values cannot be known, so it cannot be read; one that parses can be.
-  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
-  const broken = join(root, 'old/.claude/settings.json');
-  try {
-    await mkdir(join(root, 'old/.claude'), { recursive: true });
-    await mkdir(join(root, 'web/.claude'), { recursive: true });
-    await writeFile(broken, '{ "env": ');
-    await writeFile(join(root, 'web/.claude/settings.json'), '{"env":{"K":"web-value-0x0b"}}');
-    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-    const workspace = {
-      version: 1,
-      root,
-      workingDirectories: [root],
-      workingDirectorySpellings: [root],
-      readExceptions: [],
-      writeExceptions: [],
-    };
-    sdkResult({ subtype: 'success', result: 'done' });
-    await runModelWorker(
-      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
-      options(),
-    );
-    const sent = given(vi.mocked(query).mock.calls[0]![0].options);
-    const deny = (sent?.settings as { permissions: { deny: string[] } }).permissions.deny;
-    const absolute = `//${broken.replace(/^\/+/, '')}`;
-    expect(deny).toEqual(
-      expect.arrayContaining([`Read(${absolute})`, `Edit(${absolute})`, `Write(${absolute})`]),
-    );
-    expect(sent?.sandbox?.filesystem?.denyRead).toContain(broken);
-    expect(deny.filter((rule) => rule.startsWith('Read(') && rule.includes('web/.claude'))).toEqual(
-      [],
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-it('forwards and shows nothing more once an env file appears that is too large to read in full', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
-  try {
-    await writeFile(join(root, '.env'), 'KEPT=kept-value-0x05');
-    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-    const workspace = {
-      version: 1,
-      root,
-      workingDirectories: [root],
-      workingDirectorySpellings: [root],
-      readExceptions: [],
-      writeExceptions: [],
-    };
-    const result = { type: 'tool_result', tool_use_id: 'tail', content: 'TAIL=unscanned-0x77' };
-    const messages = vi.fn(async () => ({ fixture: true }));
-    vi.mocked(query).mockImplementation(
-      (call) =>
-        ({
-          async *[Symbol.asyncIterator]() {
-            yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: root };
-            // A setup command writes it after the worker's denies were fixed.
-            await writeFile(join(root, '.env.dump'), Buffer.alloc(MAX_ENV_FILE_BYTES + 1, 'a'));
-            yield { type: 'user', uuid: 'tail', message: { role: 'user', content: [result] } };
-            const handle = native.createServer.mock.calls[0]![0] as (
-              request: unknown,
-              response: unknown,
-            ) => void;
-            await new Promise<void>((complete) =>
-              handle(
-                {
-                  method: 'POST',
-                  url: '/v1/messages',
-                  headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
-                  async *[Symbol.asyncIterator]() {
-                    yield Buffer.from(
-                      JSON.stringify({
-                        model: 'deepseek-flash',
-                        max_tokens: 32000,
-                        messages: [{ role: 'user', content: [result] }],
-                      }),
-                    );
-                  },
-                },
-                {
-                  headersSent: false,
-                  destroyed: false,
-                  writeHead() {
-                    return this;
-                  },
-                  end(_body: string, done?: () => void) {
-                    done?.();
-                    complete();
-                    return this;
-                  },
-                },
-              ),
-            );
-            yield { type: 'result', subtype: 'success', result: 'done' };
-          },
-          accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
-          mcpServerStatus: async () => [],
-          close: native.close,
-        }) as unknown as ReturnType<typeof query>,
-    );
-    const activity = { running: vi.fn(), observe: vi.fn() };
-    const error = await runModelWorker(
-      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
-      { ...options(), transport: { messages } as unknown as ModelTransport, activity },
-    ).catch((caught: unknown) => caught);
-    expect(workerStop(error)).toEqual({ kind: 'execution_failure', reason: 'env_file_unscanned' });
-    expect(messages).not.toHaveBeenCalled();
-    expect(JSON.stringify(activity.observe.mock.calls)).not.toContain('unscanned-0x77');
-  } finally {
-    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -1877,192 +1504,6 @@ it('counts the image and document blocks of a warm worker into the set its accep
   await expect(run).resolves.toBe('done');
   expect(omitted.size).toBe(1);
 });
-
-it.each(['readable', 'unscannable'] as const)(
-  'rechecks a %s nested env file created while warming without a recursive watcher',
-  async (state) => {
-    const root = await mkdtemp(join(tmpdir(), 'warm-worker-env-'));
-    const start = WorkerEnvSecrets.start.bind(WorkerEnvSecrets);
-    const scan = vi
-      .spyOn(WorkerEnvSecrets, 'start')
-      .mockImplementation((roots, limits) => start(roots, { ...limits, watch: false }));
-    try {
-      const original = 'fixture-original-value-41';
-      const added = 'fixture-synthetic-added-value-42';
-      const nested = join(root, 'services', 'api');
-      await mkdir(nested, { recursive: true });
-      await writeFile(join(root, '.env'), `ORIGINAL=${original}`);
-      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-      const ownedJob = {
-        ...job,
-        root,
-        decision: {
-          ...job.decision,
-          claudeWorkspace: {
-            version: 1,
-            root,
-            workingDirectories: [root],
-            workingDirectorySpellings: [root],
-            readExceptions: [],
-            writeExceptions: [],
-          },
-        },
-      };
-      const messages = vi.fn(async () => ({ type: 'message', content: [] }));
-      sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
-        const result = await oneBridgeRequest(
-          JSON.stringify({
-            model: 'deepseek-flash',
-            messages: [{ role: 'user', content: `${original} ${added}` }],
-            max_tokens: 32_000,
-          }),
-        );
-        expect(result.status).toBe(200);
-      });
-      const sdk = vi.mocked(query).getMockImplementation()!;
-      let markReady!: () => void;
-      const ready = new Promise<void>((resolve) => {
-        markReady = resolve;
-      });
-      vi.mocked(query).mockImplementation((call) => {
-        const worker = sdk(call);
-        const accountInfo = worker.accountInfo;
-        worker.accountInfo = () => {
-          markReady();
-          return accountInfo();
-        };
-        return worker;
-      });
-      let accept!: (value: EarlyWorkerAccept) => void;
-      const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
-        accept = resolve;
-      });
-      const runOptions = { ...options(), transport: { messages } as unknown as ModelTransport };
-      const onRelease = vi.fn();
-      const run = runModelWorker(ownedJob, {
-        ...runOptions,
-        early: { accept: accepted, onRelease },
-      });
-      await Promise.race([ready, run]);
-      await writeFile(join(root, '.env'), 'ORIGINAL=fixture-replaced-value-43');
-      await writeFile(
-        join(nested, '.env.local'),
-        state === 'readable' ? `ADDED=${added}` : Buffer.alloc(MAX_ENV_FILE_BYTES + 1, 'x'),
-      );
-      accept({ ...runOptions, job: ownedJob });
-
-      if (state === 'unscannable') {
-        await expect(run).rejects.toThrow(/env file restrictions changed/);
-        expect(onRelease).not.toHaveBeenCalled();
-        expect(messages).not.toHaveBeenCalled();
-        return;
-      }
-      await expect(run).resolves.toBe('done');
-      expect(onRelease).toHaveBeenCalledOnce();
-      expect(messages).toHaveBeenCalledOnce();
-      const sent = JSON.stringify(messages.mock.calls);
-      expect(sent).toContain('[env:ORIGINAL] [env:ADDED]');
-      expect(sent).not.toContain(original);
-      expect(sent).not.toContain(added);
-    } finally {
-      scan.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
-
-// Measured 2026-11-18: a worker started at its offer waited 4.4 to 4.5 s for its env file
-// scan before its Claude Code could start. With an earlier scan of the same roots it
-// starts at once, and is released only when its own scan has ended and agreed.
-it.each([true, false] as const)(
-  'starts a warm worker before its own env file scan ends, and releases it only when that scan agreed (%s)',
-  async (agreed) => {
-    const root = await mkdtemp(join(tmpdir(), 'warm-worker-resumed-env-'));
-    let verify!: (agreed: boolean) => void;
-    const verified = new Promise<boolean>((resolve) => {
-      verify = resolve;
-    });
-    const kept = await WorkerEnvSecrets.start([root], { watch: false });
-    const scans = vi.spyOn(WorkerEnvSecrets, 'start');
-    const resume = vi.spyOn(WorkerEnvSecrets, 'resume').mockReturnValue({ env: kept, verified });
-    try {
-      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-      const ownedJob = {
-        ...job,
-        root,
-        decision: {
-          ...job.decision,
-          claudeWorkspace: {
-            version: 1,
-            root,
-            workingDirectories: [root],
-            workingDirectorySpellings: [root],
-            readExceptions: [],
-            writeExceptions: [],
-          },
-        },
-      };
-      const messages = vi.fn(async () => ({ type: 'message', content: [] }));
-      sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
-        const result = await oneBridgeRequest(
-          JSON.stringify({
-            model: 'deepseek-flash',
-            messages: [{ role: 'user', content: 'go' }],
-            max_tokens: 32_000,
-          }),
-        );
-        expect(result.status).toBe(200);
-      });
-      const sdk = vi.mocked(query).getMockImplementation()!;
-      let markReady!: () => void;
-      const ready = new Promise<void>((resolve) => {
-        markReady = resolve;
-      });
-      vi.mocked(query).mockImplementation((call) => {
-        const worker = sdk(call);
-        const accountInfo = worker.accountInfo;
-        worker.accountInfo = () => {
-          markReady();
-          return accountInfo();
-        };
-        return worker;
-      });
-      let accept!: (value: EarlyWorkerAccept) => void;
-      const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
-        accept = resolve;
-      });
-      const runOptions = { ...options(), transport: { messages } as unknown as ModelTransport };
-      const onRelease = vi.fn();
-      const run = runModelWorker(ownedJob, {
-        ...runOptions,
-        early: { accept: accepted, onRelease },
-      });
-      run.catch(() => undefined);
-      // Its Claude Code has started while its own scan still runs, and no scan was waited for.
-      await Promise.race([ready, run]);
-      expect(resume).toHaveBeenCalledOnce();
-      expect(scans).not.toHaveBeenCalled();
-      accept({ ...runOptions, job: ownedJob });
-      for (let turn = 0; turn < 20; turn++) await Promise.resolve();
-      expect(onRelease).not.toHaveBeenCalled();
-      expect(messages).not.toHaveBeenCalled();
-      verify(agreed);
-      if (!agreed) {
-        await expect(run).rejects.toThrow(/env file restrictions changed/);
-        expect(onRelease).not.toHaveBeenCalled();
-        expect(messages).not.toHaveBeenCalled();
-        return;
-      }
-      await expect(run).resolves.toBe('done');
-      expect(onRelease).toHaveBeenCalledOnce();
-      expect(messages).toHaveBeenCalledOnce();
-    } finally {
-      scans.mockRestore();
-      resume.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
 
 it('reports a warm child that exits without ever releasing an assignment', async () => {
   const child = Object.assign(new EventEmitter(), {
@@ -3079,7 +2520,7 @@ it("gives each job a private temp folder that its commands and file tools use by
 
 // Another job's temp folder holds its commands' output and the files it wrote, as written, and
 // its GitHub folder its gh caches. A worker's command read both (by a built name, or through a
-// link), and values its own scan never learned left as written.
+// link).
 it.skipIf(process.platform === 'win32')(
   "keeps every other job's temp and GitHub folders from the worker's commands, and its own open",
   async () => {
@@ -3132,28 +2573,58 @@ it.skipIf(process.platform === 'win32')(
   },
 );
 
-it('replaces the values of an env file a command wrote into the job temp folder', async () => {
-  // The folder is a working directory, so its env files are read like any other: a value
-  // that exists only there once left for Tenjin and DeepSeek as written.
-  const directory = await mkdtemp(join(tmpdir(), 'worker-temp-'));
-  const scratchpad = join(directory, 'claude-501');
-  await mkdir(scratchpad);
-  vi.mocked(prepareClaudeWorkerTemp).mockResolvedValueOnce({
-    directory,
-    scratchpad,
-    shared: [],
-    others: [],
-    close: () => rm(directory, { recursive: true, force: true }),
+// The operator ruling of 2026-11-19 opened env files and kept these walls: the Tenjin data
+// folder (the wallet), key folders and login files, and the credential probes no path stops.
+it('keeps the Tenjin data folder, keys and login files closed, and refuses credential helper and gh token probes', async () => {
+  const decisions: unknown[] = [];
+  const probes = [
+    'printf "host=github.com\\n" | git credential fill',
+    'git credential-osxkeychain get',
+    'gh auth token',
+    'gh auth status --show-token',
+  ];
+  sdkResult({ subtype: 'success', result: 'walls fixture' }, undefined, async () => {
+    const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
+    for (const command of probes)
+      decisions.push(
+        await hook!(
+          {
+            hook_event_name: 'PreToolUse',
+            tool_name: 'Bash',
+            tool_input: { command },
+            tool_use_id: command,
+          } as never,
+          undefined,
+          { signal: new AbortController().signal },
+        ),
+      );
   });
-  const fresh = 'fresh-credential-0x42-value';
-  const read = { type: 'tool_result', tool_use_id: 'cat', content: `FRESH_TOKEN=${fresh}` };
-  sdkResult(
-    { subtype: 'success', result: `the token is ${fresh}` },
-    undefined,
-    () => writeFile(join(scratchpad, '.env.local'), `FRESH_TOKEN=${fresh}\n`),
-    [{ type: 'user', uuid: 'cat', message: { role: 'user', content: [read] } }],
-  );
-  expect(await runModelWorker(job, options())).toBe('the token is [env:FRESH_TOKEN]');
+  await runModelWorker(job, options());
+  expect(decisions).toHaveLength(probes.length);
+  for (const decision of decisions)
+    expect(decision).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: /not run/ },
+    });
+  const sent = given(vi.mocked(query).mock.calls[0]![0].options);
+  const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
+  for (const path of [
+    '/data',
+    join(homedir(), '.ssh'),
+    join(homedir(), '.aws'),
+    join(homedir(), '.codex', 'auth.json'),
+  ]) {
+    const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+    expect(deny).toEqual(
+      expect.arrayContaining(
+        ['Read', 'Edit', 'Write'].flatMap((tool) => [
+          `${tool}(${absolute})`,
+          `${tool}(${absolute}/**)`,
+        ]),
+      ),
+    );
+    expect(sent.sandbox?.filesystem?.denyRead).toContain(path);
+    expect(sent.sandbox?.filesystem?.denyWrite).toContain(path);
+  }
 });
 
 it('refuses a credential probe in the worker hook whatever the mode, and leaves a push to the mode', async () => {
@@ -3768,19 +3239,24 @@ it('returns a finished job as it is when removing its settings folder keeps fail
   expect(settingsFolders()).toHaveLength(1);
 });
 
-// Failure caught: a start that failed before the worker's own cleanup (here the env scan)
-// left the job's GitHub folder and its temp folder behind.
+// Failure caught: a start that failed before the worker's own cleanup (here a cancel while the
+// job's folders were made) left the job's GitHub folder and its temp folder behind.
 it("removes the job's GitHub and temp folders when its start fails before the worker", async () => {
   const close = vi.fn(async () => undefined);
-  vi.mocked(prepareClaudeWorkerTemp).mockResolvedValueOnce({
-    directory: '/tmp/tenjin-job-fixture',
-    scratchpad: '/tmp/tenjin-job-fixture/claude-501',
-    shared: [],
-    others: [],
-    close,
+  const controller = new AbortController();
+  vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(async () => {
+    controller.abort(new Error('cancelled while starting'));
+    return {
+      directory: '/tmp/tenjin-job-fixture',
+      scratchpad: '/tmp/tenjin-job-fixture/claude-501',
+      shared: [],
+      others: [],
+      close,
+    };
   });
-  vi.spyOn(WorkerEnvSecrets, 'start').mockRejectedValueOnce(new Error('env scan failed'));
-  await expect(runModelWorker(job, options())).rejects.toThrow('env scan failed');
+  await expect(runModelWorker(job, { ...options(), signal: controller.signal })).rejects.toThrow(
+    'cancelled while starting',
+  );
   expect(native.githubClose).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
   expect(query).not.toHaveBeenCalled();

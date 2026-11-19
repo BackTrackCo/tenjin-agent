@@ -102,13 +102,11 @@ it('never includes thinking, authentication, system prompts or secret input valu
   expect(serialized).toContain('Read the source.');
   expect(serialized).toContain('Bash');
   expect(serialized).toContain('redacted');
-  // The command is its own row field, as a native row names a shell call. A value learned
-  // late is replaced in it too, and the parent's partial handback never carries it.
+  // The command is its own row field, as a native row names a shell call, and the parent's
+  // partial handback never carries it.
   const shell = () => f.activity.snapshot().rows.find((row) => row.name === 'Bash');
   expect(shell()?.command).toBe('printf private-command-value');
   expect(shell()?.inputSummary).not.toContain('private-command-value');
-  f.activity.rescrub((text) => text.replaceAll('private-command-value', '[env:LATE]'));
-  expect(shell()?.command).toBe('printf [env:LATE]');
   f.activity.observe(f.tool('shell-two', 'Bash', { command: 'printf handback-check-value' }));
   expect(JSON.stringify(partialHandback(f.activity.snapshot()))).not.toContain(
     'handback-check-value',
@@ -490,23 +488,6 @@ it('shows settled spend while running, and drops it when final accounting is unr
   expect(f.activity.snapshot().spend).toBeUndefined();
   f.activity.spending(settled);
   expect(f.activity.snapshot().spend).toBeUndefined();
-});
-
-it('removes a value learned after its row was made from the rows and the partial handback', () => {
-  const f = fixture();
-  f.activity.running();
-  // A command wrote an env file and printed it before Tenjin knew the file.
-  f.activity.observe(f.tool('late', 'Bash', { command: 'cat sub/.env.deep' }));
-  f.activity.observe(f.result('late', [{ type: 'text', text: 'DEEP=late-value-0x5e8d' }]));
-  f.activity.observe(f.assistant([{ type: 'text', text: 'It holds late-value-0x5e8d.' }]));
-  const before = f.activity.snapshot().sequence;
-  f.activity.rescrub((text) => text.split('late-value-0x5e8d').join('[env:DEEP]'));
-  const shown = JSON.stringify(f.activity.snapshot());
-  expect(shown).not.toContain('late-value-0x5e8d');
-  expect(shown).toContain('DEEP=[env:DEEP]');
-  expect(f.activity.snapshot().sequence).toBeGreaterThan(before);
-  f.activity.finish('unknown');
-  expect(partialHandback(f.activity.snapshot())?.lastText).toBe('It holds [env:DEEP].');
 });
 
 it("binds a worker that runs as a custom agent, never one named like a plugin's or with a space", () => {

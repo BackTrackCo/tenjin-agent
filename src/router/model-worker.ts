@@ -14,7 +14,7 @@ import {
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   findDefinition,
@@ -75,7 +75,6 @@ import {
   windowsWorkerLaunch,
   type WindowsWorkerLaunch,
 } from './windows-worker-launch';
-import { SettingsEnvValues, settingsFileEnv } from './model-worker-privacy';
 import { workerCredentialProbe } from './worker-credential-probes';
 import {
   readBlockUnchecked,
@@ -114,7 +113,6 @@ import {
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
-import { ENV_GLOB, envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
   modelCallStop,
   withModelRetry,
@@ -274,7 +272,6 @@ export async function runModelWorker(
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
-      rescrub?: (redact: (text: string) => string) => void;
       served?: (
         toolUseId: string,
         via: string,
@@ -360,8 +357,8 @@ async function runQualifiedWorker(
 ) {
   // A worker started at offer time sends nothing until its accept releases it.
   let released = !early;
-  // Start times for the diagnostic record, which is made further down.
-  const startTimes: Record<string, number> = { workerStart: Date.now() };
+  // The start time for the diagnostic record, which is made further down.
+  const workerStart = Date.now();
   options.signal.throwIfAborted();
   const permissionMode = assertClaudeWorkerMode(
     job.decision.claudePermissionMode,
@@ -372,7 +369,6 @@ async function runQualifiedWorker(
   assertCurrentMode();
   const workspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
   if (!workspace) throw new Error('Owned Claude workspace scope is unavailable');
-  const settingsEnv = new SettingsEnvValues();
   const assertCurrentWorkspace = async () => {
     if (!claudeWorkerAuthCompatible(process.env))
       throw new Error('Native Claude authentication is owned by its host; keep native');
@@ -406,8 +402,6 @@ async function runQualifiedWorker(
       !sameClaudeWorkspace(workspace, current)
     )
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
-    // Checked before each tool call and request, so a value added mid-job is known too.
-    settingsEnv.add(resolved.effective.env);
     return { resolved, disclosure };
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
@@ -430,21 +424,9 @@ async function runQualifiedWorker(
   // Literal GitHub token values; the bridge removes them before anything leaves.
   let secrets: readonly string[] = github?.secrets ?? workerTokenValues(process.env);
   const token = randomBytes(32).toString('hex');
-  // Also before the timer: the worker reads its env files as a native subagent does, and
-  // their values are replaced in everything that leaves this process. A scan that stops
-  // short keeps every env file denied.
   // The job's own temp folder, as a native session has its scratchpad. Without one the
-  // worker uses the shared temp root, as before. Made before the scan: it is a working
-  // directory too, so an env file a command writes there has its values replaced as well.
+  // worker uses the shared temp root, as before.
   const temp = await prepareClaudeWorkerTemp().catch(() => undefined);
-  const envRoots = [...workspace.workingDirectories, ...worktrees];
-  const envTemp = temp ? [temp.directory, temp.scratchpad] : [];
-  // A WORKER STARTED AT ITS OFFER does not wait for the scan where this process holds an
-  // earlier one of the same roots: its Claude Code starts with that scan's denies, and
-  // its own full scan runs meanwhile. It is released only once that scan has ended and
-  // agreed (`envVerified`), so nothing is sent on an older scan's word. The walk took
-  // 4.5 s over 85 worktrees, before every worker's start.
-  const resumedEnv = early ? WorkerEnvSecrets.resume(envRoots, envTemp) : undefined;
   const agentType = String(job.native.subagent_type ?? 'general-purpose');
   // The temp folder is a working directory, so the file tools take its literal paths.
   // The linked worktrees are granted through the worker's settings, not `--add-dir`: a
@@ -483,97 +465,42 @@ async function runQualifiedWorker(
       permissionMode === 'bypassPermissions' &&
       resolved.effective.permissions?.disableBypassPermissionsMode === 'disable'
     );
-  // A WORKER WITH NO EARLIER SCAN TO START FROM waits for its scan before its Claude Code
-  // may start, and its subagent prompt is read meanwhile. The read starts a Claude Code of
-  // its own that sends nothing out and needs nothing the scan finds; it came after the
-  // scan, so a process's first worker waited for the two in a row (about 2 s, then 3 to
-  // 11 s). The checks that stand before the read stand before this one too; they run
-  // again further down, where this read's result is taken or, without one, the read is made.
+  // THE SUBAGENT PROMPT IS READ AHEAD, while the worker's settings and private paths are
+  // read. The read starts a Claude Code of its own that sends nothing out. The checks that
+  // stand before the read stand before this one too; they run again further down, where
+  // this read's result is taken or, without one, the read is made.
   const promptStop = new AbortController();
   const stopPrompt = () => promptStop.abort(options.signal.reason);
   options.signal.addEventListener('abort', stopPrompt, { once: true });
   if (options.signal.aborted) stopPrompt();
-  const promptAhead = resumedEnv
-    ? undefined
-    : (async () => {
-        try {
-          if (!managedPolicyHolds(await assertCurrentWorkspace())) return undefined;
-        } catch {
-          return undefined;
-        }
-        const from = Date.now();
-        try {
-          return { native: await readPrompt(promptStop.signal), ms: Date.now() - from };
-        } catch (error) {
-          return { error };
-        }
-      })();
+  const promptAhead = (async () => {
+    try {
+      if (!managedPolicyHolds(await assertCurrentWorkspace())) return undefined;
+    } catch {
+      return undefined;
+    }
+    const from = Date.now();
+    try {
+      return { native: await readPrompt(promptStop.signal), ms: Date.now() - from };
+    } catch (error) {
+      return { error };
+    }
+  })();
   // The job's GitHub and temp folders exist from here: a start that fails before the
   // `try` that follows removes them, as every later end does.
   const removeJobFolders = async () => {
     await github?.close().catch(() => undefined);
     await temp?.close().catch(() => undefined);
   };
-  let envFiles: Awaited<ReturnType<typeof WorkerEnvSecrets.start>>;
-  try {
-    envFiles =
-      resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
-  } catch (error) {
-    options.signal.removeEventListener('abort', stopPrompt);
-    promptStop.abort(error);
-    await removeJobFolders();
-    throw error;
-  }
-  startTimes.envReady = Date.now();
-  const envVerified = resumedEnv?.verified ?? Promise.resolve(true);
-  void resumedEnv?.verified.then(() => {
-    startTimes.envVerified = Date.now();
-  });
-  const envDenied = new Set(
-    envDeniedRoots(
-      protectedRoots,
-      [...workspace.workingDirectories, ...worktrees],
-      envFiles.scanned,
-    ),
-  );
-  // A repository's `.claude/settings.json` stays closed to reads where the scan did not
-  // cover its root, or where no recursive watcher would learn one made during the job.
-  const settingsClosed = (root: string) => envDenied.has(root) || !envFiles.watching;
-  const redactEnv = (text: string) => envFiles.redact(settingsEnv.redact(text));
-  const redactAll = (text: string) => redactEnv(redactWorkerSecrets(text, [token, ...secrets]));
-  // The user's settings files the worker may read, set at start.
-  let settingsFiles: readonly string[] = [];
-  // A value found late is also removed from activity rows made before it was known.
-  let envValues = envFiles.size;
-  const refreshEnv = async () => {
-    await envFiles.refresh();
-    // A settings file the worker may read is read again, so a value added since is
-    // known. One that no longer parses has unknown values: nothing more leaves.
-    for (const path of settingsFiles) {
-      const env = await settingsFileEnv(path);
-      if (env === undefined) throw new Error('A Claude settings file could not be read');
-      settingsEnv.add(env);
-    }
-    if (envFiles.size + settingsEnv.size === envValues) return;
-    envValues = envFiles.size + settingsEnv.size;
-    try {
-      options.activity?.rescrub?.(redactAll);
-    } catch {
-      // Display only.
-    }
-  };
+  // The job's own bridge token and GitHub token, wherever they appear in text that leaves
+  // this process or is written to disk.
+  const redactAll = (text: string) => redactWorkerSecrets(text, [token, ...secrets]);
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
-    if (
-      binary.windows &&
-      (!envFiles.scanned || envFiles.withheld.length || envFiles.unlisted.length)
-    )
-      throw new Error('Cannot cover workspace env files before starting the Windows worker');
   } catch (error) {
     options.signal.removeEventListener('abort', stopPrompt);
     promptStop.abort(error);
-    envFiles.close();
     await removeJobFolders();
     throw error;
   }
@@ -665,14 +592,8 @@ async function runQualifiedWorker(
     assertCurrentMode();
     controller.signal.throwIfAborted();
   };
-  const refreshForwardingEnv = async () => {
-    await refreshEnv();
-    if (envFiles.uncovered.size)
-      throw new ModelWorkerStopped({ kind: 'execution_failure', reason: 'env_file_unscanned' });
-  };
   const fetchFallback = async (event: WorkerFetchEvent, id: unknown) => {
     if (!released || controller.signal.aborted) return null;
-    await refreshForwardingEnv();
     await assertCurrentSend();
     return workerFetchFallback(event, {
       ...web,
@@ -717,22 +638,16 @@ async function runQualifiedWorker(
         const body = Buffer.concat(chunks).toString('utf8');
         // Build what leaves only after reading the body, under current scope and redaction.
         const outgoing = async () => {
-          // An env file a command just wrote, or a settings file the person just changed, is
-          // read before this request leaves.
-          await refreshForwardingEnv();
           await assertCurrentSend();
-          // Env values may need JSON escapes, so they are replaced in the parsed strings.
           const text = withholdDroppedDirectories(
             redactWorkerSecrets(body, [token, ...secrets]),
             workspace.droppedDirectories,
           );
-          let parsed: unknown;
           try {
-            parsed = JSON.parse(text);
+            return JSON.parse(text) as Record<string, unknown>;
           } catch {
             throw new UnsupportedRequest('the request is not JSON');
           }
-          return redactWorkerMessage(parsed, redactEnv) as Record<string, unknown>;
         };
         const raw = await outgoing();
         const send = (message: unknown) => {
@@ -770,7 +685,7 @@ async function runQualifiedWorker(
         // A call the router confirms cost nothing is tried again for a transient failure,
         // as the DeepSeek harness does (`withModelRetry`); any other failure ends the job.
         // A RETRY IS A NEW SEND: it waits, so it passes again every check this request did
-        // (consent and the workspace, the mode, a cancel, env files and their values).
+        // (consent and the workspace, the mode, a cancel).
         let attempts = 0;
         let timing: ModelCallTiming | undefined;
         const message = await withModelRetry(
@@ -862,8 +777,7 @@ async function runQualifiedWorker(
     outputCap ?? MODEL_OUTPUT_TOKENS,
   );
   if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
-  for (const name of ['workerStart', 'envReady']) diagnostics.mark(name, startTimes[name]);
-  diagnostics.fact('envKept', resumedEnv !== undefined);
+  diagnostics.mark('workerStart', workerStart);
   const repeated = (tool: string, input: unknown) => {
     const reminder = repeats.observe(tool, input);
     diagnostics.repeat(tool, reminder?.count);
@@ -896,26 +810,9 @@ async function runQualifiedWorker(
       },
     );
     diagnostics.mark('workspaceRead');
-    // Known before the worker starts, so a first read of a settings file is replaced too.
-    for (const values of privatePaths.settingsEnv) settingsEnv.add(values);
-    settingsFiles = privatePaths.settingsFiles;
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
-    // Every folder the worker may read: each carries the env denies its scan leaves it. Of
-    // the Claude config paths it may read, a folder (`projects`) may hold an env file.
-    const granted = [
-      ...protectedRoots,
-      // The job's own gh and git config folder, which its commands may read and write.
-      ...(github ? [github.directory] : []),
-      ...(
-        await Promise.all(
-          privatePaths.readable.map(async (path) =>
-            (await stat(path).catch(() => undefined))?.isDirectory() ? [path] : [],
-          ),
-        )
-      ).flat(),
-    ];
     if (!managedPolicyHolds({ resolved, disclosure }))
       throw new Error('Managed Claude worker policy changed; keep native');
     const startSettings = ({
@@ -1055,34 +952,9 @@ async function runQualifiedWorker(
                     patterns.map((pattern) => `${tool}(${pattern})`),
                   ),
                   // A repository's `.claude/settings.json` is read as a native subagent reads
-                  // it where the env scan covered it and a watcher learns one made during the
-                  // job (no recursive watcher on Linux): its env values are known, and one
-                  // that could not be parsed is denied by its path below. It is never written.
-                  ...(settingsClosed(root) ? ['Read', 'Edit', 'Write'] : ['Edit', 'Write']).map(
-                    (tool) => `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
-                  ),
+                  // it, and never written.
+                  ...['Edit', 'Write'].map((tool) => `${tool}(${absolute}/**/${NESTED_SETTINGS})`),
                 ];
-              }),
-              // Inside the working directories env files are the native defaults' to judge;
-              // their values never leave. Outside them they stay private, and so do those in
-              // `node_modules` and `.git`, which the env scan skips (`envDenies`).
-              ...envFiles.envDenies(granted).flatMap((path) => {
-                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-                return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
-              }),
-              // An env or settings file that could not be read in full at start cannot be redacted.
-              ...envFiles.withheld.flatMap((path) => {
-                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-                return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
-              }),
-              // Nor can one in a folder the scan could not list, whatever its name.
-              ...envFiles.unlisted.flatMap((path) => {
-                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-                return ['Read', 'Edit', 'Write'].flatMap((tool) => [
-                  `${tool}(${absolute}/${ENV_GLOB})`,
-                  `${tool}(${absolute}/**/${ENV_GLOB})`,
-                  `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
-                ]);
               }),
               // Native settings still add these; the worker may not use them.
               ...dropped.flatMap((path) => {
@@ -1111,7 +983,7 @@ async function runQualifiedWorker(
                   filesystem: {
                     // The job's own temp and GitHub folders, which `denyRead` names with every
                     // other job's below: `allowRead` wins over `denyRead`, and deeper denies
-                    // inside them (env files in `node_modules`) still hold.
+                    // inside them still hold.
                     allowRead: [
                       ...(github ? [github.directory] : []),
                       ...(temp ? [temp.directory] : []),
@@ -1120,14 +992,9 @@ async function runQualifiedWorker(
                     ...(github ? { allowWrite: [github.directory] } : {}),
                     denyRead: [
                       ...privatePaths.paths,
-                      ...envFiles.envDenies(granted),
-                      ...protectedRoots.flatMap((root) => [
-                        ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
-                        ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
-                      ]),
-                      ...envFiles.withheld,
-                      // Commands cannot read inside a folder the scan could not list.
-                      ...envFiles.unlisted,
+                      ...protectedRoots.flatMap((root) =>
+                        NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
+                      ),
                       ...dropped,
                       // Other sessions' temp files; this job's own are in its temp folder.
                       ...(temp?.shared ?? []),
@@ -1190,11 +1057,6 @@ async function runQualifiedWorker(
                     input.hook_event_name === 'PreToolUse'
                       ? repeated(input.tool_name, input.tool_input)
                       : undefined;
-                  // An env file read by name is known before its content can be forwarded.
-                  if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'Read')
-                    await envFiles
-                      .add((input.tool_input as { file_path?: unknown } | undefined)?.file_path)
-                      .catch(() => undefined);
                   // The secrets boundary: a credential probe is refused in every mode.
                   // Every other call is the accepted mode's to judge.
                   const probe =
@@ -1366,25 +1228,11 @@ async function runQualifiedWorker(
         );
       controller.signal.throwIfAborted();
       if (early) {
-        // Its own env file scan has ended, and found nothing its fixed denies leave open.
-        if (!(await Promise.race([envVerified, stoppedBeforeAssignment])))
-          throw new Error("The warm Claude worker's env file restrictions changed");
-        if (startTimes.envVerified !== undefined)
-          diagnostics.mark('envVerified', startTimes.envVerified);
         // SDK initialization can finish before an assignment is sent. Release inference
         // only after the accept path has won the job and this child still fits its scope.
         diagnostics.mark('earlyReady');
         const accept = await Promise.race([early.accept, stoppedBeforeAssignment]);
         assertCurrentMode();
-        // Without a recursive watcher, or with one that failed, no event tells of a new env
-        // file in a previously empty nested directory: Linux finds it only by name, and macOS
-        // and Windows by a walk before each request, which ends the job on a file the fixed
-        // denies leave open. Start fresh instead if those denies need to change.
-        if (
-          (!envFiles.watching || binary.windows) &&
-          !(await Promise.race([envFiles.refreshBeforeAssignment(), stoppedBeforeAssignment]))
-        )
-          throw new Error("The warm Claude worker's env file restrictions changed");
         const current = await assertCurrentWorkspace();
         const selected = await readWorkerClaudeCode(job.root, binary.windows);
         const directories = [
@@ -1473,10 +1321,8 @@ async function runQualifiedWorker(
       if (activityReady) {
         try {
           // Rows reach the progress file, the viewer and a partial handback: drop the job's
-          // token and env values first, including an env file a tool just wrote.
-          if (message.type === 'user') await refreshEnv();
-          if (!envFiles.uncovered.size)
-            options.activity?.observe(redactWorkerMessage(message, redactAll));
+          // tokens first.
+          options.activity?.observe(redactWorkerMessage(message, redactAll));
         } catch {
           // The SDK remains the owner of complete worker history.
         }
@@ -1534,9 +1380,6 @@ async function runQualifiedWorker(
     diagnostics.mark('childClosed');
     if (released) await diagnostics.write(options.dataDir, job.id);
     await removeJobFolders();
-    // Last look, so the result and a stopped worker's partial lose a late value too.
-    await refreshEnv().catch(() => undefined);
-    envFiles.close();
   }
   if (early && !released && closeFailure?.quiescent === false)
     throw new WorkerStartUnconfirmed('Warm Claude worker cleanup could not be confirmed', {
@@ -1554,11 +1397,11 @@ async function runQualifiedWorker(
 /** Native local settings and MCP config of repositories nested in a worker root: closed. */
 const NESTED_PRIVATE = ['.claude/settings.local.json', '.mcp.json'];
 /**
- * A repository's shared settings, at any depth: readable where the env scan covered its
- * folder, which learns its env values, and never written by the file tools. A working
- * directory's own copy is in the sandbox's write denies too, so a merge or checkout that
- * must rewrite it fails at that write, as a native sandboxed command does before it asks
- * to run unsandboxed, which a worker's command cannot.
+ * A repository's shared settings, at any depth: readable, as a native subagent reads them,
+ * and never written by the file tools. A working directory's own copy is in the sandbox's
+ * write denies too, so a merge or checkout that must rewrite it fails at that write, as a
+ * native sandboxed command does before it asks to run unsandboxed, which a worker's command
+ * cannot.
  */
 const NESTED_SETTINGS = '.claude/settings.json';
 
