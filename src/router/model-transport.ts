@@ -925,6 +925,16 @@ export class ModelTransport {
                 idleMs: streamIdleMs(job.decision),
                 terminalBytes: resultLimit,
                 contentBytes: readable,
+                // The router's keep-alive reaches the child as the Messages API's own `ping`
+                // event, so the child's idle limit is re-armed as the router's is.
+                onKeep: () => {
+                  if (!relayed) return;
+                  try {
+                    relay({ type: 'ping' });
+                  } catch {
+                    // What the child is shown never changes what is paid.
+                  }
+                },
                 onEvent: (event) => {
                   const first = !relayed;
                   relayed = true;

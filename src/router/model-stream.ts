@@ -130,6 +130,8 @@ export interface StreamReadOptions {
   contentBytes: number;
   /** Called once per provider event, in order, as it arrives. */
   onEvent: (event: StreamEvent) => void;
+  /** Called for each of the router's keep-alive comments (`: keep`), as it arrives. */
+  onKeep?: () => void;
 }
 
 /**
@@ -183,9 +185,13 @@ export async function readMessagesStream(
       buffer += text.replace(/\r\n?/g, '\n');
       // A frame ends at a blank line.
       for (let end = buffer.indexOf('\n\n'); end !== -1; end = buffer.indexOf('\n\n')) {
-        const frame = parseFrame(buffer.slice(0, end));
+        const text = buffer.slice(0, end);
+        const frame = parseFrame(text);
         buffer = buffer.slice(end + 2);
-        if (!frame) continue;
+        if (!frame) {
+          if (text.startsWith(':')) o.onKeep?.();
+          continue;
+        }
         if (frame.name === 'tenjin_result' || frame.name === 'tenjin_error') {
           if (Buffer.byteLength(frame.data) > o.terminalBytes) throw new StreamCut('too_large');
           return terminalResponse(frame.data);

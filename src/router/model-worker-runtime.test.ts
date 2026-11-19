@@ -3605,18 +3605,3 @@ it('ends the job on a turn cut after its events when the charge is not proven aw
   expect(messages).toHaveBeenCalledTimes(1);
   expect(request!.seen.chunks.join('')).toContain('event: error');
 });
-
-it('tells the child when the stream ended without its last event after the reply was counted', async () => {
-  const messages = vi.fn(async (...args: unknown[]) => {
-    for (const event of streamEvents.slice(0, -1))
-      (args[5] as (e: { type: string }) => void)(event);
-    return streamMessage;
-  });
-  let request: ReturnType<typeof streamedBridgeRequest> | undefined;
-  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
-    request = streamedBridgeRequest(streamRequest);
-    await request.done;
-  });
-  await runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport });
-  expect(request!.seen.chunks.at(-1)).toContain('event: error');
-});

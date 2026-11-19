@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY } from './fee-test-utils';
 import { completedMessageSse } from './model-messages';
 import { ModelTransport } from './model-transport';
@@ -268,15 +268,19 @@ it('hands the events on as they arrive, before the stream ends, and settles as a
     (t) => timings.push({ ...t }),
     (event) => {
       got.push(event);
-      if (got.length === 2) first.resolve();
+      if (got.length === 3) first.resolve();
     },
   );
-  // Two events are with the caller while the call has neither its last event nor a result.
+  // Two events, and the router's keep-alive between them as a `ping` (so the child's own idle
+  // limit is re-armed as the router's is), are with the caller while the call has neither its
+  // last event nor a result.
   await first.promise;
-  expect(got.map((e) => e.type)).toEqual(['message_start', 'content_block_start']);
+  expect(got.map((e) => e.type)).toEqual(['message_start', 'ping', 'content_block_start']);
   barrier.resolve();
   await expect(running).resolves.toEqual(reply);
-  expect(got.map((e) => e.type)).toEqual(eventsOf(reply).map((e) => e.type));
+  expect(got.map((e) => e.type).filter((type) => type !== 'ping')).toEqual(
+    eventsOf(reply).map((e) => e.type),
+  );
   expect(timings[0]!.ttfbMs).toBeDefined();
   expect(timings[0]!.ttfbMs!).toBeLessThanOrEqual(timings[0]!.answerMs!);
   expect(f.bodies.every((body) => body.stream === true)).toBe(true);
@@ -569,4 +573,55 @@ it.each([
     reason,
   });
   expect(StreamCut).toBeDefined();
+});
+
+// Failure caught: the router's `: keep` never reached the child, whose own idle limit
+// (300 s by default) could run out while the provider was quiet, and the child then sent
+// the request again. Each keep is now handed on as a `ping` event.
+it('hands each keep-alive on once, as it arrives, between the events', async () => {
+  const kept: string[] = [];
+  const text = `${frame('message_start', { type: 'message_start' })}: keep\n\n: keep\n\n${frame('tenjin_result', { status: 200, headers: {}, body: { ok: 1 } })}`;
+  await readMessagesStream(
+    sseBody([text.slice(0, 20), text.slice(20)]),
+    reading({
+      onEvent: (event) => kept.push(event.type),
+      onKeep: () => kept.push('keep'),
+    }),
+  );
+  expect(kept).toEqual(['message_start', 'keep', 'keep']);
+});
+
+// The idle limit is re-armed by each chunk, a keep included: a stream that sends a keep
+// within the limit is not cut as idle.
+it('re-arms the idle limit on every chunk, a keep-alive too', async () => {
+  vi.useFakeTimers();
+  try {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+        },
+      }),
+      { status: 200 },
+    );
+    const done = readMessagesStream(body, reading({ idleMs: 1_000 }));
+    const settled = done.then(
+      () => 'done',
+      (error: unknown) => (error as StreamCut).reason,
+    );
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(800);
+      controller.enqueue(new TextEncoder().encode(': keep\n\n'));
+    }
+    // 4,000 ms in, five keeps, none of them idle for 1,000 ms: still reading.
+    let finished = false;
+    void settled.then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(await settled).toBe('idle');
+  } finally {
+    vi.useRealTimers();
+  }
 });
