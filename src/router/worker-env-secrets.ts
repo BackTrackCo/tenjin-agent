@@ -398,18 +398,21 @@ type WalkLimits = Pick<EnvScanLimits, 'maxDirectories' | 'maxFiles' | 'deadlineM
  * no link to a folder. `complete` is false when the walk stopped short: a limit, a start in
  * `fatal` that cannot be listed, or more unlistable folders than can each be denied. With
  * `folders`, each folder listed is recorded there as its entry stood just before the listing.
+ * `vanished` are the folders, other than those in `fatal`, that were gone when their turn to be
+ * listed came: moved, perhaps into a folder already listed.
  */
 async function walkTree(
   starts: readonly string[],
   limits: WalkLimits,
   fatal: readonly string[],
   folders?: Map<string, Folder>,
-): Promise<{ found: string[]; unlisted: string[]; complete: boolean }> {
+): Promise<{ found: string[]; unlisted: string[]; vanished: string[]; complete: boolean }> {
   const maxDirectories = limits.maxDirectories ?? 400_000;
   const maxFiles = limits.maxFiles ?? 5_000;
   const deadline = Date.now() + (limits.deadlineMs ?? 20_000);
   const found: string[] = [];
   const unlisted: string[] = [];
+  const vanished: string[] = [];
   const queue = [...starts];
   let directories = 0;
   let complete = true;
@@ -447,12 +450,15 @@ async function walkTree(
               if (found.length > maxFiles) complete = false;
             },
             (error: NodeJS.ErrnoException) => {
-              if (error.code === 'ENOENT') return;
+              // Gone, or a file in its place: it has nothing inside to read here.
+              if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+                if (!fatal.includes(directory)) vanished.push(directory);
+                return;
+              }
               // A folder that cannot be listed may hold env files the worker can reach.
               // A root, or more such folders than can each be denied, fails the walk.
               if (fatal.includes(directory) || unlisted.length >= MAX_UNLISTED) complete = false;
-              // One that turned out to be a file has nothing inside to read.
-              else if (error.code !== 'ENOTDIR') unlisted.push(directory);
+              else unlisted.push(directory);
             },
           )
           .finally(() => {
@@ -463,7 +469,7 @@ async function walkTree(
     };
     pump();
   });
-  return { found, unlisted, complete };
+  return { found, unlisted, vanished, complete };
 }
 
 /**
@@ -897,13 +903,16 @@ export class WorkerEnvSecrets {
         if (parent && !changed.some((entry) => entry.path === dirname(path)))
           changed.push({ path: dirname(path), folder: { ...parent, ctime: Number.NaN } });
       }
+      // Folders gone by the time they were listed or walked: moved, perhaps into a folder this
+      // pass had already stat'ed, so they count as gone too.
+      const vanished: string[] = [];
       await pool(changed, 32, async ({ path, folder }) => {
         let entries: Dirent[];
         try {
           entries = await readdir(path, { withFileTypes: true });
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code === 'ENOENT' || code === 'ENOTDIR') this.folders.delete(path);
+          if (code === 'ENOENT' || code === 'ENOTDIR') vanished.push(path);
           else this.unlistable(path);
           return;
         }
@@ -915,7 +924,11 @@ export class WorkerEnvSecrets {
           } else if (covered(child)) found.push(child);
         }
       });
-      found.push(...(await this.walked(starts, tops, this.folders)));
+      found.push(...(await this.walked(starts, tops, this.folders, vanished)));
+      // Each moved after this pass stat'ed every folder: the next round finds where it went, or
+      // that it is back, by the change times that move moved.
+      for (const path of vanished) this.folders.delete(path);
+      gone.push(...vanished);
       await this.trust();
       if (!gone.length) return found;
       // Folders that keep going and coming hold the send rather than let it rest on a guess.
@@ -949,16 +962,21 @@ export class WorkerEnvSecrets {
     return this.walked(outermost(folders), tops);
   }
 
-  /** The env files a walk of `starts` finds during the job; what it cannot cover holds every send. */
+  /**
+   * The env files a walk of `starts` finds during the job; what it cannot cover holds every send.
+   * The folders gone before their listing go to `vanished`.
+   */
   private async walked(
     starts: string[],
     tops: readonly string[],
     folders?: Map<string, Folder>,
+    vanished?: string[],
   ): Promise<string[]> {
     if (!starts.length) return [];
     const walk = await walkTree(starts, this.limits, tops, folders);
     if (!walk.complete) for (const start of starts) this.uncovered.add(start);
     for (const folder of walk.unlisted) this.unlistable(folder);
+    vanished?.push(...walk.vanished);
     return walk.found;
   }
 

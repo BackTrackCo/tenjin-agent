@@ -786,6 +786,45 @@ it.runIf(MACOS)(
   },
 );
 
+// Review of 800c27a2, finding E: a changed folder gone by the time its listing ran was dropped,
+// and so was a new one gone by the time the walk reached it. Either may have moved into a folder
+// the pass had already stat'ed, and the send left without what it held.
+it.runIf(MACOS)(
+  "finds a folder moved, while it waits to be listed or walked, into one the check had already stat'ed",
+  async () => {
+    const root = await trialRoot('listing');
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    let release!: () => void;
+    const moveWhileListed = async (folder: string, into: string) => {
+      walks.hold = new Promise<void>((done) => (release = done));
+      walks.holdOnly = folder;
+      walks.listed.length = 0;
+      const check = env.refresh();
+      await vi.waitFor(() => expect(walks.listed).toContain(folder), { timeout: 10_000 });
+      await rename(folder, into);
+      release();
+      await check;
+    };
+    try {
+      // A changed folder: its listing waits while it moves into `plain`.
+      const lib = join(root, 'pkg', 'lib');
+      writeFileSync(join(lib, '.env.local'), 'LISTED=listed-value-0x3a3a3a');
+      await moveWhileListed(lib, join(root, 'plain', 'lib'));
+      expect(env.redact('listed-value-0x3a3a3a')).toBe('[env:LISTED]');
+      // A new folder: its walk waits while it moves into `plain` too.
+      const made = join(root, 'pkg', 'made');
+      mkdirSync(made);
+      writeFileSync(join(made, '.env.local'), 'WALKED=walked-value-0x3b3b3b');
+      await moveWhileListed(made, join(root, 'plain', 'made'));
+      expect(env.redact('walked-value-0x3b3b3b')).toBe('[env:WALKED]');
+    } finally {
+      release?.();
+      env.close();
+    }
+  },
+);
+
 // They hold most of a workspace's folders: walking them made the start 9.7 s and each send
 // 1.82 s over 142,842 such folders. Their env files are denied to the worker instead.
 it('never lists or stats a folder in node_modules or .git, at the start or before a send', async () => {
