@@ -95,6 +95,17 @@ function statedResultBytes(job: ModelJob): number | undefined {
 /** Jobs whose router refused `stream` after offering it (its flag was turned off again). */
 const streamRefused = new Set<string>();
 
+/**
+ * The jobs whose budget file this process has read or written. A job in this set has a run
+ * under way, so its budget file is never absent by design: a missing one is treated as
+ * damage, never as a fresh budget.
+ */
+const budgetsKept = new Set<string>();
+async function saveBudget(id: string, path: string, state: unknown): Promise<void> {
+  await writePrivate(path, JSON.stringify(state));
+  budgetsKept.add(id);
+}
+
 /** An error answer's fixed code (`{error: {code}}`), never its message. */
 async function errorCode(response: Response): Promise<{ code?: string }> {
   try {
@@ -635,7 +646,7 @@ export class ModelTransport {
         // Result first: a crash can retain an over-reservation, never erase exposure.
         await writePrivate(resultFile, JSON.stringify(value.result));
         state.calls[key] = { ...current, completed: true, actual: value.actual };
-        await writePrivate(path, JSON.stringify(state));
+        await saveBudget(job.id, path, state);
         return value.result;
       });
     const existing = async (call: Call) => {
@@ -816,7 +827,7 @@ export class ModelTransport {
         const call = { invocationId: body.invocationId, quote: quote.toString() };
         state.calls[key] = call;
         state.charged = (BigInt(state.charged) + quote).toString();
-        await writePrivate(path, JSON.stringify(state));
+        await saveBudget(job.id, path, state);
         return call;
       });
     } catch (error) {
@@ -835,7 +846,7 @@ export class ModelTransport {
         if (call?.invocationId === body.invocationId && !call.completed) {
           state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
           delete state.calls[key];
-          await writePrivate(path, JSON.stringify(state));
+          await saveBudget(job.id, path, state);
         }
       });
     /**
@@ -1200,13 +1211,19 @@ export class ModelTransport {
     return settled;
   }
 
-  /** The job's budget as kept, or the routing fee alone for a job with no file yet. */
+  /** The job's budget as kept, or the routing fee alone for a job with no file yet. A job whose
+   * budget this process has written or read never gets a fresh one: see {@link budgetsKept}. */
   private async loadBudget(job: ModelJob, path: string): Promise<Budget> {
     const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
     if (job.decision.requireExistingBudget === true && !parsed.success)
       throw new Error('Original model budget is unavailable; refusing continuation');
     if (!parsed.success && (await lstat(path).catch(() => null)))
       throw new Error('Unreadable model budget; refusing another authorization');
+    // FAIL CLOSED: a run that has started never reads a missing file as a fresh budget (it
+    // would hold the routing fee alone and let a job spend its cap again). Nothing is signed.
+    if (!parsed.success && budgetsKept.has(job.id))
+      throw new Error('Model budget is missing for a running job; refusing another authorization');
+    if (parsed.success) budgetsKept.add(job.id);
     return parsed.success ? parsed.data : { charged: routingExposure(job).toString(), calls: {} };
   }
 
@@ -1248,7 +1265,7 @@ export class ModelTransport {
         throw new ModelCallFailed('Tool price exceeds remaining job ceiling', { cause: 'budget' });
       state.calls[key] = call;
       state.charged = (BigInt(state.charged) + ceilingAtomic).toString();
-      await writePrivate(path, JSON.stringify(state));
+      await saveBudget(job.id, path, state);
     });
     // A throw here keeps the whole reservation: nothing says what was signed.
     const ran = await run();
@@ -1260,7 +1277,7 @@ export class ModelTransport {
         state.charged = (BigInt(state.charged) - ceilingAtomic + ran.spentAtomic).toString();
         if (ran.spentAtomic === 0n) delete state.calls[key];
         else state.calls[key] = { ...now, completed: true, actual: ran.spentAtomic.toString() };
-        await writePrivate(path, JSON.stringify(state));
+        await saveBudget(job.id, path, state);
       });
     return ran.value;
   }
@@ -1375,7 +1392,7 @@ export class ModelTransport {
           // A released call leaves no entry, so the same request can be bought again.
           if (spent) state.data.calls[key] = { ...now, completed: true, actual: actual.toString() };
           else delete state.data.calls[key];
-          await writePrivate(path, JSON.stringify(state.data));
+          await saveBudget(job.id, path, state.data);
         });
       }
     } catch {

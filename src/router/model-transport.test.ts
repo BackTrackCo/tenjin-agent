@@ -1631,6 +1631,20 @@ it.each([
   expect(timeouts).toContain(expected);
 });
 
+// A running job's budget file never reads as a fresh budget: a missing one (swept, deleted)
+// would hold the routing fee alone and let the job spend its cap again.
+it('refuses the next call of a running job whose budget file went missing, and signs nothing', async () => {
+  const f = await fixture({});
+  const signal = new AbortController().signal;
+  await f.make().messages(f.job, { messages: [{ role: 'user', content: 'first' }] }, signal);
+  const paid = f.router.paidRequests();
+  await rm(join(f.dir, 'model-jobs', `${f.job.id}.budget.json`));
+  await expect(
+    f.make().messages(f.job, { messages: [{ role: 'user', content: 'second' }] }, signal),
+  ).rejects.toThrow(/budget is missing/i);
+  expect(f.router.paidRequests()).toBe(paid);
+});
+
 // A 256,000-token call reserves about three times what a 65,536-token one does, so a job
 // near its ceiling would stop on a call that a smaller output cap still fits.
 it('asks for the largest output cap the rest of the job ceiling can reserve, never below 65,536, and says which', async () => {

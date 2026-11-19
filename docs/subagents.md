@@ -6,7 +6,7 @@
 - **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
 - **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.
 
-Ordinary implementation and scoped review can qualify; planning stays native. Repository instructions and model or privacy restrictions still apply. Known secrets are masked, which is not a guarantee. See also the [privacy policy](https://tenjin.sh/privacy).
+Ordinary implementation and scoped review can qualify; planning stays native. Repository instructions and model or privacy restrictions still apply. Env files are not masked, and secrets in a known token shape are masked, which is not a guarantee. See also the [privacy policy](https://tenjin.sh/privacy).
 
 ## What is sent
 
@@ -85,7 +85,8 @@ On native Windows a worker has no shell sandbox:
 - **Before an offer.** The assignment and bounded parent context go to Tenjin and TypeSafe. A routing request is at most 16 KB: Tenjin gives up parent context to fit it, the oldest message first, and never cuts the assignment, so a call whose assignment alone is larger stays native.
 - **While the offer is open.** Claude Code can prepare a local worker. The worker gets its assignment only when the parent accepts. Declining or cancelling the offer, letting it expire, or ending the parent session stops that process.
 - **After acceptance.** Applicable instructions, assignments and tool results reach DeepSeek through Tenjin. A worker's web search queries, and the address of a public page its WebFetch could not fetch, reach Exa (see [Web searches and page reads](#web-searches-and-page-reads)).
-- **Masking.** Known secrets are masked; sensitive prose is not guaranteed anonymous.
+- **Env files are not masked.** A worker reads them as a normal subagent of the session does, and what it reads can reach Tenjin and DeepSeek as written.
+- **Masking.** What remains is masking of secrets in a known token shape; sensitive prose is not guaranteed anonymous.
 - **Retention.** Server replay content expires after 24 hours. Financial and continuation authorization records persist.
 
 ### Permissions
