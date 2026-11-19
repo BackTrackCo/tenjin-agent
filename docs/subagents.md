@@ -355,7 +355,7 @@ These run natively:
 ### Time limits
 
 - Jobs have a 40-minute wall limit and no turn limit, as the DeepSeek harness has none; native compaction remains enabled, given the window where the DeepSeek harness triggers it at its defaults: `min(0.8 * 1,048,576, 1,048,576 - reply cap - 65,536)`, which is 838,860 at the 65,536 reply cap of production and 727,040 at 256,000. Claude Code treats that value as a window and takes 33,000 tokens off it (a reserve of up to 20,000 for the summary plus 13,000 of headroom), so compaction fires about 33,000 tokens earlier: near 805,860 and 694,040.
-- One model call waits up to 10 minutes for the router's answer: longer than the router lets a call run (9 minutes at most, 5 in production), so Tenjin never gives up on a call the router is still serving.
+- One model call waits for the router's answer a minute longer than the router lets a call run, so Tenjin never gives up on a call the router is still serving: the call duration the router's offer names plus a minute, or 10 minutes where the offer names none (production's: its calls run 5 minutes at most).
 - A worker has no separate start-up window, as a native subagent has none: its Claude Code takes the time the machine needs to start, inside the job's wall limit. Cancel or interrupt a start that takes too long.
 - A worker still starting when the wall limit passes reports `not_started`. So does a job whose first question to the router got no answer in three tries (`endedBy: "router_unreachable"`). In each case no inference was bought, the routing fee for the offer was already paid, and sending the original call again unchanged runs it natively with no second fee.
 

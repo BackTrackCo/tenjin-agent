@@ -1595,6 +1595,42 @@ it('waits for a paid answer longer than the router allows a call, 540 s with a m
   expect(Math.max(...paidWait)).toBeGreaterThan(540_000);
 });
 
+// The next server's offer names the router's own deadline for one call: the client waits that
+// long plus the constant's minute, a bigger or a smaller figure alike, and the constant when
+// the offer names none or names it badly.
+it.each([
+  ['absent', undefined, 600_000],
+  ['present', 540_000, 600_000],
+  ['larger than today', 900_000, 960_000],
+  ['smaller than today', 300_000, 360_000],
+  ['malformed (text)', '540000', 600_000],
+  ['malformed (negative)', -1, 600_000],
+  ['malformed (fraction)', 1.5, 600_000],
+])('waits for a paid answer by the offer: %s', async (_name, offered, expected) => {
+  const timeouts: number[] = [];
+  const real = globalThis.setTimeout;
+  const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    ...args: Parameters<typeof setTimeout>
+  ) => {
+    if (typeof args[1] === 'number') timeouts.push(args[1]);
+    return real(...args);
+  }) as typeof setTimeout);
+  try {
+    const f = await fixture({});
+    if (offered !== undefined) f.job.decision.maxCallDurationMs = offered;
+    await f
+      .make()
+      .messages(
+        f.job,
+        { model: 'deepseek-flash', max_tokens: 1000, messages: [] },
+        new AbortController().signal,
+      );
+  } finally {
+    spy.mockRestore();
+  }
+  expect(timeouts).toContain(expected);
+});
+
 // A 256,000-token call reserves about three times what a 65,536-token one does, so a job
 // near its ceiling would stop on a call that a smaller output cap still fits.
 it('asks for the largest output cap the rest of the job ceiling can reserve, never below 65,536, and says which', async () => {

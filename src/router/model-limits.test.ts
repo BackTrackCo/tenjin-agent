@@ -6,6 +6,8 @@ import {
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_OUTPUT_TOKENS,
   modelPeakQuoteAtomic,
+  MODEL_PAID_CALL_TIMEOUT_MS,
+  paidCallTimeoutMs,
   usdOfAtomic,
 } from './model-limits';
 
@@ -66,4 +68,18 @@ it('compacts where the DeepSeek harness does for the reply cap of the job', () =
   // A reply and the headroom always fit under the trigger's context.
   for (const cap of [65_536, 128_000, 256_000])
     expect(compactWindowTokens(cap) + cap).toBeLessThanOrEqual(1_048_576 - 65_536);
+});
+
+it("waits for a paid call as long as its offer's deadline plus the constant's minute", () => {
+  expect(paidCallTimeoutMs({ maxCallDurationMs: 540_000 })).toBe(MODEL_PAID_CALL_TIMEOUT_MS);
+  expect(paidCallTimeoutMs({ maxCallDurationMs: 900_000 })).toBe(960_000);
+  expect(paidCallTimeoutMs({ maxCallDurationMs: 0 })).toBe(60_000);
+  for (const decision of [
+    {},
+    { maxCallDurationMs: '540000' },
+    { maxCallDurationMs: -5 },
+    { maxCallDurationMs: 1.5 },
+    { maxCallDurationMs: null },
+  ])
+    expect(paidCallTimeoutMs(decision)).toBe(MODEL_PAID_CALL_TIMEOUT_MS);
 });

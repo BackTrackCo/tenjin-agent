@@ -47,11 +47,26 @@ export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): nu
 /**
  * HOW LONG THE CLIENT WAITS FOR A PAID MODEL CALL'S ANSWER: never less than the router
  * allows it. The router's total deadline for one call is 540 s on the next server (its idle
- * limit is 300 s) and 300 s in production, and its offer advertises neither, so the wait is
- * the longer one with a minute to spare. A client that gave up first would end a call the
+ * limit is 300 s) and 300 s in production. Production's offer advertises neither, so the wait
+ * is the longer one with a minute to spare. A client that gave up first would end a call the
  * router is still serving, and its charge would be uncertain.
  */
 export const MODEL_PAID_CALL_TIMEOUT_MS = 600_000;
+/** The minute the constant leaves over the 540 s the next server allows one call. */
+const MODEL_PAID_CALL_MARGIN_MS = 60_000;
+/**
+ * THE WAIT FOR ONE PAID CALL ON THIS JOB'S ROUTER. An offer with action `model` that names
+ * `maxCallDurationMs` (an optional non-negative integer, the router's total deadline for one
+ * call) is waited on for that long plus the constant's margin, whatever it is: a router that
+ * allows longer is waited on longer, one that allows less is not waited on past its word. An
+ * offer that names none, or names it malformed, gets the constant.
+ */
+export function paidCallTimeoutMs(decision: Record<string, unknown>): number {
+  const offered = decision.maxCallDurationMs;
+  return typeof offered === 'number' && Number.isSafeInteger(offered) && offered >= 0
+    ? offered + MODEL_PAID_CALL_MARGIN_MS
+    : MODEL_PAID_CALL_TIMEOUT_MS;
+}
 /**
  * The router's peak Messages quote, as its `quoteAtomic` makes it (tariff
  * deepseek-flash-1017-2026-11-13): `bytes` of request body plus 4096 framing, at most the
