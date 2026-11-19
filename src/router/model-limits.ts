@@ -22,6 +22,14 @@ export function offeredOutputTokens(decision: Record<string, unknown>): number |
     ? Math.min(offered, MODEL_OUTPUT_TOKENS_MAX)
     : undefined;
 }
+/**
+ * HOW LONG THE CLIENT WAITS FOR A PAID MODEL CALL'S ANSWER: never less than the router
+ * allows it. The router's total deadline for one call is 540 s on the next server (its idle
+ * limit is 300 s) and 300 s in production, and its offer advertises neither, so the wait is
+ * the longer one with a minute to spare. A client that gave up first would end a call the
+ * router is still serving, and its charge would be uncertain.
+ */
+export const MODEL_PAID_CALL_TIMEOUT_MS = 600_000;
 /** The routing fee's ceiling, which a job's ceiling also covers. */
 export const MODEL_ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /**

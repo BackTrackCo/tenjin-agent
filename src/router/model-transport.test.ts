@@ -13,7 +13,7 @@ import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test
 import { modelChannelScope, modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
-import { modelPeakQuoteAtomic } from './model-limits';
+import { MODEL_PAID_CALL_TIMEOUT_MS, modelPeakQuoteAtomic } from './model-limits';
 import { ModelPace } from './model-pace';
 import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
@@ -1564,6 +1564,35 @@ it('states the result size it reads only to a router whose offer says it honours
   responses.job.decision.maxResultBytes = 4_000_000;
   await responses.make().responses(responses.job, { model: 'deepseek-flash', input: [] }, signal);
   expect(responses.last()).not.toHaveProperty('maxResultBytes');
+});
+
+// The router serves one call up to 540 s (300 s in production), so the client's wait for
+// the paid answer, 360 s before, ended a call the router was still serving.
+it('waits for a paid answer longer than the router allows a call, 540 s with a margin', async () => {
+  const timeouts: number[] = [];
+  const real = globalThis.setTimeout;
+  const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    ...args: Parameters<typeof setTimeout>
+  ) => {
+    if (typeof args[1] === 'number') timeouts.push(args[1]);
+    return real(...args);
+  }) as typeof setTimeout);
+  try {
+    const f = await fixture({});
+    await f
+      .make()
+      .messages(
+        f.job,
+        { model: 'deepseek-flash', max_tokens: 1000, messages: [] },
+        new AbortController().signal,
+      );
+  } finally {
+    spy.mockRestore();
+  }
+  expect(MODEL_PAID_CALL_TIMEOUT_MS).toBeGreaterThanOrEqual(540_000 + 30_000);
+  const paidWait = timeouts.filter((ms) => ms > 300_000 && ms <= MODEL_PAID_CALL_TIMEOUT_MS);
+  expect(paidWait.length).toBeGreaterThan(0);
+  expect(Math.max(...paidWait)).toBeGreaterThan(540_000);
 });
 
 // A 256,000-token call reserves about three times what a 65,536-token one does, so a job

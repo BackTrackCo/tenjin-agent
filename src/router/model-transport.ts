@@ -24,6 +24,7 @@ import {
   MODEL_MESSAGES_RESULT_BYTES,
   MODEL_MESSAGES_RESULT_BYTES_MAX,
   MODEL_OUTPUT_TOKENS,
+  MODEL_PAID_CALL_TIMEOUT_MS,
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
@@ -933,7 +934,7 @@ export class ModelTransport {
               const sent = await payer.routeFor(baseUrl).send(url, {
                 method: 'POST',
                 jsonBody: body,
-                timeoutMs: 360_000,
+                timeoutMs: MODEL_PAID_CALL_TIMEOUT_MS,
                 blockRedirects: true,
               });
               if (timing.answerMs !== undefined) step('bodyMs');
