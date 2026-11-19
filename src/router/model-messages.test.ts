@@ -179,6 +179,30 @@ it('sends an image or a document block as a stable text placeholder, in a tool r
   expect(JSON.stringify(sent)).not.toContain('iVBORw0KGgo=');
   expect(workerMessages(request()).messages).toEqual(sent.messages);
 });
+// The parent has to know a job needed a screenshot or a PDF that the text-only route
+// could not send. Each block counts once, however many turns carry it again.
+it('counts each image or document block it sends as text once, across turns', () => {
+  const png = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' },
+  };
+  const pdf = { type: 'document', source: { type: 'base64', data: 'JVBERi0=' } };
+  const byUrl = { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } };
+  const other = { type: 'image', source: { type: 'base64', data: 'AAAA' } };
+  const request = (content: unknown[]) => ({
+    model: 'deepseek-flash',
+    messages: [{ role: 'user', content }],
+  });
+  const omitted = new Set<string>();
+  workerMessages(request([png, pdf, byUrl]), undefined, omitted);
+  expect(omitted.size).toBe(3);
+  // The same blocks again, as a later turn re-sends its history: still three.
+  workerMessages(request([png, pdf, byUrl]), undefined, omitted);
+  expect(omitted.size).toBe(3);
+  // A different image is another block.
+  workerMessages(request([other]), undefined, omitted);
+  expect(omitted.size).toBe(4);
+});
 it('preserves the native worker output allowance instead of silently halving it', () => {
   expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000 }).max_tokens).toBe(32000);
   expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();

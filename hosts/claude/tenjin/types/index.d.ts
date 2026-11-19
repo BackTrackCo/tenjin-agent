@@ -127,6 +127,8 @@ export type TenjinModelWorker = {
   endedBy?: string;
   /** The final spend still has an unsettled part. */
   unresolved?: boolean;
+  /** Image and document blocks the job sent as text; the worker did not see them. */
+  omittedBlocks?: number;
 };
 
 export type TenjinModelViewerRecord = {

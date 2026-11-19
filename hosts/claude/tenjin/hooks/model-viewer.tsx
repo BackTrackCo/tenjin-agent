@@ -955,6 +955,7 @@ function endedFrom(answer: Json | undefined): Partial<TenjinModelWorker> | undef
       ? spend.actualAtomic
       : undefined;
   const [uses, used, elapsed] = [answer!.toolUses, answer!.tokens, answer!.elapsedMs].map(count);
+  const omitted = count(record(answer!.omitted)?.blocks);
   return {
     ended: status,
     state: status === 'not_started' ? 'unknown' : status,
@@ -962,6 +963,7 @@ function endedFrom(answer: Json | undefined): Partial<TenjinModelWorker> | undef
     ...(uses !== undefined ? { toolUses: uses } : {}),
     ...(used !== undefined ? { tokens: used } : {}),
     ...(elapsed !== undefined ? { elapsedMs: elapsed } : {}),
+    ...(omitted ? { omittedBlocks: omitted } : {}),
     ...(actual !== undefined ? { spentAtomic: actual } : {}),
     ...(Array.isArray(spend?.uncertain) && spend.uncertain.length ? { unresolved: true } : {}),
   };
@@ -1088,6 +1090,7 @@ const ENDED_BY: Record<string, string> = {
   model_call_timeout: 'Model call timed out',
   payment_refused: 'Payment refused',
   provider: 'DeepSeek unavailable',
+  refused: 'DeepSeek refused',
   worker_error: 'Stopped',
 };
 function endedByOf(code: unknown): code is string {
@@ -1100,6 +1103,10 @@ function endedByOf(code: unknown): code is string {
 function stopWord(status: unknown, endedBy: unknown): string {
   if (endedByOf(endedBy)) return ENDED_BY[endedBy]!;
   return status === 'cancelled' ? 'Interrupted' : 'Stopped';
+}
+/** The end row's part for the image and document blocks the worker did not see. */
+function omittedWords(blocks: number): string {
+  return `${blocks} image or document ${blocks === 1 ? 'block' : 'blocks'} omitted`;
 }
 type WorkerEnding = { word: string; parts: string[] };
 
@@ -1128,6 +1135,7 @@ function workerEnding(live: TenjinModelWorker): WorkerEnding {
             (unseen ? ' so far' : live.unresolved ? ' · settlement unresolved' : ''),
         ]
       : []),
+    ...(live.omittedBlocks && !unseen ? [omittedWords(live.omittedBlocks)] : []),
   ];
   return { word, parts };
 }
@@ -2923,6 +2931,7 @@ function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {
       ? spend.actualAtomic
       : undefined;
   const unresolved = Array.isArray(spend?.uncertain) && spend.uncertain.length > 0;
+  const omitted = count(ended.omittedBlocks) ?? count(record(ended.omitted)?.blocks);
   return [
     toolUses(uses),
     ...(used !== undefined ? [tokens(used)] : []),
@@ -2932,6 +2941,7 @@ function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {
       : spend?.accounting === 'unknown'
         ? ['spend unknown']
         : []),
+    ...(omitted ? [omittedWords(omitted)] : []),
   ];
 }
 /**

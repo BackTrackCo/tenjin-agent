@@ -224,6 +224,8 @@ export type EarlyWorkerAccept = {
   job: ModelJob;
   transport: ModelTransport;
   accepted?: { at: number; marks: Record<string, number> };
+  /** The job's image and document blocks sent as text, which the released worker adds to. */
+  omitted?: Set<string>;
   activity?: Parameters<typeof runModelWorker>[1]['activity'];
   currentClaudePermissionMode?: Parameters<typeof runModelWorker>[1]['currentClaudePermissionMode'];
   permission: Parameters<typeof runModelWorker>[1]['permission'];
@@ -268,6 +270,8 @@ export async function runModelWorker(
     webIdentities?: () => Promise<Identities | undefined>;
     /** Where a worker that starts without its native agent prompt says why. Default: stderr. */
     warn?: (line: string) => void;
+    /** The image and document blocks the job sent as text; the worker adds one each. */
+    omitted?: Set<string>;
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
@@ -721,9 +725,10 @@ async function runQualifiedWorker(
         }
         let messages: ReturnType<typeof workerMessages>;
         try {
-          messages = workerMessages(raw, outputCap);
+          messages = workerMessages(raw, outputCap, options.omitted);
           diagnostics.mark('firstRequest');
-          diagnostics.request(raw);
+          diagnostics.request(raw, messages);
+          diagnostics.omitted(options.omitted?.size ?? 0);
           timed.prepared();
         } catch (error) {
           // The router would refuse it, and every call after it that offers as many.
@@ -744,7 +749,10 @@ async function runQualifiedWorker(
         let timing: ModelCallTiming | undefined;
         const message = await withModelRetry(
           async () => {
-            if (attempts++ > 0) messages = workerMessages(await outgoing(), outputCap);
+            if (attempts++ > 0) {
+              messages = workerMessages(await outgoing(), outputCap, options.omitted);
+              diagnostics.omitted(options.omitted?.size ?? 0);
+            }
             return options.transport.messages(
               job,
               messages,
@@ -1376,6 +1384,7 @@ async function runQualifiedWorker(
         web.job = accept.job;
         web.transport = options.transport = accept.transport;
         options.permission = accept.permission;
+        options.omitted = accept.omitted;
         options.activity = accept.activity;
         options.currentClaudePermissionMode = accept.currentClaudePermissionMode;
         if (accept.accepted) diagnostics.accepted(accept.accepted.at, accept.accepted.marks);

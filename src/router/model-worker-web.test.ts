@@ -266,7 +266,12 @@ function setup(fetchImpl: typeof fetch, auth = spyAuthorizer()) {
     root: repo,
     task: 'Look it up',
     native: {},
-    decision: { jobId: randomUUID(), routingFeeAtomic: '3000', routerOrigin: ROUTER },
+    decision: {
+      jobId: randomUUID(),
+      routingFeeAtomic: '3000',
+      routingAuthorizedAtomic: '3000',
+      routerOrigin: ROUTER,
+    },
     capAtomic: '1000000',
     state: 'running',
     expiresAt: Date.now() + 60_000,

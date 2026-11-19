@@ -44,7 +44,10 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
     });
     record.repeat('Bash', 3);
     record.repeat('Read', undefined);
-    record.retry(1, { cause: 'provider', status: 500 });
+    record.omitted(2);
+    // The router's code stays in the retry, so a cut reply does not read like a provider
+    // failure the router answered.
+    record.retry(1, { cause: 'provider', status: 504, code: 'model_stream_idle' });
     // Start phases, from the accept on, each the first time it is reached.
     record.accepted(1_000, { cliProcess: 400, checked: 1_020, qualified: 1_350 });
     record.mark('childReady', 2_900);
@@ -66,9 +69,10 @@ it('keeps how a worker ran, names and counts only, beside the job and readable b
         thinking: ['adaptive'],
         maxTurns: null,
       },
+      omitted: 2,
       reasoning: { turns: 2, withThinking: 2, textTurns: 1, textWithThinking: 1 },
       repeats: [{ tool: 'Bash', count: 3 }],
-      retries: [{ attempt: 1, cause: 'provider', status: 500 }],
+      retries: [{ attempt: 1, cause: 'provider', status: 504, code: 'model_stream_idle' }],
       phases: { cliProcess: -600, checked: 20, qualified: 350, childReady: 1_900 },
       childMarks: {},
       start: {},
@@ -234,4 +238,16 @@ it('keeps the time before an offer, also for an offer nobody accepts, and the en
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
+});
+
+// A name longer than the stored 40 characters is checked as stored, so a second mark of it
+// is the same mark and does not take a second slot.
+it('records a child checkpoint once, by the name it stores', () => {
+  const record = new WorkerDiagnosticsRecord('/no/such/repo', 786_432, 65_536);
+  const long = 'x'.repeat(50);
+  record.childMark(long, Date.now() + 10);
+  record.childMark(long, Date.now() + 99_000);
+  const marks = (record.snapshot() as { childMarks: Record<string, number> }).childMarks;
+  expect(Object.keys(marks)).toEqual(['x'.repeat(40)]);
+  expect(marks['x'.repeat(40)]).toBeLessThan(5000);
 });

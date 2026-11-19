@@ -213,6 +213,8 @@ export type WorkerDiagnostics = {
     /** None: the job's wall time and money ceiling bound a run. */
     maxTurns: null;
   };
+  /** The image and document blocks the job sent as text: the worker did not see them. */
+  omitted?: number;
   /** The latest request's history: assistant turns, and how many carried their reasoning back. */
   reasoning: { turns: number; withThinking: number; textTurns: number; textWithThinking: number };
   repeats: { tool: string; count: number }[];
@@ -249,7 +251,7 @@ export type WorkerDiagnostics = {
   calls: WorkerCall[];
   callTotals: Record<string, number>;
   /** Model calls tried again after a failure the router confirmed cost nothing. */
-  retries: { attempt: number; cause: string; status?: number }[];
+  retries: { attempt: number; cause: string; status?: number; code?: string }[];
   stop?: { subtype: string; turns?: number; stopReason?: string };
   failure?: WorkerFailure;
 };
@@ -450,11 +452,14 @@ export class WorkerDiagnosticsRecord {
   }
 
   /** One request the bridge received from the worker's Claude Code. */
-  request(raw: Record<string, unknown>): void {
-    const cap = raw.max_tokens;
+  request(raw: Record<string, unknown>, sent: Record<string, unknown> = raw): void {
+    // The thinking mode and the output cap are those of the request as it was SENT, which
+    // the router and DeepSeek read, not what Claude Code asked for. The history is the
+    // worker's own.
+    const cap = sent.max_tokens;
     if (typeof cap === 'number' && Number.isSafeInteger(cap))
       this.value.settings.maxOutputTokens = Math.max(this.value.settings.maxOutputTokens ?? 0, cap);
-    const thinking = (raw.thinking as { type?: unknown } | undefined)?.type;
+    const thinking = (sent.thinking as { type?: unknown } | undefined)?.type;
     if (typeof thinking === 'string' && !this.value.settings.thinking.includes(thinking))
       this.value.settings.thinking = [...this.value.settings.thinking, thinking.slice(0, 40)];
     const turns = (Array.isArray(raw.messages) ? raw.messages : []).filter(
@@ -471,6 +476,12 @@ export class WorkerDiagnosticsRecord {
       }
     }
     this.value.reasoning = reasoning;
+  }
+
+  /** The image and document blocks the job sent as text: how many the worker did not see. */
+  omitted(count: number): void {
+    const value = whole(count, MAX_CALLS * 64);
+    if (value !== undefined) this.value.omitted = value;
   }
 
   /** A repeat reminder that fired: which tool, at which count. */
@@ -501,17 +512,21 @@ export class WorkerDiagnosticsRecord {
   /** A start-up checkpoint of the child, once: milliseconds since the accept. */
   childMark(name: string, at = Date.now()): void {
     const marks = this.value.childMarks;
-    if (name in marks || Object.keys(marks).length >= MAX_PHASES) return;
-    marks[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
+    const key = name.slice(0, 40);
+    if (key in marks || Object.keys(marks).length >= MAX_PHASES) return;
+    marks[key] = Math.round(at - this.acceptedAt);
   }
 
   /** A model call tried again: which try failed, and why (fixed codes). */
-  retry(attempt: number, failure: { cause: string; status?: number }): void {
+  retry(attempt: number, failure: { cause: string; status?: number; code?: string }): void {
     if (this.value.retries.length >= MAX_REPEATS) return;
     this.value.retries.push({
       attempt,
       cause: failure.cause.slice(0, 40),
       ...(failure.status !== undefined ? { status: failure.status } : {}),
+      ...(failure.code !== undefined && /^[a-z][a-z0-9_]{0,63}$/.test(failure.code)
+        ? { code: failure.code }
+        : {}),
     });
   }
 

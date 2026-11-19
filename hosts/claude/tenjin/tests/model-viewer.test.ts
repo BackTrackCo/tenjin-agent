@@ -1192,6 +1192,7 @@ for (const [endedBy, word, status] of [
   ['model_call_timeout', 'Model call timed out', 'stopped'],
   ['payment_refused', 'Payment refused', 'stopped'],
   ['provider', 'DeepSeek unavailable', 'stopped'],
+  ['refused', 'DeepSeek refused', 'stopped'],
   ['worker_error', 'Stopped', 'unknown'],
 ] as const)
   test('a worker ended by ' + endedBy + ' says so on its row', async ($, on) => {
@@ -1213,6 +1214,28 @@ for (const [endedBy, word, status] of [
     await f.clock.settle();
     expect((await acceptRow($, 'accept_after_resume', OFFER, MOVED))[0]).toBe(line);
   });
+
+// An image or document the text-only route could not send is a fact the parent needs on
+// the end line, with the counts it already reads.
+test('a worker that did not see image or document content says how many on its row', async ($, on) => {
+  const f = setup($, on);
+  const answer = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 61_000,
+    toolUses: 3,
+    tokens: 900,
+    omitted: { blocks: 2, note: 'The worker did not see 2 image or document blocks.' },
+  });
+  const line =
+    '⏺DeepSeek(subagent)  ⎿  Done (3 tool uses · 900 tokens · 1m 1s · 2 image or document blocks omitted)';
+  expect((await acceptRow($, 'parent_accept', OFFER, answer))[0]).toBe(line);
+  f.state.liveView = false;
+  f.state.liveFile = false;
+  f.state.ended = JSON.parse(answer);
+  await acceptRow($, 'accept_after_resume', OFFER, MOVED);
+  await f.clock.settle();
+  expect((await acceptRow($, 'accept_after_resume', OFFER, MOVED))[0]).toBe(line);
+});
 
 for (const terminal of ['completed', 'cancelled'] as const) {
   test(

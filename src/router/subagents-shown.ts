@@ -31,7 +31,9 @@ export const SUBAGENT_TERMS: readonly string[] = [
 
 const OFF_HINT = 'Run `tenjin config subagents off` to turn them off.';
 export const ON_HINT = 'Run `tenjin config subagents on` to turn them on.';
-/** After `off`, and after "Keep off" in setup. */
+/** After "Keep off" in setup: it is off, and how to turn it on. A job has never started there. */
+export const SUBAGENTS_KEPT_OFF_LINES = ['○ DeepSeek subagents are off', '', ON_HINT] as const;
+/** After `off`. */
 export const SUBAGENTS_OFF_LINE = '○ DeepSeek subagents are off. No new jobs will start.';
 
 /**
@@ -53,20 +55,24 @@ export type SubagentsShown = {
   perCall: bigint;
   /** The ceiling named with `--max-job`. */
   named?: bigint;
+  /** The cap in force before this turn-on, where a saved consent at this router gave one. */
+  wasCap?: bigint;
   /** Whether a daily budget is set. */
   daily: boolean;
   routerOrigin: string;
 };
 
 /** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
-function costWords({ perCall, named, daily }: SubagentsShown): string {
+function costWords({ perCall, named, wasCap, daily }: SubagentsShown): string {
+  const now = named !== undefined && named < perCall ? named : perCall;
+  const change = wasCap !== undefined && wasCap !== now ? ` (was ${usd(wasCap)})` : '';
   const cap =
     named === undefined
       ? `Up to ${usd(perCall)} a job (your per-call limit)`
       : named < perCall
         ? `Up to ${usd(named)} a job (your --max-job)`
         : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it)`;
-  return daily ? `${cap} · your daily budget applies` : cap;
+  return daily ? `${cap}${change} · your daily budget applies` : cap + change;
 }
 
 const ROW_LABEL = 9;

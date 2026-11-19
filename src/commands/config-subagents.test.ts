@@ -267,6 +267,30 @@ it("--repository limits the consent to the named directories, and each change of
   );
 });
 
+// Review of 24bdfc42: a bare `on` after `on --max-job 0.50` takes the named ceiling back to the
+// limit and the cost row did not say so, as the scope row does.
+it('marks a change of the cap on the cost row, as the scope row marks a change of scope', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '1000000' }));
+  const cost = async (flags: { maxJob?: string }) =>
+    (await runConfigSubagents('on', flags, testCtx(dir))).humanLines?.[3]?.replace(
+      ' · your daily budget applies',
+      '',
+    );
+  expect(await cost({ maxJob: '0.50' })).toBe('  Cost     Up to $0.50 a job (your --max-job)');
+  expect(await cost({})).toBe('  Cost     Up to $1.00 a job (your per-call limit) (was $0.50)');
+  expect(await cost({})).toBe('  Cost     Up to $1.00 a job (your per-call limit)');
+  expect(await cost({ maxJob: '0.25' })).toBe(
+    '  Cost     Up to $0.25 a job (your --max-job) (was $1.00)',
+  );
+  // What the command saves is unchanged: a bare on names no ceiling.
+  await cost({});
+  expect(
+    JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).router.subagentConsent
+      .maxJobAtomic,
+  ).toBeUndefined();
+});
+
 // Review of 2120958a: `on` printed about 420 words of terms before its status lines, the
 // setup receipt had a second terms text, and the cost line could not be told from a literal.
 it('prints one short terms text that names every recipient of the consent record, and the cap read from the settings', async () => {
@@ -294,7 +318,7 @@ it('prints one short terms text that names every recipient of the consent record
   // A named ceiling under the limit is the cap, and the row says whose it is.
   const named = await runConfigSubagents('on', { maxJob: '0.50' }, testCtx(dir));
   expect(named.humanLines?.[3]).toBe(
-    '  Cost     Up to $0.50 a job (your --max-job) · your daily budget applies',
+    '  Cost     Up to $0.50 a job (your --max-job) (was $0.70) · your daily budget applies',
   );
   // The status reads the cap again from the settings as they stand, with no terms.
   await writeFile(

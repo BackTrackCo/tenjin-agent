@@ -121,6 +121,21 @@ const toolChange = z.object({
 });
 
 /**
+ * A STABLE IDENTITY FOR AN IMAGE OR A DOCUMENT BLOCK, so a job counts each block it sent
+ * as text once, however many turns carry it again.
+ */
+export function omittedBlockKey(block: Record<string, unknown>): string {
+  const source = isRecord(block.source) ? block.source : {};
+  const identity =
+    typeof source.data === 'string'
+      ? `data:${createHash('sha256').update(source.data).digest('hex')}`
+      : typeof source.url === 'string'
+        ? `url:${source.url}`
+        : `source:${JSON.stringify(source)}`;
+  return `${String(block.type)}:${createHash('sha256').update(identity).digest('hex')}`;
+}
+
+/**
  * AN IMAGE OR A DOCUMENT BLOCK, IN A MESSAGE OR A TOOL RESULT, AS TEXT. The router's
  * Messages contract takes text only there and refused the whole request with
  * `invalid_model_request` (400): one image a tool returned, or a PDF a worker read, ended
@@ -153,6 +168,8 @@ export function workerMessages(
   raw: Record<string, unknown>,
   /** The output cap the job's router offers, when its offer names one. */
   outputCap?: number,
+  /** The job collects the image and document blocks it sends as text: one identity each. */
+  omitted?: Set<string>,
 ) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
   // THINKING IS ON FOR EVERY TURN OF THE WORKER, as the DeepSeek harness has it, whatever
@@ -231,7 +248,10 @@ export function workerMessages(
     return value
       .filter((b) => !isToolChange(b))
       .map((b) => {
-        if (isRecord(b) && (b.type === 'image' || b.type === 'document')) return omittedText(b);
+        if (isRecord(b) && (b.type === 'image' || b.type === 'document')) {
+          omitted?.add(omittedBlockKey(b));
+          return omittedText(b);
+        }
         if (
           !b ||
           typeof b !== 'object' ||

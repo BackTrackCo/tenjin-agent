@@ -1002,6 +1002,9 @@ it.each([
       // The job's cap, and the cap each call asked for (less when the ceiling ran short).
       expect(record.settings.outputCap).toBe(cap);
       expect(record.calls).toMatchObject([{ outputCap: cap }]);
+      // The record keeps what was SENT: thinking on, and the cap the bridge set.
+      expect(record.settings.thinking).toEqual(['enabled']);
+      expect(record.settings.maxOutputTokens).toBe(cap);
       // Compaction triggers where the DeepSeek harness's does for that cap, in the child's
       // process env and in its flag settings alike.
       expect(record.settings.compactWindow).toBe(window);
@@ -1690,6 +1693,35 @@ it('keeps the initialized worker input and its model and Exa bridge closed befor
   expect(transport.messages).toHaveBeenCalledOnce();
   expect(assigned).toHaveBeenCalledOnce();
   expect(query).toHaveBeenCalledOnce();
+});
+
+// A warm worker is built before its job is accepted, with no set of omitted blocks. The set
+// the accept brings is the one its requests must add to, or the handback cannot count them.
+it('counts the image and document blocks of a warm worker into the set its accept brings', async () => {
+  const transport = { messages: vi.fn(async () => ({ type: 'message', content: [] })) };
+  const png = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+  const bridgeBody = {
+    model: 'deepseek-flash',
+    messages: [{ role: 'user', content: [png, { type: 'text', text: 'what is this' }] }],
+    max_tokens: 32_000,
+  };
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    expect((await oneBridgeRequest(JSON.stringify(bridgeBody))).status).toBe(200);
+  });
+  let accept!: (value: EarlyWorkerAccept) => void;
+  const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+    accept = resolve;
+  });
+  const runOptions = {
+    ...options(),
+    transport: transport as unknown as ModelTransport,
+    early: { accept: accepted, onRelease: vi.fn() },
+  };
+  const run = runModelWorker(job, runOptions);
+  const omitted = new Set<string>();
+  accept({ ...runOptions, job, omitted });
+  await expect(run).resolves.toBe('done');
+  expect(omitted.size).toBe(1);
 });
 
 it.each(['readable', 'unscannable'] as const)(

@@ -97,6 +97,13 @@ async function errorCode(response: Response): Promise<{ code?: string }> {
   }
 }
 
+/** The most a job may charge: the job's own cap, or a lower ceiling the consent now holds. */
+function jobCap(current: { maxJobAtomic: bigint }, job: { capAtomic: string }): bigint {
+  return current.maxJobAtomic < BigInt(job.capAtomic)
+    ? current.maxJobAtomic
+    : BigInt(job.capAtomic);
+}
+
 /** The router's record says a call cost nothing: its voucher cancelled, or it failed unpaid. */
 function costNothing(server: { state: string; voucherState: string }): boolean {
   return (
@@ -660,10 +667,7 @@ export class ModelTransport {
     if (sentMessages && typeof asked === 'number' && asked > MODEL_OUTPUT_TOKENS) {
       const remaining = await modelLock(`${path}.lock`, async () => {
         const current = await consent();
-        const cap =
-          current.maxJobAtomic < BigInt(job.capAtomic)
-            ? current.maxJobAtomic
-            : BigInt(job.capAtomic);
+        const cap = jobCap(current, job);
         return cap - BigInt((await load()).charged);
       });
       const fits = fittingOutputTokens(Buffer.byteLength(wire), asked, remaining);
@@ -734,10 +738,7 @@ export class ModelTransport {
         const current = await consent();
         const state = await load();
         if (state.calls[key]) return state.calls[key];
-        const cap =
-          current.maxJobAtomic < BigInt(job.capAtomic)
-            ? current.maxJobAtomic
-            : BigInt(job.capAtomic);
+        const cap = jobCap(current, job);
         if (quote <= 0n || quote > cap - BigInt(state.charged))
           throw new ModelCallFailed('Model quote exceeds remaining job ceiling', {
             cause: 'budget',
@@ -850,10 +851,7 @@ export class ModelTransport {
           policy: async () => {
             const policy = await payerDeps.policy();
             const current = await consent();
-            const cap =
-              current.maxJobAtomic < BigInt(job.capAtomic)
-                ? current.maxJobAtomic
-                : BigInt(job.capAtomic);
+            const cap = jobCap(current, job);
             return {
               ...policy,
               maxAutoSpendAtomic: policy.maxAutoSpendAtomic < cap ? policy.maxAutoSpendAtomic : cap,
@@ -902,10 +900,7 @@ export class ModelTransport {
             // call included, is held against the cap as it stands now. Over it, nothing is
             // signed and the reservation is released.
             const current = await consent();
-            const cap =
-              current.maxJobAtomic < BigInt(job.capAtomic)
-                ? current.maxJobAtomic
-                : BigInt(job.capAtomic);
+            const cap = jobCap(current, job);
             if (BigInt((await load()).charged) > cap) throw (paid.overCap = new QuoteOverCap());
             // A QUOTE THE ROUTER NO LONGER HOLDS A PLACE FOR. A router that counts a call
             // at its quote serves the paid request that follows within 120 s whatever the
@@ -1154,8 +1149,7 @@ export class ModelTransport {
     await modelLock(`${path}.lock`, async () => {
       const current = await this.jobConsent(job);
       const state = await this.loadBudget(job, path);
-      const cap =
-        current.maxJobAtomic < BigInt(job.capAtomic) ? current.maxJobAtomic : BigInt(job.capAtomic);
+      const cap = jobCap(current, job);
       if (ceilingAtomic <= 0n || ceilingAtomic > cap - BigInt(state.charged))
         throw new ModelCallFailed('Tool price exceeds remaining job ceiling', { cause: 'budget' });
       state.calls[key] = call;
