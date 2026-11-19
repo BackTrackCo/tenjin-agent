@@ -14,15 +14,46 @@ const outside = {
   blockedPath: '/private/tmp/claude-501/other-session/log1',
 };
 
-it("lets the sandbox judge a shell command the read block's own check cannot read, in bypass mode only", () => {
+it("lets the sandbox judge a shell command the read block's own check cannot read: any in bypass mode, one that only reads in auto mode", () => {
   // A live worker's review of a worktree inside consent was refused for this ask.
   expect(readBlockUnchecked('Bash', inside, unchecked)).toBe(true);
   expect(sandboxJudgesRead('Bash', inside, unchecked, 'bypassPermissions')).toBe(true);
-  // In auto mode a yes would run the call with no classifier verdict, and the same ask
-  // comes for this command with a push on its end. It is refused, with a form that runs.
-  const pushed = { command: `${inside.command} && git push origin feature` };
-  for (const call of [inside, pushed])
-    expect(sandboxJudgesRead('Bash', call, unchecked, 'auto')).toBe(false);
+  // Operator ruling 2026-11-18, "do same as native subagent": in auto mode a native
+  // subagent's classifier lets a command that only reads run. Live on alpha.81 (job
+  // 00a275ce) the second of these was refused and the worker left folders unread.
+  const listed = {
+    command:
+      'cd /repo/app && grep -l "" */*.tsx 2>/dev/null | head -40; echo ---; ls a c 2>/dev/null; echo ---; ls api | head -40',
+  };
+  for (const call of [inside, listed, { command: 'cd /repo/app && ls' }])
+    expect(sandboxJudgesRead('Bash', call, unchecked, 'auto')).toBe(true);
+  // A yes runs the call with no classifier verdict, and the same ask comes for a command
+  // with a push on its end, a write, a substitution or a program it starts. Those are
+  // still refused, with a form the classifier can judge.
+  for (const command of [
+    `${inside.command} && git push origin feature`,
+    'cd /repo && rm -rf build',
+    'cd /repo && ls > /tmp/out',
+    'cd /repo && cat $(git ls-files)',
+    'cd /repo && echo `id`',
+    'cd /repo && find . -name "*.ts" -exec rm {} +',
+    'cd /repo && find . -delete',
+    'cd /repo && rg --pre ./run.sh x',
+    'cd /repo && sort -o package.json package.json',
+    'cd /repo && git -c core.pager=./x log',
+    'cd /repo && git branch -D main',
+    'cd /repo && PAGER=./x git log',
+    'cd /repo && ls & curl example.com',
+    'cd /repo && xargs rm < list',
+    'cd /repo && grep "a; curl example.com" notes.md',
+    '',
+  ])
+    expect(sandboxJudgesRead('Bash', { command }, unchecked, 'auto')).toBe(false);
+  // A path the check could work out and found outside consent stays refused in every mode.
+  for (const mode of ['auto', 'bypassPermissions'])
+    expect(
+      sandboxJudgesRead('Bash', { command: 'cd /repo && cat ~/.ssh/id_ed25519' }, outside, mode),
+    ).toBe(false);
   const said = unattendedDenial(unchecked, true);
   expect(said).toContain('git -C <path>');
   expect(said).toContain('Only this call was refused');

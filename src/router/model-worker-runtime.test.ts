@@ -2478,26 +2478,24 @@ it.each(['auto', 'bypassPermissions', 'default'] as const)(
     if (mode !== 'default') {
       // Auto and bypass: nothing may wait on a person dialog, so each ask is answered at once
       // and the person's own permission surface is never reached.
-      const ask = (context: Record<string, unknown>) =>
-        sent.canUseTool!(
-          'Bash',
-          {
-            command:
-              'cd /repo/.worktrees/b && git rev-parse HEAD && git status --short | head -20 && echo "---DIFF---" && git diff origin/main...HEAD --stat',
-          },
-          {
-            signal: new AbortController().signal,
-            toolUseID: 't',
-            requestId: 'r',
-            suggestions: [],
-            suppressAlwaysAllowRule: true,
-            ...context,
-          } as never,
-        );
+      const reads =
+        'cd /repo/.worktrees/b && git rev-parse HEAD && git status --short | head -20 && echo "---DIFF---" && git diff origin/main...HEAD --stat';
+      const ask = (context: Record<string, unknown>, command = reads) =>
+        sent.canUseTool!('Bash', { command }, {
+          signal: new AbortController().signal,
+          toolUseID: 't',
+          requestId: 'r',
+          suggestions: [],
+          suppressAlwaysAllowRule: true,
+          ...context,
+        } as never);
       // The read block's ask about a command whose paths it cannot work out, as Claude Code
-      // 2.1.326 sends it. Bypass judges no call, so the sandbox alone bounds the read. In
-      // auto mode a yes would run it with no classifier verdict: refused, with a form that runs.
-      const unchecked = await ask({ decisionReasonType: 'safetyCheck' });
+      // 2.1.326 sends it. This one only reads, so the sandbox alone bounds it in both modes,
+      // as a native subagent's classifier lets it run (operator ruling 2026-11-18).
+      expect(await ask({ decisionReasonType: 'safetyCheck' })).toMatchObject({ behavior: 'allow' });
+      // The same ask for a command that does more than read. Bypass judges no call. In auto
+      // mode a yes would run it with no classifier verdict: refused, with a form that runs.
+      const unchecked = await ask({ decisionReasonType: 'safetyCheck' }, `${reads} && git push`);
       expect(unchecked).toMatchObject({
         behavior: mode === 'bypassPermissions' ? 'allow' : 'deny',
       });
