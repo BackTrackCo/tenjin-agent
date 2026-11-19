@@ -32,6 +32,9 @@ const COMPACT_HEADROOM_TOKENS = 65_536;
  * reply cap - 65,536 headroom))`, with the reply cap of the job's own calls. 838,860 at
  * 65,536 (production today), 727,040 at 256,000. A fixed value leaves a reply that is
  * allowed to be longer without room: 786,432 and a 256,000 reply is 1,042,432 of 1,048,576.
+ * This is the WINDOW Claude Code reads from `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. It takes
+ * `min(its max output tokens, 20,000) + 13,000` off the window (read in 2.1.327), so compaction
+ * fires 33,000 tokens earlier than this value: about 805,860 and 694,040.
  */
 export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): number {
   return Math.floor(
