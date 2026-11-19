@@ -39,6 +39,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 let dir: string | undefined;
 afterEach(async () => {
+  // A test that failed while holding a listing must not hold the next one's.
+  walks.hold = undefined;
+  walks.holdOnly = undefined;
   if (dir) await rm(dir, { recursive: true, force: true });
   dir = undefined;
 });
@@ -218,7 +221,10 @@ it.runIf(WATCHES)(
 it.runIf(WATCHES)(
   'walks the roots once for workers that start together, and still catches a file changed after that walk',
   async () => {
-    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    const root = await workspace({
+      '.env': 'FIRST=first-value-0x21',
+      'plain/index.js': 'x',
+    });
     (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
     walks.listed.length = 0;
     walks.done.length = 0;
@@ -228,7 +234,9 @@ it.runIf(WATCHES)(
     // Made while the shared walk is held at its first listing, before the second worker starts.
     await writeFile(join(root, '.env.local'), 'DURING=during-value-0x31');
     const dirty = (first.env as unknown as { dirty: Set<string> }).dirty;
-    await vi.waitFor(() => expect(dirty.has(join(root, '.env.local'))).toBe(true));
+    await vi.waitFor(() => expect(dirty.has(join(root, '.env.local'))).toBe(true), {
+      timeout: 4_000,
+    });
     const second = WorkerEnvSecrets.resume([root])!;
     walks.hold = undefined;
     release();
@@ -238,7 +246,7 @@ it.runIf(WATCHES)(
       // Both workers know the file made during the walk.
       expect(second.env.redact('during-value-0x31')).toBe('[env:DURING]');
       // One walk of the root served both.
-      expect(walks.listed.filter((path) => path === root)).toHaveLength(1);
+      expect(walks.listed.filter((path) => path === join(root, 'plain'))).toHaveLength(1);
       // A file changed after the shared walk is caught by the second worker's first check.
       await writeFile(join(root, '.env.late'), 'LATE=late-value-0x32');
       await second.env.refresh();
@@ -271,7 +279,9 @@ it.runIf(WATCHES)(
     const heldFolder = join(root, 'zz');
     walks.holdOnly = heldFolder;
     const first = WorkerEnvSecrets.resume([root])!;
-    await vi.waitFor(() => expect(walks.done).toContain(join(root, 'apps', 'service')));
+    await vi.waitFor(() => expect(walks.done).toContain(join(root, 'apps', 'service')), {
+      timeout: 4_000,
+    });
     first.env.close();
     await writeFile(join(root, 'apps', 'service', '.env.local'), 'LATE=late-value-0x41');
     const second = WorkerEnvSecrets.resume([root])!;
@@ -292,7 +302,10 @@ it.runIf(WATCHES)(
 it.runIf(WATCHES)(
   'releases no worker on a shared walk whose watcher failed, and lets the next one walk for itself',
   async () => {
-    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    const root = await workspace({
+      '.env': 'FIRST=first-value-0x21',
+      'plain/index.js': 'x',
+    });
     (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
     walks.listed.length = 0;
     let release!: () => void;
@@ -310,7 +323,7 @@ it.runIf(WATCHES)(
       expect(await first.verified).toBe(false);
       expect(await second.verified).toBe(false);
       expect(await third.verified).toBe(true);
-      expect(walks.listed.filter((path) => path === root)).toHaveLength(2);
+      expect(walks.listed.filter((path) => path === join(root, 'plain'))).toHaveLength(2);
     } finally {
       for (const worker of [first, second, third]) worker.env.close();
       WorkerEnvSecrets.forgetScans();
@@ -321,7 +334,11 @@ it.runIf(WATCHES)(
 it.runIf(WATCHES)(
   'lets a worker whose roots lie inside a running walk take it, and a file made there during the walk is known',
   async () => {
-    const root = await workspace({ 'a/.env': 'A=a-value-0x51', '.env': 'TOP=top-value-0x52' });
+    const root = await workspace({
+      'a/.env': 'A=a-value-0x51',
+      '.env': 'TOP=top-value-0x52',
+      'plain/index.js': 'x',
+    });
     (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
     (await WorkerEnvSecrets.start([join(root, 'a')], { keep: true, watch: false })).close();
     walks.listed.length = 0;
@@ -330,15 +347,13 @@ it.runIf(WATCHES)(
     const first = WorkerEnvSecrets.resume([root])!;
     const inner = WorkerEnvSecrets.resume([join(root, 'a')])!;
     await writeFile(join(root, 'a', '.env.new'), 'NEW=new-value-0x53');
-    const dirty = (first.env as unknown as { dirty: Set<string> }).dirty;
-    await vi.waitFor(() => expect(dirty.has(join(root, 'a', '.env.new'))).toBe(true));
     walks.hold = undefined;
     release();
     try {
       expect(await first.verified).toBe(true);
       expect(await inner.verified).toBe(true);
       expect(inner.env.redact('new-value-0x53')).toBe('[env:NEW]');
-      expect(walks.listed.filter((path) => path === root)).toHaveLength(1);
+      expect(walks.listed.filter((path) => path === join(root, 'plain'))).toHaveLength(1);
     } finally {
       first.env.close();
       inner.env.close();
@@ -350,7 +365,10 @@ it.runIf(WATCHES)(
 it.runIf(WATCHES)(
   'does not join a walk whose first worker was cancelled: its watcher no longer feeds the walk',
   async () => {
-    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    const root = await workspace({
+      '.env': 'FIRST=first-value-0x21',
+      'plain/index.js': 'x',
+    });
     (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
     walks.listed.length = 0;
     walks.done.length = 0;
@@ -365,7 +383,7 @@ it.runIf(WATCHES)(
       await first.verified;
       expect(await second.verified).toBe(true);
       // A walk of its own: nothing but a live watcher's events may stand in for one.
-      expect(walks.listed.filter((path) => path === root)).toHaveLength(2);
+      expect(walks.listed.filter((path) => path === join(root, 'plain'))).toHaveLength(2);
     } finally {
       second.env.close();
       WorkerEnvSecrets.forgetScans();

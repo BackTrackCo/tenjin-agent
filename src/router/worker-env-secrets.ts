@@ -488,9 +488,11 @@ export class WorkerEnvSecrets {
       this.remember(value, name, current.derived.has(value));
     for (const [path, signature] of current.files) if (mine(path)) this.files.set(path, signature);
     for (const directory of current.hot) if (mine(directory)) this.hot.add(directory);
-    const changed = [...scan.events].filter(mine);
-    await Promise.all(changed.map((path) => this.load(path).catch(() => undefined)));
-    return !changed.some((path) => this.uncovered.has(path));
+    // What the first worker's watcher saw since the walk began, and a listing of every folder
+    // that held an env file: the OS may report a change as the folder's alone.
+    for (const path of scan.events) if (mine(path)) this.dirty.add(path);
+    await this.refresh();
+    return this.uncovered.size === 0;
   }
 
   /** How many distinct strings are replaced; never the strings. */
