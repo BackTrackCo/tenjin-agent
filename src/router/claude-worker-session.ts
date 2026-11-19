@@ -1,9 +1,10 @@
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { codexHome } from '../lib/codex-home';
+import { markJobFolder, removeJobFolder } from './job-folders';
 import {
   CLAUDE_WORKER_READABLE,
   CLAUDE_WORKER_SETTINGS,
@@ -82,9 +83,12 @@ export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.e
   // Under /tmp, not the macOS per-user temp folder: Claude Code makes sockets under it,
   // and falls back to the shared root when the path is too long for one.
   const directory = await realpath(await mkdtemp(`/tmp/${JOB_TEMP_PREFIX}`));
+  markJobFolder(directory);
   // Claude Code names its temp root so (2.1.326) and checks that it is private.
   const scratchpad = join(directory, `claude-${uid}`);
-  const close = () => rm(directory, { recursive: true, force: true });
+  const close = async () => {
+    await removeJobFolder(directory);
+  };
   await mkdir(scratchpad, { mode: 0o700 }).catch(async (error: unknown) => {
     await close();
     throw error;

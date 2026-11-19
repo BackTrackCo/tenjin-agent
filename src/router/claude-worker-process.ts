@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Settings, SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core';
+import { markJobFolder, removeJobFolder } from './job-folders';
 
 export type WindowsWorkerProcess = {
   launcherPath: string;
@@ -22,7 +22,9 @@ export type WindowsWorkerProcess = {
  * process table and which the SDK's own debug log (`DEBUG_CLAUDE_AGENT_SDK`) records with
  * every spawn. So they are written first, by {@link settingsFile}, to a file of its own
  * folder that only this user can open and that is outside every working directory, and
- * the SDK is given only its path. The folder is removed once every child has closed.
+ * the SDK is given only its path. The folder is removed once every child has closed, and a
+ * failed delete never fails the job ({@link removeJobFolder}); a kill of this process leaves
+ * it to the next `tenjin mcp`'s sweep ({@link markJobFolder}).
  */
 export function claudeWorkerProcess(
   o: {
@@ -121,13 +123,18 @@ export function claudeWorkerProcess(
       // Named under `tenjin-worker-`, which every worker's sandbox denies (`WorkerGithub.others`).
       const folder = mkdtempSync(join(tmpdir(), 'tenjin-worker-settings-'));
       folders.push(folder);
+      markJobFolder(folder);
       try {
         const file = join(folder, 'settings.json');
         writeFileSync(file, JSON.stringify(settings), { mode: 0o600, flag: 'wx' });
         return file;
       } catch (error) {
         folders.splice(folders.indexOf(folder), 1);
-        rmSync(folder, { recursive: true, force: true });
+        try {
+          rmSync(folder, { recursive: true, force: true });
+        } catch {
+          // Left to the sweep; the write's own error is the one that matters.
+        }
         throw error;
       }
     },
@@ -144,6 +151,7 @@ export function claudeWorkerProcess(
       const cancelFolder = windows
         ? mkdtempSync(join(tmpdir(), 'tenjin-worker-cancel-'))
         : undefined;
+      if (cancelFolder) markJobFolder(cancelFolder);
       const cancelFile = cancelFolder ? join(cancelFolder, 'stop') : undefined;
       let child: ChildProcessWithoutNullStreams;
       try {
@@ -185,7 +193,13 @@ export function claudeWorkerProcess(
                 ...(process.platform === 'win32' ? {} : { detached: true }),
               });
       } catch (error) {
-        if (cancelFolder) rmSync(cancelFolder, { recursive: true, force: true });
+        if (cancelFolder) {
+          try {
+            rmSync(cancelFolder, { recursive: true, force: true });
+          } catch {
+            // Left to the sweep.
+          }
+        }
         throw error;
       }
       if (cancelFile) {
@@ -204,8 +218,7 @@ export function claudeWorkerProcess(
         if (options.signal.aborted) stop();
         child.once('close', () => {
           options.signal.removeEventListener('abort', stop);
-          if (cancelFolder)
-            void rm(cancelFolder, { recursive: true, force: true }).catch(() => undefined);
+          if (cancelFolder) void removeJobFolder(cancelFolder);
         });
       }
       if (o.onStartupMark) tapStartupMarks(child, o.onStartupMark);
@@ -240,10 +253,10 @@ export function claudeWorkerProcess(
       try {
         return await drainChildren(now);
       } finally {
-        // Every child has closed, or was killed: nothing reads its settings any more.
-        await Promise.all(
-          folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })),
-        );
+        // Every child has closed, or was killed: nothing reads its settings any more. A
+        // delete that fails is tried again and then left to the sweep: it never changes how
+        // the drain, or the job, ended.
+        await Promise.all(folders.splice(0).map((folder) => removeJobFolder(folder)));
       }
     },
   };

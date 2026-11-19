@@ -1,3 +1,4 @@
+import { sweepJobFolders } from './job-folders';
 import { isModelWorkerProcess } from './model-worker-context';
 import { registerModelTool, stopModelWorkers } from './model-mcp';
 import { ModelTransport } from './model-transport';
@@ -908,6 +909,9 @@ function toolResult(result: RequestToolResult): CallToolResult {
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
   const { server, payer } = await createRouterMcp({ ...opts, topUpAtStart: true });
+  // What a crash or a kill of an earlier `tenjin mcp` left of its jobs' temp folders, in
+  // the background: a folder of a job still running in another process is never touched.
+  if (!isModelWorkerProcess(opts.env)) void sweepJobFolders();
   await server.connect(new StdioServerTransport());
   let ended!: () => void;
   const end = new Promise<void>((resolve) => (ended = resolve));

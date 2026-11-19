@@ -1,12 +1,17 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { claudeWorkerProcess } from './claude-worker-process';
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
 class Child extends EventEmitter {
   stdin = new PassThrough();
   stdout = new PassThrough();
@@ -189,4 +194,38 @@ it('leaves the child environment as given when no one asks for checkpoints', () 
   expect(vi.mocked(spawn).mock.calls[0]![2]?.env).not.toHaveProperty(
     'CLAUDE_CODE_SDK_READS_STARTUP_MARKS',
   );
+});
+
+// Failure caught: a delete that failed (a dying descendant still writing into the folder)
+// rejected the drain, which the job reports as its own failure, and left the settings
+// folder, with the job's bridge token and GitHub token in it, in the temp folder.
+it('removes the settings folder after a failed delete, and a delete that keeps failing changes nothing', async () => {
+  const ENOTEMPTY = Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY' });
+  const actual = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rm;
+  const drained = async (failures: number) => {
+    const child = new Child();
+    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    const process = claudeWorkerProcess();
+    const file = process.settingsFile({ env: { GH_TOKEN: 'fixture' } });
+    process.spawn({ ...options(), args: ['--settings', file] });
+    let left = failures;
+    vi.mocked(rm).mockImplementation(async (...args) => {
+      if (left-- > 0) throw ENOTEMPTY;
+      return actual(...args);
+    });
+    child.exitCode = 0;
+    child.emit('close', 0, null);
+    const outcome = process.drain();
+    await vi.advanceTimersByTimeAsync(5_000);
+    return { outcome: await outcome, folder: dirname(file) };
+  };
+  const retried = await drained(2);
+  expect(retried.outcome).toEqual({ successful: true });
+  expect(existsSync(retried.folder)).toBe(false);
+  const stuck = await drained(100);
+  expect(stuck.outcome).toEqual({ successful: true });
+  // Left for the next `tenjin mcp`'s sweep, which finds its marker.
+  expect(existsSync(stuck.folder)).toBe(true);
+  expect(existsSync(`${stuck.folder}/tenjin-owner.json`)).toBe(true);
+  rmSync(stuck.folder, { recursive: true, force: true });
 });

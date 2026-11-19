@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -151,4 +151,15 @@ it("names every job's GitHub folder by each spelling of the temp folder, for the
   } finally {
     await other.close();
   }
+});
+
+// Failure caught: a job's GitHub folder that a kill of `tenjin mcp` left behind could not
+// be told from one a live job of another process still uses, so it stayed for good.
+it('names the process that made the job folder, and removes the folder on close', async () => {
+  prepared = await prepareWorkerGithub({}, { run: runner() });
+  const marker = JSON.parse(await readFile(join(prepared.directory, 'tenjin-owner.json'), 'utf8'));
+  expect(marker.pid).toBe(process.pid);
+  const { directory } = prepared;
+  await prepared.close();
+  await expect(stat(directory)).rejects.toThrow();
 });

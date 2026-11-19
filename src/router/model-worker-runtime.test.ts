@@ -16,6 +16,7 @@ import { PassThrough } from 'node:stream';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -124,6 +125,8 @@ vi.mock('node:fs/promises', async (original) => {
   return {
     ...actual,
     realpath: vi.fn(async (path: unknown) => String(path)),
+    // Real, unless a test makes a delete fail (`failDeletes`).
+    rm: vi.fn(actual.rm),
     // Fixture paths such as /repo are directories; a real temporary folder is itself.
     stat: async (path: unknown) =>
       String(path).startsWith(tmpdir())
@@ -3640,4 +3643,140 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
       additionalContext: expect.stringContaining('Read through Exa.'),
     },
   });
+});
+
+/** A native child that closes when told to, and a query that spawns it and then goes `end`. */
+function startedWorker(end: 'hangs' | 'fails') {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 4242,
+    exitCode: null as number | null,
+    signalCode: null as string | null,
+    killed: false,
+    kill: vi.fn((signal?: string) => {
+      child.signalCode = signal ?? 'SIGTERM';
+      queueMicrotask(() => child.emit('close', null, child.signalCode));
+      return true;
+    }),
+  });
+  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+  let queried!: () => void;
+  const spawned = new Promise<void>((resolve) => {
+    queried = resolve;
+  });
+  vi.mocked(query).mockImplementation((call) => {
+    queried();
+    call.options?.spawnClaudeCodeProcess?.({
+      command: '/fixture/claude',
+      args: ['--settings', String(call.options.settings)],
+      cwd: '/repo',
+      env: {},
+      signal: new AbortController().signal,
+    });
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const message of call.prompt) native.promptMessages.push(message);
+        yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+        if (end === 'fails') throw new Error('Claude Code failed');
+        await new Promise<void>((resolve) =>
+          call.options?.abortController?.signal.addEventListener('abort', () => resolve()),
+        );
+      },
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+  return { spawned };
+}
+
+/** The folders of the settings files the run so far wrote: their paths, as the run named them. */
+const settingsFolders = () => [...native.settings.keys()].map((path) => dirname(path));
+
+/** Makes the first `count` deletes of a settings folder fail, as a dying descendant's writes do. */
+function failDeletes(count: number) {
+  const actual = vi.mocked(rm).getMockImplementation()!;
+  let left = count;
+  vi.mocked(rm).mockImplementation(async (path, ...rest) => {
+    if (String(path).includes('tenjin-worker-settings-') && left-- > 0)
+      throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY' });
+    return actual(path, ...rest);
+  });
+}
+
+/** Drives a run on fake timers to its end. */
+async function settle<T>(run: Promise<T>) {
+  let done = false;
+  void run.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  while (!done) {
+    await vi.advanceTimersByTimeAsync(250);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+afterEach(async () => {
+  vi.useRealTimers();
+  // The real rm again, and no folder a test made is left in the temp folder.
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(rm).mockImplementation(actual.rm);
+  for (const folder of settingsFolders()) await actual.rm(folder, { recursive: true, force: true });
+  native.settings.clear();
+});
+
+// Failure caught: a job that ended with its child still dying (a 40-minute worker has
+// commands running) met a delete that failed once, and its settings folder, which holds the
+// bridge token and the GitHub token, stayed in the temp folder after the job.
+it.each(['the wall time', 'a cancel', 'a worker error'] as const)(
+  'leaves no settings folder when a job ends by %s, also when a first delete fails',
+  async (ending) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { spawned } = startedWorker(ending === 'a worker error' ? 'fails' : 'hangs');
+    failDeletes(1);
+    const controller = new AbortController();
+    const run = runModelWorker(job, { ...options(), signal: controller.signal }).catch(
+      (error: unknown) => error,
+    );
+    await spawned;
+    if (ending === 'the wall time') await vi.advanceTimersByTimeAsync(40 * 60 * 1000 + 1);
+    if (ending === 'a cancel') controller.abort(new Error('Esc'));
+    await settle(run);
+    if (ending === 'the wall time')
+      expect(workerStop(await run)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
+    expect(settingsFolders()).toHaveLength(1);
+    for (const folder of settingsFolders()) expect(existsSync(folder), folder).toBe(false);
+  },
+);
+
+// Failure caught: a delete that failed after a good job turned its result into an error.
+it('returns a finished job as it is when removing its settings folder keeps failing', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  sdkResult({ subtype: 'success', result: 'done' });
+  failDeletes(1000);
+  const run = runModelWorker(job, options());
+  await settle(run);
+  await expect(run).resolves.toBe('done');
+  expect(settingsFolders()).toHaveLength(1);
+});
+
+// Failure caught: a start that failed before the worker's own cleanup (here the env scan)
+// left the job's GitHub folder and its temp folder behind.
+it("removes the job's GitHub and temp folders when its start fails before the worker", async () => {
+  const close = vi.fn(async () => undefined);
+  vi.mocked(prepareClaudeWorkerTemp).mockResolvedValueOnce({
+    directory: '/tmp/tenjin-job-fixture',
+    scratchpad: '/tmp/tenjin-job-fixture/claude-501',
+    shared: [],
+    others: [],
+    close,
+  });
+  vi.spyOn(WorkerEnvSecrets, 'start').mockRejectedValueOnce(new Error('env scan failed'));
+  await expect(runModelWorker(job, options())).rejects.toThrow('env scan failed');
+  expect(native.githubClose).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+  expect(query).not.toHaveBeenCalled();
 });

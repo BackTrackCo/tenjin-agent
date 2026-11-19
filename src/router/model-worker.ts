@@ -494,8 +494,22 @@ async function runQualifiedWorker(
           return { error };
         }
       })();
-  const envFiles =
-    resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
+  // The job's GitHub and temp folders exist from here: a start that fails before the
+  // `try` that follows removes them, as every later end does.
+  const removeJobFolders = async () => {
+    await github?.close().catch(() => undefined);
+    await temp?.close().catch(() => undefined);
+  };
+  let envFiles: Awaited<ReturnType<typeof WorkerEnvSecrets.start>>;
+  try {
+    envFiles =
+      resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
+  } catch (error) {
+    options.signal.removeEventListener('abort', stopPrompt);
+    promptStop.abort(error);
+    await removeJobFolders();
+    throw error;
+  }
   startTimes.envReady = Date.now();
   const envVerified = resumedEnv?.verified ?? Promise.resolve(true);
   void resumedEnv?.verified.then(() => {
@@ -546,8 +560,7 @@ async function runQualifiedWorker(
     options.signal.removeEventListener('abort', stopPrompt);
     promptStop.abort(error);
     envFiles.close();
-    await github?.close().catch(() => undefined);
-    await temp?.close().catch(() => undefined);
+    await removeJobFolders();
     throw error;
   }
   const controller = new AbortController();
@@ -1508,8 +1521,7 @@ async function runQualifiedWorker(
     closeFailure = await processClosed;
     diagnostics.mark('childClosed');
     if (released) await diagnostics.write(options.dataDir, job.id);
-    await github?.close().catch(() => undefined);
-    await temp?.close().catch(() => undefined);
+    await removeJobFolders();
     // Last look, so the result and a stopped worker's partial lose a late value too.
     await refreshEnv().catch(() => undefined);
     envFiles.close();

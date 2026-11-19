@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { markJobFolder, removeJobFolder } from './job-folders';
 
 /** Also the start of every other per-job folder name in the temp folder (`WorkerGithub.others`). */
 const GITHUB_PREFIX = 'tenjin-worker-';
@@ -155,6 +156,7 @@ export async function prepareWorkerGithub(
 ): Promise<WorkerGithub> {
   const run = options.run ?? exec;
   const directory = await mkdtemp(join(tmpdir(), GITHUB_PREFIX));
+  markJobFolder(directory);
   try {
     const others = [...new Set([tmpdir(), await realpath(tmpdir())])].map((base) =>
       join(base, `${GITHUB_PREFIX}*`),
@@ -185,10 +187,12 @@ export async function prepareWorkerGithub(
       },
       secrets: [...new Set([...(token ? [token] : []), ...workerTokenValues(parent)])],
       authenticated: token !== null,
-      close: () => rm(directory, { recursive: true, force: true }),
+      close: async () => {
+        await removeJobFolder(directory);
+      },
     };
   } catch (error) {
-    await rm(directory, { recursive: true, force: true });
+    await removeJobFolder(directory);
     throw error;
   }
 }
