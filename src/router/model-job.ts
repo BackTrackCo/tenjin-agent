@@ -61,10 +61,25 @@ export const STRANDED_HANDBACK = {
     'This worker stopped when its session or Tenjin process ended, as a native subagent does. It cannot be continued. If the work is still needed, start a fresh assignment with the needed context.',
 } as const;
 
-/** Removes every model record file not written for {@link MODEL_RECORD_TTL_MS}. Never throws. */
+/**
+ * Removes every model record file not written for {@link MODEL_RECORD_TTL_MS}, EXCEPT the files
+ * of a job that is still live: a job has no wall time, so one that waits for a permission
+ * answer for days has an old record that its run still needs (its budget file holds what it
+ * has spent). A live job is a record still `running` or `cancelling` (the caller ends the
+ * records of dead processes first, see `strand`), and every file named for its id is kept.
+ * Age alone never decides for such a job. Never throws.
+ */
 export async function sweepModelRecords(dataDir: string, now = Date.now()): Promise<void> {
-  const old = async (_name: string, path: string) =>
-    now - (await lstat(path)).mtimeMs > MODEL_RECORD_TTL_MS;
+  const live = new Set(
+    (await new ModelJobStore(dataDir).unfinished().catch(() => [] as ModelJob[])).map(
+      (job) => job.id,
+    ),
+  );
+  const old = async (name: string, path: string) => {
+    const id = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(name)?.[1];
+    if (id && live.has(id.toLowerCase())) return false;
+    return now - (await lstat(path)).mtimeMs > MODEL_RECORD_TTL_MS;
+  };
   for (const store of ['model-jobs', 'model-conversations'])
     await sweep(join(dataDir, store), old, { limit: 50_000 });
 }

@@ -334,6 +334,42 @@ it('lists what was left running across sessions, and nothing else', async () => 
   expect((await store.owned(offered.id, 'other'))?.state).toBe('offered');
 });
 
+// A job has no wall time: one that waits for an answer for over 7 days still needs its budget
+// file, and age alone never removes the files of a job that is still running.
+it('keeps every file of a job that is still running, however old, and removes them once it has ended', async () => {
+  const { store, job } = await heldAgentCall();
+  await store.accept(job.id, 'root');
+  const files = [
+    join(dir, 'model-jobs', `${job.id}.budget.json`),
+    join(dir, 'model-jobs', `${job.id}-abc.result.json`),
+  ];
+  for (const path of files) await writeFile(path, '{}');
+  const old = new Date(Date.now() - 8 * 24 * 3600_000);
+  for (const path of [...files, join(dir, 'model-jobs', `${job.id}.json`)])
+    await utimes(path, old, old);
+  await sweepModelRecords(dir);
+  for (const path of files)
+    expect(
+      await stat(path).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(true);
+  expect((await store.owned(job.id, 'root'))?.state).toBe('running');
+  // Ended by its gone process: the age rule applies again.
+  await store.strand(job.id, { isAlive: () => false });
+  for (const path of [...files, join(dir, 'model-jobs', `${job.id}.json`)])
+    await utimes(path, old, old);
+  await sweepModelRecords(dir);
+  for (const path of files)
+    expect(
+      await stat(path).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+});
+
 it('removes a record 7 days after its last write and keeps one written a moment later', async () => {
   const { store, job } = await heldAgentCall();
   await mkdir(join(dir, 'model-conversations'));

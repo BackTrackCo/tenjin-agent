@@ -227,8 +227,9 @@ export function registerModelTool(
   const repaired = isModelWorkerProcess()
     ? Promise.resolve()
     : (async () => {
-        await sweepModelRecords(options.dataDir);
+        // Records of dead processes end first, so the sweep keeps only a live job's files.
         for (const job of await jobs.unfinished()) await strand(job).catch(() => null);
+        await sweepModelRecords(options.dataDir);
       })().catch(() => undefined);
   const refundRecovery = new AbortController();
   const refundsRecovered =
