@@ -6,7 +6,7 @@ import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
-import { workerStop } from './model-worker-control';
+import { ModelWorkerStopped } from './model-worker-control';
 vi.mock('./codex-native-worker', () => ({
   qualifyNativeCodexWorker: vi.fn(),
   runNativeCodexWorker: vi.fn(),
@@ -132,7 +132,7 @@ it('does not start a native or SDK worker after cancellation', async () => {
   expect(query).not.toHaveBeenCalled();
 });
 
-it('applies the shared wall guard to an accepted native Codex worker', async () => {
+it('lets an accepted native Codex worker run past the old 40-minute wall, and a cancel still stops it', async () => {
   vi.useFakeTimers();
   let nativeSignal: AbortSignal | undefined;
   vi.mocked(runNativeCodexWorker).mockImplementation(async (_job, options) => {
@@ -142,18 +142,20 @@ it('applies the shared wall guard to an accepted native Codex worker', async () 
     );
     throw options.signal.reason;
   });
+  const controller = new AbortController();
   const run = runModelWorker({ id: 'owned', root: '/repo' } as ModelJob, {
     dataDir: '/data',
     transport: {} as ModelTransport,
-    signal: new AbortController().signal,
+    signal: controller.signal,
     codexPolicy: policy,
     permission: vi.fn(),
   });
   const outcome = run.catch((error: unknown) => error);
-  await vi.advanceTimersByTimeAsync(39 * 60 * 1000);
+  await vi.advanceTimersByTimeAsync(41 * 60 * 1000);
   expect(nativeSignal?.aborted).toBe(false);
-  await vi.advanceTimersByTimeAsync(60 * 1000);
-  expect(workerStop(await outcome)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
+  const stop = new ModelWorkerStopped({ kind: 'execution_failure', reason: 'worker_execution' });
+  controller.abort(stop);
+  expect(await outcome).toBe(stop);
   expect(nativeSignal?.aborted).toBe(true);
   expect(vi.getTimerCount()).toBe(0);
 });

@@ -199,7 +199,7 @@ it('touches the marker while the owner runs, and stops once the folder is remove
   }
 });
 
-it('treats a folder with no marker as stale only when older than any job and named by no process', async () => {
+it('treats a folder with no marker as stale only when unchanged for hours and named by no process', async () => {
   // The folders an older build left carry no marker.
   const old = JOB_FOLDER_STALE_MS + HOUR;
   const left = await folder('tenjin-worker-settings-Old001', { ageMs: old });

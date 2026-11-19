@@ -2436,7 +2436,6 @@ it.each([
   ['agent_stopped', "the person stops the worker's agent"],
   ['host_aborted', 'the host ends the accept call'],
   ['session_ended', 'the session ends'],
-  ['time_limit', 'the wall limit passes'],
 ] as const)('records %s as what ended a job when %s', async (endedBy, _when) => {
   // A live job once read `cancelled` with nothing to say who or what had ended it.
   const f = await ownedClaudeFixture();
@@ -2452,8 +2451,6 @@ it.each([
           once: true,
         });
         started();
-        if (endedBy === 'time_limit')
-          stopped(new ModelWorkerStopped({ kind: 'harness_limit', reason: 'wall_time' }));
       }),
   );
   const host = new AbortController();
@@ -2477,7 +2474,7 @@ it.each([
   const record = await f.store.owned(f.job.id, 'root');
   expect(JSON.parse(record!.result!)).toMatchObject({
     endedBy,
-    status: endedBy === 'time_limit' ? 'stopped' : 'cancelled',
+    status: 'cancelled',
   });
   // A later read from a process with no live view of the job draws the same end.
   await f.restart();

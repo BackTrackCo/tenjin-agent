@@ -5,7 +5,6 @@ import { utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pidAlive } from '../lib/lock';
-import { WORKER_WALL_MS } from './model-worker-control';
 
 /**
  * THE FOLDERS A DEEPSEEK JOB LEAVES ON DISK, and how they go.
@@ -17,7 +16,7 @@ import { WORKER_WALL_MS } from './model-worker-control';
  * - `/tmp/tenjin-job-*`: the job's commands' output and its scratchpad (`claude-worker-session`).
  *
  * Each job removes its own once its child has exited ({@link removeJobFolder}), also when its
- * end is an error, a cancel or the wall time. A crash or a kill of `tenjin mcp` cannot run
+ * end is an error or a cancel. A crash or a kill of `tenjin mcp` cannot run
  * that, so each folder carries {@link JOB_FOLDER_MARKER} (the process that made it) and
  * `tenjin mcp` sweeps stale ones at start ({@link sweepJobFolders}).
  */
@@ -27,14 +26,18 @@ export const JOB_FOLDER_MARKER = 'tenjin-owner.json';
 const JOB_FOLDER_NAME =
   /^(?:tenjin-worker-settings-|tenjin-worker-cancel-|tenjin-worker-|tenjin-job-)[A-Za-z0-9]{6}$/;
 
-/** No job is still going this long after it started: the wall limit, then a long margin. */
-export const JOB_FOLDER_STALE_MS = WORKER_WALL_MS + 15 * 60_000;
 /**
  * A folder whose owner looks gone is left this long after the owner's last sign of life (its
  * marker is touched every {@link HEARTBEAT_MS} while the job runs). A late sweep costs
  * nothing; a wrong delete loses a running job's files and the money paid for it.
  */
 const OWNER_GONE_FLOOR_MS = 2 * 60 * 60_000;
+/**
+ * A folder with no marker (an older build made it) has no heartbeat to read, and a job has no
+ * wall: it goes only when it has not changed for as long as an owner's marker may be quiet, and
+ * no process names it.
+ */
+export const JOB_FOLDER_STALE_MS = OWNER_GONE_FLOOR_MS;
 /**
  * A process that holds the owner's pid counts as another one only if it started this long
  * after the owner's last sign of life: no clock change, time zone or rounding makes that
@@ -175,7 +178,7 @@ export type SweepOptions = {
   directories?: readonly string[];
   now?: number;
   facts?: ProcessFacts;
-  /** The longest a job can live, which a folder with no live owner must exceed. */
+  /** How long a marker-less folder must be unchanged. Default {@link JOB_FOLDER_STALE_MS}. */
   staleMs?: number;
   /** When a folder was last changed. Default: the newest of its birth, modification and change times. */
   changedAt?: (stat: Stats) => number;
@@ -203,7 +206,7 @@ async function readMarker(folder: string): Promise<Marker | undefined> {
  * the pid started more than ten minutes after that last touch. Every doubt reads as alive: a
  * start time that cannot be read, is off by an hour, or lies in an ambiguous hour never
  * leads to a delete (`ps` is read in UTC besides). A folder with no marker (an older build
- * made it) is stale when it is older than any job can be and no process names it on its
+ * made it) is stale when it has not changed for {@link JOB_FOLDER_STALE_MS} and no process names it on its
  * command line or in its environment; where the process list cannot be read, it stays.
  * A folder of this process is never removed, so a job of another `tenjin mcp` stays untouched.
  */

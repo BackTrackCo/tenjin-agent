@@ -1186,7 +1186,6 @@ for (const [endedBy, word, status] of [
   ['parent_cancel', 'Cancelled by the parent', 'cancelled'],
   ['host_aborted', 'Interrupted', 'cancelled'],
   ['session_ended', 'Session ended', 'cancelled'],
-  ['time_limit', 'Time limit reached', 'unknown'],
   ['budget', 'Budget reached', 'stopped'],
   ['model_call_failed', 'Model call failed', 'stopped'],
   ['model_call_timeout', 'Model call timed out', 'stopped'],
@@ -2608,30 +2607,6 @@ test('a worker moved to the background ends when its job does, with the job’s 
     'DeepSeek "Read selected source" finished · Done (89 tool uses · 215.8k tokens · 14m 42s · $0.226437)',
   );
 });
-
-// Forty-five minutes of one-second ticks: longer than the kit's default time for a test.
-test(
-  'a row that cannot learn how its job ended says so at the job’s limit, never as a stop or with a time past its end',
-  { timeoutMs: 120_000 },
-  async ($, on) => {
-    const f = setup($, on);
-    await acceptMoved($, f);
-    f.state.toolUses = 89;
-    f.state.tokens = 215_822;
-    f.state.actualAtomic = '226437';
-    await f.clock.advance(763_000);
-    // The job ends, and every read the row makes is refused.
-    f.state.liveFile = false;
-    f.state.readsRefused = true;
-    await f.clock.advance(45 * 60_000 - 883_000 + 2000);
-    await f.clock.settle();
-    const [line, color] = await acceptRow($, 'parent_accept', OFFER, MOVED);
-    expect(line).toBe(
-      '⏺DeepSeek(Read selected source)  ⎿  Outcome not shown here (89 tool uses · 215.8k tokens · $0.226437 so far)',
-    );
-    expect(color).toBeUndefined();
-  },
-);
 
 test('a row drawn after a resume, with no record and no live view, follows the running job and ends with it', async ($, on) => {
   const f = setup($, on);

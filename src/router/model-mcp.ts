@@ -19,7 +19,7 @@ import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { WORKER_ENDS, WORKER_WALL_MS, workerEnd, workerStop } from './model-worker-control';
+import { WORKER_ENDS, workerEnd, workerStop } from './model-worker-control';
 import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, nativeBackground, ownedModelReference } from './model-continuation';
@@ -100,6 +100,9 @@ const jobWindow = (job: Pick<ModelJob, 'sessionId' | 'id'>) =>
 
 /** A held Agent call that asked to run in the background: its worker does. */
 const backgroundJob = (job: Pick<ModelJob, 'native'>) => nativeBackground(job.native) === true;
+/** How long a permission question waits for the person: as long as an elicitation can wait (2^31 - 1 ms), with no job wall. */
+const PROMPT_WAIT_MS = 2_147_483_647;
+
 /** What the parent reads when a background worker has started, as a native background agent's launch reads. */
 const BACKGROUND_STARTED =
   'The DeepSeek worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.';
@@ -1068,7 +1071,7 @@ export function registerModelTool(
                       workerPermissionForm(tool, input, ask, {
                         jobChoice: options.harness === 'claude',
                       }),
-                      { signal, timeout: Math.max(1, started + WORKER_WALL_MS - Date.now()) },
+                      { signal, timeout: PROMPT_WAIT_MS },
                     )
                     .then(workerPermissionAnswer, () => false);
                 },

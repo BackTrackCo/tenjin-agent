@@ -119,7 +119,6 @@ import {
   modelCallStop,
   withModelRetry,
   ModelWorkerStopped,
-  withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
   workerStop,
@@ -250,7 +249,7 @@ export async function runModelWorker(
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
-    /** Tests only: a start-up window. A job has none; its start is bounded by the wall time and by cancel. */
+    /** Tests only: a start-up window. A job has none; a cancel bounds its start. */
     startupMs?: number;
     /** Tests only: the wait before a model call is tried again. */
     retryWait?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -259,7 +258,7 @@ export async function runModelWorker(
     /**
      * A worker started at offer time: it starts its Claude Code and brings it to ready,
      * then waits for `accept` before it sends the assignment. Until then no request leaves
-     * it, its wall time has not begun, and nothing it needs from the accept is known.
+     * it, and nothing it needs from the accept is known.
      */
     early?: EarlyWorkerInput;
     /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
@@ -330,7 +329,22 @@ export async function runModelWorker(
       throw new Error('Owned Claude workspace scope changed or is unavailable');
     return runQualifiedWorker(job, current, binary, options.early);
   };
-  return withWorkerDeadline(options.signal, run, options.early?.accept);
+  // NO WALL TIME, as a native subagent has none: the job runs until it completes, reaches its
+  // dollar cap or the daily budget, is cancelled, or its session ends. A stop the caller's
+  // signal carries is what the job reports.
+  options.signal.throwIfAborted();
+  try {
+    const result = await run(options.signal);
+    options.signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    if (
+      options.signal.reason instanceof ModelWorkerStopped &&
+      workerStop(error)?.kind !== 'not_started'
+    )
+      throw options.signal.reason;
+    throw error;
+  }
 }
 
 async function runQualifiedWorker(
@@ -609,9 +623,8 @@ async function runQualifiedWorker(
   const denyInitialization = () => initialized(false);
   controller.signal.addEventListener('abort', denyInitialization, { once: true });
   // No start-up window, as for a native subagent: a loaded machine starts Claude Code
-  // slowly, and a missed start leaves the routing fee paid. The job's wall time and a
-  // cancel bound the start.
-  let started = false;
+  // slowly, and a missed start leaves the routing fee paid. A cancel bounds the
+  // start.
   const initTimer =
     options.startupMs === undefined
       ? undefined
@@ -1134,7 +1147,7 @@ async function runQualifiedWorker(
         // and reopen a session. Native retention/config discovery are unchanged.
         persistSession: session !== undefined,
         // No turn cap (operator ruling 2026-11-17, as the DeepSeek harness has none): the
-        // job's wall time and money ceiling bound a run.
+        // job's money ceiling and a cancel bound a run.
         disallowedTools: [
           // A worker starts no subagent, native or DeepSeek, and none of its calls is
           // held or offered (operator ruling 2026-11-17).
@@ -1449,7 +1462,6 @@ async function runQualifiedWorker(
         controller.signal.throwIfAborted();
         assertCurrentMode();
         initialized(matches);
-        started = true;
         clearTimeout(initTimer);
         activityReady = true;
         try {
@@ -1531,10 +1543,9 @@ async function runQualifiedWorker(
       cause: closeFailure.error,
     });
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
-  // A child that never started reports that, whatever the SDK threw on the way out,
-  // also when the job's wall time is what ended the wait.
+  // A child that never started reports that, whatever the SDK threw on the way out.
   const stop = workerStop(controller.signal.reason);
-  if (stop?.kind === 'not_started' || (!started && stop?.reason === 'wall_time'))
+  if (stop?.kind === 'not_started')
     throw new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' });
   if (executionFailure) throw executionFailure.error;
   return redactAll(result!);

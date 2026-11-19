@@ -55,9 +55,9 @@ Where no prompt was typed since Tenjin's process started (a resumed session woke
 ## A job's folders on disk
 
 - **Where.** In the system temp folder, `tenjin-worker-settings-*` (the worker's settings file, which holds the job's bridge token and GitHub token, mode 0600 in a 0700 folder) and `tenjin-worker-*` (gh config, caches, run logs and a gitconfig; on Windows also `tenjin-worker-cancel-*`, its launcher's stop file). Under `/tmp`, `tenjin-job-*` (the job's commands' output and its scratchpad).
-- **Removed.** By the job, once its child has closed, whichever way it ends: done, a worker error, a cancel, the session's end, `/clear`, the wall time, or a start that never ran. A delete that fails is tried again, then left; it never changes the job's result, and one job never removes another's folder.
+- **Removed.** By the job, once its child has closed, whichever way it ends: done, a worker error, a cancel, the session's end, `/clear`, or a start that never ran. A delete that fails is tried again, then left; it never changes the job's result, and one job never removes another's folder.
 - **Marked.** Each folder holds `tenjin-owner.json`: the process that made it and when that process started. The owner touches it every 30 seconds while it runs.
-- **Swept.** When `tenjin mcp` starts, it removes the folders a crash or a kill left. A folder goes only when its marker has not been touched for 2 hours and either its process is gone or a process that holds its pid started over 10 minutes after the last touch (`ps` is read in UTC). Any doubt, such as a start time that cannot be read, keeps the folder, which keeps a job of another Claude Code session on the machine safe. A folder with no marker (an older build made it) goes only when it is older than the wall limit plus 15 minutes and no process names it in its command line or environment.
+- **Swept.** When `tenjin mcp` starts, it removes the folders a crash or a kill left. A folder goes only when its marker has not been touched for 2 hours and either its process is gone or a process that holds its pid started over 10 minutes after the last touch (`ps` is read in UTC). Any doubt, such as a start time that cannot be read, keeps the folder, which keeps a job of another Claude Code session on the machine safe. A folder with no marker (an older build made it) goes only when it has not changed for 2 hours and no process names it in its command line or environment.
 
 ## Inference channels and their lock
 
@@ -81,7 +81,7 @@ Where no prompt was typed since Tenjin's process started (a resumed session woke
 - A call counts as confirmed uncharged, and is tried again, when it never reached the router, the router answered a rate limit or a server error before any payment, or DeepSeek failed it and nothing was charged. An empty reply is such a failure (`incomplete_model_response`). A reply of thinking alone is not: it is a completed, charged call.
 - A reply DeepSeek refused to give is never tried again, as the DeepSeek harness tries none, once the router names it (`model_refused`, 502). The job ends with its own `refused` cause, which tells the parent and the person that DeepSeek refused the request and that nothing was charged for that call. A router that answers a refusal as `incomplete_model_response` cannot be told from one that got an empty reply, so that refusal is tried again.
 - A model reply is read through 2,000,000 bytes. To a router whose offer says it honours a stated size of at least 2,000,000 bytes, each Messages call states the size the worker then reads (`maxResultBytes`), the smaller of the router's size and 4,000,000 bytes, and that router fails a larger reply before it charges for it.
-- MCP servers keep connecting while a worker works; a worker has no start-up window of its own inside the job's 40-minute wall limit.
+- MCP servers keep connecting while a worker works; a worker has no start-up window of its own with no time limit.
 
 ## What the plugin draws
 

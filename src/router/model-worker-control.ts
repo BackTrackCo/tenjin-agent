@@ -1,15 +1,11 @@
 import { stable } from '../lib/request-schema';
 
-/** Resource bounds, not a model-fit decision or an ordinary task turn budget. */
-export const WORKER_WALL_MS = 40 * 60 * 1000;
-
 export type WorkerStop = {
   kind: 'harness_limit' | 'provider_limit' | 'execution_failure' | 'not_started';
   reason:
     | 'startup_timeout'
     | 'router_unreachable'
     | 'turn_guard'
-    | 'wall_time'
     | 'budget_guard'
     | 'structured_output_guard'
     | 'output_limit'
@@ -195,7 +191,6 @@ export const WORKER_ENDS = {
   agent_stopped: "The person stopped the worker's agent.",
   host_aborted: 'The host ended the call that was running it.',
   session_ended: 'Its session or its Tenjin process ended.',
-  time_limit: "It reached the job's time limit.",
   turn_limit: "It reached the job's turn limit.",
   budget: 'It reached its spending limit.',
   output_limit: "It reached the model's output limit.",
@@ -219,8 +214,6 @@ export type WorkerEnd = keyof typeof WORKER_ENDS;
 /** The end code of a worker that stopped without an abort, from its stop reason. */
 export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
   switch (stop?.reason) {
-    case 'wall_time':
-      return 'time_limit';
     case 'turn_guard':
       return 'turn_limit';
     case 'budget_guard':
@@ -279,47 +272,6 @@ export function workerResultError(result: {
             : { kind: 'execution_failure', reason: 'worker_execution' };
   }
   return new ModelWorkerStopped({ ...stop, ...(turns === undefined ? {} : { turns }) });
-}
-
-/** Abort at the wall bound, then await the native runner's accounting/process drain. */
-export async function withWorkerDeadline<T>(
-  signal: AbortSignal,
-  run: (signal: AbortSignal) => Promise<T>,
-  /** A worker started before its accept: its wall time runs from the accept, not the start. */
-  from?: Promise<unknown>,
-): Promise<T> {
-  signal.throwIfAborted();
-  const controller = new AbortController();
-  const cancel = () => controller.abort(signal.reason);
-  signal.addEventListener('abort', cancel, { once: true });
-  if (signal.aborted) cancel();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let ended = false;
-  const arm = () => {
-    if (ended || controller.signal.aborted) return;
-    timer = setTimeout(
-      () =>
-        controller.abort(new ModelWorkerStopped({ kind: 'harness_limit', reason: 'wall_time' })),
-      WORKER_WALL_MS,
-    );
-    timer.unref();
-  };
-  if (from) from.then(arm, () => undefined);
-  else arm();
-  try {
-    const result = await run(controller.signal);
-    controller.signal.throwIfAborted();
-    return result;
-  } catch (error) {
-    // A worker the wall bound found still starting ran nothing: it reports that.
-    if (workerStop(error)?.kind === 'not_started') throw error;
-    if (controller.signal.reason instanceof ModelWorkerStopped) throw controller.signal.reason;
-    throw error;
-  } finally {
-    ended = true;
-    clearTimeout(timer);
-    signal.removeEventListener('abort', cancel);
-  }
 }
 
 /**

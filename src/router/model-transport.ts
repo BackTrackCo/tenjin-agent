@@ -36,7 +36,6 @@ import {
   retryAfterMs,
   sleepFor,
   timedOut,
-  WORKER_WALL_MS,
 } from './model-worker-control';
 import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
 import type { ModelCallTiming } from './model-worker-diagnostics';
@@ -955,7 +954,9 @@ export class ModelTransport {
           {
             signal,
             takeOverDead: true,
-            timeoutMs: WORKER_WALL_MS,
+            // No job wall: the wait for a lane ends with the job's own signal, and the holder
+            // of a lane is bounded by its own per-call deadline or is dead (taken over).
+            timeoutMs: Number.POSITIVE_INFINITY,
             retryMs: 100,
             onHeld: (pid) => {
               timing.waitedOn ??=

@@ -284,7 +284,7 @@ it('finds an offer by its own id in a later turn and from another process, for i
   expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
 });
 
-it('ends a running record only once the process that accepted it is gone or no run could still be going', async () => {
+it('ends a running record only once the process that accepted it is gone', async () => {
   const { store, job } = await heldAgentCall();
   const accepted = (await store.accept(job.id, 'root'))!;
   const path = join(dir, 'model-jobs', `${job.id}.json`);
@@ -295,10 +295,14 @@ it('ends a running record only once the process that accepted it is gone or no r
   await runningIn(other);
   expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
   expect((await store.owned(job.id, 'root'))?.state).toBe('running');
-  // Past the wall limit and its drain no run is going, whatever answers for that pid now.
-  expect(
-    await store.strand(job.id, { isAlive: () => true, now: Date.now() + 46 * 60_000 }),
-  ).toMatchObject({ state: 'unknown' });
+  // No wall: a live process still holds the run however long it has gone on (a 3-hour-old
+  // accept is not over), so nothing changes.
+  await writeFile(
+    path,
+    JSON.stringify({ ...accepted, runner: { pid: other, acceptedAt: Date.now() - 3 * 3600_000 } }),
+  );
+  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
+  expect((await store.owned(job.id, 'root'))?.state).toBe('running');
   // A process that is gone left it: it ends as interrupted, and stays ended.
   await runningIn(other);
   const ended = await store.strand(job.id, { isAlive: () => false });

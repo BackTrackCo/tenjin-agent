@@ -230,8 +230,6 @@ const movedTasks = new Map<string, readonly string[]>();
 /** Accept calls by their tool use id, for the same. */
 const acceptCalls = new Map<string, readonly string[]>();
 const ENDED = ['completed', 'cancelled', 'unknown'];
-/** Past the job's own 40-minute wall time: nothing can still be running. */
-const RUN_LIMIT_MS = 45 * 60_000;
 const ALIASES = 'deepseek-viewer-alias-v1:';
 const SERIAL = 'deepseek-viewer-serial-v1';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -983,13 +981,12 @@ function endedFromActivity(activity: TenjinModelActivity): Partial<TenjinModelWo
 /**
  * How a worker whose accept call no longer answers here ended, once it has: once its
  * display file is gone or says so, the CLI tells, from the job's own record, with the
- * job's own time. Past the job's wall time with no answer, the row stops following.
+ * job's own time. A job has no wall time: with no answer the row keeps following.
  */
 async function endedNow(
   $: Dollar,
   offerId: string,
   seen: TenjinModelActivity | 'missing',
-  startedAt: number,
 ): Promise<Partial<TenjinModelWorker> | undefined> {
   if (seen !== 'missing' && !ENDED.includes(seen.state)) return undefined;
   let ended: Partial<TenjinModelWorker> | undefined;
@@ -1002,10 +999,9 @@ async function endedNow(
       if (!ended && ENDED.includes(last.state)) ended = endedFromActivity(last);
     }
   } catch {
-    /* The file's own word, or the limit below, still ends the row. */
+    /* The file's own word still ends the row. */
   }
   if (!ended && seen !== 'missing') ended = endedFromActivity(seen);
-  if (!ended && (await $.clock.now()) - startedAt > RUN_LIMIT_MS) return { ended: 'unseen' };
   return ended;
 }
 /**
@@ -1045,18 +1041,13 @@ async function settle($: Dollar, offerId: string, title: string): Promise<void> 
   };
   try {
     // Once, whatever the display file says: a file a killed process left still says running.
-    const ended = await endedNow($, offerId, 'missing', startedAt);
+    const ended = await endedNow($, offerId, 'missing');
     if (ended) return await end(ended);
     timer = $.clock.every(POLL_MS, async () => {
       if (polling) return;
       polling = true;
       try {
-        const ended = await endedNow(
-          $,
-          offerId,
-          await pollWorker($, offerId, path, cwd),
-          startedAt,
-        );
+        const ended = await endedNow($, offerId, await pollWorker($, offerId, path, cwd));
         if (ended) await end(ended);
       } catch {
         /* Display only. */
@@ -1084,7 +1075,6 @@ const ENDED_BY: Record<string, string> = {
   parent_cancel: 'Cancelled by the parent',
   host_aborted: 'Interrupted',
   session_ended: 'Session ended',
-  time_limit: 'Time limit reached',
   budget: 'Budget reached',
   model_call_failed: 'Model call failed',
   model_call_timeout: 'Model call timed out',
@@ -1698,8 +1688,7 @@ async function watchAccept(
     viewerStarted = false,
     background = false,
     stopped = false,
-    observed = false,
-    startedAt = 0;
+    observed = false;
   // THE END OF THE LIVE DISPLAY, once: with the accept call's own answer, or,
   // for a call the host moved to the background, when the CLI says the worker ended.
   const stop = (ended?: Partial<TenjinModelWorker>) => {
@@ -1763,7 +1752,7 @@ async function watchAccept(
         {
           offerId,
           title: known?.title ?? 'subagent',
-          startedAt: (startedAt = await $.clock.now()),
+          startedAt: await $.clock.now(),
           elapsedMs: 0,
           state: 'starting',
         },
@@ -1782,7 +1771,7 @@ async function watchAccept(
             const seen = await pollWorker($, offerId, path, cwd);
             observed ||= seen !== 'missing';
             if (stopped || (!background && !(batched && observed))) return;
-            const ended = await endedNow($, offerId, seen, startedAt);
+            const ended = await endedNow($, offerId, seen);
             if (ended) stop(ended);
           } catch {
             /* Display only. */

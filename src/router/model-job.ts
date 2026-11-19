@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { pidAlive, withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
-import { WORKER_ENDS, WORKER_WALL_MS } from './model-worker-control';
+import { WORKER_ENDS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
 
 const jobSchema = z.object({
@@ -50,8 +50,6 @@ export const modelLock = <T>(path: string, fn: () => Promise<T>): Promise<T> =>
 
 /** Local job, conversation and budget records are removed this long after their last write. */
 export const MODEL_RECORD_TTL_MS = 7 * 24 * 60 * 60_000;
-/** No run is still going this long after its accept: the wall limit, and time to drain. */
-const RUN_OVER_MS = WORKER_WALL_MS + 5 * 60_000;
 
 /** What a later accept of a worker that died with its process answers. */
 export const STRANDED_HANDBACK = {
@@ -349,21 +347,19 @@ export class ModelJobStore {
   }
   /**
    * Ends a record its process left `running`: that process is gone, it is this
-   * process (which the caller knows runs no such worker), or the accept is
-   * older than any run. The record becomes `unknown` and is returned. Null
+   * process (which the caller knows runs no such worker). The record becomes `unknown` and is returned. Null
    * while another live process may still be running the worker.
    */
   async strand(
     id: string,
-    o: { isAlive?: (pid: number) => boolean; now?: number } = {},
+    o: { isAlive?: (pid: number) => boolean } = {},
   ): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.read(id);
       if (!job || !['running', 'cancelling'].includes(job.state)) return job;
       const { runner } = job;
-      const over = (o.now ?? Date.now()) - (runner?.acceptedAt ?? job.expiresAt) > RUN_OVER_MS;
       const gone = runner && (runner.pid === process.pid || !(o.isAlive ?? pidAlive)(runner.pid));
-      if (!over && !gone) return null;
+      if (!gone) return null;
       const ended: ModelJob = {
         ...job,
         state: 'unknown',

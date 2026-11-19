@@ -4,7 +4,6 @@ import {
   modelCallStop,
   ModelWorkerStopped,
   timedOut,
-  withWorkerDeadline,
   WorkerRepeatReminder,
   withModelRetry,
   WORKER_ENDS,
@@ -77,80 +76,6 @@ it('does not fail execution or keep a repeat streak for an unhashable input', ()
   expect(repeats.observe('Read', { path: 'a' })).toBeUndefined();
 });
 
-it('waits for the owned runner to drain after the forty-minute wall guard', async () => {
-  vi.useFakeTimers();
-  const parent = new AbortController();
-  let observed: AbortSignal | undefined;
-  let drained!: () => void;
-  const cleanup = new Promise<void>((resolve) => {
-    drained = resolve;
-  });
-  const run = withWorkerDeadline(parent.signal, async (signal) => {
-    observed = signal;
-    await new Promise<void>((resolve) =>
-      signal.addEventListener('abort', () => resolve(), { once: true }),
-    );
-    await cleanup;
-    throw new Error('native runner interrupted');
-  });
-  let settled = false;
-  const outcome = run.then(
-    () => {
-      settled = true;
-      return undefined;
-    },
-    (error: unknown) => {
-      settled = true;
-      return error;
-    },
-  );
-  await vi.advanceTimersByTimeAsync(39 * 60 * 1000);
-  expect(observed?.aborted).toBe(false);
-  await vi.advanceTimersByTimeAsync(60 * 1000);
-  expect(observed?.aborted).toBe(true);
-  expect(parent.signal.aborted).toBe(false);
-  expect(settled).toBe(false);
-  drained();
-  expect(workerStop(await outcome)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
-  expect(vi.getTimerCount()).toBe(0);
-});
-
-it('reports a worker the wall guard found still starting as not started, never as a wall stop', async () => {
-  vi.useFakeTimers();
-  const run = withWorkerDeadline(new AbortController().signal, async (signal) => {
-    await new Promise<void>((resolve) =>
-      signal.addEventListener('abort', () => resolve(), { once: true }),
-    );
-    throw new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' });
-  });
-  const outcome = run.catch((error: unknown) => error);
-  await vi.advanceTimersByTimeAsync(40 * 60 * 1000);
-  expect(workerStop(await outcome)).toEqual({ kind: 'not_started', reason: 'startup_timeout' });
-});
-
-it('preserves caller interruption, drains it and clears its wall timer', async () => {
-  vi.useFakeTimers();
-  const parent = new AbortController();
-  const interrupted = new Error('owned interrupt');
-  const run = withWorkerDeadline(parent.signal, async (signal) => {
-    await new Promise<void>((resolve) =>
-      signal.addEventListener('abort', () => resolve(), { once: true }),
-    );
-    throw signal.reason;
-  });
-  const outcome = run.catch((error: unknown) => error);
-  parent.abort(interrupted);
-  expect(await outcome).toBe(interrupted);
-  expect(workerStop(interrupted)).toBeUndefined();
-  expect(vi.getTimerCount()).toBe(0);
-});
-
-it('clears the wall timer after a completed run', async () => {
-  vi.useFakeTimers();
-  expect(await withWorkerDeadline(new AbortController().signal, async () => 'done')).toBe('done');
-  expect(vi.getTimerCount()).toBe(0);
-});
-
 it.each([
   ['error_max_turns', 'harness_limit', 'turn_guard'],
   ['error_max_budget_usd', 'harness_limit', 'budget_guard'],
@@ -187,7 +112,6 @@ it('reports known provider output/context limits and omits invalid turn counts',
 });
 
 it.each([
-  ['wall_time', 'time_limit'],
   ['turn_guard', 'turn_limit'],
   ['budget_guard', 'budget'],
   ['output_limit', 'output_limit'],

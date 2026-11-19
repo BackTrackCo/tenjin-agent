@@ -210,7 +210,7 @@ export type WorkerDiagnostics = {
     maxOutputTokens?: number;
     compactWindow: number;
     thinking: string[];
-    /** None: the job's wall time and money ceiling bound a run. */
+    /** None: the job's money ceiling and a cancel bound a run. */
     maxTurns: null;
   };
   /** The image and document blocks the job sent as text: the worker did not see them. */

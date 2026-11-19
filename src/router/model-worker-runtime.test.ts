@@ -2197,14 +2197,22 @@ it('waits for a slow Claude Code start as a native subagent does, and still canc
   }
 });
 
-it('reports a worker still starting at the wall time as not started', async () => {
+it('keeps waiting for a worker still starting past the old 40-minute wall, until a cancel', async () => {
   vi.useFakeTimers();
   try {
     const spawned = startingQuery(new Promise<never>(() => {}));
-    const run = runModelWorker(job, options()).catch((error: unknown) => error);
+    const controller = new AbortController();
+    let settled = false;
+    const run = runModelWorker(job, { ...options(), signal: controller.signal })
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
     await spawned;
-    await vi.advanceTimersByTimeAsync(40 * 60 * 1000);
-    expect(workerStop(await run)).toEqual({ kind: 'not_started', reason: 'startup_timeout' });
+    await vi.advanceTimersByTimeAsync(41 * 60 * 1000);
+    expect(settled).toBe(false);
+    controller.abort(new Error('Esc during start'));
+    expect(workerStop(await run)).toBeUndefined();
     expect(native.close).toHaveBeenCalled();
   } finally {
     vi.useRealTimers();
@@ -3731,7 +3739,7 @@ afterEach(async () => {
 // Failure caught: a job that ended with its child still dying (a 40-minute worker has
 // commands running) met a delete that failed once, and its settings folder, which holds the
 // bridge token and the GitHub token, stayed in the temp folder after the job.
-it.each(['the wall time', 'a cancel', 'a worker error'] as const)(
+it.each(['a cancel', 'a worker error'] as const)(
   'leaves no settings folder when a job ends by %s, also when a first delete fails',
   async (ending) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -3742,11 +3750,8 @@ it.each(['the wall time', 'a cancel', 'a worker error'] as const)(
       (error: unknown) => error,
     );
     await spawned;
-    if (ending === 'the wall time') await vi.advanceTimersByTimeAsync(40 * 60 * 1000 + 1);
     if (ending === 'a cancel') controller.abort(new Error('Esc'));
     await settle(run);
-    if (ending === 'the wall time')
-      expect(workerStop(await run)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
     expect(settingsFolders()).toHaveLength(1);
     for (const folder of settingsFolders()) expect(existsSync(folder), folder).toBe(false);
   },
