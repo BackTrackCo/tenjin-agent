@@ -5,6 +5,7 @@ import { sanitizeForTerminal } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import { isCanonicalUsdc } from '../lib/x402-pay';
 import { CliError } from '../lib/errors';
+import { mask } from '../lib/redact';
 import { searchOrthogonal } from '../lib/orthogonal-catalog';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -38,6 +39,14 @@ export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Prom
   )
     throw new CliError('USAGE', 'Use --sources registries,orthogonal or a subset.');
   const query = args.query?.trim() ?? '';
+  // The rule `request({browse})` follows: a query the mask would change is not
+  // sent to anyone, masked or otherwise.
+  if (mask(query) !== query)
+    throw new CliError(
+      'REFUSED',
+      'The query carries a credential-shaped value, so nothing was sent.',
+      { fix: 'Search again with a few plain words for the need.' },
+    );
   const [sweep, catalogs] = await Promise.all([
     sources.includes('registries')
       ? sweepRegistries(settings.bazaarRegistries, {

@@ -134,6 +134,17 @@ describe('runDiscover', () => {
     expect(registry.urls).toEqual([]);
   });
 
+  it('refuses a credential-shaped query before any request', async () => {
+    await writeConfig();
+    const registry = stubRegistry(() => {
+      throw new Error('must not be called');
+    });
+    await expect(
+      runDiscover({ query: `speech ghp_${'c'.repeat(36)}` }, makeCtx().ctx),
+    ).rejects.toMatchObject({ code: 'REFUSED' });
+    expect(registry.urls).toEqual([]);
+  });
+
   it('dispatches explicit API discovery through the shipped CLI with no wallet', async () => {
     await writeConfig();
     vi.stubEnv('TENJIN_DATA_DIR', dir);
