@@ -161,7 +161,7 @@ These are sent as written:
 
 A new env file in a folder that is not a working directory's top level and held no env file at job start can be missed for a while:
 
-- **Linux.** There is no watcher: the file is found only when the worker opens it with the Read tool, or at the next job. A command that reads it sends its values as written.
+- **Linux.** There is no watcher: the file is found only when the worker opens it with the Read tool, or at the next job. A command that reads it sends its values as written. Claude Code's Linux sandbox turns each env deny into the files that exist when a command starts, so a command that writes an env file inside `node_modules` or `.git` and reads it in the same run sends its values as written too.
 - **macOS.** A network share can report a folder's new entries late, so a file made there can be missed until a later request, or until the worker opens it with the Read tool.
 - **Windows.** A request waits 120 ms for reports of changes. A file whose report comes later is found before the request after it.
 
