@@ -16,7 +16,7 @@ export type InstallSubagentChoice = 'on' | 'off';
 
 /** Said once, to a person who has just turned subagents on: who receives what, and the fees. */
 export const DEEPSEEK_INSTALL_TERMS =
-  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto. Each job costs up to your per-call spend limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, and Exa searches cost $0.004 each. Your spend limits apply.';
+  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto. Each job costs up to your per-call spend limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, Exa searches cost $0.004 each and a page read through Exa $0.001. Your spend limits apply.';
 
 /** The page the question sends a person to for the recipients, the reads, the fees and the cap. */
 export const SUBAGENT_DETAILS_URL =
