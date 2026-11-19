@@ -109,6 +109,8 @@ async function fixture(
   let signedGets = 0;
   let voucherState = 'accepted';
   let recoveryState = 'completed';
+  let recoveryActual = options.charge ?? '1000';
+  let recoveryStatus = 200;
   const paidSignals: AbortSignal[] = [];
   /** Every signed request in the order it reached the router: its channel, the total its
    *  voucher claims, and the status the router answered (0 when the answer was lost). */
@@ -142,11 +144,12 @@ async function fixture(
       }
       gets++;
       if (request.headers.has(SIWX_HEADER)) signedGets++;
+      if (recoveryStatus !== 200) return new Response(null, { status: recoveryStatus });
       return Response.json({
         invocationId: last?.invocationId,
         state: recoveryState,
         voucherState,
-        actualAtomic: options.charge ?? '1000',
+        actualAtomic: recoveryActual,
         result,
       });
     }
@@ -218,6 +221,13 @@ async function fixture(
     },
     setVoucher: (value: string) => {
       voucherState = value;
+    },
+    /** The charge the router's record of a call names, and the status of that read. */
+    setRecoveryActual: (value: string) => {
+      recoveryActual = value;
+    },
+    setRecoveryStatus: (value: number) => {
+      recoveryStatus = value;
     },
   };
 }
@@ -1774,55 +1784,93 @@ it('says how a model call failed: the status of an answer that is not a result, 
 
 // Live case: the provider's account was empty, so the router failed every paid call; the
 // worker's job ended `unknown` and each call stayed reserved as uncertain.
-// Also a reply the router cut (504 `model_stream_idle`, `model_deadline_exceeded`): the
-// worker skipped the receipt read for those, and the full quote stayed reserved.
-it.each([
-  ['model_inference_failed', 500],
-  ['model_stream_idle', 504],
-  ['model_deadline_exceeded', 504],
-] as const)(
-  'releases at once a call the router failed with %s when its record says it cost nothing',
-  async (code, status) => {
-    const f = await fixture();
-    const real = f.deps.fetchImpl!;
-    f.setRecoveryState('unknown');
-    f.setVoucher('cancelled');
-    f.deps.fetchImpl = async (input, init) =>
-      new Request(input, init).headers.has('payment-signature')
-        ? Response.json({ error: { code, message: 'Model invocation failed' } }, { status })
-        : real(input, init);
-    const failed = await f
-      .make()
-      .messages(f.job, { messages: [] }, new AbortController().signal)
-      .catch((error: unknown) => error as ModelCallFailed);
-    expect(failed).toBeInstanceOf(ModelCallFailed);
-    expect(failed?.detail).toEqual({ cause: 'provider', status, uncharged: true, code });
-    // One free read of the router's record, nothing bought again, and the quote released.
-    expect(f.signedGets()).toBe(1);
-    expect(await f.make().summary(f.job)).toMatchObject({
-      reservedAtomic: '3000',
-      uncertain: [],
-    });
-  },
-);
-
-it('keeps a cut reply reserved when the router record does not say it cost nothing', async () => {
+it('releases at once a call the router says the provider failed when its record says it cost nothing', async () => {
   const f = await fixture();
   const real = f.deps.fetchImpl!;
+  f.setRecoveryState('unknown');
+  f.setVoucher('cancelled');
   f.deps.fetchImpl = async (input, init) =>
     new Request(input, init).headers.has('payment-signature')
-      ? Response.json({ error: { code: 'model_deadline_exceeded' } }, { status: 504 })
+      ? Response.json(
+          { error: { code: 'model_inference_failed', message: 'Model invocation failed' } },
+          { status: 500 },
+        )
       : real(input, init);
   const failed = await f
     .make()
     .messages(f.job, { messages: [] }, new AbortController().signal)
     .catch((error: unknown) => error as ModelCallFailed);
   expect(failed).toBeInstanceOf(ModelCallFailed);
-  const { detail } = failed as ModelCallFailed;
-  expect(detail).toMatchObject({ cause: 'failed', status: 504 });
-  expect(detail.uncharged).toBeUndefined();
-  expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+  expect(failed?.detail).toEqual({
+    cause: 'provider',
+    status: 500,
+    uncharged: true,
+    code: 'model_inference_failed',
+  });
+  // One free read of the router's record, nothing bought again, and the quote released.
+  expect(f.signedGets()).toBe(1);
+  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
 });
+
+// A REPLY THE ROUTER CUT (504 `model_stream_idle`, `model_deadline_exceeded`). Its record
+// reads `state: "unknown"` for every cut, so the proof of no charge is the cancelled
+// voucher together with a zero charge. A cut so proven was released but never tried again,
+// and one whose record held only `unknown` was released as if it were proven.
+const cutReply = async (
+  code: string,
+  record: { state?: string; voucher?: string; actual?: string; status?: number },
+) => {
+  const f = await fixture();
+  const real = f.deps.fetchImpl!;
+  f.setRecoveryState(record.state ?? 'unknown');
+  f.setVoucher(record.voucher ?? 'cancelled');
+  f.setRecoveryActual(record.actual ?? '0');
+  f.setRecoveryStatus(record.status ?? 200);
+  let signed = 0;
+  f.deps.fetchImpl = async (input, init) => {
+    if (!new Request(input, init).headers.has('payment-signature')) return real(input, init);
+    signed++;
+    return Response.json({ error: { code, message: 'Provider stream stalled' } }, { status: 504 });
+  };
+  const failed = await f
+    .make()
+    .messages(f.job, { messages: [] }, new AbortController().signal)
+    .catch((error: unknown) => error as ModelCallFailed);
+  expect(failed).toBeInstanceOf(ModelCallFailed);
+  // Whatever the record says, this call signed once and bought nothing again.
+  expect(signed).toBe(1);
+  return { f, failed: failed as ModelCallFailed };
+};
+
+it.each(['model_stream_idle', 'model_deadline_exceeded'])(
+  'releases a reply cut with %s, and lets it be tried again, on a cancelled voucher with a zero charge',
+  async (code) => {
+    const { f, failed } = await cutReply(code, {});
+    expect(failed.detail).toEqual({ cause: 'provider', status: 504, uncharged: true, code });
+    expect(retryableModelCall(failed)).toBe(true);
+    expect(f.signedGets()).toBe(1);
+    expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '3000', uncertain: [] });
+  },
+);
+
+it.each([
+  ['a failed state alone, its voucher still pending', { voucher: 'pending' }],
+  ['a record still running', { state: 'running', voucher: 'pending' }],
+  ['a cancelled voucher beside a charge', { actual: '1000' }],
+  ['an accepted voucher', { state: 'completed', voucher: 'accepted', actual: '1000' }],
+  ['a record that cannot be read', { status: 500 }],
+] as const)(
+  'keeps a cut reply uncertain, reserved and never tried again on %s',
+  async (_name, record) => {
+    for (const code of ['model_stream_idle', 'model_deadline_exceeded']) {
+      const { f, failed } = await cutReply(code, record);
+      expect(failed.detail).toMatchObject({ cause: 'failed', status: 504, code });
+      expect(failed.detail.uncharged).toBeUndefined();
+      expect(retryableModelCall(failed)).toBe(false);
+      expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+    }
+  },
+);
 
 it('retains exposure when signing starts but fails before a paid request is sent', async () => {
   const f = await fixture();

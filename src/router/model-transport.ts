@@ -99,6 +99,17 @@ function costNothing(server: { state: string; voucherState: string }): boolean {
   );
 }
 
+/**
+ * THE PROOF THAT A CUT REPLY COST NOTHING (`model_stream_idle`, `model_deadline_exceeded`):
+ * the voucher cancelled together with a zero charge, which the router writes for both
+ * cuts. `state` reads `unknown` for every cut, so it proves nothing, and a record still
+ * `running` or a voucher still `pending` means a write the router did not finish: nothing
+ * was charged then either, but the record does not say so, and the call stays uncertain.
+ */
+function cutCostNothing(server: { voucherState: string; actualAtomic: string }): boolean {
+  return server.voucherState === 'cancelled' && server.actualAtomic === '0';
+}
+
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
   calls: z.record(
@@ -1009,9 +1020,13 @@ export class ModelTransport {
       // THE PROVIDER FAILED THE CALL: the router says so in a fixed code. Its own record
       // then says whether anything was charged; a call that cost nothing is released at
       // once, with the same read and rule as `reconcile`, and nothing is bought again.
+      // A REPLY THE ROUTER CUT is released, and so may be tried again, only on its
+      // stricter proof; a record that cannot be read, or one that does not hold that
+      // proof, leaves the call uncertain and its reservation whole.
       if (paidError?.code !== undefined && PROVIDER_FAILURES.has(paidError.code)) {
         const server = await this.recover(body.invocationId, signal, protocol).catch(() => null);
-        if (server && costNothing(server)) {
+        const free = MODEL_CUT_REPLY_CODES.has(paidError.code) ? cutCostNothing : costNothing;
+        if (server && free(server)) {
           await release();
           throw new ModelCallFailed(
             'The model provider failed the call; nothing was charged for it',

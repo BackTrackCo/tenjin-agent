@@ -291,11 +291,9 @@ describe('a model call tried again', () => {
       new ModelCallFailed('charged', { cause: 'failed', status: 502 }),
       // Refused as malformed: trying again cannot help.
       new ModelCallFailed('bad', { cause: 'failed', status: 400, uncharged: true }),
-      // A reply the router cut after its idle limit or its deadline: released at no
-      // charge, and the same request would run for minutes again.
+      // A reply the router cut whose record did not prove it cost nothing: uncertain.
       ...['model_stream_idle', 'model_deadline_exceeded'].map(
-        (code) =>
-          new ModelCallFailed('cut', { cause: 'provider', status: 504, uncharged: true, code }),
+        (code) => new ModelCallFailed('cut', { cause: 'failed', status: 504, code }),
       ),
       new ModelCallFailed('ceiling', { cause: 'budget' }),
       new Error('Unsupported request'),
@@ -305,6 +303,22 @@ describe('a model call tried again', () => {
       expect(f.calls()).toBe(1);
     }
   });
+
+  // A provider stall ended the job: the DeepSeek harness tries a timeout again.
+  it.each(['model_stream_idle', 'model_deadline_exceeded'])(
+    'tries a reply the router cut with %s again once its record proved it cost nothing',
+    async (code) => {
+      const cut = new ModelCallFailed('cut', {
+        cause: 'provider',
+        status: 504,
+        uncharged: true,
+        code,
+      });
+      const f = failing([cut]);
+      await expect(withModelRetry(f.call, signal, () => undefined, wait)).resolves.toBe('ok');
+      expect(f.calls()).toBe(2);
+    },
+  );
 
   it('waits as the router asks with Retry-After', async () => {
     waits.length = 0;

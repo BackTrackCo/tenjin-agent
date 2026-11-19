@@ -67,8 +67,11 @@ export class ModelCallFailed extends Error {
 export const MODEL_RETRY = { tries: 5, baseMs: 500, maxMs: 10_000, jitter: 0.1, hintMs: 60_000 };
 /**
  * The router's codes for a reply it cut: no byte from the provider for its idle limit, or
- * the call's total deadline. It records such a call with no charge. Never tried again:
- * the same request has just run for minutes without an answer.
+ * the call's total deadline. Its record of such a call always reads `state: "unknown"`,
+ * the name of its failed state, so that alone says nothing of a charge: the transport
+ * calls a cut reply uncharged only on a cancelled voucher together with a zero charge
+ * (`cutCostNothing`). So proven, it is tried again as the DeepSeek harness tries a
+ * timeout; any other record, or none, leaves it uncertain and never tried again.
  */
 export const MODEL_CUT_REPLY_CODES: ReadonlySet<string> = new Set([
   'model_stream_idle',
@@ -76,8 +79,7 @@ export const MODEL_CUT_REPLY_CODES: ReadonlySet<string> = new Set([
 ]);
 export function retryableModelCall(error: unknown): error is ModelCallFailed {
   if (!(error instanceof ModelCallFailed) || error.detail.uncharged !== true) return false;
-  const { cause, status, code } = error.detail;
-  if (code !== undefined && MODEL_CUT_REPLY_CODES.has(code)) return false;
+  const { cause, status } = error.detail;
   if (cause === 'provider' || cause === 'timeout') return true;
   return cause === 'failed' && (status === undefined || status === 429 || status >= 500);
 }
