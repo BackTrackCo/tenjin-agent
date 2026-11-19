@@ -1,3 +1,4 @@
+import { WorkerInbox } from './model-worker-inbox';
 import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
 import { RelayedCut, sseError, sseFrame, type StreamEvent } from './model-stream';
 import { WorkerDiagnosticsRecord, type ModelCallTiming } from './model-worker-diagnostics';
@@ -221,6 +222,8 @@ export async function qualifiedModelWorker(
 /** State supplied only after a Claude offer has been accepted and recorded. */
 export type EarlyWorkerAccept = {
   job: ModelJob;
+  /** What the parent writes to the worker while it runs. */
+  inbox?: WorkerInbox;
   transport: ModelTransport;
   accepted?: { at: number; marks: Record<string, number> };
   /** The job's image and document blocks sent as text, which the released worker adds to. */
@@ -249,6 +252,8 @@ export async function runModelWorker(
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
+    /** What the parent writes to this worker while it runs: each message is a user message at its next turn. */
+    inbox?: WorkerInbox;
     /** Tests only: a start-up window. A job has none; a cancel bounds its start. */
     startupMs?: number;
     /** Tests only: the wait before a model call is tried again. */
@@ -548,6 +553,16 @@ async function runQualifiedWorker(
       },
       parent_tool_use_id: null,
     };
+    // Later messages from the parent, in order, each at the worker's next turn. The input
+    // stays open until the worker has reported with none waiting.
+    for (let text = await options.inbox?.next(); text != null; text = await options.inbox?.next())
+      yield {
+        type: 'user',
+        session_id: '',
+        message: { role: 'user', content: [{ type: 'text' as const, text }] },
+        parent_tool_use_id: null,
+        priority: 'next',
+      };
   }
   const denyInitialization = () => initialized(false);
   controller.signal.addEventListener('abort', denyInitialization, { once: true });
@@ -1324,6 +1339,7 @@ async function runQualifiedWorker(
         options.permission = accept.permission;
         options.omitted = accept.omitted;
         options.activity = accept.activity;
+        options.inbox = accept.inbox;
         options.currentClaudePermissionMode = accept.currentClaudePermissionMode;
         if (accept.accepted) diagnostics.accepted(accept.accepted.at, accept.accepted.marks);
         diagnostics.mark('released');
@@ -1381,6 +1397,9 @@ async function runQualifiedWorker(
         session?.assert(message.session_id);
         if (message.subtype !== 'success') throw workerResultError(message);
         result = message.result;
+        // Reported with nothing waiting: the input closes and the worker ends. A message
+        // queued meanwhile is sent first, and its turn reports again.
+        options.inbox?.closeIfEmpty();
       }
     }
     if (proxyFailure) throw proxyFailure.error;
@@ -1391,6 +1410,7 @@ async function runQualifiedWorker(
     executionFailure = proxyFailure ?? { error };
   } finally {
     authorizePrompt(false);
+    options.inbox?.close();
     clearTimeout(initTimer);
     initialized(false);
     controller.signal.removeEventListener('abort', denyInitialization);

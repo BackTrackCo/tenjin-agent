@@ -255,6 +255,98 @@ function sdkResult(
   );
 }
 
+/**
+ * A fake Claude Code that takes its input as a stream: it pumps every user message it is
+ * given into `seen`, ends turns on the test's say, and ends when its input does.
+ */
+function streamingWorker(turns: Array<() => Promise<void>>) {
+  const seen: Array<{ text: string; priority?: string }> = [];
+  vi.mocked(query).mockImplementation(
+    (call) =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          const pump = (async () => {
+            for await (const message of call.prompt as AsyncIterable<{
+              message: { content: Array<{ text: string }> };
+              priority?: string;
+            }>)
+              seen.push({
+                text: message.message.content.map((block) => block.text).join('|'),
+                ...(message.priority ? { priority: message.priority } : {}),
+              });
+          })();
+          yield {
+            type: 'system',
+            subtype: 'init',
+            permissionMode: 'default',
+            cwd: '/repo',
+            session_id: 'sess',
+          };
+          for (const [index, turn] of turns.entries()) {
+            await turn();
+            yield {
+              type: 'result',
+              session_id: 'sess',
+              subtype: 'success',
+              result: `turn ${index + 1}`,
+            };
+          }
+          await pump;
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  return seen;
+}
+
+// Failure caught: a parent could not tell a running worker anything. Its message is one
+// more user message at the worker's next turn, in order, and the worker ends once it has
+// reported with none waiting.
+it('gives the worker the parent messages in order while it runs, then ends when it has reported', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const inbox = new WorkerInbox();
+  let proceed!: () => void;
+  const gate = new Promise<void>((resolve) => (proceed = resolve));
+  const seen = streamingWorker([() => gate]);
+  const run = runModelWorker(job, { ...options(), inbox });
+  await vi.waitFor(() => expect(seen).toHaveLength(1));
+  expect(inbox.push('the head moved')).toBe('delivered');
+  expect(inbox.push('and rebase')).toBe('delivered');
+  await vi.waitFor(() => expect(seen).toHaveLength(3));
+  proceed();
+  await expect(run).resolves.toBe('turn 1');
+  expect(seen.slice(1)).toEqual([
+    { text: 'the head moved', priority: 'next' },
+    { text: 'and rebase', priority: 'next' },
+  ]);
+  // The worker has reported: a late message is refused, never accepted and lost.
+  expect(inbox.push('too late')).toBe('closed');
+});
+
+// Failure caught: the run ending at its first report while the parent's messages were
+// still on their way. The run's result is that of the last turn the messages caused.
+it('ends at the last turn that its messages caused', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const inbox = new WorkerInbox();
+  let proceed!: () => void;
+  const gate = new Promise<void>((resolve) => (proceed = resolve));
+  const seen = streamingWorker([
+    () => gate,
+    async () => {
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+    },
+  ]);
+  const run = runModelWorker(job, { ...options(), inbox });
+  await vi.waitFor(() => expect(seen).toHaveLength(1));
+  inbox.push('first');
+  inbox.push('second');
+  proceed();
+  await expect(run).resolves.toBe('turn 2');
+  expect(seen.map((m) => m.text).slice(1)).toEqual(['first', 'second']);
+});
+
 function authenticationQuery(account: Promise<unknown>) {
   let started!: (value: Promise<IteratorResult<unknown>>) => void;
   const pendingPrompt = new Promise<Promise<IteratorResult<unknown>>>((resolve) => {
