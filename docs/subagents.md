@@ -2,7 +2,7 @@
 
 - **What it is.** Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job. Claude keeps its own model and accepts or declines each offer. DeepSeek subagents are off by default.
 - **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. Web searches go to Exa.
-- **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs up to $0.003 an offer, also when Claude declines it.
+- **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs 15% of the expected cost of a job, the same rule as tool routing, an offer at a time, also when Claude declines it.
 - **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
 - **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.
 
@@ -62,7 +62,7 @@ Local GitHub origin names for the offer's directories and their direct child rep
 - With no `--max-job`, the cap is your per-call spend limit as it stands at each offer ($1 unless you chose another). A changed limit changes the next offer, up or down, and lowers a running job's remaining cap at once.
 - `--max-job <USD>` names a lower ceiling. The cap is then the smaller of that ceiling and the limit, and a higher limit never lifts a ceiling you named. Each `on` sets the ceiling from its own flags, so running it without `--max-job` drops a ceiling named earlier.
 - Your daily budget applies on top.
-- Where the cap is under $0.086866, what one model call and its routing fee need, no job is offered. `tenjin config subagents why` says so, and `tenjin config subagents on` refuses to turn DeepSeek subagents on under such a limit and names the command that raises it.
+- Where the cap is not above $0.083866, what one model call needs before its routing fee, no job is offered; a routing fee the cap leaves no room for is skipped the same way. `tenjin config subagents why` says so, and `tenjin config subagents on` refuses to turn DeepSeek subagents on under such a limit and names the command that raises it.
 - A call held at one cap whose cap is lowered before its offer is made stays native.
 
 ### Linux and Windows
@@ -296,7 +296,7 @@ These run natively:
 
 ### The routing fee
 
-- A valid offered job incurs one routing fee: 15% of expected inference spend, capped at $0.003, even if declined.
+- A valid offered job incurs one routing fee: 15% of the expected cost of a job, the same rule as tool routing and with no cap of its own beyond the tool router's ceiling, even if declined. The offer shows its own fee, which Tenjin pays only up to what the router stated for that call, within your spend limits and the job cap.
 - Several calls in a turn mean several offers and several routing fees, one each. Your daily budget and spend limits apply to every fee, and each job keeps its own ceiling.
 - A fee your limits refuse buys no offer, and that call runs natively. A call the router judges should stay native pays no fee.
 - Sending an offered call again unchanged to keep it native adds no second fee. A follow-up to a finished worker is not a new offer and pays no routing fee.
@@ -308,7 +308,7 @@ These run natively:
 - **Output cap.** A worker's turn asks for the output cap its router's offer names, up to 256,000 tokens, the DeepSeek harness's cap. On a router whose offer names none it asks for up to 65,536. Thinking counts as output.
 - **What a call reserves.** A quote reserves the output a call asks for. At the current peak tariff plus 5%, a 256,000-token call reserves about $0.324 plus $0.32 per decimal MB of request body through about 1.04 MB, then caps near $0.653 at the model's input-context limit; a 65,536-token call reserves about $0.084 plus the same, capped near $0.413. For a 130 KiB request that is $0.365784 against $0.125799. These are reservation estimates, not actual charges or a guaranteed run.
 - **Near the ceiling.** When what is left of a job's ceiling cannot reserve the offered cap, the call asks for the largest cap that still fits, never under 65,536, so a higher cap does not end a job sooner. Under that, the rule below applies.
-- **The floor.** A 65,536-token call reserves at least $0.083866 before system, tools and history input. Configuration refuses a job ceiling below $0.086866, including the maximum routing fee; this necessary floor does not guarantee a larger prompt fits.
+- **The floor.** A 65,536-token call reserves at least $0.083866 before system, tools and history input. Configuration refuses a job ceiling not above that, since the routing fee comes on top and is paid only from the room the cap leaves; this necessary floor does not guarantee a larger prompt fits.
 - A continuing job must retain enough unspent ceiling, after actual spend and unresolved reservations, for each next call's full quote. Inference is refused if its quote exceeds the remaining ceiling; a routing fee may already be paid.
 - A job's cap is your per-call spend limit or a lower ceiling you named, so no inference deposit passes the per-call limit. The daily budget and creator allowlist still apply, and a per-call limit of zero stops jobs as it stops every automatic payment.
 - Other connected services retain their own permissions and billing. A worker cannot call Tenjin's paid-tool router or purchase tool itself; its web searches are the only tool calls Tenjin pays for on its behalf.

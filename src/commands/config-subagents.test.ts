@@ -414,3 +414,14 @@ it('says which recent calls without an offer a native subagent made, and why it 
   );
   expect(result.humanLines?.[3]).toContain('  Agent                  The call set `name`');
 });
+
+it('words the routing fee as the tool router rule, with no amount and no cap of its own', async () => {
+  const { SUBAGENT_TERMS } = await import('../router/subagents-shown');
+  const { readFile } = await import('node:fs/promises');
+  const terms = SUBAGENT_TERMS.join(' ');
+  expect(terms).toContain(
+    'Routing costs 15% of the expected cost of a job, the same rule as tool routing',
+  );
+  for (const text of [terms, await readFile('docs/subagents.md', 'utf8')])
+    expect(text).not.toMatch(/capped at \$0\.003|up to \$0\.003/);
+});
