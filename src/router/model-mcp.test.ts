@@ -628,6 +628,15 @@ async function ownedClaudeFixture(
         input: { to: handle, message: 'Continue the same change with the current constraints.' },
       },
     });
+  /**
+   * A follow-up sent from a process that did not accept the worker (a resumed session):
+   * the choice is not made, so it is held as an offer. In the process that accepted it,
+   * the follow-up runs at once.
+   */
+  const heldCapture = async (handle: string, callId = 'followup-call') => {
+    await restart();
+    return capture(handle, callId);
+  };
   const close = async () => {
     await model.shutdown();
     await client.close();
@@ -652,6 +661,7 @@ async function ownedClaudeFixture(
     call,
     activity,
     capture,
+    heldCapture,
     close,
     route,
     requireResumeBudget,
@@ -1120,6 +1130,47 @@ it('delivers a SendMessage to a running worker in order, and refuses another ses
   }
 });
 
+// Failure caught: a follow-up to a finished worker took two calls (a held offer, then an
+// accept). Addressed by name from the session that accepted it, it is one call, and it
+// runs the accept's own checks; a resumed session keeps the held offer.
+it('runs a follow-up to a finished worker in one call from the session that accepted it, and holds it where the choice is not made', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const first = await f.call({ offer_id: f.job.id });
+    expect(first.status).toBe('completed');
+    f.session.turnId = 'followup-turn';
+    const sent = await f.capture(first.worker_handle);
+    expect(sent).toMatchObject({
+      action: 'continued',
+      worker_handle: first.worker_handle,
+      message: expect.stringMatching(
+        /^The DeepSeek worker tenjin-worker-.* continues with your message/,
+      ),
+    });
+    // The accept ran: a second run with the first one's history, no routing fee, and the
+    // result kept for the session as a background worker's is.
+    await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(2));
+    const [execution, options] = worker.run.mock.calls[1]!;
+    expect(execution).toMatchObject({
+      id: f.job.id,
+      task: 'Continue the same change with the current constraints.',
+      decision: { requireExistingBudget: true },
+    });
+    expect(options.claudeSession).toMatchObject({ resume: expect.any(String) });
+    expect(f.route).not.toHaveBeenCalled();
+    const stored = await f.call({ offer_id: sent.offer_id });
+    expect(stored.status === 'completed' || stored.status === 'started').toBe(true);
+    // A permission mode that changed since the accept is refused as the accept refuses it.
+    f.session.turnId = 'third-turn';
+    f.session.claudePermissionMode = 'auto';
+    await vi.waitFor(async () =>
+      expect((await f.capture(first.worker_handle)).action).not.toBe('continued'),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
   const f = await ownedClaudeFixture();
   let release!: () => void;
@@ -1285,7 +1336,7 @@ it.each(['general-purpose', 'Explore'] as const)(
       const config = JSON.parse(await readFile(configPath, 'utf8'));
       config.router.subagentConsent.maxJobAtomic = '500000';
       await writeFile(configPath, JSON.stringify(config));
-      const held = await f.capture(first.worker_handle);
+      const held = await f.heldCapture(first.worker_handle);
       expect(held).toMatchObject({
         action: 'offer',
         continuation: true,
@@ -1419,7 +1470,7 @@ it('cancels an unstarted Claude continuation back to idle and refuses stale or c
   try {
     const first = await f.call({ offer_id: f.job.id });
     f.session.turnId = 'cancel-offer';
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     const owner = { parentSessionId: 'root', root: f.repo, configDir: f.configDir };
     expect((await f.conversations.lookup(first.worker_handle, owner))?.state).toBe('offered');
     const changed = join(dir, 'changed-config');
@@ -1453,14 +1504,14 @@ it('refuses a missing original ledger before activation and keeps a foreign Clau
     });
     expect(multiple.action).toBe('refused');
     f.session.turnId = 'ledger-turn';
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     f.requireResumeBudget.mockRejectedValue(new Error('Original ledger missing'));
     expect((await f.call({ offer_id: held.offer_id })).action).toBe('refused');
     expect((await jobOf('ledger-turn'))?.state).toBe('offered');
     expect(worker.run).toHaveBeenCalledTimes(1);
     f.session.sessionId = 'foreign';
     f.session.turnId = 'foreign-turn';
-    expect((await f.capture(first.worker_handle)).action).toBe('refused');
+    expect((await f.heldCapture(first.worker_handle)).action).toBe('refused');
     expect(f.route).not.toHaveBeenCalled();
     expect(worker.run).toHaveBeenCalledTimes(1);
   } finally {
@@ -1489,7 +1540,7 @@ it('qualifies an Explore continuation with its original native profile even when
     const first = await f.call({ offer_id: f.job.id });
     expect(first.status).toBe('completed');
     f.session.turnId = 'explore-followup';
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     expect(held.action).toBe('offer');
     expect((await f.call({ offer_id: held.offer_id })).status).toBe('completed');
     expect(worker.qualified.mock.calls.every(([, profile]) => profile === 'Explore')).toBe(true);
@@ -1515,7 +1566,7 @@ it('fences and drains a running Claude continuation before refusing duplicate ac
   try {
     const first = await f.call({ offer_id: f.job.id });
     f.session.turnId = 'running-turn';
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     let started!: () => void, drain!: () => void;
     const began = new Promise<void>((resolve) => {
       started = resolve;
@@ -1786,7 +1837,7 @@ it('promises no free native repeat when a continuation never started', async () 
   try {
     const first = await f.call({ offer_id: f.job.id });
     f.session.turnId = 'followup-turn';
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     worker.run.mockRejectedValue(
       new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }),
     );
@@ -1795,7 +1846,7 @@ it('promises no free native repeat when a continuation never started', async () 
     expect(stopped.nextStep).not.toContain('no second routing fee');
     expect(stopped.nextStep).toContain('This owned conversation is fenced');
     // The repeat it must not promise: the continuation is refused, never run again.
-    expect((await f.capture(first.worker_handle, 'repeat-call')).action).toBe('refused');
+    expect((await f.heldCapture(first.worker_handle, 'repeat-call')).action).toBe('refused');
   } finally {
     await f.close();
   }
@@ -1873,7 +1924,7 @@ it('accepts an offer in a later turn of its session, and answers a repeat with t
     f.session.turnId = 'a-still-later-turn';
     expect(await f.call({ offer_id: f.job.id })).toEqual(first);
     // After the conversation has moved on to a follow-up, the first result is still there.
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     expect(held.action).toBe('offer');
     expect(await f.call({ offer_id: f.job.id })).toEqual(first);
     expect(worker.run).toHaveBeenCalledTimes(1);
@@ -1891,7 +1942,7 @@ it('returns a finished result after the session is resumed in a new process, and
     f.session.turnId = 'after-resume';
     expect(await f.call({ offer_id: f.job.id })).toEqual(first);
     expect(worker.run).toHaveBeenCalledTimes(1);
-    const held = await f.capture(first.worker_handle);
+    const held = await f.heldCapture(first.worker_handle);
     expect(held).toMatchObject({ action: 'offer', continuation: true, routingFeeAtomic: '0' });
     expect((await f.call({ offer_id: held.offer_id })).status).toBe('completed');
     expect(worker.run).toHaveBeenCalledTimes(2);
@@ -2042,7 +2093,7 @@ it.each(['a new process', 'the same process'] as const)(
       expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('unknown');
       expect((await f.conversations.lookup(conversation.handle, owner))?.state).toBe('unknown');
       await expect(stat(shown)).rejects.toThrow();
-      expect((await f.capture(conversation.handle)).action).toBe('refused');
+      expect((await f.heldCapture(conversation.handle)).action).toBe('refused');
       expect(await f.call({ offer_id: f.job.id })).toEqual(stopped);
       expect(worker.run).not.toHaveBeenCalled();
       expect(f.route).not.toHaveBeenCalled();
@@ -2199,7 +2250,7 @@ it.each([true, 'true'] as const)(
       expect(worker.run).toHaveBeenCalledTimes(1);
       expect(f.route).not.toHaveBeenCalled();
       // Its follow-up is held and offered by the worker's handle, as a foreground worker's is.
-      expect((await f.capture(started.worker_handle)).action).toBe('offer');
+      expect((await f.heldCapture(started.worker_handle)).action).toBe('offer');
     } finally {
       finish('late');
       await f.close();

@@ -383,6 +383,11 @@ export class ModelHandoff {
     caller?: ModelCaller,
     /** Diagnostics only: filled with the job's id and when each step before the offer ended. */
     timing?: CaptureTiming,
+    /**
+     * A follow-up the parent addressed to a worker this process accepted: the choice is made, so
+     * the offer is marked to run at once in the background, as a native agent resumed by a message is.
+     */
+    direct = false,
   ) {
     signal?.throwIfAborted();
     const settings = await this.currentConsent(session.cwd);
@@ -398,6 +403,7 @@ export class ModelHandoff {
           reference.handle,
           reference.task,
           signal,
+          direct,
         );
       } catch {
         return continuationRefusal('DeepSeek continuation is unavailable or interrupted');
@@ -484,6 +490,7 @@ export class ModelHandoff {
     handle: string,
     task: string,
     signal?: AbortSignal,
+    direct = false,
   ) {
     const { dataDir, transport } = this.options;
     const settings = await this.currentConsent(session.cwd);
@@ -555,7 +562,7 @@ export class ModelHandoff {
       callId,
       root: settings.root,
       task,
-      native,
+      native: direct ? { ...native, run_in_background: true } : native,
       decision: {
         ...original.decision,
         workerHandle: handle,
@@ -582,6 +589,7 @@ export class ModelHandoff {
       offer_id: job.id,
       worker_handle: handle,
       continuation: true,
+      ...(direct ? { direct: true } : {}),
       label: 'DeepSeek V4.1 Flash 1017',
       routingFeeAtomic: '0',
       proxyFeePercent: 5,
