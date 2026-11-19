@@ -690,6 +690,36 @@ export class WorkerEnvSecrets {
     return true;
   }
 
+  /**
+   * THE ENV DENIES, FROM THE ONE LIST OF ROOTS THIS SCAN WALKS, so no root is walked with a
+   * skip and left without the matching deny. Under each root it walks (working directories,
+   * worktrees, the job's temp folder), the env and settings files of the folders the walk
+   * skips (`skippedEnvPatterns`), or every env and settings file when the scan stopped short.
+   * Under each other root the worker is granted (a read or write exception, a Claude config
+   * path it may read), which no scan covers, every env file. Path patterns, for the file
+   * tools' rules and the sandbox alike.
+   */
+  envDenies(granted: readonly string[]): string[] {
+    const walked = topRoots(this.roots);
+    const every = (root: string) => [
+      `${root}/${ENV_GLOB}`,
+      `${root}/**/${ENV_GLOB}`,
+      ...(covered(root) ? [root] : []),
+    ];
+    return [
+      ...new Set([
+        ...walked.flatMap((root) =>
+          this.scanned
+            ? skippedEnvPatterns(root)
+            : [...every(root), `${root}/**/.claude/settings.json`],
+        ),
+        ...granted
+          .filter((root) => !walked.some((top) => inside(top, resolve(root))))
+          .flatMap(every),
+      ]),
+    ];
+  }
+
   /** How many distinct strings are replaced; never the strings. */
   get size(): number {
     return this.placeholders.size;

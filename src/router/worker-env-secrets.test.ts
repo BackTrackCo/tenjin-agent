@@ -1039,6 +1039,49 @@ it("replaces the env values of a repository's .claude/settings.json at any depth
   expect(env.redact('later-value-0x0e')).toBe('[env:LATER_KEY]');
 });
 
+// Greptile P1 on b325aa3d: the job temp folder was walked with node_modules skipped but given
+// no deny. The denies come from the scan's own roots, so a walked root cannot go without one.
+it('denies under every root it walks what the walk skips, and every env file under a granted root it does not walk', async () => {
+  const base = await workspace({});
+  const repo = join(base, 'repo');
+  const temp = join(base, 'job');
+  const exception = join(base, 'read-only');
+  for (const folder of [repo, join(repo, 'wt'), temp, exception])
+    mkdirSync(folder, { recursive: true });
+  const ENV = '.[eE][nN][vV]*';
+  const skipped = (root: string) =>
+    ['node_modules', '.git'].flatMap((folder) => [
+      `${root}/**/${folder}/**/${ENV}`,
+      `${root}/**/${folder}/**/.claude/settings.json`,
+    ]);
+  const every = (root: string) => [`${root}/${ENV}`, `${root}/**/${ENV}`];
+  const granted = [repo, join(repo, 'wt'), exception];
+
+  const env = await WorkerEnvSecrets.start([repo, join(repo, 'wt')], {
+    watch: false,
+    fresh: [temp],
+  });
+  expect(env.scanned).toBe(true);
+  expect(env.envDenies(granted).sort()).toEqual(
+    [...skipped(repo), ...skipped(temp), ...every(exception)].sort(),
+  );
+  env.close();
+
+  // A scan that stopped short learned nothing anywhere: every env and settings file it would
+  // have walked is denied, the temp folder's too.
+  const short = await WorkerEnvSecrets.start([repo], {
+    watch: false,
+    fresh: [temp],
+    maxDirectories: 1,
+  });
+  expect(short.scanned).toBe(false);
+  for (const root of [repo, temp])
+    expect(short.envDenies([repo, exception])).toEqual(
+      expect.arrayContaining([...every(root), `${root}/**/.claude/settings.json`]),
+    );
+  short.close();
+});
+
 // macOS and Windows volumes ignore case by default: `cat .env` opens a file named `.ENV`, so a
 // scan that took only the lower case left its values unreplaced. On a case-sensitive volume
 // (Linux) `.env` and `.ENV` are two files, and both are env files.

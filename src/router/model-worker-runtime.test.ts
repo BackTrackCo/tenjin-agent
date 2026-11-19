@@ -769,6 +769,60 @@ it('denies the env and settings files in node_modules and .git, which the env sc
   expect([...deny, ...denyRead].filter(skippedOther)).toEqual([]);
 });
 
+// Greptile P1 on b325aa3d: the scan walks the job's temp folder and skips its node_modules,
+// but the skipped-folder denies were built from the protected roots, which leave the temp
+// folder out, so `$TMPDIR/node_modules/pkg/.env.local` was readable and never scanned. Every
+// root the scan walks, whatever its kind, carries the deny of what its walk skips.
+it.skipIf(process.platform === 'win32')(
+  'denies what the scan skips under every root it walks, the job temp folder included',
+  async () => {
+    const actual =
+      await vi.importActual<typeof import('./claude-worker-session')>('./claude-worker-session');
+    vi.mocked(prepareClaudeWorkerTemp).mockImplementationOnce(actual.prepareClaudeWorkerTemp);
+    native.worktrees = ['/repo/.worktrees/fix'];
+    const workspace = {
+      version: 1,
+      root: '/repo',
+      workingDirectories: ['/repo', '/sibling'],
+      workingDirectorySpellings: ['/repo', '/sibling'],
+      readExceptions: ['/read-only'],
+      writeExceptions: ['/shell-write'],
+    };
+    vi.mocked(modelSettings).mockResolvedValue({
+      scope: 'native-workspace',
+      root: '/repo',
+      repositories: ['/repo'],
+    } as never);
+    vi.mocked(resolveSettings).mockResolvedValue({
+      effective: {
+        permissions: { additionalDirectories: ['/sibling'] },
+        sandbox: { filesystem: { allowRead: ['/read-only'], allowWrite: ['/shell-write'] } },
+      },
+    } as never);
+    const scans = vi.spyOn(WorkerEnvSecrets, 'start');
+    sdkResult({ subtype: 'success', result: 'done' });
+    await runModelWorker(
+      { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+      options(),
+    );
+    const [roots, limits] = scans.mock.calls[0]!;
+    const walked = [...roots, ...(limits?.fresh ?? [])];
+    expect(walked.length).toBeGreaterThan(3);
+    const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
+    const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
+    const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
+    // A root inside another walked root is covered by that one's patterns.
+    const covering = (root: string) => walked.find((other) => root.startsWith(`${other}/`)) ?? root;
+    for (const root of walked)
+      for (const folder of ['node_modules', '.git']) {
+        const pattern = `${covering(root)}/**/${folder}/**/${ENV}`;
+        expect(denyRead).toContain(pattern);
+        expect(deny).toContain(`Read(/${pattern})`);
+      }
+    scans.mockRestore();
+  },
+);
+
 // The env scan follows no link to a folder, and widening it past the consented directories is
 // not wanted: a link inside them that leads outside must give the worker nothing. Claude
 // Code's read block checks a path's real place, for its file tools and, on macOS (Seatbelt),
@@ -1361,7 +1415,8 @@ it("reads its working directories' env files natively, and only their placeholde
     const deny = (given(call.options).settings as { permissions: { deny: string[] } }).permissions
       .deny;
     // Apart from those in node_modules and .git, which the scan skips.
-    const unskipped = (rule: string) => rule.includes(ENV) && !SKIPPED_FOLDER.test(rule);
+    const unskipped = (rule: string) =>
+      rule.includes(`${root}/`) && rule.includes(ENV) && !SKIPPED_FOLDER.test(rule);
     expect(deny.filter(unskipped)).toEqual([]);
     expect((given(call.options).sandbox?.filesystem?.denyRead ?? []).filter(unskipped)).toEqual([]);
     // Tenjin and DeepSeek, the parent and the activity rows see names, never values.

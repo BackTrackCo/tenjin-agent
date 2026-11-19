@@ -124,7 +124,7 @@ On Linux and macOS:
 - **Where it goes.** What the worker loads or reads there, other projects' sessions and memory included, can reach Tenjin and DeepSeek.
 - **Settings `env` blocks.** The values in those settings files' `env` blocks, and in the `env` block Claude Code hands to the worker's commands, become `[env:NAME]` by the env file rules below. The files are read when the job starts and again before anything is forwarded. A settings file that cannot be parsed at the start stays unreadable, and one that stops parsing during the job stops it.
 - **Transcripts and history are not scanned.** A secret pasted or printed in an earlier session is sent as written unless it has a known token shape.
-- **Closed.** The credentials file, settings backups (whose old values are not scanned), session state such as `debug` and `file-history`, `tenjin-loops` outside your consented directories, a skill's files where its folder links outside `~/.claude`, and `~/.claude.json`.
+- **Closed.** The credentials file, settings backups (whose old values are not scanned), env files under `~/.claude/projects`, session state such as `debug` and `file-history`, `tenjin-loops` outside your consented directories, a skill's files where its folder links outside `~/.claude`, and `~/.claude.json`.
 
 In the working directories:
 
@@ -135,7 +135,7 @@ In the working directories:
 Temp files:
 
 - Each job has its own temp folder under `/tmp`, which only your user can open and which is removed when the job ends. It is `$TMPDIR` in the worker's commands, its file tools can read and write it by path, and the worker is told to use it instead of `/tmp`.
-- An env file written there is read like one in any other working directory, so its values are replaced before anything is forwarded.
+- An env file written there is read like one in any other working directory, so its values are replaced before anything is forwarded, and one inside a `node_modules` or `.git` folder there is refused to the worker, as in the working directories.
 - Worker commands cannot read or write the temp files of other Claude Code sessions under `/tmp/claude-<uid>`.
 
 ### Env files

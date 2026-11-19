@@ -14,8 +14,8 @@ import {
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { realpath } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import {
   findDefinition,
   isCustomAgentType,
@@ -114,12 +114,7 @@ import {
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
-import {
-  ENV_GLOB,
-  envDeniedRoots,
-  skippedEnvPatterns,
-  WorkerEnvSecrets,
-} from './worker-env-secrets';
+import { ENV_GLOB, envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
   modelCallStop,
   withModelRetry,
@@ -881,6 +876,20 @@ async function runQualifiedWorker(
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
+    // Every folder the worker may read: each carries the env denies its scan leaves it. Of
+    // the Claude config paths it may read, a folder (`projects`) may hold an env file.
+    const granted = [
+      ...protectedRoots,
+      // The job's own gh and git config folder, which its commands may read and write.
+      ...(github ? [github.directory] : []),
+      ...(
+        await Promise.all(
+          privatePaths.readable.map(async (path) =>
+            (await stat(path).catch(() => undefined))?.isDirectory() ? [path] : [],
+          ),
+        )
+      ).flat(),
+    ];
     if (!managedPolicyHolds({ resolved, disclosure }))
       throw new Error('Managed Claude worker policy changed; keep native');
     const startSettings = ({
@@ -1013,20 +1022,8 @@ async function runQualifiedWorker(
               ...privatePaths.deny,
               ...protectedRoots.flatMap((root) => {
                 const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-                const patterns = [
-                  // Inside the working directories env files are the native defaults' to
-                  // judge; their values never leave. Outside them they stay private, and so
-                  // do those in `node_modules` and `.git`, which the env scan skips.
-                  ...(envDenied.has(root)
-                    ? [
-                        `${absolute}/${ENV_GLOB}`,
-                        `${absolute}/**/${ENV_GLOB}`,
-                        ...(basename(root).toLowerCase().startsWith('.env') ? [absolute] : []),
-                      ]
-                    : skippedEnvPatterns(absolute)),
-                  // A consented workspace holds other repositories' native settings too.
-                  ...NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`),
-                ];
+                // A consented workspace holds other repositories' native settings too.
+                const patterns = NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`);
                 return [
                   ...['Read', 'Edit', 'Write'].flatMap((tool) =>
                     patterns.map((pattern) => `${tool}(${pattern})`),
@@ -1039,6 +1036,13 @@ async function runQualifiedWorker(
                     (tool) => `${tool}(${absolute}/**/${NESTED_SETTINGS})`,
                   ),
                 ];
+              }),
+              // Inside the working directories env files are the native defaults' to judge;
+              // their values never leave. Outside them they stay private, and so do those in
+              // `node_modules` and `.git`, which the env scan skips (`envDenies`).
+              ...envFiles.envDenies(granted).flatMap((path) => {
+                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
               }),
               // An env or settings file that could not be read in full at start cannot be redacted.
               ...envFiles.withheld.flatMap((path) => {
@@ -1083,14 +1087,8 @@ async function runQualifiedWorker(
                     ...(github ? { allowWrite: [github.directory] } : {}),
                     denyRead: [
                       ...privatePaths.paths,
+                      ...envFiles.envDenies(granted),
                       ...protectedRoots.flatMap((root) => [
-                        ...(envDenied.has(root)
-                          ? [
-                              `${root}/${ENV_GLOB}`,
-                              `${root}/**/${ENV_GLOB}`,
-                              ...(basename(root).toLowerCase().startsWith('.env') ? [root] : []),
-                            ]
-                          : skippedEnvPatterns(root)),
                         ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
                         ...(settingsClosed(root) ? [`${root}/**/${NESTED_SETTINGS}`] : []),
                       ]),

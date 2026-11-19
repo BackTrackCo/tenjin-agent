@@ -40,6 +40,7 @@ Where no prompt was typed since Tenjin's process started (a resumed session woke
 - A Windows worker starts only from a complete scan: its own, or, for a worker prepared while its offer is open, the session's last complete one, and that worker sends nothing until its own scan has ended and agrees.
 - Before each request Tenjin rechecks the files it knows and the folders that hold them. A request that follows a tool result runs one check, whose wait for file events (Windows) or pass over the folders (macOS) starts again from the request when the request comes during it.
 - A folder Tenjin cannot list has its env files denied to the file tools as well as its contents to commands, since a command could still open one by name. One found during a job ends it with `env_file_unscanned`.
+- The env denies come from the scan's own list of roots, so no root is walked with a skip and left without the matching deny: under each root it walks (working directories, worktrees, the job's temp folder) the env and settings files inside `node_modules` and `.git`, or every env and settings file when the scan stopped short; under every other folder the worker may read (read and write exceptions, `~/.claude/projects`, the job's gh config folder) every env file.
 - On Linux nothing learns files made during a job, which is why a repository's tracked `.claude/settings.json` stays unreadable to a Linux worker.
 
 ### New files during a job
