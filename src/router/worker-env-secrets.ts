@@ -269,7 +269,27 @@ export type EnvScanLimits = {
   deadlineMs?: number;
   /** Recursive watching where the OS does it natively (macOS, Windows). */
   watch?: boolean;
+  /** Keep a complete scan of `roots` for the next worker over them (`WorkerEnvSecrets.resume`). */
+  keep?: boolean;
+  /**
+   * Folders made for this job alone (its temp folder): scanned and watched with the
+   * roots, and left out of a kept scan.
+   */
+  fresh?: readonly string[];
 };
+
+/**
+ * THE LAST FULL SCAN OF EACH SET OF ROOTS IN THIS PROCESS, so the next worker over the
+ * same roots need not wait for its own scan before its Claude Code may start: it starts
+ * from this one's denies, and its own full scan runs meanwhile and must agree before
+ * anything is sent (`WorkerEnvSecrets.resume`). In memory only, like every scan, and
+ * replaced by each newer complete scan of the same roots.
+ */
+const lastScans = new Map<string, WorkerEnvSecrets>();
+/** One session works in one set of roots; a few more cover a changed worktree list. */
+const MAX_KEPT_SCANS = 4;
+const scanKey = (roots: readonly string[]) =>
+  JSON.stringify([...new Set(roots.map((root) => resolve(root)))].sort());
 
 export class WorkerEnvSecrets {
   /** False when the start scan stopped short: the env denies then stay. */
@@ -317,7 +337,7 @@ export class WorkerEnvSecrets {
     roots: readonly string[],
     limits: EnvScanLimits = {},
   ): Promise<WorkerEnvSecrets> {
-    const env = new WorkerEnvSecrets(roots);
+    const env = new WorkerEnvSecrets([...roots, ...(limits.fresh ?? [])]);
     try {
       env.scanned = await env.scan(limits);
     } catch {
@@ -325,12 +345,77 @@ export class WorkerEnvSecrets {
     }
     if (limits.watch !== false && (process.platform === 'darwin' || process.platform === 'win32'))
       env.watch();
+    // Kept for the next worker over these roots when the scan ran to its end: a copy,
+    // which this job's later finds never reach.
+    if (limits.keep && env.scanned) {
+      const key = scanKey(roots);
+      lastScans.delete(key);
+      lastScans.set(key, env.copy(roots));
+      while (lastScans.size > MAX_KEPT_SCANS) lastScans.delete(lastScans.keys().next().value!);
+    }
     return env;
   }
 
-  /** Refreshes a warm child's scan without weakening the read denies it started with. */
-  async refreshBeforeAssignment(): Promise<boolean> {
-    const current = await WorkerEnvSecrets.start(this.roots, { watch: false });
+  /**
+   * A worker's scan that starts from the last full scan of `roots` in this process, so
+   * its Claude Code can start at once with that scan's read denies. `fresh` are folders
+   * made for this job alone (its temp folder), which hold nothing yet and are covered
+   * from now by the watcher and the per-request checks. Undefined when no such scan is
+   * held, or where nothing watches files (a file made between the scans would be missed).
+   *
+   * `verified` is this worker's own full scan, started here: it adds every value it
+   * finds, and resolves false when the denies the child started with no longer cover
+   * what it found. NOTHING MAY BE SENT BEFORE IT RESOLVES TRUE; on false the caller
+   * starts over with `start`, which now holds the newer scan.
+   */
+  static resume(
+    roots: readonly string[],
+    fresh: readonly string[] = [],
+  ): { env: WorkerEnvSecrets; verified: Promise<boolean> } | undefined {
+    if (process.platform !== 'darwin' && process.platform !== 'win32') return undefined;
+    const held = lastScans.get(scanKey(roots));
+    if (!held) return undefined;
+    const env = held.copy([...roots, ...fresh]);
+    // Watching before its own scan begins: no change falls between the two.
+    env.watch();
+    if (!env.watching) {
+      env.close();
+      return undefined;
+    }
+    for (const root of fresh) env.hot.add(resolve(root));
+    return { env, verified: env.refreshBeforeAssignment(held.roots, true).catch(() => false) };
+  }
+
+  /** Forgets the scans kept for later workers; for tests. */
+  static forgetScans(): void {
+    lastScans.clear();
+  }
+
+  /** The same findings over `roots`, sharing nothing that a later find changes. */
+  private copy(roots: readonly string[]): WorkerEnvSecrets {
+    const env = new WorkerEnvSecrets(roots);
+    env.scanned = this.scanned;
+    env.withheld.push(...this.withheld);
+    env.unlisted.push(...this.unlisted);
+    for (const [path, signature] of this.files) env.files.set(path, signature);
+    for (const directory of this.hot)
+      if (env.roots.some((root) => inside(root, directory))) env.hot.add(directory);
+    for (const [value, name] of this.placeholders) env.placeholders.set(value, name);
+    for (const value of this.derived) env.derived.add(value);
+    for (const [key, lengths] of this.index) env.index.set(key, [...lengths]);
+    return env;
+  }
+
+  /**
+   * Refreshes a warm child's scan without weakening the read denies it started with:
+   * a full scan of `roots` (default: every root of this one), whose values are added
+   * here. False when it found a file or folder to deny that the child was not denied.
+   */
+  async refreshBeforeAssignment(
+    roots: readonly string[] = this.roots,
+    keep = false,
+  ): Promise<boolean> {
+    const current = await WorkerEnvSecrets.start(roots, { watch: false, keep });
     if (
       current.scanned !== this.scanned ||
       current.withheld.some((path) => !this.withheld.includes(path)) ||

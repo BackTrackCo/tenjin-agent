@@ -155,6 +155,81 @@ it('rejects a warmed worker when an env file needs a new deny and marks it uncov
   expect(env.redact('previous-value-0x12 next-value-0x13')).toBe('[env:OLD] [env:NEXT]');
 });
 
+// Where the OS watches a tree (macOS, Windows): elsewhere a later worker always scans first.
+const WATCHES = process.platform === 'darwin' || process.platform === 'win32';
+
+// Measured 2026-11-18: every worker waited 4.4 to 4.5 s for its own walk of 85 worktrees
+// before its Claude Code could start.
+it.runIf(WATCHES)(
+  'starts a later worker from the kept scan of the same roots at once, and its own scan adds what changed since',
+  async () => {
+    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    const first = await WorkerEnvSecrets.start([root], { keep: true, watch: false });
+    first.close();
+    // Changed after the first scan: the kept scan does not know it.
+    await writeFile(join(root, '.env.local'), 'LATER=later-value-0x22');
+    const temp = join(root, '..', 'job-temp-unused');
+    const resumed = WorkerEnvSecrets.resume([root], [temp])!;
+    try {
+      // At once, with no walk: what the kept scan found, and the same denies.
+      expect(resumed.env.scanned).toBe(true);
+      expect(resumed.env.redact('first-value-0x21')).toBe('[env:FIRST]');
+      expect(resumed.env.withheld).toEqual([]);
+      // Its own full scan is what releases it, and it brings the newer value.
+      expect(await resumed.verified).toBe(true);
+      expect(resumed.env.redact('first-value-0x21 later-value-0x22')).toBe(
+        '[env:FIRST] [env:LATER]',
+      );
+      // What this job learned never reaches the kept scan's first copy.
+      expect(first.redact('later-value-0x22')).toBe('later-value-0x22');
+    } finally {
+      resumed.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+it.runIf(WATCHES)(
+  'refuses to release a worker started from a kept scan when a file now needs a deny it did not start with',
+  async () => {
+    const root = await workspace({ '.env': 'FIRST=first-value-0x21' });
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    await writeFile(join(root, '.envrc'), 'export PATH\n');
+    const resumed = WorkerEnvSecrets.resume([root])!;
+    try {
+      expect(resumed.env.withheld).toEqual([]);
+      expect(await resumed.verified).toBe(false);
+      // The newer scan is the kept one now: the next start has the deny from its first moment.
+      const next = WorkerEnvSecrets.resume([root])!;
+      expect(next.env.withheld).toEqual([join(root, '.envrc')]);
+      expect(await next.verified).toBe(true);
+      next.env.close();
+    } finally {
+      resumed.env.close();
+      WorkerEnvSecrets.forgetScans();
+    }
+  },
+);
+
+it('keeps no scan that stopped short, was not asked for, or is of other roots', async () => {
+  const root = await workspace({ '.env': 'FIRST=first-value-0x21', 'a/b/.env': 'B=bbbbbbbb-0x23' });
+  try {
+    (await WorkerEnvSecrets.start([root], { watch: false })).close();
+    expect(WorkerEnvSecrets.resume([root])).toBeUndefined();
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false, maxDirectories: 1 })).close();
+    expect(WorkerEnvSecrets.resume([root])).toBeUndefined();
+    (await WorkerEnvSecrets.start([root], { keep: true, watch: false })).close();
+    expect(WorkerEnvSecrets.resume([join(root, 'a')])).toBeUndefined();
+    const held = WorkerEnvSecrets.resume([root]);
+    // Without a watcher a file made between the two scans would be missed: always a full scan.
+    expect(held === undefined).toBe(!WATCHES);
+    held?.env.close();
+    await held?.verified;
+  } finally {
+    WorkerEnvSecrets.forgetScans();
+  }
+});
+
 it('keeps env files denied when the scan stops short, and outside the working directories', async () => {
   const root = await workspace({ 'a/.env': 'A_SECRET=never-reached-0x1' });
   const env = await WorkerEnvSecrets.start([root], { maxDirectories: 1, watch: false });

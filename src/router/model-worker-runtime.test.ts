@@ -1484,6 +1484,99 @@ it.each(['readable', 'unscannable'] as const)(
   },
 );
 
+// Measured 2026-11-18: a worker started at its offer waited 4.4 to 4.5 s for its env file
+// scan before its Claude Code could start. With an earlier scan of the same roots it
+// starts at once, and is released only when its own scan has ended and agreed.
+it.each([true, false] as const)(
+  'starts a warm worker before its own env file scan ends, and releases it only when that scan agreed (%s)',
+  async (agreed) => {
+    const root = await mkdtemp(join(tmpdir(), 'warm-worker-resumed-env-'));
+    let verify!: (agreed: boolean) => void;
+    const verified = new Promise<boolean>((resolve) => {
+      verify = resolve;
+    });
+    const kept = await WorkerEnvSecrets.start([root], { watch: false });
+    const scans = vi.spyOn(WorkerEnvSecrets, 'start');
+    const resume = vi.spyOn(WorkerEnvSecrets, 'resume').mockReturnValue({ env: kept, verified });
+    try {
+      vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+      const ownedJob = {
+        ...job,
+        root,
+        decision: {
+          ...job.decision,
+          claudeWorkspace: {
+            version: 1,
+            root,
+            workingDirectories: [root],
+            workingDirectorySpellings: [root],
+            readExceptions: [],
+            writeExceptions: [],
+          },
+        },
+      };
+      const messages = vi.fn(async () => ({ type: 'message', content: [] }));
+      sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+        const result = await oneBridgeRequest(
+          JSON.stringify({
+            model: 'deepseek-flash',
+            messages: [{ role: 'user', content: 'go' }],
+            max_tokens: 32_000,
+          }),
+        );
+        expect(result.status).toBe(200);
+      });
+      const sdk = vi.mocked(query).getMockImplementation()!;
+      let markReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        markReady = resolve;
+      });
+      vi.mocked(query).mockImplementation((call) => {
+        const worker = sdk(call);
+        const accountInfo = worker.accountInfo;
+        worker.accountInfo = () => {
+          markReady();
+          return accountInfo();
+        };
+        return worker;
+      });
+      let accept!: (value: EarlyWorkerAccept) => void;
+      const accepted = new Promise<EarlyWorkerAccept>((resolve) => {
+        accept = resolve;
+      });
+      const runOptions = { ...options(), transport: { messages } as unknown as ModelTransport };
+      const onRelease = vi.fn();
+      const run = runModelWorker(ownedJob, {
+        ...runOptions,
+        early: { accept: accepted, onRelease },
+      });
+      run.catch(() => undefined);
+      // Its Claude Code has started while its own scan still runs, and no scan was waited for.
+      await Promise.race([ready, run]);
+      expect(resume).toHaveBeenCalledOnce();
+      expect(scans).not.toHaveBeenCalled();
+      accept({ ...runOptions, job: ownedJob });
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+      expect(onRelease).not.toHaveBeenCalled();
+      expect(messages).not.toHaveBeenCalled();
+      verify(agreed);
+      if (!agreed) {
+        await expect(run).rejects.toThrow(/env file restrictions changed/);
+        expect(onRelease).not.toHaveBeenCalled();
+        expect(messages).not.toHaveBeenCalled();
+        return;
+      }
+      await expect(run).resolves.toBe('done');
+      expect(onRelease).toHaveBeenCalledOnce();
+      expect(messages).toHaveBeenCalledOnce();
+    } finally {
+      scans.mockRestore();
+      resume.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it('reports a warm child that exits without ever releasing an assignment', async () => {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),

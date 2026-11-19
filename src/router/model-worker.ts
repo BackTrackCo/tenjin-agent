@@ -409,11 +409,17 @@ async function runQualifiedWorker(
   // worker uses the shared temp root, as before. Made before the scan: it is a working
   // directory too, so an env file a command writes there has its values replaced as well.
   const temp = await prepareClaudeWorkerTemp().catch(() => undefined);
-  const envFiles = await WorkerEnvSecrets.start([
-    ...workspace.workingDirectories,
-    ...worktrees,
-    ...(temp ? [temp.directory, temp.scratchpad] : []),
-  ]);
+  const envRoots = [...workspace.workingDirectories, ...worktrees];
+  const envTemp = temp ? [temp.directory, temp.scratchpad] : [];
+  // A WORKER STARTED AT ITS OFFER does not wait for the scan where this process holds an
+  // earlier one of the same roots: its Claude Code starts with that scan's denies, and
+  // its own full scan runs meanwhile. It is released only once that scan has ended and
+  // agreed (`envVerified`), so nothing is sent on an older scan's word. The walk took
+  // 4.5 s over 85 worktrees, before every worker's start.
+  const resumedEnv = early ? WorkerEnvSecrets.resume(envRoots, envTemp) : undefined;
+  const envFiles =
+    resumedEnv?.env ?? (await WorkerEnvSecrets.start(envRoots, { keep: true, fresh: envTemp }));
+  const envVerified = resumedEnv?.verified ?? Promise.resolve(true);
   const envDenied = new Set(
     envDeniedRoots(
       protectedRoots,
@@ -1210,6 +1216,9 @@ async function runQualifiedWorker(
         );
       controller.signal.throwIfAborted();
       if (early) {
+        // Its own env file scan has ended, and found nothing its fixed denies leave open.
+        if (!(await Promise.race([envVerified, stoppedBeforeAssignment])))
+          throw new Error("The warm Claude worker's env file restrictions changed");
         // SDK initialization can finish before an assignment is sent. Release inference
         // only after the accept path has won the job and this child still fits its scope.
         diagnostics.mark('earlyReady');
