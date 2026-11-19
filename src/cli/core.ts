@@ -271,7 +271,10 @@ Examples:
       'enable DeepSeek for repositories or a containing folder, turn it off, or list why calls got no offer',
     )
     .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
-    .option('--max-job <USD>', 'total routing and inference ceiling per job')
+    .option(
+      '--max-job <USD>',
+      'a lower ceiling per job than your per-call spend limit, which is the default cap',
+    )
     .option('--windows-worker-sid <sid>', 'SID of the dedicated standard Windows worker account')
     .option('--windows-launcher <path>', 'absolute local path to the Windows worker launcher .exe')
     .option('--windows-claude <path>', 'absolute local path to the native Claude Code .exe')
@@ -286,7 +289,12 @@ Examples:
     .addHelpText(
       'after',
       configExamples(
-        ['subagents on --repository . --max-job 1.00', 'subagents off', 'subagents why'],
+        [
+          'subagents on --repository .',
+          'subagents on --repository . --max-job 0.50',
+          'subagents off',
+          'subagents why',
+        ],
         'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
       ),
     )

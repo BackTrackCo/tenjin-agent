@@ -689,9 +689,12 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
   expect(route).toHaveBeenCalledTimes(2);
   // The consent statement is about the current endpoint and ceiling, not an
   // earlier configuration that happened to authorize classification.
-  for (const [turnId, consentChange] of [
-    ['origin-changed', { routerOrigin: 'https://other-router.example' }],
-    ['cap-lowered', { maxJobAtomic: '500000' }],
+  for (const [turnId, consentChange, limits] of [
+    ['origin-changed', { routerOrigin: 'https://other-router.example' }, {}],
+    // A ceiling the person named: with the rule (`maxJob`), the amount is not the cap.
+    ['cap-lowered', { maxJobAtomic: '500000', maxJob: undefined }, {}],
+    // The cap is the per-call limit, so a limit lowered during routing lowers it too.
+    ['limit-lowered', {}, { maxAutoSpend: '500000' }],
   ] as const) {
     await writeFile(join(dir, 'config.json'), JSON.stringify(savedConfig));
     const guarded = { ...session, turnId };
@@ -703,6 +706,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
         join(dir, 'config.json'),
         JSON.stringify({
           ...savedConfig,
+          ...limits,
           router: {
             ...savedConfig.router,
             subagentConsent: { ...savedConfig.router.subagentConsent, ...consentChange },
@@ -716,7 +720,7 @@ it.each([2, 3])('routes with consent v%i and preserves parent veto', async (vers
     });
     expect(await model.store.pending('root', guarded.turnId)).toMatchObject({ state: 'native' });
   }
-  expect(route).toHaveBeenCalledTimes(4);
+  expect(route).toHaveBeenCalledTimes(5);
 });
 
 it('native-workspace routing follows later native projects and discloses only their current qualified roots', async () => {
@@ -844,6 +848,28 @@ it('keeps a legacy undersized job native before purchasing model routing', async
     prompt: 'Read the fixture.',
   });
   expect(f.route).toHaveBeenCalledTimes(1);
+});
+
+// The offer's cap, which the row draws as `cap $X`, was the consent's own amount, $1 from
+// install, whatever the person's per-call limit said.
+it.each([
+  ['500000', '500000'],
+  // The consent names a $1 ceiling: a higher limit does not lift it.
+  ['3000000', '1000000'],
+  // Under what one model call and its routing fee need: no offer, and nothing is routed.
+  ['50000', null],
+] as const)('offers a job at the per-call limit %s with the cap %s', async (maxAutoSpend, cap) => {
+  const f = await routedFixture();
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ ...config, maxAutoSpend }));
+  const answer = await f.model.capture(f.session, 'limited-call', { prompt: 'Read the fixture.' });
+  if (cap !== null) {
+    expect(answer).toMatchObject({ action: 'offer', capAtomic: cap });
+    return;
+  }
+  expect(answer).toMatchObject({ action: 'native' });
+  expect(f.route).not.toHaveBeenCalled();
+  expect((await f.model.store.noOffers()).at(-1)).toMatchObject({ code: 'job_cap_too_low' });
 });
 
 async function routedFixture() {

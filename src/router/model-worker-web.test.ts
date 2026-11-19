@@ -84,13 +84,18 @@ const IDENTITIES = JSON.parse(
 ) as Identities;
 
 async function configure(
-  options: { cap?: string; maxAutoSpend?: string; policy?: Record<string, unknown> } = {},
+  options: {
+    cap?: string;
+    maxAutoSpend?: string;
+    sessionBudget?: string;
+    policy?: Record<string, unknown>;
+  } = {},
 ) {
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({
       maxAutoSpend: options.maxAutoSpend ?? '250000',
-      sessionBudget: '5000000',
+      sessionBudget: options.sessionBudget ?? '5000000',
       router: {
         subagents: true,
         subagentConsent: {
@@ -375,22 +380,29 @@ it("refuses a search the job's budget cannot cover at the spec's ceiling, before
   expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
 });
 
-it("refuses a search over the person's per-call limit with the native error, and releases its reservation", async () => {
-  // The failure: a worker search kept as a quote or paid past the person's own limit.
-  await configure({ maxAutoSpend: '3000' });
-  const { fetchImpl, seen } = network();
-  const { job, transport, deps, auth } = setup(fetchImpl);
-  const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
-  expect(reads.errors).toEqual(['unavailable']);
-  expect(reads.text).toContain("it would pass the person's spending limits");
-  expect(seen.some((call) => call.url === EXA_SEARCH && call.paid)).toBe(false);
-  expect(auth.commit).not.toHaveBeenCalled();
-  expect(await transport.summary(job)).toEqual({
-    reservedAtomic: ROUTING_FEE.toString(),
-    actualAtomic: ROUTING_FEE.toString(),
-    uncertain: [],
-  });
-});
+it.each([
+  // The job's cap is the per-call limit, so a limit this low leaves the job no room.
+  ['per-call limit', { maxAutoSpend: '3000' }, "this job's budget has no room for another search"],
+  ['daily budget', { sessionBudget: '3000' }, "it would pass the person's spending limits"],
+] as const)(
+  "refuses a search over the person's %s with the native error, and releases its reservation",
+  async (_limit, limits, why) => {
+    // The failure: a worker search kept as a quote or paid past the person's own limit.
+    await configure(limits);
+    const { fetchImpl, seen } = network();
+    const { job, transport, deps, auth } = setup(fetchImpl);
+    const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
+    expect(reads.errors).toEqual(['unavailable']);
+    expect(reads.text).toContain(why);
+    expect(seen.some((call) => call.url === EXA_SEARCH && call.paid)).toBe(false);
+    expect(auth.commit).not.toHaveBeenCalled();
+    expect(await transport.summary(job)).toEqual({
+      reservedAtomic: ROUTING_FEE.toString(),
+      actualAtomic: ROUTING_FEE.toString(),
+      uncertain: [],
+    });
+  },
+);
 
 it('answers the native error when the router declines the search, and pays nothing', async () => {
   await configure();

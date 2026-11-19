@@ -6,15 +6,17 @@ import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/confi
 import { selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { hasCode } from '../lib/errno';
+import { formatUsdDisplay } from '../lib/money';
 import { paint } from '../lib/output';
 import type { QuestionStep } from './install';
-import { nativeWorkspaceModelConsent } from './model-settings';
+import { MODEL_MINIMUM_JOB_ATOMIC, usdOfAtomic } from './model-limits';
+import { nativeWorkspaceModelConsent, perCallLimitAtomic } from './model-settings';
 
 export type InstallSubagentChoice = 'on' | 'off';
 
 /** Said once, to a person who has just turned subagents on: who receives what, and the fees. */
 export const DEEPSEEK_INSTALL_TERMS =
-  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto and a $1 job limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, and Exa searches cost $0.004 each. Your spend limits apply.';
+  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto. Each job costs up to your per-call spend limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, and Exa searches cost $0.004 each. Your spend limits apply.';
 
 /** The page the question sends a person to for the recipients, the reads, the fees and the cap. */
 export const SUBAGENT_DETAILS_URL =
@@ -206,7 +208,12 @@ export async function completeNewInstall(
         ...config.router,
         subagents: choice === 'on',
         ...(choice === 'on'
-          ? { subagentConsent: nativeWorkspaceModelConsent({ routerOrigin: pending.routerOrigin }) }
+          ? {
+              subagentConsent: nativeWorkspaceModelConsent({
+                routerOrigin: pending.routerOrigin,
+                maxJobAtomic: perCallLimitAtomic(config).toString(),
+              }),
+            }
           : {}),
       },
     };
@@ -285,6 +292,8 @@ export async function finishNewInstall(
     return addSubagentQuestion(result, session.continueWith + harness);
   }
   const enabled = applied === 'on';
+  // The cap is the per-call limit at each offer. What it is now is said with the answer.
+  const perCall = perCallLimitAtomic(await loadRawConfig(session.dataDir));
   return {
     ...result,
     data: {
@@ -293,7 +302,8 @@ export async function finishNewInstall(
         ? {
             enabled,
             scope: 'native-workspace',
-            maxJobAtomic: '1000000',
+            maxJob: 'per-call-limit',
+            maxJobAtomic: perCall.toString(),
             terms: DEEPSEEK_INSTALL_TERMS,
           }
         : { enabled },
@@ -304,7 +314,12 @@ export async function finishNewInstall(
       ...(result.humanLines ?? []),
       ...(enabled
         ? [
-            'DeepSeek subagent routing is enabled with parent veto and a $1 job limit. Turn it off with `tenjin config subagents off`.',
+            `DeepSeek subagent routing is enabled with parent veto. Each job costs up to your per-call spend limit, $${formatUsdDisplay(perCall.toString())} now. Turn it off with \`tenjin config subagents off\`.`,
+            ...(perCall < MODEL_MINIMUM_JOB_ATOMIC
+              ? [
+                  `No job is offered while that limit is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} one model call and its routing fee need. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
+                ]
+              : []),
             paint(ctx.io, 'dim', DEEPSEEK_INSTALL_TERMS),
           ]
         : ['DeepSeek subagent routing is off.']),

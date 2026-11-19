@@ -630,19 +630,18 @@ export class ModelTransport {
     };
     const payer = new Payer({
       ...payerDeps,
-      // Inference has a separately accepted job ceiling. Keep the rolling
-      // budget/creator gates and an explicit automatic-spend stop unchanged.
+      // A job's cap is the per-call limit or a lower named ceiling, so no deposit
+      // passes the per-call limit. The rolling budget and creator gates are unchanged.
       policy: async () => {
         const policy = await payerDeps.policy();
         const current = await consent();
+        const cap =
+          current.maxJobAtomic < BigInt(job.capAtomic)
+            ? current.maxJobAtomic
+            : BigInt(job.capAtomic);
         return {
           ...policy,
-          maxAutoSpendAtomic:
-            policy.maxAutoSpendAtomic === 0n
-              ? 0n
-              : current.maxJobAtomic < BigInt(job.capAtomic)
-                ? current.maxJobAtomic
-                : BigInt(job.capAtomic),
+          maxAutoSpendAtomic: policy.maxAutoSpendAtomic < cap ? policy.maxAutoSpendAtomic : cap,
         };
       },
       getSigner: async () => {

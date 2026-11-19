@@ -41,7 +41,8 @@ it.each([
   { scope: undefined },
   { scope: 'all' },
   { repositories: ['/'] },
-  { maxJobAtomic: '0' },
+  // A named ceiling of zero. With the rule (`maxJob`), the amount is not the cap.
+  { maxJobAtomic: '0', maxJob: undefined },
   { recipients: ['Tenjin'] },
 ])('refuses incomplete or widened native-workspace consent %j', async (change) => {
   const consent = nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939' });
@@ -116,16 +117,51 @@ it('a repository cannot create native-workspace disclosure, or override a global
   await writeFile(project, JSON.stringify({ router: { subagents: false } }));
   expect(await modelSettings(data, repo)).toBeNull();
 });
-async function fixture(router: Record<string, unknown>) {
+async function fixture(router: Record<string, unknown>, limits: Record<string, string> = {}) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'model-consent-')));
   const data = join(dir, 'data'),
     repo = join(dir, 'repo');
   await mkdir(data);
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
-  await writeFile(join(data, 'config.json'), JSON.stringify({ router }));
+  await writeFile(join(data, 'config.json'), JSON.stringify({ ...limits, router }));
   return { data, repo };
 }
+
+// A job is one call to the person. The cap was the consent's own amount, $1 from install,
+// whatever the per-call limit said: a $0.25 limit still let a job spend $1.
+it.each([
+  // [the per-call limit, the consent's amount, whether it names the rule, the cap]
+  ['250000', '1000000', true, 250000n],
+  ['3000000', '1000000', true, 3000000n],
+  ['0', '1000000', true, 0n],
+  // A named ceiling, or a consent from before the rule: the smaller of the two.
+  ['250000', '1000000', false, 250000n],
+  ['3000000', '1000000', false, 1000000n],
+  ['3000000', '500000', false, 500000n],
+] as const)(
+  'caps a job at the per-call limit %s with a consent amount of %s (rule: %s)',
+  async (maxAutoSpend, maxJobAtomic, rule, cap) => {
+    const consent: Record<string, unknown> = {
+      ...nativeWorkspaceModelConsent({ routerOrigin: 'http://localhost:3939', maxJobAtomic }),
+    };
+    if (!rule) delete consent.maxJob;
+    const { data, repo } = await fixture(
+      { subagents: true, subagentConsent: consent },
+      { maxAutoSpend },
+    );
+    expect(await modelSettings(data, repo)).toMatchObject({ maxJobAtomic: cap });
+  },
+);
+
+it('caps a job at the default per-call limit where none is saved', async () => {
+  const consent = nativeWorkspaceModelConsent({
+    routerOrigin: 'http://localhost:3939',
+    maxJobAtomic: '4000000',
+  });
+  const { data, repo } = await fixture({ subagents: true, subagentConsent: consent });
+  expect(await modelSettings(data, repo)).toMatchObject({ maxJobAtomic: 1000000n });
+});
 it('does not turn legacy tier routing or a boolean into inference/data consent', async () => {
   const { data, repo } = await fixture({ subagents: 'apply' });
   expect(await modelSettings(data, repo)).toBeNull();

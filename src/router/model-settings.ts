@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { sep } from 'node:path';
 import { z } from 'zod';
-import { loadRawConfig } from '../lib/config';
+import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
 import { isRecord } from '../lib/guards';
 import { routerSettings } from './settings';
 
@@ -24,6 +24,13 @@ const consentFields = {
   /** A consent that names fewer recipients was given under an earlier disclosure. */
   recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
   maxJobAtomic: z.string().regex(/^\d+$/),
+  /**
+   * Set where the person agreed to the rule and to no amount: a job's cap is their
+   * per-call spend limit as it stands at each offer. `maxJobAtomic` then holds that limit
+   * as it stood at consent, the ceiling a build from before the rule reads. Absent,
+   * `maxJobAtomic` is a ceiling the person named, which a higher per-call limit never lifts.
+   */
+  maxJob: z.literal('per-call-limit').optional(),
 };
 const repositoryConsentSchema = z.object({
   ...consentFields,
@@ -41,9 +48,33 @@ export const modelConsentSchema = z.discriminatedUnion('version', [
   nativeWorkspaceConsentSchema,
 ]);
 
-/** Installation records disclosure, never a directory or a native permission grant. */
+/** The person's per-call spend limit, the same one the tool router applies to one paid call. */
+export function perCallLimitAtomic(config: PartialConfig): bigint {
+  return BigInt(resolveSettings({ config, flags: {}, env: process.env }).maxAutoSpend.value);
+}
+
+/**
+ * A JOB'S CAP: from the person's side a job is one call, so it is their per-call spend
+ * limit, read fresh. A ceiling the person named (`--max-job`, or a consent from before
+ * the rule) lowers it and never raises it. A lower limit lowers the next offer and a
+ * running job's remaining cap at once. A higher one lifts the cap only where the consent
+ * names the rule; a named ceiling stays until the person gives the consent again.
+ */
+function jobCapAtomic(
+  consent: { maxJobAtomic: string; maxJob?: 'per-call-limit' },
+  perCall: bigint,
+): bigint {
+  const named = BigInt(consent.maxJobAtomic);
+  return consent.maxJob === 'per-call-limit' || perCall < named ? perCall : named;
+}
+
+/**
+ * Installation records disclosure, never a directory or a native permission grant. Its
+ * question names the rule for the cap, so the record does too.
+ */
 export function nativeWorkspaceModelConsent(options: {
   routerOrigin: string;
+  /** The per-call limit as it stands, for a build from before the rule. */
   maxJobAtomic?: string;
 }) {
   return nativeWorkspaceConsentSchema.parse({
@@ -54,6 +85,7 @@ export function nativeWorkspaceModelConsent(options: {
     recipients: [...RECIPIENTS],
     routerOrigin: options.routerOrigin,
     maxJobAtomic: options.maxJobAtomic ?? '1000000',
+    maxJob: 'per-call-limit',
   });
 }
 
@@ -110,14 +142,20 @@ export async function modelSettings(dataDir: string, cwd: string) {
       ? [root]
       : await Promise.all(parsed.data.repositories.map((p) => realpath(p).catch(() => null)));
   const repositories = [...new Set(roots.filter((path): path is string => path !== null))];
-  if (!disclosureCovers(repositories, root) || BigInt(parsed.data.maxJobAtomic) <= 0n) return null;
+  // A named ceiling of zero is no consent to any job. A per-call limit of zero is the
+  // person's stop for automatic payments: the cap is then zero, and no job is offered.
+  if (
+    !disclosureCovers(repositories, root) ||
+    (parsed.data.maxJob === undefined && BigInt(parsed.data.maxJobAtomic) <= 0n)
+  )
+    return null;
   return {
     version: parsed.data.version,
     scope: parsed.data.version === 3 ? ('native-workspace' as const) : ('repositories' as const),
     root,
     repositories,
     githubRepositories: parsed.data.version === 2 ? parsed.data.githubRepositories : [],
-    maxJobAtomic: BigInt(parsed.data.maxJobAtomic),
+    maxJobAtomic: jobCapAtomic(parsed.data, perCallLimitAtomic(config)),
     routerOrigin: parsed.data.routerOrigin,
     context: settings.context.value,
   };

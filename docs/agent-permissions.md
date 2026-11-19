@@ -8,7 +8,7 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, and on a fresh install asks whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. DeepSeek subagents and checkout each require their own choice.
 
-Turning on DeepSeek subagents during fresh setup enables them for each session's qualified native workspace with a $1 job ceiling within your daily budget. Your parent keeps final accept/veto. Existing users, saved off choices and named-directory consent keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing. [Scope, sharing and worker controls →](./subagents.md)
+Turning on DeepSeek subagents during fresh setup enables them for each session's qualified native workspace. Each job costs up to your per-call spend limit, within your daily budget. Your parent keeps final accept/veto. Existing users, saved off choices and named-directory consent keep their behavior through updates and refreshes. Use `tenjin config subagents off` to stop helper routing. [Scope, sharing and worker controls →](./subagents.md)
 
 Use the activation step the installer returns:
 
@@ -45,9 +45,9 @@ Installation and the first task add no optional retention or second-host questio
 | Wallet balance      | No payment can exceed available funds.                                                                                                                                                                                       |
 | `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                                                                      |
 
-Ordinary spending defaults apply before any answer. Turning on DeepSeek subagents during fresh setup records the $1 job ceiling. Explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+Ordinary spending defaults apply before any answer. Turning on DeepSeek subagents during fresh setup records that a job's cap is your per-call spend limit. Explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
 
-A DeepSeek job's saved ceiling covers its routing, inference and web searches together. Inference uses that ceiling rather than a positive ordinary per-call limit; an explicit zero automatic-spend stop and the daily budget still apply. A worker's web search, an Exa search at $0.004, is paid like any lookup, within your per-call limit and daily budget too. [Quotes and cumulative job limits →](./subagents.md#charges-and-limits)
+A DeepSeek job's cap covers its routing, inference and web searches together. It is your per-call spend limit as it stands at each offer, or a lower ceiling you named with `--max-job`, so a job never costs more than one call may; the daily budget still applies, and a per-call limit of zero stops jobs. A worker's web search, an Exa search at $0.004, is paid like any lookup, within your per-call limit and daily budget too. [Quotes and cumulative job limits →](./subagents.md#charges-and-limits)
 
 Changing global limits is a normal config write: the CLI does not distinguish a person from an agent. Your host's permissions and filesystem access protect those writes. Authorize limit changes deliberately; the request tool itself cannot raise them.
 

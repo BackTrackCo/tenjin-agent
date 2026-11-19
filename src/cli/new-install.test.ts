@@ -153,7 +153,10 @@ async function install(args: string[] = []) {
   const code = await main(['install', ...args], captured.io);
   return { code, output: captured.stdout(), config: await loadRawConfig(seams.data) };
 }
-function expectEnabled(config: Awaited<ReturnType<typeof loadRawConfig>>) {
+function expectEnabled(
+  config: Awaited<ReturnType<typeof loadRawConfig>>,
+  perCallAtomic = '1000000',
+) {
   expect(config.router).toMatchObject({
     subagents: true,
     subagentConsent: {
@@ -163,7 +166,9 @@ function expectEnabled(config: Awaited<ReturnType<typeof loadRawConfig>>) {
       reads: 'claude-home',
       recipients: ['Tenjin', 'DeepSeek', 'Exa'],
       routerOrigin: 'https://tenjin.sh',
-      maxJobAtomic: '1000000',
+      // The rule the question names, and the limit as it stood for an older build.
+      maxJob: 'per-call-limit',
+      maxJobAtomic: perCallAtomic,
     },
   });
   expect(config.router?.subagentConsent).not.toHaveProperty('repositories');
@@ -227,15 +232,29 @@ it('saves off without consent and does not ask again on reinstall', async () => 
   expect(repeated.output).not.toContain('Use a cheap model for eligible subagent jobs?');
 });
 
-it('accepts custom limits on continuation without changing the DeepSeek job ceiling', async () => {
-  await install();
-  const out = await install(['--max-auto-spend', '0', '--session-budget', 'none']);
-  expect(out.code).toBe(0);
-  expect(out.config.router?.subagentConsent).toBeUndefined();
-  expectEnabled((await install(['--subagents', 'on'])).config);
-  expect(out.config.maxAutoSpend).toBe('0');
-  expect(out.config.sessionBudget).toBe('none');
-});
+// The job cap was a separate $1, whatever per-call limit the person had just chosen.
+it.each([
+  ['0', '0'],
+  ['0.50', '500000'],
+  ['3', '3000000'],
+])(
+  'turns subagents on at the per-call limit %s the person chose on continuation',
+  async (usd, atomic) => {
+    await install();
+    const out = await install(['--max-auto-spend', usd, '--session-budget', 'none']);
+    expect(out.code).toBe(0);
+    expect(out.config.router?.subagentConsent).toBeUndefined();
+    const on = await install(['--subagents', 'on']);
+    expectEnabled(on.config, atomic);
+    expect(JSON.parse(on.output).data.subagents).toMatchObject({
+      enabled: true,
+      maxJob: 'per-call-limit',
+      maxJobAtomic: atomic,
+    });
+    expect(on.config.maxAutoSpend).toBe(atomic);
+    expect(on.config.sessionBudget).toBe('none');
+  },
+);
 
 // The terms paragraph was in every receipt's disclosure, so it came back after Keep off
 // and a second time after the question that held it.

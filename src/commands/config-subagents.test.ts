@@ -209,6 +209,41 @@ it('records current GitHub origins for selected folders and refreshes aliases wi
   expect(JSON.parse(saved).router.subagentConsent.repositories).toEqual([workspace]);
 });
 
+// `--max-job` was required, and the cap was that amount whatever the per-call limit said.
+it('takes the per-call limit as the cap where no ceiling is named, and says the cap in force', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({ maxAutoSpend: '500000' }));
+  const followed = await runConfigSubagents('on', { repository: dir }, testCtx(dir));
+  expect(followed.data).toMatchObject({ maxJob: 'per-call-limit', jobCapAtomic: '500000' });
+  expect(JSON.parse(await readFile(path, 'utf8')).router.subagentConsent).toMatchObject({
+    maxJob: 'per-call-limit',
+    maxJobAtomic: '500000',
+  });
+  expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 500000n });
+  // The next offer follows a changed limit, up as well as down: the consent names the rule.
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...saved, maxAutoSpend: '2000000' }));
+  expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 2000000n });
+  // A named ceiling above the limit is kept as named and does not lift the cap.
+  const named = await runConfigSubagents('on', { repository: dir, maxJob: '5' }, testCtx(dir));
+  expect(named.data).toMatchObject({ maxJobAtomic: '5000000', jobCapAtomic: '2000000' });
+  expect(named.data).not.toHaveProperty('maxJob');
+  expect(await modelSettings(dir, dir)).toMatchObject({ maxJobAtomic: 2000000n });
+});
+
+it('refuses to turn subagents on while the per-call limit is under one model call, and says so', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({ maxAutoSpend: '50000' }));
+  await expect(runConfigSubagents('on', { repository: dir }, testCtx(dir))).rejects.toMatchObject({
+    code: 'USAGE',
+    message: expect.stringContaining('per-call spend limit, $0.05'),
+    fix: expect.stringContaining('tenjin config set maxAutoSpend'),
+  });
+  expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ maxAutoSpend: '50000' });
+});
+
 it('refuses a job ceiling below the useful reservation floor before saving consent', async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
   await expect(

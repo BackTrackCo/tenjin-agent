@@ -59,6 +59,7 @@ async function fixture(
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
   const config = {
+    maxAutoSpend: (options.maxAutoSpendAtomic ?? 1000000n).toString(),
     router: {
       subagents: true,
       subagentConsent: {
@@ -340,18 +341,28 @@ it('ends a run as not started, with the router as the cause, when that question 
   expect(worker).not.toHaveBeenCalled();
 });
 
-it('funds a Messages quote from saved job consent while preserving an explicit smaller tool limit', async () => {
+// A job is one call to the person. The consent's $1 ceiling used to stand in for the
+// per-call limit, so a $0.50 quote was funded under a $0.25 limit.
+it('refuses a Messages quote above the per-call limit, whatever ceiling the consent names', async () => {
   const f = await fixture({ maxAutoSpendAtomic: 250000n, minDeposit: '500000' });
+  await expect(
+    f.make().messages(f.job, { messages: [] }, new AbortController().signal),
+  ).rejects.toThrow('remaining job ceiling');
+  expect(f.router.deposits).toBe(0);
+  expect(f.router.paidRequests()).toBe(0);
+});
+
+it('funds a Messages quote within the per-call limit, with no deposit above that limit', async () => {
+  const f = await fixture({ quote: '200000', maxAutoSpendAtomic: 250000n, minDeposit: '250000' });
   await expect(
     f.make().messages(f.job, { messages: [] }, new AbortController().signal),
   ).resolves.toEqual(f.message);
   expect(f.router.deposits).toBe(1);
-  expect(f.router.paidRequests()).toBe(1);
-  expect((await f.deps.policy()).maxAutoSpendAtomic).toBe(250000n);
+  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('250000');
 });
 
 it('can consume close to the job ceiling when Messages quotes follow the requested output', async () => {
-  const f = await fixture({ quote: '60000', charge: '40000', maxAutoSpendAtomic: 250000n });
+  const f = await fixture({ quote: '60000', charge: '40000' });
   const transport = f.make();
   for (let turn = 0; turn < 24; turn++)
     await transport.messages(
@@ -377,9 +388,10 @@ it('can consume close to the job ceiling when Messages quotes follow the request
 it.each(['daily', 'creator'] as const)(
   'retains the %s payment gate when using job consent for inference',
   async (gate) => {
-    const f = await fixture({ maxAutoSpendAtomic: 250000n, minDeposit: '500000' });
+    const f = await fixture({ minDeposit: '500000' });
     f.deps.policy = async () => ({
       ...TEST_POLICY,
+      maxAutoSpendAtomic: 1000000n,
       ...(gate === 'daily'
         ? { sessionBudgetAtomic: 1000n }
         : { allowlistCreators: ['somebody-else'] }),
@@ -1395,7 +1407,7 @@ it('retains exposure when signing starts but fails before a paid request is sent
 });
 
 it('preserves a second queued reservation when the first call settles', async () => {
-  const f = await fixture({ cap: '1100000' });
+  const f = await fixture({ cap: '1100000', maxAutoSpendAtomic: 1100000n });
   f.job.capAtomic = '1100000';
   let finishFirst!: () => void;
   f.router.hold = new Promise<void>((resolve) => {

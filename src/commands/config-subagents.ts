@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { CliError } from '../lib/errors';
-import { parseUsdToAtomic } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
@@ -37,7 +37,7 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   host_unqualified: 'the host cannot show a worker permission prompt',
   no_consent: 'no DeepSeek consent covers this directory at this router',
   consent_outdated:
-    'your DeepSeek consent predates what a worker can read now, or does not name Exa as a recipient; read the current terms and renew it with tenjin config subagents on --repository <path> --max-job <USD>',
+    'your DeepSeek consent predates what a worker can read now, or does not name Exa as a recipient; read the current terms and renew it with tenjin config subagents on --repository <path>',
   permission_mode: 'the session was in plan mode, or its mode was not seen',
   worker_unqualified:
     'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
@@ -47,7 +47,8 @@ const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
   scope_not_covered: "consent does not cover the session's working directories",
   parent_context_unavailable: "the session's transcript could not be read",
   over_size_limit: "the assignment is over the router's request limit",
-  job_cap_too_low: 'the job ceiling is under the minimum a job needs',
+  job_cap_too_low:
+    'the job cap (your per-call spend limit, or a lower ceiling you named) is under what one model call and its routing fee need; raise the limit with tenjin config set maxAutoSpend <usd>',
   capture_error: 'a local error before routing',
   route_error: 'the routing request failed, or a spend limit refused its fee',
   server_declined: 'the router judged that the work stays native',
@@ -129,17 +130,30 @@ export async function runConfigSubagents(
           ],
     };
   }
-  if (mode !== 'on' || !flags.repository || !flags.maxJob)
-    throw new CliError('USAGE', 'Use on --repository <path> --max-job <USD>, off, or why.');
+  if (mode !== 'on' || !flags.repository)
+    throw new CliError('USAGE', 'Use on --repository <path> [--max-job <USD>], off, or why.');
   const repository = await realpath(flags.repository);
-  const maxJob = BigInt(parseUsdToAtomic(flags.maxJob));
   const settings = await resolveContextSettings(ctx);
   const routerOrigin = new URL(settings.baseUrl).origin;
-  if (maxJob < MODEL_MINIMUM_JOB_ATOMIC)
+  // A JOB IS ONE CALL to the person, so its cap is their per-call spend limit, read at
+  // each offer. `--max-job` names a lower ceiling and never lifts the cap above the limit.
+  const perCall = settings.policy.maxAutoSpendAtomic;
+  const named = flags.maxJob === undefined ? undefined : BigInt(parseUsdToAtomic(flags.maxJob));
+  if (named !== undefined && named < MODEL_MINIMUM_JOB_ATOMIC)
     throw new CliError(
       'USAGE',
       `The job ceiling must be at least ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} for the current minimum Messages reservation and routing fee. Actual input can require more.`,
     );
+  const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
+  if (perCall < MODEL_MINIMUM_JOB_ATOMIC)
+    throw new CliError(
+      'USAGE',
+      `Your per-call spend limit, ${usd(perCall)}, is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} that one model call and its routing fee need, so no job would be offered. Nothing was changed.`,
+      {
+        fix: 'Raise the limit with `tenjin config set maxAutoSpend <usd>`, then run this command again.',
+      },
+    );
+  const cap = named !== undefined && named < perCall ? named : perCall;
   if (configuringWindows && !flags.acceptWindowsShellAccess)
     throw new CliError('USAGE', NATIVE_WINDOWS_DISCLOSURE, {
       fix: 'Review the Windows disclosure and add --accept-windows-shell-access if you agree.',
@@ -167,7 +181,7 @@ export async function runConfigSubagents(
     windowsWorker
       ? NATIVE_WINDOWS_DISCLOSURE
       : 'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. A Claude worker may read and write in every named directory, inside its sandbox and your native permissions; your own sessions gain nothing. It may read env files in those directories as a native session can, and Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek; values under 8 characters and bare words or numbers under 16 are sent as written. It loads your global Claude Code configuration as a native subagent does: your personal CLAUDE.md is in its instructions, and it can read the skills, plugins, agents, commands and rules under ~/.claude, every session transcript and memory folder there, your prompt history and your settings files, so what it reads there, other projects’ sessions included, can reach Tenjin and DeepSeek; the values in those settings files’ env blocks are replaced with [env:NAME]. Settings backups, wallet and login files, env files elsewhere and folders you did not name stay unreadable; known secrets are masked, not guaranteed anonymous.',
-    `Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. A worker request, with its ${MODEL_OUTPUT_TOKENS.toLocaleString('en-US')}-token output cap, reserves at least ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.`,
+    `Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. A job costs up to your per-call spend limit as it stands at each offer, or a lower ceiling you name with --max-job; the daily budget and creator allowlist still apply. A worker request, with its ${MODEL_OUTPUT_TOKENS.toLocaleString('en-US')}-token output cap, reserves at least ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.`,
   ].join('\n\n');
   let repositories = [repository];
   let githubRepositories: string[] = [];
@@ -188,7 +202,9 @@ export async function runConfigSubagents(
         recipients: ['Tenjin', 'DeepSeek', 'Exa'],
         repositories,
         githubRepositories,
-        maxJobAtomic: maxJob.toString(),
+        // The named ceiling, or the limit as it stands for a build from before the rule.
+        maxJobAtomic: (named ?? perCall).toString(),
+        ...(named === undefined ? { maxJob: 'per-call-limit' as const } : {}),
         routerOrigin,
       },
     };
@@ -202,14 +218,23 @@ export async function runConfigSubagents(
       repository,
       repositories,
       githubRepositories,
-      maxJobAtomic: maxJob.toString(),
+      maxJobAtomic: (named ?? perCall).toString(),
+      ...(named === undefined ? { maxJob: 'per-call-limit' } : {}),
+      jobCapAtomic: cap.toString(),
+      perCallLimitAtomic: perCall.toString(),
       routerOrigin,
       disclosure,
       ...(windowsWorker ? { windowsWorker: { enabled: true } } : {}),
     },
     humanLines: [
       disclosure,
-      `Enabled for ${repositories.join(', ')}, at ${routerOrigin}, at most $${flags.maxJob} per job.`,
+      `Enabled for ${repositories.join(', ')}, at ${routerOrigin}. ${
+        named === undefined
+          ? `Each job costs up to your per-call spend limit, ${usd(perCall)} now.`
+          : named < perCall
+            ? `Each job costs at most ${usd(named)}, the ceiling you named, under your per-call spend limit of ${usd(perCall)}.`
+            : `Each job costs at most ${usd(perCall)}, your per-call spend limit: the ${usd(named)} ceiling you named does not lift it.`
+      }`,
       ...(process.platform === 'win32' && !windowsWorker
         ? [
             'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',

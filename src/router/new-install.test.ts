@@ -49,6 +49,7 @@ it('retains a pending new-install claim without consent until an explicit setup 
       recipients: ['Tenjin', 'DeepSeek', 'Exa'],
       routerOrigin: 'https://tenjin.sh',
       maxJobAtomic: '1000000',
+      maxJob: 'per-call-limit',
     },
   });
 });
