@@ -823,6 +823,32 @@ it.skipIf(process.platform === 'win32')(
   },
 );
 
+// Review of 800c27a2, J (M20, M21): the job's GitHub folder and `~/.claude/projects` are folders
+// the worker may read that no scan walks, so an env file in them would leave as written.
+it.skipIf(process.platform === 'win32')(
+  "denies every env file in the job's GitHub folder and under ~/.claude/projects",
+  async () => {
+    const config = await mkdtemp(join(tmpdir(), 'worker-claude-config-'));
+    await mkdir(join(config, 'projects'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', config);
+    try {
+      sdkResult({ subtype: 'success', result: 'done' });
+      await runModelWorker(job, options());
+      const sent = given(vi.mocked(query).mock.calls.at(-1)![0].options);
+      const deny = (sent.settings as { permissions: { deny: string[] } }).permissions.deny;
+      const denyRead = sent.sandbox?.filesystem?.denyRead ?? [];
+      for (const folder of ['/job', join(config, 'projects')])
+        for (const pattern of [`${folder}/${ENV}`, `${folder}/**/${ENV}`]) {
+          expect(denyRead).toContain(pattern);
+          expect(deny).toContain(`Read(/${pattern})`);
+        }
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(config, { recursive: true, force: true });
+    }
+  },
+);
+
 // The env scan follows no link to a folder, and widening it past the consented directories is
 // not wanted: a link inside them that leads outside must give the worker nothing. Claude
 // Code's read block checks a path's real place, for its file tools and, on macOS (Seatbelt),

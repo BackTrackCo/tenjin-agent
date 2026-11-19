@@ -6,6 +6,7 @@ import {
   rmSync,
   type Stats,
   statSync,
+  symlinkSync,
   watch,
   writeFileSync,
 } from 'node:fs';
@@ -616,6 +617,34 @@ it.runIf(WATCHES)(
   },
 );
 
+// Review of 800c27a2, J (M24): on Windows a command can read an env file inside `node_modules` or
+// `.git`, which no walk enters; one written there during the job is read when a report names it.
+it.runIf(WATCHES)(
+  'reads an env file a watcher names inside node_modules or .git, where it lists nothing',
+  async () => {
+    const root = await trialRoot('named');
+    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
+    mkdirSync(join(root, '.git', 'hooks'), { recursive: true });
+    const env = await WorkerEnvSecrets.start([root], { learning: 'events' });
+    const watcher = watches.made.at(-1)!;
+    watches.mute = true;
+    try {
+      await env.refresh();
+      writeFileSync(join(root, 'node_modules', 'pkg', '.env'), 'NAMED=named-value-0x7d7d7d');
+      writeFileSync(join(root, '.git', 'hooks', '.env.test'), 'HOOKED=hooked-value-0x7e7e7e');
+      watcher.send(join('node_modules', 'pkg', '.env'));
+      watcher.send(join('.git', 'hooks', '.env.test'));
+      await env.refresh();
+      expect(env.redact('named-value-0x7d7d7d hooked-value-0x7e7e7e')).toBe(
+        '[env:NAMED] [env:HOOKED]',
+      );
+    } finally {
+      watches.mute = false;
+      env.close();
+    }
+  },
+);
+
 it.runIf(MACOS)(
   'releases a worker only once its own walk listed every root, and lets a send go only once each changed folder is listed again',
   async () => {
@@ -792,6 +821,86 @@ it.runIf(MACOS)(
       await env.refresh();
       expect(env.redact('swapped-volume-0x2c2c2c')).toBe('[env:SWAP]');
     } finally {
+      env.close();
+    }
+  },
+);
+
+// Review of 800c27a2, J (M4, M5): a volume mounted inside an APFS one is judged by its own type,
+// and a folder whose type the table does not give is never trusted.
+it.runIf(MACOS)(
+  'judges a folder by the deepest mount above it, and trusts none the mount table does not place',
+  async () => {
+    const root = await trialRoot('deepest');
+    const real = realpathSync(root);
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    try {
+      mounts.table = `/dev/disk9s1 on ${real} (exfat, local)\n/dev/disk3s1 on / (apfs, local)\n`;
+      writeWithTimesKept(join(root, 'plain'), '.env.local', 'DEEP=deepest-mount-0x2d2d2d');
+      await env.refresh();
+      expect(env.redact('deepest-mount-0x2d2d2d')).toBe('[env:DEEP]');
+      mounts.table = '/dev/disk3s1 on /elsewhere (apfs, local)\n';
+      writeWithTimesKept(join(root, 'pkg', 'lib'), '.env.local', 'NONE=no-mount-0x2e2e2e');
+      await env.refresh();
+      expect(env.redact('no-mount-0x2e2e2e')).toBe('[env:NONE]');
+    } finally {
+      env.close();
+    }
+  },
+);
+
+// Review of 800c27a2, J (M6, M7): a root may be a link to its folder. Stat'ed as a link, it was
+// never recorded, so every check walked it in full, or it counted as gone at every pass, and
+// after 8 passes every send was held.
+it.runIf(MACOS)(
+  'checks a root given as a link to its folder by the folder it leads to',
+  async () => {
+    const real = await trialRoot('linked');
+    const root = `${real}-link`;
+    symlinkSync(real, root);
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    try {
+      walks.listed.length = 0;
+      await env.refresh();
+      expect(walks.listed).not.toContain(join(root, 'plain'));
+      expect([...env.uncovered]).toEqual([]);
+      writeFileSync(join(real, 'plain', '.env.local'), 'LINKED=linked-root-0x4c4c4c');
+      await env.refresh();
+      expect(env.redact('linked-root-0x4c4c4c')).toBe('[env:LINKED]');
+      expect([...env.uncovered]).toEqual([]);
+    } finally {
+      env.close();
+    }
+  },
+);
+
+// Review of 800c27a2, J (M8): a folder moved away during the pass, with a file left in its place.
+it.runIf(MACOS)(
+  "finds a folder moved, while the folders are checked, into one already stat'ed, with a file left in its place",
+  async () => {
+    const root = await trialRoot('filed');
+    aged();
+    const env = await WorkerEnvSecrets.start([root]);
+    let release!: () => void;
+    try {
+      const lib = join(root, 'pkg', 'lib');
+      writeFileSync(join(lib, '.env.local'), 'FILED=filed-value-0x6c6c6c');
+      walks.stated.length = 0;
+      walks.statHold = { path: lib, until: new Promise<void>((done) => (release = done)) };
+      const check = env.refresh();
+      await vi.waitFor(
+        () => expect(walks.stated).toEqual(expect.arrayContaining([lib, join(root, 'plain')])),
+        { timeout: 10_000 },
+      );
+      await rename(lib, join(root, 'plain', 'lib'));
+      writeFileSync(lib, 'not a folder');
+      release();
+      await check;
+      expect(env.redact('filed-value-0x6c6c6c')).toBe('[env:FILED]');
+    } finally {
+      release?.();
       env.close();
     }
   },
