@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -50,6 +49,12 @@ export type ModelContinuationInput = Pick<
 export type ModelConversationAcceptance =
   | { action: 'start'; conversation: ModelConversation; continuation: ModelContinuation }
   | { action: 'replay'; result: string };
+
+/**
+ * A conversation's handle, fixed by its first job: the offer names it before anything
+ * is accepted, so the parent can write to the worker from the moment it runs.
+ */
+export const workerHandleFor = (jobId: string) => MODEL_WORKER_HANDLE_PREFIX + jobId;
 
 function handleId(handle: string): string | null {
   if (!handle.startsWith(MODEL_WORKER_HANDLE_PREFIX)) return null;
@@ -149,7 +154,7 @@ export class ModelConversationStore {
           throw new Error('Existing conversation identity is unavailable or changed');
         return kept;
       }
-      const handle = MODEL_WORKER_HANDLE_PREFIX + randomUUID();
+      const handle = workerHandleFor(job.id);
       const conversation: ModelConversation = {
         version: 1,
         handle,

@@ -265,6 +265,11 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   const instruction = 'instruction' in first ? String(first.instruction) : '';
   expect(instruction).toContain('with subagent({offer_id})');
   expect(instruction).toContain('subagent({offer_ids: [id1, id2, ...]})');
+  // The worker's address is in the offer the parent reads before it accepts, and is the
+  // one the conversation takes at the accept.
+  const address = `tenjin-worker-${'offer_id' in first ? String(first.offer_id) : ''}`;
+  expect(first).toMatchObject({ worker_handle: address });
+  expect(instruction).toContain(`SendMessage({to:"${address}"`);
   expect(instruction).toContain(
     'To keep it native, send the original Agent call again unchanged; that repeat costs no second routing fee.',
   );
