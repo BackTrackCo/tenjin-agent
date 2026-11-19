@@ -356,7 +356,9 @@ it('refuses a Messages quote above the per-call limit, whatever ceiling the cons
 // inference lane, and a per-call limit lowered meanwhile was held against that one quote
 // only, so the job's total passed the new cap.
 it("holds a job's reserved total against a cap lowered while a call waited for its lane, and releases that call unpaid", async () => {
-  const f = await fixture({ quote: '300000' });
+  // The first deposit covers both quotes, so the second call needs no top-up: only the
+  // job's cap can stop it.
+  const f = await fixture({ quote: '300000', minDeposit: '900000' });
   const signal = new AbortController().signal;
   await f.make().messages(f.job, { messages: [{ role: 'user', content: 'first' }] }, signal);
   expect(f.router.paidRequests()).toBe(1);
@@ -372,12 +374,25 @@ it("holds a job's reserved total against a cap lowered while a call waited for i
       JSON.stringify({ ...config, maxAutoSpend: (spent + 300000n - 1n).toString() }),
     );
   };
-  await expect(
-    f.make().messages(f.job, { messages: [{ role: 'user', content: 'second' }] }, signal, lower),
-  ).rejects.toMatchObject({
-    message: expect.stringContaining('remaining job ceiling'),
-    detail: { cause: 'budget' },
+  // Lowered when the call, its quote already reserved, takes its turn at the lane.
+  const withFileLock = locks.withFileLock;
+  const lane = vi.spyOn(locks, 'withFileLock').mockImplementation(async (path, run, opts) => {
+    if (path.endsWith('.payment.lock')) {
+      expect(BigInt(JSON.parse(await readFile(budget, 'utf8')).charged)).toBe(spent + 300000n);
+      await lower();
+    }
+    return withFileLock(path, run, opts);
   });
+  try {
+    await expect(
+      f.make().messages(f.job, { messages: [{ role: 'user', content: 'second' }] }, signal),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('remaining job ceiling'),
+      detail: { cause: 'budget' },
+    });
+  } finally {
+    lane.mockRestore();
+  }
   expect(f.router.paidRequests()).toBe(1);
   expect(JSON.parse(await readFile(budget, 'utf8')).charged).toBe(spent.toString());
 });
