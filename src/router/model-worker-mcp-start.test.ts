@@ -37,7 +37,9 @@ it('initializes the real worker MCP tool catalog without unlocking a wallet or s
     await server.connect(a);
     await client.connect(b);
     const tools = await client.listTools();
-    expect(tools.tools.some((tool) => tool.name === 'request')).toBe(true);
+    // The catalog a worker's host reads at start: the hook legs' tool alone. A worker has
+    // none of Tenjin's own tools, so `request` is no longer in it.
+    expect(tools.tools.map((tool) => tool.name)).toEqual(['hook']);
     expect(topUp).not.toHaveBeenCalled();
     expect(prewarm).not.toHaveBeenCalled();
   } finally {
