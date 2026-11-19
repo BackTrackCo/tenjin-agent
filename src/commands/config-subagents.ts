@@ -1,16 +1,14 @@
 import { realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
+import { paint } from '../lib/output';
+import { tilde } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
-import {
-  modelConsent,
-  modelConsentSchema,
-  namedDirectories,
-  perCallLimitAtomic,
-} from '../router/model-settings';
-import { loadRawConfig } from '../lib/config';
+import { modelConsent, modelConsentSchema, namedDirectories } from '../router/model-settings';
+import { loadRawConfig, type PartialConfig } from '../lib/config';
 import {
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
@@ -34,75 +32,228 @@ export type SubagentConfigFlags = {
 const NATIVE_WINDOWS_DISCLOSURE =
   'The Windows DeepSeek worker runs under the dedicated standard account with Claude’s native permissions and without its shell sandbox. Shell tools can reach files and networks available to that Windows account. Tenjin and DeepSeek can receive instructions and tool results from those resources. Exa can receive search queries and public page addresses. Use a separate shared Claude profile and keep wallet, login and spend data under the controller account.';
 
-/** What each no-offer code means, in the words `tenjin config subagents why` prints. */
-const NO_OFFER_REASONS: Record<NoOffer['code'], string> = {
-  kept_native: 'the parent sent the offered call again unchanged, which keeps it native',
-  no_session: 'this Tenjin process had not seen an event of the session yet',
-  host_unqualified: 'the host cannot show a worker permission prompt',
-  no_consent: 'subagent routing is off, or no DeepSeek consent is saved for this router',
-  permission_mode: 'the session was in plan mode, or its mode was not seen',
-  worker_unqualified:
-    'Claude Code version, login, managed policy, sandbox or workspace does not qualify here',
-  input_filter: 'the call set a field a worker cannot match',
-  caller_unqualified:
-    'the subagent that made the call cannot accept an offer (tools), or it or an agent above it may set its own permission mode (mode), or it works in a folder of its own (folder)',
-  scope_not_covered:
-    "the session's working directory or its workspace changed after the call was held, or the workspace could not be read",
-  parent_context_unavailable: "the session's transcript could not be read",
-  over_size_limit: "the assignment is over the router's request limit",
-  job_cap_too_low:
-    'the job cap (your per-call spend limit, or a lower ceiling you named) is under what one model call and its routing fee need; raise the limit with tenjin config set maxAutoSpend <usd>',
-  job_cap_lowered:
-    'the job cap (your per-call spend limit, or a lower ceiling you named) was lowered after the call was held, under the cap it was held at; send the call again for an offer at the cap as it stands',
-  capture_error: 'a local error before routing',
-  route_error: 'the routing request failed, or a spend limit refused its fee',
-  server_declined: 'the router judged that the work stays native',
-  invalid_offer: "the router's answer was not a valid offer",
-  superseded: 'the call was cancelled while it was routed',
-  expired: 'the offer was not accepted within 15 minutes',
-  interrupted: 'the session closed or was interrupted while routing',
-};
-const WHY_SHOWN = 20;
+/** The page the setup question and each turn-on send a person to for the full terms. */
+export const SUBAGENT_DETAILS_URL =
+  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md';
 
-function whyLine(entry: NoOffer): string {
-  const size = entry.bytes === undefined ? '' : ` (${entry.bytes} of ${entry.limit ?? '?'} bytes)`;
-  const code = entry.detail === undefined ? entry.code : `${entry.code}:${entry.detail}`;
+/**
+ * THE ONE SHORT TERMS TEXT, printed after `tenjin config subagents on` and after "Turn on"
+ * in setup. It names every recipient the consent record names and the `~/.claude` read.
+ * The full terms are the guide and the `disclosure` field of `on --json`.
+ */
+export const SUBAGENT_TERMS: readonly string[] = [
+  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs up to $0.003 an offer, also when Claude declines it.',
+  'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results. Web searches, and the address of a public page the worker could not fetch, go to Exa.',
+  'In ~/.claude, Claude Code loads your CLAUDE.md, skills and plugins as the worker’s instructions. The worker’s file tools can read the session transcripts, prompt history and settings there, and what they read can reach DeepSeek.',
+  `Details: ${SUBAGENT_DETAILS_URL}`,
+];
+
+const OFF_HINT = 'Run `tenjin config subagents off` to turn them off.';
+const ON_HINT = 'Run `tenjin config subagents on` to turn them on.';
+/** After `off`, and after "Keep off" in setup. */
+export const SUBAGENTS_OFF_LINE = '○ DeepSeek subagents are off. No new jobs will start.';
+
+/**
+ * Why a call got no offer, in plain words. The code and its detail stay in `--json`; a
+ * field of the call or of an agent's definition is named, since the person can change it.
+ */
+function whyReason(entry: NoOffer): string {
+  const detail = entry.detail ?? '';
+  switch (entry.code) {
+    case 'kept_native':
+      return 'Claude sent the offered call again unchanged, which keeps it native';
+    case 'no_session':
+      return 'Tenjin had not seen an event of this session yet';
+    case 'host_unqualified':
+      return 'This Claude Code cannot show a worker’s permission prompt';
+    case 'no_consent':
+      return 'DeepSeek subagents were off, or the session was outside their scope';
+    case 'permission_mode':
+      return detail === 'plan'
+        ? 'The session was in plan mode'
+        : 'The session’s permission mode was not seen, or a worker cannot run in it';
+    case 'worker_unqualified':
+      return 'The Claude Code version, login, managed policy, sandbox or workspace does not qualify here';
+    case 'input_filter':
+      if (detail === 'prompt') return 'The call had no prompt';
+      if (detail === 'subagent_type') return 'A worker cannot run as that agent type';
+      if (detail === 'definition:model') return 'The agent pins its own model';
+      if (detail.startsWith('definition:'))
+        return `The agent’s definition sets \`${detail.slice('definition:'.length)}\`, which a worker cannot match`;
+      if (detail === 'frontmatter') return 'The agent’s definition could not be read exactly';
+      return detail
+        ? `The call set \`${detail}\`, which a worker cannot match`
+        : 'The call set a field a worker cannot match';
+    case 'caller_unqualified':
+      return detail === 'tools'
+        ? 'The subagent that made the call has no tool to accept an offer'
+        : detail === 'mode'
+          ? 'The subagent that made the call, or an agent above it, may set its own permission mode'
+          : 'The subagent that made the call works in a folder of its own';
+    case 'scope_not_covered':
+      return 'The session’s working directory or workspace changed after the call was held, or could not be read';
+    case 'parent_context_unavailable':
+      return 'The session’s transcript could not be read';
+    case 'over_size_limit':
+      return entry.bytes === undefined
+        ? 'The assignment is over the router’s size limit'
+        : `The assignment is over the router’s size limit (${entry.bytes.toLocaleString('en-US')} of ${entry.limit?.toLocaleString('en-US') ?? '?'} bytes)`;
+    case 'job_cap_too_low':
+      return `The job cap is below one model call and its routing fee (${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)}); raise it with \`tenjin config set maxAutoSpend <usd>\``;
+    case 'job_cap_lowered':
+      return 'The job cap was lowered after the call was held; send the call again for an offer at the new cap';
+    case 'capture_error':
+      return 'A local error before routing';
+    case 'route_error':
+      return 'The routing request failed, or a spend limit refused its fee';
+    case 'server_declined':
+      return 'The router judged that the work stays native';
+    case 'invalid_offer':
+      return 'The router’s answer was not a valid offer';
+    case 'superseded':
+      return 'The call was cancelled while it was routed';
+    case 'expired':
+      return 'The offer was not accepted within 15 minutes';
+    case 'interrupted':
+      return 'The session closed or was interrupted while routing';
+  }
+}
+const WHY_SHOWN = 20;
+const WHY_TIME = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** `Nov 18 12:45`, in this machine's own time zone. */
+function whyTime(at: number): string {
+  const part = Object.fromEntries(
+    WHY_TIME.formatToParts(new Date(at)).map(({ type, value }) => [type, value]),
+  );
+  return `${part.month} ${part.day} ${part.hour}:${part.minute}`;
+}
+
+function whyLines(entries: readonly NoOffer[]): string[] {
   // A native subagent's own call, at any depth, is judged as the main loop's is.
-  const tool = entry.from === 'subagent' ? `${entry.tool} from a subagent` : entry.tool;
-  return `${new Date(entry.at).toISOString()}  ${tool}  ${code}${size}  ${NO_OFFER_REASONS[entry.code]}`;
+  const tool = (entry: NoOffer) =>
+    entry.from === 'subagent' ? `${entry.tool} from a subagent` : entry.tool;
+  const width = Math.max(...entries.map((entry) => tool(entry).length));
+  return entries.map(
+    (entry) => `  ${whyTime(entry.at)}  ${tool(entry).padEnd(width)}  ${whyReason(entry)}`,
+  );
 }
 
 /**
- * THE SCOPE IN PLAIN WORDS, the same in the status readback and after each `on`: every
- * workspace, or only the listed directories. A listed directory includes its subfolders.
+ * THE SCOPE IN PLAIN WORDS, the same in the status, after each `on` and in `tenjin status`:
+ * every workspace, or the listed directories. A listed directory includes its subfolders.
  */
-function scopeLine(directories: readonly string[] | null): string {
-  return directories
-    ? `Scope: only these directories, each with its subfolders: ${directories.join(', ')}. A session outside them gets no offer.`
-    : 'Scope: every workspace. A session in any directory can be offered DeepSeek, and its worker gets that session’s own workspace.';
+export function scopeWords(directories: readonly string[] | null, home = homedir()): string {
+  if (!directories) return 'Every workspace';
+  const shown = directories.map((path) => tilde(path, home)).join(', ');
+  return `${shown} and ${directories.length === 1 ? 'its' : 'their'} subfolders`;
 }
 const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
 
-/** Read only: whether routing is on, its scope and the cap in force. */
+/** What a turn-on or the status shows: the scope, a change of it, and the cap in force. */
+export type SubagentsShown = {
+  directories: readonly string[] | null;
+  /** The scope this turn-on replaced, where it narrowed or widened a saved consent. */
+  was?: readonly string[] | 'every-workspace';
+  perCall: bigint;
+  /** The ceiling named with `--max-job`. */
+  named?: bigint;
+  /** Whether a daily budget is set. */
+  daily: boolean;
+  routerOrigin: string;
+};
+
+/** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
+function costWords({ perCall, named, daily }: SubagentsShown): string {
+  const cap =
+    named === undefined
+      ? `Up to ${usd(perCall)} a job (your per-call limit)`
+      : named < perCall
+        ? `Up to ${usd(named)} a job (your --max-job)`
+        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it)`;
+  return daily ? `${cap} · your daily budget applies` : cap;
+}
+
+const ROW_LABEL = 9;
+const row = (label: string, value: string) => `  ${label.padEnd(ROW_LABEL)}${value}`;
+
+/** The scope row's words: the scope, and the one a turn-on replaced when it changed it. */
+function scopeShown({ directories, was }: SubagentsShown, home = homedir()): string {
+  const before =
+    was === undefined
+      ? ''
+      : was === 'every-workspace'
+        ? ' (was every workspace)'
+        : ` (was ${was.map((path) => tilde(path, home)).join(', ')} only)`;
+  return scopeWords(directories, home) + before;
+}
+
+/**
+ * THE ON BLOCK, laid out as `tenjin status` is: the header, the scope and cost rows, the
+ * short terms after a turn-on, and how to turn it off. `tenjin config subagents`, its `on`
+ * and the setup receipt after "Turn on" all print this, so there is one layout and one terms text.
+ */
+export function subagentsOnLines(
+  ctx: CommandContext,
+  shown: SubagentsShown,
+  options: { terms?: boolean; notes?: readonly string[] } = {},
+): string[] {
+  return [
+    `${paint(ctx.io, 'green', '●')} DeepSeek subagents are on`,
+    '',
+    row('Scope', scopeShown(shown)),
+    row('Cost', costWords(shown)),
+    // The router is said only when it is not Tenjin's own.
+    ...(shown.routerOrigin === 'https://tenjin.sh' ? [] : [row('Router', shown.routerOrigin)]),
+    ...(options.terms ? ['', ...SUBAGENT_TERMS] : []),
+    ...(options.notes?.length ? ['', ...options.notes] : []),
+    '',
+    OFF_HINT,
+  ];
+}
+
+/** The `Subagents` row of `tenjin status`: on with its scope, or off. */
+export function subagentsStatusValue(config: PartialConfig): string {
+  if (config.router?.subagents !== true) return 'Off';
+  const consent = modelConsentSchema.safeParse(config.router?.subagentConsent);
+  if (!consent.success) return 'On, but no consent is saved';
+  const directories = namedDirectories(consent.data);
+  return `On · ${
+    !directories
+      ? 'every workspace'
+      : directories.length === 1
+        ? scopeWords(directories)
+        : `${directories.length} directories`
+  }`;
+}
+
+/** Read only: whether DeepSeek subagents are on, their scope and the cap in force. */
 async function status(ctx: CommandContext): Promise<CommandResult> {
   const config = await loadRawConfig(ctx.dataDir);
   const consent = modelConsentSchema.safeParse(config.router?.subagentConsent);
   if (config.router?.subagents !== true)
     return {
       data: { enabled: false },
-      humanLines: [
-        'DeepSeek subagent routing is off. Turn it on with `tenjin config subagents on`.',
-      ],
+      humanLines: ['○ DeepSeek subagents are off', '', ON_HINT],
     };
   if (!consent.success)
     return {
       data: { enabled: true, consent: false },
       humanLines: [
-        'DeepSeek subagent routing is on, but no valid consent is saved, so no job is offered. Run `tenjin config subagents on`.',
+        '○ DeepSeek subagents are on, but no valid consent is saved, so no job is offered',
+        '',
+        'Run `tenjin config subagents on` to save it.',
       ],
     };
   const directories = namedDirectories(consent.data);
-  const perCall = perCallLimitAtomic(config);
+  const settings = await resolveContextSettings(ctx);
+  const perCall = settings.policy.maxAutoSpendAtomic;
   const named =
     consent.data.maxJobAtomic === undefined ? undefined : BigInt(consent.data.maxJobAtomic);
   const cap = named !== undefined && named < perCall ? named : perCall;
@@ -116,13 +267,13 @@ async function status(ctx: CommandContext): Promise<CommandResult> {
       perCallLimitAtomic: perCall.toString(),
       routerOrigin: consent.data.routerOrigin,
     },
-    humanLines: [
-      `DeepSeek subagent routing is on at ${consent.data.routerOrigin}.`,
-      scopeLine(directories),
-      named !== undefined && named < perCall
-        ? `Each job costs at most ${usd(named)}, the ceiling you named, under your per-call spend limit of ${usd(perCall)}.`
-        : `Each job costs up to your per-call spend limit, ${usd(perCall)} now.`,
-    ],
+    humanLines: subagentsOnLines(ctx, {
+      directories,
+      perCall,
+      ...(named === undefined ? {} : { named }),
+      daily: settings.policy.sessionBudgetAtomic !== null,
+      routerOrigin: consent.data.routerOrigin,
+    }),
   };
 }
 
@@ -155,7 +306,7 @@ export async function runConfigSubagents(
     });
     return {
       data: { enabled: false },
-      humanLines: ['Subagent model routing is off. No new DeepSeek jobs may start.'],
+      humanLines: [SUBAGENTS_OFF_LINE],
     };
   }
   if (mode === 'why') {
@@ -165,11 +316,12 @@ export async function runConfigSubagents(
       data: { noOffers },
       humanLines: noOffers.length
         ? [
-            'Subagent calls that got no DeepSeek offer, newest first (kept 7 days, on this machine only):',
-            ...noOffers.slice(0, WHY_SHOWN).map(whyLine),
+            'Subagent calls with no DeepSeek offer · last 7 days, this machine only',
+            '',
+            ...whyLines(noOffers.slice(0, WHY_SHOWN)),
           ]
         : [
-            'No subagent call without an offer is on record. A call is recorded only while subagent routing is on.',
+            'No subagent call went without an offer in the last 7 days. Calls are recorded only while DeepSeek subagents are on.',
           ],
     };
   }
@@ -247,21 +399,21 @@ export async function runConfigSubagents(
     `Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. A job costs up to your per-call spend limit as it stands at each offer, or a lower ceiling you name with --max-job; the daily budget and creator allowlist still apply. A worker request, with its ${MODEL_OUTPUT_TOKENS.toLocaleString('en-US')}-token output cap, reserves at least ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003. A worker’s web searches are paid Tenjin tool calls to Exa search, $0.004 each with no routing fee, and a page its WebFetch could not fetch is read through Exa for $0.001; each is paid from your wallet within your per-call limit and daily budget and counted against the job ceiling.`,
   ].join('\n\n');
   let repositories: string[] | null = null;
-  // What this turn-on did to the scope the saved consent had, said in its readback.
-  let change = '';
+  // The scope this turn-on replaced, where it narrowed or widened one: said on the scope row.
+  let was: SubagentsShown['was'];
   await persist(ctx.dataDir, (c) => {
     const prior = modelConsentSchema.safeParse(c.router?.subagentConsent);
     const here = prior.success && prior.data.routerOrigin === routerOrigin;
     // The directories named earlier at this router, which another `--repository` keeps.
     const before = namedDirectories(c.router?.subagentConsent, routerOrigin);
     repositories = limited ? [...new Set([...(before ?? []), ...chosen])] : null;
-    change = !here
-      ? ''
+    was = !here
+      ? undefined
       : limited && !before
-        ? ' This narrows a consent that covered every workspace.'
+        ? 'every-workspace'
         : !limited && before
-          ? ` This widens a consent that was limited to: ${before.join(', ')}. Those directories are no longer named.`
-          : '';
+          ? before
+          : undefined;
     const consent = modelConsent({
       routerOrigin,
       ...(repositories ? { repositories } : {}),
@@ -272,7 +424,26 @@ export async function runConfigSubagents(
     else delete router.windowsWorker;
     return { ...c, router };
   });
-  const scope = scopeLine(repositories) + change;
+  const shown: SubagentsShown = {
+    directories: repositories,
+    ...(was === undefined ? {} : { was }),
+    perCall,
+    ...(named === undefined ? {} : { named }),
+    daily: settings.policy.sessionBudgetAtomic !== null,
+    routerOrigin,
+  };
+  const humanLines = subagentsOnLines(ctx, shown, {
+    terms: true,
+    notes: windowsWorker
+      ? [
+          'On Windows the worker has no shell sandbox: it runs as the dedicated account, with the access Windows gives that account.',
+        ]
+      : process.platform === 'win32'
+        ? [
+            'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',
+          ]
+        : [],
+  });
   return {
     data: {
       enabled: true,
@@ -283,24 +454,13 @@ export async function runConfigSubagents(
       jobCapAtomic: cap.toString(),
       perCallLimitAtomic: perCall.toString(),
       routerOrigin,
+      // The full terms. The human output prints the short form and links to the guide.
       disclosure,
-      readback: scope,
+      terms: SUBAGENT_TERMS.join('\n'),
+      // The scope row as printed, with a narrowed or widened scope said.
+      readback: `Scope: ${scopeShown(shown)}`,
       ...(windowsWorker ? { windowsWorker: { enabled: true } } : {}),
     },
-    humanLines: [
-      disclosure,
-      `Enabled at ${routerOrigin}. ${scope}`,
-      named === undefined
-        ? `Each job costs up to your per-call spend limit, ${usd(perCall)} now.`
-        : named < perCall
-          ? `Each job costs at most ${usd(named)}, the ceiling you named, under your per-call spend limit of ${usd(perCall)}.`
-          : `Each job costs at most ${usd(perCall)}, your per-call spend limit: the ${usd(named)} ceiling you named does not lift it.`,
-      ...(process.platform === 'win32' && !windowsWorker
-        ? [
-            'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',
-          ]
-        : []),
-      'Undo: tenjin config subagents off',
-    ],
+    humanLines,
   };
 }

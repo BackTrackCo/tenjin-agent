@@ -234,36 +234,85 @@ it("--repository limits the consent to the named directories, and each change of
   await mkdir(second);
   const said = (result: { humanLines?: string[] }) => result.humanLines?.join('\n') ?? '';
   const wide = await runConfigSubagents('on', {}, testCtx(dir));
-  expect(said(wide)).toContain('Scope: every workspace.');
-  expect(said(wide)).not.toMatch(/narrows|widens/);
-  // Over a wide consent: narrowed, and said. A session elsewhere gets no offer any more.
+  expect(said(wide)).toContain('  Scope    Every workspace\n');
+  // Over a wide consent: narrowed, and said on the scope row. A session elsewhere gets no offer any more.
   const narrowed = await runConfigSubagents('on', { repository: [first, second] }, testCtx(dir));
   expect(narrowed.data).toMatchObject({ scope: 'directories', repositories: [first, second] });
   expect(said(narrowed)).toContain(
-    `Scope: only these directories, each with its subfolders: ${first}, ${second}. A session outside them gets no offer. This narrows a consent that covered every workspace.`,
+    `  Scope    ${first}, ${second} and their subfolders (was every workspace)\n`,
   );
   expect(await modelSettings(dir, dir)).toBeNull();
   expect(await modelSettings(dir, first)).toMatchObject({ scope: 'repositories' });
-  // The status says the same scope, and changes nothing.
+  // The status says the same scope with no change on it, and changes nothing.
   const before = await readFile(join(dir, 'config.json'), 'utf8');
   const status = await runConfigSubagents(undefined, {}, testCtx(dir));
   expect(status.data).toMatchObject({ scope: 'directories', repositories: [first, second] });
-  expect(said(status)).toContain(
-    `Scope: only these directories, each with its subfolders: ${first}, ${second}.`,
-  );
+  expect(said(status)).toContain(`  Scope    ${first}, ${second} and their subfolders\n`);
   expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
-  // Only a bare on widens it, and it says what became of the directories.
+  // Only a bare on widens it, and it says what the scope was.
   const widened = await runConfigSubagents('on', {}, testCtx(dir));
   expect(widened.data).toMatchObject({ scope: 'every-workspace' });
-  expect(said(widened)).toContain(
-    `Scope: every workspace. A session in any directory can be offered DeepSeek, and its worker gets that session’s own workspace. This widens a consent that was limited to: ${first}, ${second}. Those directories are no longer named.`,
-  );
+  expect(said(widened)).toContain(`  Scope    Every workspace (was ${first}, ${second} only)\n`);
   expect(await modelSettings(dir, dir)).toMatchObject({ scope: 'native-workspace' });
   expect(said(await runConfigSubagents('status', {}, testCtx(dir)))).toContain(
-    'Scope: every workspace.',
+    '  Scope    Every workspace\n',
+  );
+  // One directory reads "its subfolders".
+  expect(said(await runConfigSubagents('on', { repository: first }, testCtx(dir)))).toContain(
+    `  Scope    ${first} and its subfolders (was every workspace)\n`,
   );
   await runConfigSubagents('off', {}, testCtx(dir));
-  expect(said(await runConfigSubagents(undefined, {}, testCtx(dir)))).toContain('routing is off');
+  expect(said(await runConfigSubagents(undefined, {}, testCtx(dir)))).toContain(
+    '○ DeepSeek subagents are off',
+  );
+});
+
+// Review of 2120958a: `on` printed about 420 words of terms before its status lines, the
+// setup receipt had a second terms text, and the cost line could not be told from a literal.
+it('prints one short terms text that names every recipient of the consent record, and the cap read from the settings', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({ maxAutoSpend: '700000' }));
+  const on = await runConfigSubagents('on', {}, testCtx(dir));
+  const lines = on.humanLines ?? [];
+  expect(lines.slice(0, 4)).toEqual([
+    '● DeepSeek subagents are on',
+    '',
+    '  Scope    Every workspace',
+    '  Cost     Up to $0.70 a job (your per-call limit) · your daily budget applies',
+  ]);
+  expect(lines.at(-1)).toBe('Run `tenjin config subagents off` to turn them off.');
+  // The short form: every recipient the saved record names, TypeSafe, and the ~/.claude read.
+  const terms = lines.slice(4, -1).join('\n');
+  const saved = JSON.parse(await readFile(path, 'utf8')).router.subagentConsent;
+  for (const recipient of [...saved.recipients, 'TypeSafe']) expect(terms).toContain(recipient);
+  expect(terms).toContain('~/.claude');
+  expect(terms).toContain('session transcripts');
+  expect(terms.length).toBeLessThan(900);
+  // The full terms stay in --json.
+  expect((on.data as { disclosure: string }).disclosure).toContain('After acceptance');
+  // A named ceiling under the limit is the cap, and the row says whose it is.
+  const named = await runConfigSubagents('on', { maxJob: '0.50' }, testCtx(dir));
+  expect(named.humanLines?.[3]).toBe(
+    '  Cost     Up to $0.50 a job (your --max-job) · your daily budget applies',
+  );
+  // The status reads the cap again from the settings as they stand, with no terms.
+  await writeFile(
+    path,
+    JSON.stringify({ ...JSON.parse(await readFile(path, 'utf8')), maxAutoSpend: '300000' }),
+  );
+  const status = await runConfigSubagents(undefined, {}, testCtx(dir));
+  expect(status.humanLines).toEqual([
+    '● DeepSeek subagents are on',
+    '',
+    '  Scope    Every workspace',
+    '  Cost     Up to $0.30 a job (your per-call limit; your --max-job of $0.50 does not lift it) · your daily budget applies',
+    '',
+    'Run `tenjin config subagents off` to turn them off.',
+  ]);
+  expect((await runConfigSubagents('off', {}, testCtx(dir))).humanLines).toEqual([
+    '○ DeepSeek subagents are off. No new jobs will start.',
+  ]);
 });
 
 // `--max-job` was required, and the cap was that amount whatever the per-call limit said.
@@ -332,8 +381,14 @@ it('lists why recent subagent calls got no offer, newest first, without changing
   expect(result.data).toMatchObject({
     noOffers: [{ code: 'over_size_limit', bytes: 17_203 }, { code: 'input_filter' }],
   });
-  expect(result.humanLines?.[1]).toMatch(/Task {2}over_size_limit \(17203 of 16384 bytes\)/);
-  expect(result.humanLines?.[2]).toContain('Agent  input_filter:name');
+  // Local time, the tool and a plain reason. The codes stay in the data.
+  expect(result.humanLines?.[2]).toMatch(
+    /^ {2}[A-Z][a-z]{2} \d{2} \d{2}:\d{2} {2}Task {3}The assignment is over the router’s size limit \(17,203 of 16,384 bytes\)$/,
+  );
+  expect(result.humanLines?.[3]).toMatch(
+    / {2}Agent {2}The call set `name`, which a worker cannot match$/,
+  );
+  expect(result.humanLines?.join('\n')).not.toMatch(/over_size_limit|input_filter/);
   await expect(stat(join(dir, 'config.json'))).rejects.toThrow();
 });
 
@@ -354,6 +409,8 @@ it('says which recent calls without an offer a native subagent made, and why it 
   expect(result.data).toMatchObject({
     noOffers: [{ code: 'caller_unqualified', from: 'subagent' }, { code: 'input_filter' }],
   });
-  expect(result.humanLines?.[1]).toContain('Agent from a subagent  caller_unqualified:tools');
-  expect(result.humanLines?.[2]).toContain('Z  Agent  input_filter:name');
+  expect(result.humanLines?.[2]).toContain(
+    'Agent from a subagent  The subagent that made the call has no tool to accept an offer',
+  );
+  expect(result.humanLines?.[3]).toContain('  Agent                  The call set `name`');
 });

@@ -9,7 +9,7 @@ import { loadRawConfig } from '../lib/config';
 import type { RuntimeSetup } from '../lib/runtime';
 import { runCodexInstall } from '../router/codex-install';
 import { runRouterInstall } from '../router/install';
-import { DEEPSEEK_INSTALL_TERMS } from '../router/new-install';
+import { SUBAGENT_TERMS } from '../commands/config-subagents';
 import { CODEX_PLUGIN } from '../router/codex-host';
 
 // Real core, host installers, config locks, registration files and receipts.
@@ -252,7 +252,7 @@ it.each(['claude', 'codex'] as const)(
   'says the DeepSeek terms once after on, and not at all after off, on %s',
   async (host) => {
     const run = host === 'claude' ? runRouterInstall : runCodexInstall;
-    const count = (text: string) => text.split(DEEPSEEK_INSTALL_TERMS).length - 1;
+    const count = (text: string) => text.split(SUBAGENT_TERMS[0]!).length - 1;
     const said = async (subagents: 'on' | 'off') => {
       await rm(seams.data, { recursive: true, force: true });
       const out = await run({ yes: true, subagents }, testCtx(seams.data, { json: false }));

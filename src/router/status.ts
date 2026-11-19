@@ -8,6 +8,7 @@ import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { balanceReader, lowBalance } from '../commands/balance';
 import { connectedLabels, describeRules, summarizeRule } from '../commands/config-readback';
+import { subagentsStatusValue } from '../commands/config-subagents';
 import { dollars } from '../commands/fund-watch';
 import { channelCredit, routingSpent } from './channel-credit';
 import { ROUTING_DEPOSIT_KEY, SUGGESTED_FUND_USD } from './fee';
@@ -486,14 +487,14 @@ export async function runRouterStatus(
       ...rowLines(ctx, [
         ...balance,
         today,
-        ...(modelCreditAtomic > 0n
-          ? [
-              {
-                label: 'Subagents',
-                value: `${dollars(modelCreditAtomic)} set aside for model calls`,
-              },
-            ]
-          : []),
+        {
+          // Whether DeepSeek subagents are on and where, then the money set aside for them.
+          label: 'Subagents',
+          value: [
+            subagentsStatusValue(config),
+            ...(modelCreditAtomic > 0n ? [`${dollars(modelCreditAtomic)} set aside`] : []),
+          ].join(' · '),
+        },
         ...(modelRoutingCreditAtomic > 0n
           ? [
               {

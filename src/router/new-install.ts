@@ -1,24 +1,25 @@
 import { lstat, mkdir } from 'node:fs/promises';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from '../commands/config';
+import {
+  SUBAGENT_DETAILS_URL,
+  SUBAGENT_TERMS,
+  SUBAGENTS_OFF_LINE,
+  subagentsOnLines,
+} from '../commands/config-subagents';
 import { loadRawConfig, resolveSettings, type PartialConfig } from '../lib/config';
 import { selectOne } from '../lib/clack';
 import { hasCode } from '../lib/errno';
-import { formatUsdDisplay } from '../lib/money';
-import { paint } from '../lib/output';
 import type { QuestionStep } from './install';
 import { MODEL_MINIMUM_JOB_ATOMIC, usdOfAtomic } from './model-limits';
-import { modelConsent, perCallLimitAtomic } from './model-settings';
+import {
+  modelConsent,
+  modelConsentSchema,
+  namedDirectories,
+  perCallLimitAtomic,
+} from './model-settings';
 
 export type InstallSubagentChoice = 'on' | 'off';
-
-/** Said once, to a person who has just turned subagents on: who receives what, and the fees. */
-export const DEEPSEEK_INSTALL_TERMS =
-  'Enabling eligible DeepSeek subagents follows the host’s qualified native workspace, with parent accept or veto. Each job costs up to your per-call spend limit. Tenjin and TypeSafe receive assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive assignments, instructions and tool results. A worker can read your ~/.claude folder, including session transcripts. Exa receives worker web search queries and URLs that the worker could not fetch. Inference adds 5%, routing costs 15% of expected inference, up to $0.003 per offer, Exa searches cost $0.004 each and a page read through Exa $0.001. Your spend limits apply.';
-
-/** The page the question sends a person to for the recipients, the reads, the fees and the cap. */
-export const SUBAGENT_DETAILS_URL =
-  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md';
 
 /** The whole fresh-setup question, in a terminal and through an agent: its wording changes here alone. */
 export const SUBAGENT_QUESTION = [
@@ -232,30 +233,48 @@ export async function finishNewInstall(
           `That was already saved, so --subagents ${answer} changed nothing. Change it with \`tenjin config subagents ${answer}\`.`,
         ]
       : [];
+  const consent = modelConsentSchema.safeParse(config.router?.subagentConsent).data;
+  const named = consent?.maxJobAtomic === undefined ? undefined : BigInt(consent.maxJobAtomic);
   return {
     ...result,
     data: {
       ...(result.data as Record<string, unknown>),
       subagents:
         saved && enabled
-          ? { enabled, jobCapAtomic: perCall.toString(), terms: DEEPSEEK_INSTALL_TERMS }
+          ? { enabled, jobCapAtomic: perCall.toString(), terms: SUBAGENT_TERMS.join('\n') }
           : { enabled, ...(saved ? {} : { changed: false }) },
     },
-    // The terms follow the one answer they inform. The question links to them, and the
-    // receipt's disclosure does not repeat them after either answer.
+    // The same block `tenjin config subagents on` prints. Its short terms follow the one
+    // answer they inform: the question links to the guide, and nothing repeats after
+    // "Keep off" or over an answer saved earlier.
     humanLines: [
       ...(result.humanLines ?? []),
       ...(enabled
         ? [
-            `DeepSeek subagent routing is enabled with parent veto. Each job costs up to your per-call spend limit, $${formatUsdDisplay(perCall.toString())} now. Turn it off with \`tenjin config subagents off\`.`,
-            ...(saved && perCall < MODEL_MINIMUM_JOB_ATOMIC
-              ? [
-                  `No job is offered while that limit is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} one model call and its routing fee need. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
-                ]
-              : []),
-            ...(saved ? [paint(ctx.io, 'dim', DEEPSEEK_INSTALL_TERMS)] : []),
+            '',
+            ...subagentsOnLines(
+              ctx,
+              {
+                directories: namedDirectories(consent),
+                perCall,
+                ...(named === undefined ? {} : { named }),
+                daily:
+                  resolveSettings({ config, flags: {}, env: process.env }).sessionBudget.value !==
+                  'none',
+                routerOrigin: origin(config, ctx) ?? 'https://tenjin.sh',
+              },
+              {
+                terms: saved,
+                notes:
+                  saved && perCall < MODEL_MINIMUM_JOB_ATOMIC
+                    ? [
+                        `No job is offered while that limit is under the ${usdOfAtomic(MODEL_MINIMUM_JOB_ATOMIC)} one model call and its routing fee need. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
+                      ]
+                    : [],
+              },
+            ),
           ]
-        : ['DeepSeek subagent routing is off.']),
+        : [SUBAGENTS_OFF_LINE]),
       ...stands,
     ],
   };

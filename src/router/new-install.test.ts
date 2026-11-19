@@ -103,7 +103,7 @@ it('--subagents saves the answer on an existing profile that has none, and a sec
   expect((await loadRawConfig(dir)).router).toEqual({ subagents: false });
   const second = await run('off');
   expect(second.data).toMatchObject({ subagents: { enabled: false, changed: false } });
-  expect(second.humanLines).toEqual(['DeepSeek subagent routing is off.']);
+  expect(second.humanLines).toEqual(['○ DeepSeek subagents are off. No new jobs will start.']);
   // An answer already saved is the config command's to change, and the receipt says so.
   const on = await run('on');
   expect(on.data).toMatchObject({ subagents: { enabled: false, changed: false } });
