@@ -3,6 +3,7 @@ import {
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
 } from './model-limits';
+import { lockSupport } from '../lib/held-lock';
 import { isModelWorkerProcess } from './model-worker-context';
 import { qualifiedModelWorker } from './model-worker';
 import { z } from 'zod';
@@ -321,6 +322,8 @@ export class ModelHandoff {
           homeDir: homedir(),
         });
     if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
+    // A Linux Node without node:sqlite cannot take the worker's locks: no offer, no fee.
+    if (!lockSupport().ok) return stay('worker_unqualified', { detail: 'linux_needs_node_22_13' });
     const worker = await qualifiedModelWorker(
       session.cwd,
       agentType,

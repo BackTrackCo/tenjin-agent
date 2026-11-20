@@ -1,5 +1,6 @@
 import { realpath } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
+import { lockSupport } from '../lib/held-lock';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
@@ -237,6 +238,11 @@ export async function runConfigSubagents(
       'USAGE',
       'Use on [--repository <path>...] [--max-job <USD>], off, why, or no mode for the status.',
     );
+  const lock = lockSupport();
+  if (!lock.ok)
+    throw new CliError('USAGE', `DeepSeek subagents cannot run here. ${lock.reason}`, {
+      fix: 'Run Tenjin with Node 24, as its installer sets up, then run this command again.',
+    });
   // THE SCOPE IS THE COMMAND'S OWN WORD. No `--repository`: every session's workspace.
   // With it: only the named directories. Neither is ever kept or widened in silence.
   const chosen = await Promise.all([flags.repository ?? []].flat().map((path) => realpath(path)));
