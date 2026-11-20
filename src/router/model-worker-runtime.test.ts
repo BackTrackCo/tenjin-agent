@@ -3857,6 +3857,8 @@ it('removes the wallet key and passphrase by value from a request, from a settin
     JSON.stringify({ env: { TENJIN_WALLET_PASSPHRASE: FILE_PASSPHRASE } }),
   );
   vi.stubEnv('HOME', home);
+  // The settings folder the worker reads is the config dir, so the file must be in it.
+  vi.stubEnv('CLAUDE_CONFIG_DIR', join(home, '.claude'));
   vi.stubEnv('TENJIN_WALLET_KEY', ENV_KEY);
   try {
     const messages = vi.fn(async () => ({ fixture: true }));
@@ -3870,7 +3872,16 @@ it('removes the wallet key and passphrase by value from a request, from a settin
       ...options(),
       transport: { messages } as unknown as ModelTransport,
     });
-    const sent = JSON.stringify(messages.mock.calls);
+    // The DECODED strings the model client got: a JSON.stringify of them escapes a value again
+    // and would hide a leak of the file's escaped form.
+    const strings: string[] = [];
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string') strings.push(value);
+      else if (Array.isArray(value)) value.forEach(collect);
+      else if (value && typeof value === 'object') Object.values(value).forEach(collect);
+    };
+    collect(messages.mock.calls);
+    const sent = strings.join('\n');
     for (const value of [FILE_PASSPHRASE, JSON.stringify(FILE_PASSPHRASE).slice(1, -1), ENV_KEY])
       expect(sent).not.toContain(value);
     expect(sent).toContain('[redacted job secret]');

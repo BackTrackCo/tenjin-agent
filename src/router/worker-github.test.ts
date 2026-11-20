@@ -203,6 +203,18 @@ it.each(['\\walletPass123', 'walletPass123\\', 'pa"ss\\"word', 'caf\u00e9\\u00e9
   },
 );
 
+it('removes the escaped form a settings file holds, and the body still parses', () => {
+  const secret = 'pa"ss\\word\nx';
+  const file = JSON.stringify({ env: { TENJIN_WALLET_PASSPHRASE: secret } });
+  const out = redactWorkerJson(JSON.stringify({ result: file }), (text) =>
+    redactWorkerSecrets(text, [secret]),
+  );
+  const decoded = (JSON.parse(out) as { result: string }).result;
+  expect(decoded).not.toContain(JSON.stringify(secret).slice(1, -1));
+  expect(decoded).toContain('[redacted job secret]');
+  expect(() => JSON.parse(decoded)).not.toThrow();
+});
+
 it('removes a GitHub token by its shape', () => {
   expect(redactGithubTokenShapes(`x ${TOKEN} ${NAMED} y`)).toBe(
     'x [redacted job secret] [redacted job secret] y',

@@ -206,10 +206,21 @@ export async function prepareWorkerGithub(
 
 export const REDACTED_JOB_SECRET = '[redacted job secret]';
 
-/** Removes each literal secret from plain text. */
+/**
+ * Removes each literal secret from plain text, and its JSON-escaped form where that differs:
+ * a settings file holds a value with a quote, a backslash or a control character escaped, and
+ * a worker that reads the file sends that form. The escaped form goes first, since it can
+ * contain the raw one. Each is a string removal, so a JSON body this is applied to per
+ * decoded string stays valid.
+ */
 export function redactWorkerSecrets(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_JOB_SECRET);
+  for (const secret of secrets) {
+    if (!secret) continue;
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    if (escaped !== secret) out = out.split(escaped).join(REDACTED_JOB_SECRET);
+    out = out.split(secret).join(REDACTED_JOB_SECRET);
+  }
   return out;
 }
 
@@ -280,8 +291,8 @@ export function redactGithubTokenShapes(text: string): string {
  * A literal removal over every key and string of a parsed SDK message, by the
  * values the caller names: the job's tokens and the wallet's secrets. It feeds the
  * activity copy behind the viewer, the plugin's progress file and a stopped worker's
- * partial handback. Other secrets a worker read are not removed there, as they are not
- * in what it sends.
+ * partial handback. Other secrets a worker read are not removed there: they are sent as
+ * written, as the terms say.
  */
 export function redactWorkerMessage(message: unknown, redact: (text: string) => string): unknown {
   const walk = (value: unknown): unknown => {
