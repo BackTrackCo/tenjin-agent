@@ -554,22 +554,32 @@ describe.skipIf(!posix)('named-entry lock (Linux scheme)', () => {
   });
 });
 
+async function runStress(ms: string, chaos: string, workers: string, broken = '0') {
+  const run = child('stress.ts', ms, chaos, workers, join(tmp, 'stress'), broken);
+  return JSON.parse(await run.line('{')) as {
+    rounds: number;
+    overlaps: number;
+    timeouts: number;
+    errors: number;
+  };
+}
+
+// The control for the harness: against a lock skipped on 5% of the rounds, the log detector MUST
+// report overlaps. A detector that reports none here has proved nothing about a real lock.
+it('the stress detector sees two holders inside a deliberately broken lock', async () => {
+  const result = await runStress('3000', 'none', '4', '0.05');
+  expect(result.rounds).toBeGreaterThan(0);
+  expect(result.overlaps).toBeGreaterThan(0);
+}, 60_000);
+
 const stress = process.env.TENJIN_LOCK_STRESS === '1';
 describe.skipIf(!stress)('stress (opt in with TENJIN_LOCK_STRESS=1)', () => {
   it('lets no two holders in, with kills and stops', async () => {
-    const run = child(
-      'stress.ts',
+    const result = await runStress(
       process.env.TENJIN_LOCK_STRESS_MS ?? '20000',
       process.env.TENJIN_LOCK_STRESS_CHAOS ?? 'both',
-      process.env.TENJIN_LOCK_STRESS_WORKERS ?? '4',
-      join(tmp, 'stress'),
+      process.env.TENJIN_LOCK_STRESS_WORKERS ?? '8',
     );
-    const result = JSON.parse(await run.line('{')) as {
-      rounds: number;
-      overlaps: number;
-      timeouts: number;
-      errors: number;
-    };
     console.warn(`lock stress: ${JSON.stringify(result)}`);
     expect(result.rounds).toBeGreaterThan(0);
     expect(result.overlaps).toBe(0);
