@@ -235,51 +235,54 @@ describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows
 });
 
 // The Linux primitive, on any platform that has node:sqlite.
-describe.skipIf(loadSqlite() === null)('exclusive SQLite transaction (Linux primitive)', () => {
-  const attemptOn = (lock: string) => sqliteAttempt(heldPath(lock), loadSqlite()!);
+describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
+  'exclusive SQLite transaction (Linux primitive)',
+  () => {
+    const attemptOn = (lock: string) => sqliteAttempt(heldPath(lock), loadSqlite()!);
 
-  it('starts over on the new file when the lock file is deleted after its connection opened', async () => {
-    const lock = join(tmp, 'sq-ino');
-    const holding = await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock);
-    const waiter = attemptOn(lock);
-    // Busy: this connection is open on the first file.
-    expect(waiter.tryOnce()).toBeNull();
-    unlinkSync(heldPath(lock));
-    holding();
-    // The old file is free, but it is no longer the lock file: the waiter ends on the new one.
-    const release = waiter.tryOnce();
-    expect(release).not.toBeNull();
-    expect(await probe(lock)).toBe('held');
-    release!();
-  });
+    it('starts over on the new file when the lock file is deleted after its connection opened', async () => {
+      const lock = join(tmp, 'sq-ino');
+      const holding = await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock);
+      const waiter = attemptOn(lock);
+      // Busy: this connection is open on the first file.
+      expect(waiter.tryOnce()).toBeNull();
+      unlinkSync(heldPath(lock));
+      holding();
+      // The old file is free, but it is no longer the lock file: the waiter ends on the new one.
+      const release = waiter.tryOnce();
+      expect(release).not.toBeNull();
+      expect(await probe(lock)).toBe('held');
+      release!();
+    });
 
-  it.skipIf(!posix)('makes the lock file private to the user', async () => {
-    const lock = join(tmp, 'sq-mode');
-    (await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock))();
-    expect(statSync(heldPath(lock)).mode & 0o077).toBe(0);
-  });
+    it.skipIf(!posix)('makes the lock file private to the user', async () => {
+      const lock = join(tmp, 'sq-mode');
+      (await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock))();
+      expect(statSync(heldPath(lock)).mode & 0o077).toBe(0);
+    });
 
-  it('abandoning a wait closes its connection and leaves the holder alone', async () => {
-    const lock = join(tmp, 'sq-abandon');
-    const holding = await holdLock(lock);
-    const waiter = attemptOn(lock);
-    expect(waiter.tryOnce()).toBeNull();
-    waiter.abandon();
-    expect(await probe(lock)).toBe('held');
-    holding();
-    expect(await probe(lock)).toBe('free');
-  });
+    it('abandoning a wait closes its connection and leaves the holder alone', async () => {
+      const lock = join(tmp, 'sq-abandon');
+      const holding = await holdLock(lock);
+      const waiter = attemptOn(lock);
+      expect(waiter.tryOnce()).toBeNull();
+      waiter.abandon();
+      expect(await probe(lock)).toBe('held');
+      holding();
+      expect(await probe(lock)).toBe('free');
+    });
 
-  // A container restart gives the next process another pid namespace: a lock that depended on
-  // a pid would stay stuck. The kernel drops the dead holder's lock whatever namespace asks.
-  it('is free the moment its holder is killed, for a process that shares nothing with it', async () => {
-    const lock = join(tmp, 'sq-restart');
-    const held = await startHolder(lock);
-    expect(await probe(lock)).toBe('held');
-    await held.kill();
-    expect(await probe(lock)).toBe('free');
-  });
-});
+    // A container restart gives the next process another pid namespace: a lock that depended on
+    // a pid would stay stuck. The kernel drops the dead holder's lock whatever namespace asks.
+    it('is free the moment its holder is killed, for a process that shares nothing with it', async () => {
+      const lock = join(tmp, 'sq-restart');
+      const held = await startHolder(lock);
+      expect(await probe(lock)).toBe('held');
+      await held.kill();
+      expect(await probe(lock)).toBe('free');
+    });
+  },
+);
 
 describe.skipIf(process.platform !== 'linux')('Linux without node:sqlite', () => {
   afterEach(() => forgetSqlite());

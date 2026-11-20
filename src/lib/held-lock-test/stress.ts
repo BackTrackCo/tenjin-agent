@@ -86,7 +86,7 @@ while (performance.now() < end) {
     setTimeout(() => pick.kill('SIGCONT'), 400);
   }
 }
-for (const child of children) child.kill('SIGCONT');
+if (process.platform !== 'win32') for (const child of children) child.kill('SIGCONT');
 for (const child of children) child.kill('SIGTERM');
 await delay(1500);
 const sum = [...dead, ...last.values()].reduce(
