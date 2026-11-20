@@ -1352,7 +1352,10 @@ it.each(['general-purpose', 'Explore'] as const)(
       expect(first).toMatchObject({
         status: 'completed',
         worker_handle: expect.stringMatching(/^tenjin-worker-/),
-        continuation: expect.stringContaining('SendMessage'),
+        // True for both cases: one call where this process accepted the worker, a held offer elsewhere.
+        continuation: expect.stringMatching(
+          /one call starts the worker again at once[\s\S]*holds the follow-up as an offer/,
+        ),
       });
       // The address the offer named before the accept is the one the conversation took.
       expect(first.worker_handle).toBe(`tenjin-worker-${f.job.id}`);
