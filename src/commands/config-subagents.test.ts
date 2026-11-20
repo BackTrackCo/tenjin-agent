@@ -447,3 +447,18 @@ it('words the routing fee as the tool router rule, with no amount and no cap of 
   for (const text of [terms, await readFile('docs/subagents.md', 'utf8')])
     expect(text).not.toMatch(/capped at \$0\.003|up to \$0\.003/);
 });
+
+// DeepSeek workers run on Claude Code only: turning them on without it is saved, and said.
+it.each([
+  ['codex', true],
+  ['claude', false],
+] as const)('says workers need Claude Code when the only host is %s: %s', async (host, said) => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-host-')));
+  await writeFile(join(dir, 'installed-hosts.json'), JSON.stringify({ hosts: [host] }));
+  const result = await runConfigSubagents('on', {}, testCtx(dir));
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagents).toBe(true);
+  const text = (result.humanLines ?? []).join('\n');
+  expect(text.includes('run on Claude Code only')).toBe(said);
+  expect(JSON.stringify(result.data).includes('run on Claude Code only')).toBe(said);
+});

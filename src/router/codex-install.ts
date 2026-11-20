@@ -50,12 +50,7 @@ import {
 } from './install';
 import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/codex-trust';
 import { readInstalledHosts, withNote } from './hosts';
-import {
-  captureNewInstall,
-  reserveNewInstall,
-  finishNewInstall,
-  type InstallSubagentChoice,
-} from './new-install';
+import { captureNewInstall, reserveNewInstall } from './new-install';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
 import { fundStep, type FundingDeps } from './install-funding';
@@ -75,7 +70,6 @@ import { SUGGESTED_FUND_USD } from './fee';
 export interface CodexArgs {
   project?: boolean;
   yes?: boolean;
-  subagents?: InstallSubagentChoice;
   noWallet?: boolean;
   /** `--max-auto-spend`: the non-negative per-call limit in USD. */
   maxAutoSpend?: string;
@@ -93,7 +87,7 @@ export interface CodexSetupDeps
   extends
     WalletDeps,
     FundingDeps,
-    Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount' | 'promptSubagents' | 'newInstall'> {
+    Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount' | 'newInstall'> {
   /** One `codex` command, recorded in tests. */
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
@@ -216,7 +210,8 @@ async function addPlugin(
   }
 }
 
-const TRUST_STEP = 'Open Codex, run /hooks and review the Tenjin hooks, then start a new session.';
+const TRUST_STEP =
+  'Open Codex, run /hooks and trust the five Tenjin hooks, then start a new session.';
 /** What a person reads when this Codex cannot run the plugin's routing hooks. */
 const CODEX_TOO_OLD = `Routing in Codex needs Codex ${CODEX_MCP_HOOKS_VERSION} or later, so Tenjin left its Codex plugin as it was. Ask your agent to update Codex.`;
 /** What a person reads when an install or update turned the hooks on itself. */
@@ -468,7 +463,7 @@ export async function runCodexInstall(
     next = `Follow the instructions in nextSteps, then ${next}`;
   newInstall.completed.push(!tooOld);
   newInstall.continueWith ??= install;
-  const result: CommandResult = {
+  return {
     data: {
       plugin: CODEX_PLUGIN,
       wallet,
@@ -498,14 +493,6 @@ export async function runCodexInstall(
     ],
     humanTail: receiptTail(ctx, policy, next),
   };
-  return deps.newInstall
-    ? result
-    : finishNewInstall(result, newInstall, ctx, {
-        ...(args.subagents !== undefined ? { choice: args.subagents } : {}),
-        yes: args.yes === true,
-        isInteractive: canPrompt,
-        ...(deps.promptSubagents ? { promptSubagents: deps.promptSubagents } : {}),
-      });
 }
 
 export async function runCodexUninstall(

@@ -116,8 +116,10 @@ Learn more:
           });
         if (o.refresh !== true || harness !== undefined) {
           const installed = await installAll();
+          // DeepSeek workers run on Claude Code only: with no Claude Code among the hosts of
+          // this run, nothing is asked and nothing is saved, and a later Claude Code setup asks.
           const result =
-            o.refresh === true
+            o.refresh === true || !hosts.includes('claude')
               ? installed
               : await finishNewInstall(installed, newInstall, ctx, {
                   ...(o.subagents !== undefined ? { choice: o.subagents } : {}),

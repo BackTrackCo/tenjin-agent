@@ -39,6 +39,8 @@ export type SubagentConfigFlags = {
 
 const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
 
+const NO_CLAUDE_NOTE =
+  'DeepSeek workers run on Claude Code only, and Tenjin is not set up for Claude Code on this machine, so no job is offered until it is (`tenjin install --harness claude`).';
 const NATIVE_WINDOWS_DISCLOSURE =
   'The Windows DeepSeek worker runs under the dedicated standard account with Claude’s native permissions and without its shell sandbox. Shell tools can reach files and networks available to that Windows account. Tenjin and DeepSeek can receive instructions and tool results from those resources. Exa can receive the addresses of public pages. Use a separate shared Claude profile and keep wallet, login and spend data under the controller account.';
 
@@ -344,17 +346,22 @@ export async function runConfigSubagents(
     daily: settings.policy.sessionBudgetAtomic !== null,
     routerOrigin,
   };
+  // Workers run on Claude Code only: say so where the person turned them on without it.
+  const claudeMissing = !(await (await import('../router/hosts')).claudeHostSetUp(ctx.dataDir));
   const humanLines = subagentsOnLines(ctx, shown, {
     terms: true,
-    notes: windowsWorker
-      ? [
-          'On Windows the worker has no shell sandbox: it runs as the dedicated account, with the access Windows gives that account.',
-        ]
-      : process.platform === 'win32'
+    notes: [
+      ...(claudeMissing ? [NO_CLAUDE_NOTE] : []),
+      ...(windowsWorker
         ? [
-            'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',
+            'On Windows the worker has no shell sandbox: it runs as the dedicated account, with the access Windows gives that account.',
           ]
-        : [],
+        : process.platform === 'win32'
+          ? [
+              'Claude on Windows uses native subagents until you opt in with a dedicated Windows worker account.',
+            ]
+          : []),
+    ],
   });
   return {
     data: {
@@ -372,6 +379,7 @@ export async function runConfigSubagents(
       // The scope row as printed, with a narrowed or widened scope said.
       readback: `Scope: ${scopeShown(shown)}`,
       ...(windowsWorker ? { windowsWorker: { enabled: true } } : {}),
+      ...(claudeMissing ? { note: NO_CLAUDE_NOTE } : {}),
     },
     humanLines,
   };
