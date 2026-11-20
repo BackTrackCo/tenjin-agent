@@ -194,6 +194,12 @@ const job = {
   native: {},
   task: 'Check the selected function.',
   decision: {
+    routingAuthorizedAtomic: '3000',
+    maxResultBytes: 4_000_000,
+    maxOutputTokens: 256_000,
+    maxCallDurationMs: 540_000,
+    callIdleLimitMs: 300_000,
+    callLimit: { max: 120, windowSeconds: 60 },
     claudePermissionMode: 'default',
     claudeWorkspace: {
       version: 1,
@@ -676,7 +682,7 @@ it('sets no turn cap, so a long job runs on, while retaining its evaluated model
   expect(given(call.options).settings).toMatchObject({
     autoMemoryEnabled: false,
     apiKeyHelper: expect.any(String),
-    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '838860', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '727040', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   });
   // Thinking stays on above the person's own settings: `alwaysThinkingEnabled: false`,
   // or `MAX_THINKING_TOKENS=0` in their settings env, sent each worker turn without it.
@@ -967,10 +973,7 @@ it('makes no prompt read ahead when the checks that stand before the read fail',
 
 // Operator ruling 2026-11-18: a worker asks for 256,000 output tokens of a router whose
 // offer says it accepts them. Its Claude Code is told 65,536, so the bridge sets the cap.
-it.each([
-  ['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000, 727_040],
-  ['an offer that names no cap', {}, 65_536, 838_860],
-] as const)(
+it.each([['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000, 727_040]] as const)(
   "asks the job's router for the output cap of %s on a worker's turn, and records it",
   async (_name, offered, cap, window) => {
     const messages = vi.fn(
@@ -3096,6 +3099,58 @@ it("sends a worker's WebSearch to the model as one Messages call with DeepSeek's
   expect(answered.body).toContain('Found it.');
 });
 
+// Greptile review on the web search: a search that exhausted its retries after a no-charge
+// failure ended the whole worker `unknown`, after the parent had paid for earlier work.
+it('answers a search that cost nothing with its native error and keeps the job going', async () => {
+  const messages = vi.fn(async () => {
+    throw new ModelCallFailed('The model provider failed the call; nothing was charged for it', {
+      cause: 'provider',
+      status: 500,
+      uncharged: true,
+      code: 'model_inference_failed',
+    });
+  });
+  let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    answered = await oneBridgeRequest(JSON.stringify(NESTED_SEARCH));
+  });
+  await expect(
+    runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+      retryWait: async () => undefined,
+    }),
+  ).resolves.toBe('done');
+  // The retry rule took the known-unpaid call up again, then the search failed alone.
+  expect(messages.mock.calls.length).toBeGreaterThan(1);
+  expect(answered.status).toBe(200);
+  expect(answered.body).toContain('"error_code":"unavailable"');
+  expect(answered.body).toContain('the search did not run and nothing was charged');
+});
+
+it('still stops the worker when a search payment is uncertain, and answers the child with an error', async () => {
+  const messages = vi.fn(async () => {
+    throw new ModelCallFailed('Model call uncertain; inspect invocation receipt', {
+      cause: 'failed',
+      status: 502,
+    });
+  });
+  let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+  sdkResult({ subtype: 'success', result: 'not reached' }, undefined, async () => {
+    answered = await oneBridgeRequest(JSON.stringify(NESTED_SEARCH));
+  });
+  const error = await runModelWorker(job, {
+    ...options(),
+    transport: { messages } as unknown as ModelTransport,
+  }).catch((caught: unknown) => caught);
+  // An uncertain payment is never tried again, and the search does not answer the child:
+  // the worker ends with the error, as any uncertain model call does.
+  expect(error).toBeInstanceOf(ModelCallFailed);
+  expect(messages).toHaveBeenCalledOnce();
+  expect(answered.status).toBe(502);
+  expect(answered.body).toContain('Tenjin worker request stopped');
+});
+
 it('answers a whole search request with the whole message, and a filtered search with its tool error before any call', async () => {
   const messages = vi.fn(async (..._args: unknown[]) => structuredClone(SEARCH_REPLY));
   let whole: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
@@ -3266,7 +3321,7 @@ it("hands a worker's failed WebFetch the page through Exa, as hook context, whil
   expect(toolCall).toHaveBeenCalledWith(job, 'exa-contents', 1000n, expect.any(Function));
   expect(diagnostics).toMatchObject({
     root: job.root,
-    settings: { compactWindow: 838_860, maxTurns: null },
+    settings: { compactWindow: 727_040, maxTurns: null },
     stop: { subtype: 'success' },
     phases: expect.objectContaining({
       childSpawned: expect.any(Number),

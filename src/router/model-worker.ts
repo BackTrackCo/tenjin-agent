@@ -246,6 +246,13 @@ export type EarlyWorkerAccept = {
 /** A second worker must not start if the prewarmed worker could not be stopped. */
 export class WorkerStartUnconfirmed extends Error {}
 
+/** Why a search that cost nothing did not run, in words the worker passes on. */
+function searchFailure(cause: string): string {
+  if (cause === 'budget') return "this job's budget has no room for a search";
+  if (cause === 'payment_refused') return 'the payment was refused before anything was sent';
+  return 'the search did not run and nothing was charged';
+}
+
 type EarlyWorkerInput = {
   accept: Promise<EarlyWorkerAccept>;
   onRelease: () => void;
@@ -750,23 +757,43 @@ async function runQualifiedWorker(
           timed.prepared();
           let attempts = 0;
           let timing: ModelCallTiming | undefined;
-          const message = await withModelRetry(
-            async () => {
-              attempts++;
-              return options.transport.messages(
-                job,
-                workerSearchMessages(search),
-                controller.signal,
-                assertCurrentSend,
-                (split) => {
-                  timing = split;
-                },
-              );
-            },
-            controller.signal,
-            (attempt, failure) => diagnostics.retry(attempt, failure.detail),
-            options.retryWait,
-          );
+          let message: Record<string, unknown>;
+          try {
+            message = await withModelRetry(
+              async () => {
+                attempts++;
+                return options.transport.messages(
+                  job,
+                  workerSearchMessages(search),
+                  controller.signal,
+                  assertCurrentSend,
+                  (split) => {
+                    timing = split;
+                  },
+                );
+              },
+              controller.signal,
+              (attempt, failure) => diagnostics.retry(attempt, failure.detail),
+              options.retryWait,
+            );
+          } catch (error) {
+            // A SEARCH THAT COST NOTHING FAILS ALONE: the child gets the native error
+            // block and the assignment goes on with its local tools. An uncertain payment
+            // still ends the job, as any uncertain model call does, because the job must
+            // not spend more while that call is unresolved.
+            if (
+              error instanceof ModelCallFailed &&
+              !controller.signal.aborted &&
+              (error.detail.uncharged === true ||
+                error.detail.cause === 'budget' ||
+                error.detail.cause === 'payment_refused')
+            ) {
+              timed.done({ tries: attempts, ...(timing ? { timing } : {}) });
+              send(searchRefusedMessage(search, searchFailure(error.detail.cause)));
+              return;
+            }
+            throw error;
+          }
           timed.done({ usage: message.usage, tries: attempts, ...(timing ? { timing } : {}) });
           send(message);
           return;
