@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   prepareWorkerGithub,
   redactGithubTokenShapes,
+  redactWorkerJson,
   redactWorkerSecrets,
   settingsFileWalletValues,
   workerWalletValues,
@@ -190,10 +191,19 @@ it('reads the wallet values from the env block of a settings file, and only thos
   }
 });
 
-it('removes a secret as JSON text writes it, and a GitHub token by its shape', () => {
-  const secret = 'pa"ss\\word';
-  const body = JSON.stringify({ text: `a ${secret} b ${TOKEN}` });
-  expect(redactWorkerSecrets(body, [secret])).not.toContain('pa\\"ss');
+it.each(['\\walletPass123', 'walletPass123\\', 'pa"ss\\"word', 'caf\u00e9\\u00e9\nline'])(
+  'removes the secret %j from a JSON body and leaves a body that still parses',
+  (secret) => {
+    const body = JSON.stringify({ [`k${secret}`]: `a ${secret} b`, keep: 'c:\\d "q" \u00e9' });
+    const out = redactWorkerJson(body, (text) => redactWorkerSecrets(text, [secret]));
+    expect(JSON.parse(out)).toEqual({
+      'k[redacted job secret]': 'a [redacted job secret] b',
+      keep: 'c:\\d "q" \u00e9',
+    });
+  },
+);
+
+it('removes a GitHub token by its shape', () => {
   expect(redactGithubTokenShapes(`x ${TOKEN} ${NAMED} y`)).toBe(
     'x [redacted job secret] [redacted job secret] y',
   );

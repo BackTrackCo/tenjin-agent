@@ -109,6 +109,7 @@ import {
 import {
   prepareWorkerGithub,
   redactGithubTokenShapes,
+  redactWorkerJson,
   redactWorkerMessage,
   redactWorkerSecrets,
   sessionTokenClears,
@@ -686,7 +687,7 @@ async function runQualifiedWorker(
         const outgoing = async () => {
           await assertCurrentSend();
           const text = withholdDroppedDirectories(
-            removeSecrets(body),
+            redactWorkerJson(body, removeSecrets),
             workspace.droppedDirectories,
           );
           try {

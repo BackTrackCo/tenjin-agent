@@ -901,7 +901,7 @@ it('uses the paid Responses bridge for worker calls and defaults only the bounde
 it("removes the job's tokens and the wallet's secrets by value from a request before it is bought", async () => {
   const accepted = await job();
   const github = `gho_${'Qm4z'.repeat(9)}`;
-  const wallet = `fixture-wallet-pass-${'k9'.repeat(4)}`;
+  const wallet = `\\fixture-wallet-"pass"-${'k9'.repeat(4)}\\`;
   vi.stubEnv('GH_TOKEN', github);
   vi.stubEnv('TENJIN_WALLET_PASSPHRASE', wallet);
   try {

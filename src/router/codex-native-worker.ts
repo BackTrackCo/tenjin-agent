@@ -29,6 +29,7 @@ import type { ModelTransport } from './model-transport';
 import { codexModelPolicy } from './codex-model-context';
 import { MODEL_WORKER_CREDENTIAL_KEYS as CLEARED_CREDENTIAL_KEYS } from './model-worker-privacy';
 import {
+  redactWorkerJson,
   redactWorkerSecrets,
   settingsFileWalletValues,
   workerTokenValues,
@@ -758,13 +759,17 @@ export async function runNativeCodexWorker(
         // The job's own bridge token, any GitHub token the session holds and the wallet's
         // secrets are removed by value, as the Claude bridge removes them; nothing else is
         // masked. The wallet values come from the environment and the user's Claude settings.
-        const removed = redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), [
+        const secrets = [
           token,
           ...workerTokenValues(process.env),
           ...workerWalletValues(process.env),
           ...(await settingsFileWalletValues([join(homedir(), '.claude', 'settings.json')])),
-        ]);
-        const raw: unknown = JSON.parse(removed);
+        ];
+        const raw: unknown = JSON.parse(
+          redactWorkerJson(Buffer.concat(chunks).toString('utf8'), (text) =>
+            redactWorkerSecrets(text, secrets),
+          ),
+        );
         const guardian =
           isRecord(raw) &&
           isRecord(raw.client_metadata) &&

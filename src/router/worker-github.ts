@@ -206,17 +206,24 @@ export async function prepareWorkerGithub(
 
 export const REDACTED_JOB_SECRET = '[redacted job secret]';
 
-/** Removes each literal secret, as written and as JSON text escapes it. */
+/** Removes each literal secret from plain text. */
 export function redactWorkerSecrets(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const secret of secrets) {
-    if (!secret) continue;
-    out = out.split(secret).join(REDACTED_JOB_SECRET);
-    // A request body is JSON: a value with a quote, backslash or newline is written escaped.
-    const escaped = JSON.stringify(secret).slice(1, -1);
-    if (escaped !== secret) out = out.split(escaped).join(REDACTED_JOB_SECRET);
-  }
+  for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_JOB_SECRET);
   return out;
+}
+
+/**
+ * The same removal on a JSON body: the decoded strings are changed and the body is written
+ * again, so a secret holding a backslash, a quote or a character JSON escapes is found and
+ * the escapes of the rest stay whole. Text that is not JSON is removed from as plain text.
+ */
+export function redactWorkerJson(text: string, redact: (text: string) => string): string {
+  try {
+    return JSON.stringify(redactWorkerMessage(JSON.parse(text), redact));
+  } catch {
+    return redact(text);
+  }
 }
 
 /** The wallet's two secrets: a worker never gets them, from its environment or any file it reads. */
