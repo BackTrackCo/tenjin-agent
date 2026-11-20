@@ -31,6 +31,7 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 import { LockTimeoutError, withFileLock, withFirstFileLock, withRuntimeLock } from './lock';
+import { processStartToken } from './process-identity';
 
 let dir: string;
 beforeEach(async () => {
@@ -243,106 +244,115 @@ describe('withFileLock with takeOverDead', () => {
     expect(existsSync(join(lock, 'meta'))).toBe(true);
   });
 
-  // Failure caught (Greptile): after a crash or a reboot an unrelated long-lived process took the
-  // recorded pid, and a pid-only check held the lock for ever, with no deadline on the wait.
-  it('takes a beaten lock whose live pid shows no beat for the watch window', async () => {
+  // Failure caught (Greptile): after a crash or a reboot an unrelated long-lived process took
+  // the recorded pid, and a pid-only check held the lock for ever, with no deadline on the wait.
+  it('takes a lock whose live pid has another start token, as a reused pid', async () => {
     const lock = join(dir, 'reused.lock');
-    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: Date.now(), beats: true }));
-    // Seen once, then still: not before the window, taken after it.
-    const opts = { timeoutMs: 2000, retryMs: 10, takeOverDead: true, watchMs: 150 };
-    const started = performance.now();
-    expect(await withFileLock(lock, async () => 'ran', opts)).toBe('ran');
-    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: Date.now(), token: 'not:this' }));
+    expect(await withFileLock(lock, async () => 'ran', { ...quick, takeOverDead: true })).toBe(
+      'ran',
+    );
   });
 
-  it('never takes a lock whose holder beats, however long it holds', async () => {
-    const lock = join(dir, 'beating.lock');
-    let release!: () => void;
-    const holding = withFileLock(lock, () => new Promise<void>((resolve) => (release = resolve)), {
-      takeOverDead: true,
-      beatMs: 20,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    // Many watch windows pass; the beat moves in each, so the waiter never takes the lock.
+  it('never takes a lock whose live pid has the recorded token, however long it holds', async () => {
+    const lock = join(dir, 'same.lock');
+    leave(
+      lock,
+      JSON.stringify({ pid: process.pid, acquiredAt: 0, token: processStartToken(process.pid) }),
+    );
+    // Nothing beats and no timer runs in the holder: a suspended session is still the holder.
     await expect(
-      withFileLock(lock, async () => 'unreached', {
-        timeoutMs: 700,
-        retryMs: 10,
-        takeOverDead: true,
-        watchMs: 120,
-      }),
+      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
     ).rejects.toBeInstanceOf(LockTimeoutError);
-    release();
-    await holding;
+    expect(existsSync(join(lock, 'meta'))).toBe(true);
   });
 
-  it('is not moved by a step of the wall clock, forward or back', async () => {
+  it('treats a holder with no recorded token, or one it cannot read, as alive', async () => {
+    const lock = join(dir, 'no-token.lock');
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: 0 }));
+    await expect(
+      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+  });
+
+  it('writes its own pid, token and owner id into a lock, readable by the user alone', async () => {
+    const lock = join(dir, 'meta.lock');
+    let meta: { pid?: number; token?: string; owner?: string } = {};
+    let mode = 0;
+    await withFileLock(lock, async () => {
+      meta = JSON.parse(await readFile(join(lock, 'meta'), 'utf8'));
+      mode = (await stat(join(lock, 'meta'))).mode & 0o777;
+    });
+    expect(meta.pid).toBe(process.pid);
+    expect(meta.token).toBe(processStartToken(process.pid));
+    expect(typeof meta.owner).toBe('string');
+    expect(mode).toBe(0o600);
+  });
+
+  it('is not moved by a step of the wall clock, forward or back, and its wait is monotonic', async () => {
     vi.useFakeTimers({ toFake: ['Date'], now: Date.now(), shouldAdvanceTime: true });
     try {
-      // A beating holder stays the holder when the clock jumps a day ahead and a day back.
-      const live = join(dir, 'live-step.lock');
-      let release!: () => void;
-      const holding = withFileLock(
-        live,
-        () => new Promise<void>((resolve) => (release = resolve)),
-        { takeOverDead: true, beatMs: 20 },
+      const same = join(dir, 'same-step.lock');
+      leave(
+        same,
+        JSON.stringify({ pid: process.pid, acquiredAt: 0, token: processStartToken(process.pid) }),
       );
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      vi.setSystemTime(Date.now() + 86_400_000);
-      await expect(
-        withFileLock(live, async () => 'unreached', {
-          timeoutMs: 400,
-          retryMs: 10,
-          takeOverDead: true,
-          watchMs: 120,
-        }),
-      ).rejects.toBeInstanceOf(LockTimeoutError);
-      release();
-      await holding;
-      // A reused pid is not taken sooner by a step, and still taken after the real window.
       const reused = join(dir, 'reused-step.lock');
-      leave(reused, JSON.stringify({ pid: process.pid, acquiredAt: Date.now(), beats: true }));
-      await expect(
-        withFileLock(reused, async () => 'unreached', {
-          timeoutMs: 60,
-          retryMs: 10,
-          takeOverDead: true,
-          watchMs: 400,
-        }),
-      ).rejects.toBeInstanceOf(LockTimeoutError);
-      vi.setSystemTime(Date.now() - 2 * 86_400_000);
-      expect(
-        await withFileLock(reused, async () => 'ran', {
-          timeoutMs: 2000,
-          retryMs: 10,
-          takeOverDead: true,
-          watchMs: 150,
-        }),
-      ).toBe('ran');
+      leave(reused, JSON.stringify({ pid: process.pid, acquiredAt: 0, token: 'not:this' }));
+      for (const step of [86_400_000, -2 * 86_400_000]) {
+        vi.setSystemTime(Date.now() + step);
+        // A live holder with its token is held however the clock moved, and the wait lasts its
+        // own timeout, not the clock's.
+        const began = performance.now();
+        await expect(
+          withFileLock(same, async () => 'unreached', {
+            timeoutMs: 300,
+            retryMs: 10,
+            takeOverDead: true,
+          }),
+        ).rejects.toBeInstanceOf(LockTimeoutError);
+        expect(performance.now() - began).toBeGreaterThanOrEqual(290);
+      }
+      // A reused pid is taken at once, with no age to read.
+      expect(await withFileLock(reused, async () => 'ran', { ...quick, takeOverDead: true })).toBe(
+        'ran',
+      );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('judges a holder of an older build, which never beats, by its pid alone', async () => {
-    const lock = join(dir, 'older.lock');
-    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: 0 }));
-    await expect(
-      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true, watchMs: 20 }),
-    ).rejects.toBeInstanceOf(LockTimeoutError);
+  it('leaves the lock a waiter took in place when the first holder releases', async () => {
+    const lock = join(dir, 'taken.lock');
+    let release!: () => void;
+    const first = withFileLock(lock, () => new Promise<void>((resolve) => (release = resolve)), {
+      takeOverDead: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The first holder's record is rewritten as another process's (a taker's), as after a takeover.
+    writeFileSync(
+      join(lock, 'meta'),
+      JSON.stringify({ pid: process.pid, owner: 'someone-else', acquiredAt: Date.now() }),
+    );
+    release();
+    await first;
+    expect(existsSync(join(lock, 'meta'))).toBe(true);
   });
 
-  it('takes a lock with no readable holder only once it is older than 10 s', async () => {
+  it('takes a lock with no readable holder only once it stood unchanged for the window', async () => {
     const lock = join(dir, 'ownerless.lock');
     leave(lock, '{"pid":');
     await expect(
       withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
     ).rejects.toBeInstanceOf(LockTimeoutError);
-    const old = new Date(Date.now() - 11_000);
-    utimesSync(lock, old, old);
-    expect(await withFileLock(lock, async () => 'ran', { ...quick, takeOverDead: true })).toBe(
-      'ran',
-    );
+    expect(
+      await withFileLock(lock, async () => 'ran', {
+        timeoutMs: 2000,
+        retryMs: 10,
+        takeOverDead: true,
+        ownerlessMs: 150,
+      }),
+    ).toBe('ran');
   });
 
   it('lets waiters on one dead lock run one at a time, each landing its update', async () => {

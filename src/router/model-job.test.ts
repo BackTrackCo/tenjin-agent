@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MODEL_RECORD_TTL_MS, ModelJobStore, sweepModelRecords } from './model-job';
 import { canonicalHash } from '../lib/request-schema';
+import { processStartToken } from '../lib/process-identity';
 let dir: string;
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -440,57 +441,43 @@ it('keeps the original job files and conversation of a running continuation, wha
 });
 
 // Failure caught (Greptile): after a crash or a reboot another process holds the recorded pid and a
-// pid-only check left an abandoned job `running` for good. A live pid is the runner while its beat
-// moves, watched on the monotonic clock: no wall time is read, so a clock step changes nothing.
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function runningWithBeat(beat?: string) {
+// pid-only check left an abandoned job `running` for good. The runner is named by its pid and its
+// start token, compared for equality only: no wall clock, no timer, no beat.
+async function runningAs(runner: { pid: number; token?: string }) {
   const { store, job } = await heldAgentCall();
   const accepted = await store.accept(job.id, 'root', 'turn');
   const path = join(dir, 'model-jobs', `${job.id}.json`);
   await writeFile(
     path,
-    JSON.stringify({
-      ...accepted,
-      runner: { pid: process.pid + 1, acceptedAt: Date.now() - 3 * 3600_000 },
-    }),
+    JSON.stringify({ ...accepted, runner: { ...runner, acceptedAt: Date.now() - 3 * 3600_000 } }),
   );
-  const beatFile = join(dir, 'model-jobs', `${job.id}.beat`);
-  // The accept in this process starts its own beat; this runner is another process's.
-  await store.finish(job.id, 'unknown').catch(() => undefined);
-  await writeFile(
-    path,
-    JSON.stringify({ ...accepted, runner: { pid: process.pid + 1, acceptedAt: 1 } }),
-  );
-  if (beat === undefined) await rm(beatFile, { force: true });
-  else await writeFile(beatFile, beat);
-  return { store, job, beatFile };
+  return { store, job };
 }
 
-it('ends a running job whose live pid shows no beat for the watch window, and not before', async () => {
-  const { store, job } = await runningWithBeat('1');
-  const o = { isAlive: () => true, watchMs: 120 };
-  expect(await store.strand(job.id, o)).toBeNull();
-  await wait(40);
-  expect(await store.strand(job.id, o)).toBeNull();
-  await wait(120);
-  expect(await store.strand(job.id, o)).toMatchObject({ state: 'unknown' });
+it('records the runner with its start token, in a file only the user can read', async () => {
+  const { store, job } = await heldAgentCall();
+  const accepted = await store.accept(job.id, 'root', 'turn');
+  expect(accepted?.runner?.pid).toBe(process.pid);
+  expect(accepted?.runner?.token).toBe(processStartToken(process.pid));
+  const files = await readdir(join(dir, 'model-jobs'));
+  for (const name of files)
+    expect((await stat(join(dir, 'model-jobs', name))).mode & 0o777).toBe(0o600);
 });
 
-it('keeps a running job whose runner beats, however long it runs, and one with no beat file', async () => {
-  const { store, job, beatFile } = await runningWithBeat('1');
-  const o = { isAlive: () => true, watchMs: 100 };
-  for (let beat = 2; beat < 8; beat++) {
-    await writeFile(beatFile, String(beat));
-    await wait(40);
-    expect(await store.strand(job.id, o)).toBeNull();
-  }
-  // A record of an older build has no beat: judged by its pid alone.
-  const older = await runningWithBeat();
-  await wait(150);
-  expect(await older.store.strand(older.job.id, o)).toBeNull();
-  expect(await older.store.strand(older.job.id, o)).toBeNull();
-  // A pid that is gone is dead at once.
-  expect(await older.store.strand(older.job.id, { isAlive: () => false })).toMatchObject({
+it('ends a running job whose live pid has another start token, and keeps one with the same', async () => {
+  const reused = await runningAs({ pid: process.ppid, token: 'not:this' });
+  expect(await reused.store.strand(reused.job.id, { isAlive: () => true })).toMatchObject({
+    state: 'unknown',
+  });
+  const live = await runningAs({ pid: process.ppid, token: processStartToken(process.ppid)! });
+  // The same pid and token as another process holds: alive for ever, however long it ran.
+  expect(await live.store.strand(live.job.id, { isAlive: () => true })).toBeNull();
+});
+
+it('treats a runner with no token, or a pid that is gone, by the simplest rule: alive, or dead at once', async () => {
+  const bare = await runningAs({ pid: process.pid + 1 });
+  expect(await bare.store.strand(bare.job.id, { isAlive: () => true })).toBeNull();
+  expect(await bare.store.strand(bare.job.id, { isAlive: () => false })).toMatchObject({
     state: 'unknown',
   });
 });
@@ -498,16 +485,15 @@ it('keeps a running job whose runner beats, however long it runs, and one with n
 it('is not moved by a step of the wall clock, forward or back', async () => {
   vi.useFakeTimers({ toFake: ['Date'], now: Date.now(), shouldAdvanceTime: true });
   try {
-    const live = await runningWithBeat('1');
-    const o = { isAlive: () => true, watchMs: 150 };
-    expect(await live.store.strand(live.job.id, o)).toBeNull();
-    vi.setSystemTime(Date.now() + 2 * 86_400_000);
-    expect(await live.store.strand(live.job.id, o)).toBeNull();
-    vi.setSystemTime(Date.now() - 4 * 86_400_000);
-    expect(await live.store.strand(live.job.id, o)).toBeNull();
-    // Only the real window ends the job whose beat stood still.
-    await wait(200);
-    expect(await live.store.strand(live.job.id, o)).toMatchObject({ state: 'unknown' });
+    const live = await runningAs({ pid: process.ppid, token: processStartToken(process.ppid)! });
+    for (const step of [2 * 86_400_000, -4 * 86_400_000]) {
+      vi.setSystemTime(Date.now() + step);
+      expect(await live.store.strand(live.job.id, { isAlive: () => true })).toBeNull();
+    }
+    const reused = await runningAs({ pid: process.ppid, token: 'not:this' });
+    expect(await reused.store.strand(reused.job.id, { isAlive: () => true })).toMatchObject({
+      state: 'unknown',
+    });
   } finally {
     vi.useRealTimers();
   }

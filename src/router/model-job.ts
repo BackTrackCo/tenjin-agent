@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, opendir, readFile, writeFile } from 'node:fs/promises';
-import { performance } from 'node:perf_hooks';
+import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { pidAlive, withFileLock } from '../lib/lock';
+import { holderGone, ownStartToken } from '../lib/process-identity';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
@@ -37,7 +37,9 @@ const jobSchema = z.object({
   expiresAt: z.number(),
   result: z.string().optional(),
   /** The process that accepted the job and runs its worker, and when. */
-  runner: z.object({ pid: z.number().int(), acceptedAt: z.number() }).optional(),
+  runner: z
+    .object({ pid: z.number().int(), acceptedAt: z.number(), token: z.string().optional() })
+    .optional(),
 });
 export type ModelJob = z.infer<typeof jobSchema>;
 export const modelJobSchema = jobSchema;
@@ -89,32 +91,6 @@ export async function sweepModelRecords(dataDir: string, now = Date.now()): Prom
   };
   for (const store of ['model-jobs', 'model-conversations'])
     await sweep(join(dataDir, store), old, { limit: 50_000 });
-}
-/**
- * A RUNNER SHOWS IT IS ALIVE by rewriting a counter beside its job record every
- * {@link RUNNER_BEAT_MS}. A process that finds another pid alive in a `running` record watches
- * that counter on its own monotonic clock, never a wall clock: one that stands still for
- * {@link RUNNER_WATCH_MS} means the pid is another process's now (after a crash or a reboot), so
- * the record is no live job's. A record with no counter (an older build) is judged by its pid
- * alone.
- */
-export const RUNNER_BEAT_MS = 10_000;
-export const RUNNER_WATCH_MS = 60_000;
-const runnerBeats = new Map<string, ReturnType<typeof setInterval>>();
-const watchedRunners = new Map<string, { beat: string; movedAt: number }>();
-function startRunnerBeat(path: string): void {
-  stopRunnerBeat(path);
-  let count = 0;
-  const write = () => void writeFile(path, String(++count)).catch(() => undefined);
-  write();
-  const timer = setInterval(write, RUNNER_BEAT_MS);
-  timer.unref();
-  runnerBeats.set(path, timer);
-}
-function stopRunnerBeat(path: string): void {
-  const timer = runnerBeats.get(path);
-  if (timer) clearInterval(timer);
-  runnerBeats.delete(path);
 }
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 /** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
@@ -210,9 +186,6 @@ export class ModelJobStore {
   private path(id: string) {
     if (!z.uuid().safeParse(id).success) throw new Error('Invalid model job');
     return join(this.dir, `${id}.json`);
-  }
-  private beatPath(id: string) {
-    return join(this.dir, `${id}.beat`);
   }
   private window(sessionId: string, turnId: string) {
     return join(this.dir, `window-${canonicalHash({ sessionId, turnId })}.json`);
@@ -394,9 +367,10 @@ export class ModelJobStore {
       )
         return null;
       job.state = 'running';
-      job.runner = { pid: process.pid, acceptedAt: Date.now() };
+      // The token names this process by its start, so a later process that takes the pid is told apart.
+      const token = ownStartToken();
+      job.runner = { pid: process.pid, acceptedAt: Date.now(), ...(token ? { token } : {}) };
       await writePrivate(this.path(id), JSON.stringify(job));
-      startRunnerBeat(this.beatPath(id));
       return job;
     });
   }
@@ -407,17 +381,18 @@ export class ModelJobStore {
    */
   async strand(
     id: string,
-    o: { isAlive?: (pid: number) => boolean; watchMs?: number } = {},
+    o: { isAlive?: (pid: number) => boolean } = {},
   ): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.read(id);
       if (!job || !['running', 'cancelling'].includes(job.state)) return job;
       const { runner } = job;
-      // A pid that is gone is dead at once. A live one is the runner while its beat moves: no
-      // wall clock and no process start is compared, so a clock step after a sleep cannot make a
-      // live runner read as another process.
-      let gone = runner && (runner.pid === process.pid || !(o.isAlive ?? pidAlive)(runner.pid));
-      if (runner && !gone) gone = await this.beatStill(id, o.watchMs ?? RUNNER_WATCH_MS);
+      // Gone: this process (the caller knows it runs no such worker), a pid that is not running,
+      // or a pid held by a process with another start token than the one recorded. A runner with
+      // no recorded token, or whose token cannot be read, is alive: the pid alone decides.
+      const gone =
+        runner &&
+        (runner.pid === process.pid || holderGone(runner.pid, runner.token, o.isAlive ?? pidAlive));
       if (!gone) return null;
       const ended: ModelJob = {
         ...job,
@@ -426,26 +401,8 @@ export class ModelJobStore {
         result: JSON.stringify(STRANDED_HANDBACK),
       };
       await writePrivate(this.path(id), JSON.stringify(ended));
-      stopRunnerBeat(this.beatPath(id));
       return ended;
     });
-  }
-  /** True when a live runner's beat has stood still for `watchMs` on this process's monotonic clock. */
-  private async beatStill(id: string, watchMs: number): Promise<boolean> {
-    const path = this.beatPath(id);
-    const beat = await readFile(path, 'utf8').catch(() => undefined);
-    if (beat === undefined) {
-      watchedRunners.delete(path);
-      return false;
-    }
-    const now = performance.now();
-    const seen = watchedRunners.get(path);
-    if (!seen || seen.beat !== beat) {
-      watchedRunners.set(path, { beat, movedAt: now });
-      if (watchedRunners.size > 256) watchedRunners.delete(watchedRunners.keys().next().value!);
-      return false;
-    }
-    return now - seen.movedAt >= watchMs;
   }
   /** Codex: the held call retried unchanged in its own turn passes the hold once. */
   async nativeRetry(
@@ -531,8 +488,6 @@ export class ModelJobStore {
           ...(result ? { result } : {}),
         }),
       );
-      stopRunnerBeat(this.beatPath(id));
-      watchedRunners.delete(this.beatPath(id));
     });
   }
   /** Records why a call got no offer, newest last, in one bounded private file. Never throws. */
