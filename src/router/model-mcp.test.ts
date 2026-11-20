@@ -1919,6 +1919,20 @@ it('refuses a repeated accept while the worker runs, and starts exactly one work
   }
 });
 
+it('says the job store is busy, not that the offer was taken, when its lock is held', async () => {
+  const f = await ownedClaudeFixture();
+  const store = await holdLock(join(dir, 'model-jobs', 'lock'));
+  try {
+    const answer = await f.call({ offer_id: f.job.id });
+    expect(answer.reason).toContain('job store is busy');
+    expect(answer.reason).toContain('Nothing was charged');
+    expect(worker.run).not.toHaveBeenCalled();
+  } finally {
+    store();
+    await f.close();
+  }
+}, 20_000);
+
 it.each(['a new process', 'the same process'] as const)(
   'reports a worker its process left running as interrupted to %s, without restarting or continuing it',
   async (where) => {

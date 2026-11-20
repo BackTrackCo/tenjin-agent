@@ -956,10 +956,21 @@ export function registerModelTool(
               let job: ModelJob | null = null;
               try {
                 runnerLock = await model.store.holdRunner(args.offer_id);
-                job = await model.store.accept(args.offer_id, session.sessionId);
               } catch (error) {
                 // A runner already holds this offer: another accept of it won.
                 if (!(error instanceof LockTimeoutError)) throw error;
+              }
+              if (runnerLock) {
+                try {
+                  job = await model.store.accept(args.offer_id, session.sessionId);
+                } catch (error) {
+                  // The job store's own lock, not another accept: say so. Nothing was charged.
+                  if (!(error instanceof LockTimeoutError)) throw error;
+                  if (offered) await warming.get(offered)?.stop();
+                  return unavailable(
+                    `The job store is busy: ${error.lockPath} is held by another Tenjin process. Nothing was charged; retry the offer.`,
+                  );
+                }
               }
               const warm = job && warming.get(job.id);
               if (job) warming.delete(job.id);
