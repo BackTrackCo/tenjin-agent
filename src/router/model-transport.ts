@@ -153,6 +153,10 @@ const budgetSchema = z.object({
       /** A router tool a worker's native tool paid for (`toolCall`), by its catalog id;
        *  absent for a model call. Its id is local: the model proxy holds no record of it. */
       tool: z.string().min(1).max(200).optional(),
+      /** Events of this call reached its caller, or the router cut its reply: the call is
+       *  released only on the strict proof (a cancelled voucher with a zero charge), by
+       *  `reconcile` as at the call. */
+      strict: z.literal(true).optional(),
     }),
   ),
 });
@@ -810,6 +814,16 @@ export class ModelTransport {
       await challenge.body?.cancel();
       return existing(reservation);
     }
+    /** Records that this uncertain call needs the strict proof, for a later `reconcile`. */
+    const markStrict = () =>
+      modelLock(`${path}.lock`, async () => {
+        const state = await load();
+        const call = state.calls[key];
+        if (call?.invocationId === body.invocationId && !call.completed && !call.strict) {
+          state.calls[key] = { ...call, strict: true };
+          await saveBudget(job.id, path, state);
+        }
+      }).catch(() => undefined);
     const release = () =>
       modelLock(`${path}.lock`, async () => {
         const state = await load();
@@ -1166,6 +1180,10 @@ export class ModelTransport {
           );
         }
       }
+      // Left uncertain after events reached the caller, or after the router cut its reply:
+      // a later `reconcile` releases it only on the same strict proof, never on the looser one.
+      if (relayed || (paidError?.code !== undefined && MODEL_CUT_REPLY_CODES.has(paidError.code)))
+        await markStrict();
       // The payer's own code says how far the paid call went, such as `payment_failed`
       // when the router answered the signed request with an error.
       throw new ModelCallFailed(
@@ -1364,7 +1382,9 @@ export class ModelTransport {
         const server = await this.recover(call.invocationId, signal, protocol).catch(() => null);
         if (!server) continue;
         const spent = server.state === 'completed' && server.voucherState === 'accepted';
-        const free = costNothing(server);
+        // A call whose events reached its caller, or whose reply the router cut, needs the
+        // strict proof here as at the call.
+        const free = call.strict === true ? cutCostNothing(server) : costNothing(server);
         if (!spent && !free) continue;
         const actual = spent ? BigInt(server.actualAtomic) : 0n;
         await modelLock(`${path}.lock`, async () => {
