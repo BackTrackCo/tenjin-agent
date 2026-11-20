@@ -70,11 +70,17 @@ export const STRANDED_HANDBACK = {
  * Age alone never decides for such a job. Never throws.
  */
 export async function sweepModelRecords(dataDir: string, now = Date.now()): Promise<void> {
-  const live = new Set(
-    (await new ModelJobStore(dataDir).unfinished().catch(() => [] as ModelJob[])).map(
-      (job) => job.id,
-    ),
-  );
+  // A running continuation spends from its original job's files (budget, record, result,
+  // conversation), which carry the original's id and the handle's, not its own.
+  const live = new Set<string>();
+  const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  for (const job of await new ModelJobStore(dataDir).unfinished().catch(() => [] as ModelJob[])) {
+    live.add(job.id.toLowerCase());
+    for (const named of [job.decision.jobId, job.decision.workerHandle]) {
+      const id = typeof named === 'string' ? uuid.exec(named)?.[0] : undefined;
+      if (id) live.add(id.toLowerCase());
+    }
+  }
   const old = async (name: string, path: string) => {
     const id = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(name)?.[1];
     if (id && live.has(id.toLowerCase())) return false;

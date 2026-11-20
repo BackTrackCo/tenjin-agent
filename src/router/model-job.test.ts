@@ -399,3 +399,42 @@ it('removes a record 7 days after its last write and keeps one written a moment 
   expect(await store.owned(job.id, 'root')).toBeNull();
   expect(await readdir(join(dir, 'model-conversations'))).toEqual([]);
 });
+
+// Failure caught (vraspar's repro): a running continuation spends from its original job's
+// budget, record and result files, which carry the original's id, so the age sweep removed
+// them under it and the next call failed closed with the job dead.
+it('keeps the original job files and conversation of a running continuation, whatever their age', async () => {
+  const { store, job: original } = await heldAgentCall();
+  await mkdir(join(dir, 'model-conversations'));
+  const handle = `tenjin-worker-${original.id}`;
+  const continuation = await store.offer({
+    sessionId: 'root',
+    turnId: 'followup',
+    callId: 'followup-call',
+    task: 'Continue.',
+    root: '/repo',
+    native: {},
+    decision: { jobId: original.id, workerHandle: handle },
+    capAtomic: '1000000',
+  });
+  await store.accept(continuation.id, 'root');
+  const files = [
+    join(dir, 'model-jobs', `${original.id}.budget.json`),
+    join(dir, 'model-jobs', `${original.id}-result.result.json`),
+    join(dir, 'model-conversations', `${original.id}.json`),
+  ];
+  for (const path of files) await writeFile(path, '{}');
+  const old = new Date(Date.now() - MODEL_RECORD_TTL_MS - 1000);
+  for (const path of files) await utimes(path, old, old);
+  await sweepModelRecords(dir);
+  const exists = (path: string) =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  expect(await Promise.all(files.map(exists))).toEqual([true, true, true]);
+  // Once the continuation has ended they are old files like any other.
+  await store.finish(continuation.id, 'completed');
+  await sweepModelRecords(dir);
+  expect(await Promise.all(files.map(exists))).toEqual([false, false, false]);
+});
