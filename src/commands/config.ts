@@ -14,8 +14,6 @@ import {
   ROUTER_CONTEXTS,
   PERSONAL_ROUTER_KEYS,
   loadRawConfig,
-  MAX_AUTO_SPEND_FLOOR_ATOMIC,
-  MAX_AUTO_SPEND_FLOOR_WHY,
   parseOnOffFlag,
   parseUpdateModeFlag,
   resolveSettings,
@@ -86,7 +84,7 @@ const KEY_WIDTH = Math.max(
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend:
-    'automatic router limit per call, the runaway guard: at least 0.25 (the default); router.enabled false turns the router off',
+    'automatic router limit per call, the runaway guard: default 1.00, 0 blocks positive automatic payments; router.enabled false turns the router off',
   sessionBudget:
     'automatic router daily budget shared across chats (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
@@ -130,11 +128,13 @@ function isRouterKey(key: string): key is RouterConfigKey {
 /** The list/get shape for a router key, with the file that set it. */
 function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
   const { value, source, path } =
-    key === 'router.enabled'
-      ? settings.enabled
-      : key === 'router.context'
-        ? settings.context
-        : settings.improve;
+    key === 'router.subagents'
+      ? settings.subagents
+      : key === 'router.enabled'
+        ? settings.enabled
+        : key === 'router.context'
+          ? settings.context
+          : settings.improve;
   return { value, source, ...(path !== undefined ? { path } : {}) };
 }
 
@@ -430,7 +430,11 @@ async function setExperimentalKey(
 
 /** The router keys a project file may carry: both only ever tighten. */
 type ProjectRouterKey = Exclude<RouterConfigKey, 'router.improve'>;
-const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = ['router.enabled', 'router.context'];
+const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = [
+  'router.enabled',
+  'router.context',
+  'router.subagents',
+];
 
 function isProjectRouterKey(key: string): key is ProjectRouterKey {
   return (PROJECT_ROUTER_KEYS as readonly string[]).includes(key);
@@ -488,8 +492,9 @@ async function setRouterKey(
   ctx: CommandContext,
   project: { local: boolean } | undefined,
 ): Promise<CommandResult> {
-  const field = key === 'router.enabled' ? 'enabled' : 'context';
-  const parsed = field === 'enabled' ? parseBoolean(value) : parseRouterContext(value);
+  const field =
+    key === 'router.enabled' ? 'enabled' : key === 'router.subagents' ? 'subagents' : 'context';
+  const parsed = field !== 'context' ? parseBoolean(value) : parseRouterContext(value);
   let written: RenderedSetting;
   if (project === undefined) {
     await persist(ctx.dataDir, (existing) => ({
@@ -532,7 +537,7 @@ function parseRouterContext(value: string): RouterContext {
  */
 async function persistProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
+  field: 'enabled' | 'context' | 'subagents',
   value: boolean | RouterContext,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o755 });
@@ -552,7 +557,7 @@ async function persistProjectRouter(
 
 async function mergeProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
+  field: 'enabled' | 'context' | 'subagents',
   value: boolean | RouterContext,
 ): Promise<void> {
   // Through the one parser: a file that is not an object, or whose block is
@@ -605,7 +610,7 @@ export interface RouterDefaultsResult {
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
  * current settings; a fresh install fills only missing automatic limits, with the
  * values the person approved or chose. A key `limits` leaves out stays absent,
- * and the code default ($0.25 a call, $5 a day) holds for it: that is an install
+ * and the code default ($1 a call, $5 a day) holds for it: that is an install
  * nobody answered. A key in `chosen` is an amount the
  * user named for this install (`--max-auto-spend`, `--session-budget`), so it
  * replaces what the file holds. */
@@ -700,7 +705,7 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'sessionBudget':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'maxAutoSpend':
-      return parseAutoSpend(value);
+      return parseUsdToAtomic(value);
     case 'sendMaxAmount':
       return value === 'none' ? 'none' : parseUsdToAtomic(value);
     case 'allowlistCreators':
@@ -711,17 +716,6 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'bazaarRegistries':
       return parseRegistryList(value);
   }
-}
-
-/** A per-call limit, refused below the $0.25 floor (and on a bad amount). */
-function parseAutoSpend(value: string): string {
-  const atomic = parseUsdToAtomic(value);
-  if (BigInt(atomic) < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
-    throw new CliError('USAGE', `maxAutoSpend ${value} is below the 0.25 USD minimum.`, {
-      fix: MAX_AUTO_SPEND_FLOOR_WHY,
-    });
-  }
-  return atomic;
 }
 
 /** "" clears to []; comma-split, each entry an absolute http(s) URL. */

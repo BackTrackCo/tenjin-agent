@@ -321,6 +321,22 @@ describe('zero and unlimited daily budgets', () => {
   });
 });
 
+describe('several jobs paying at once', () => {
+  it('lets concurrent requests of different jobs through only while the daily budget covers them', async () => {
+    // Each DeepSeek job has its own transport and authorizer on the one ledger.
+    const jobs = [0, 1, 2].map(() =>
+      createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 250n }) }),
+    );
+    const results = await Promise.all(
+      jobs.map((job, i) =>
+        job.authorize({ amountAtomic: 100n, creator: 'host', requestKey: `job-${i}` }),
+      ),
+    );
+    expect(results.filter((a) => a.decision === 'allow')).toHaveLength(2);
+    expect(results.filter((a) => a.reason === 'session_budget_exceeded')).toHaveLength(1);
+  });
+});
+
 describe('automatic exposure and manual accounting share one ledger', () => {
   it('manual pending and committed spend leave automatic headroom intact', async () => {
     const auth = createLocalSpendAuthorizer({ dir, policy: policy({ sessionBudgetAtomic: 100n }) });

@@ -1,0 +1,224 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import {
+  JOB_FOLDER_MARKER,
+  forgetJobFolder,
+  JOB_FOLDER_STALE_MS,
+  markJobFolder,
+  removeJobFolder,
+  sweepJobFolders,
+  type ProcessFacts,
+} from './job-folders';
+
+// Every folder here is under a temp directory of this test's own, never the real one.
+let scratch: string;
+beforeEach(async () => {
+  scratch = await realpath(await mkdtemp(join(tmpdir(), 'job-folders-test-')));
+});
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await rm(scratch, { recursive: true, force: true });
+});
+
+const HOUR = 60 * 60_000;
+const now = Date.now();
+/** A job folder of the given kind and age, with an owner marker unless `owner` is null. */
+async function folder(
+  name: string,
+  o: { ageMs: number; owner?: { pid: number; startedAt: number } | null },
+) {
+  const path = join(scratch, name);
+  await mkdir(path);
+  await writeFile(join(path, 'settings.json'), '{}');
+  if (o.owner)
+    await writeFile(join(path, JOB_FOLDER_MARKER), JSON.stringify(o.owner), { mode: 0o600 });
+  const at = new Date(now - o.ageMs);
+  if (o.owner) await utimes(join(path, JOB_FOLDER_MARKER), at, at);
+  await utimes(path, at, at);
+  return path;
+}
+const facts = (o: Partial<ProcessFacts> & { alive?: (pid: number) => boolean } = {}) => ({
+  alive: () => false,
+  commandLines: async () => '',
+  ...o,
+});
+const sweep = (f: ProcessFacts) =>
+  sweepJobFolders({ directories: [scratch], now, facts: f, changedAt: (stat) => stat.mtimeMs });
+
+it('marks a folder with the process that made it, readable by this user alone', async () => {
+  const path = join(scratch, 'tenjin-worker-settings-AbCdEf');
+  await mkdir(path);
+  markJobFolder(path);
+  const file = join(path, JOB_FOLDER_MARKER);
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ pid: process.pid });
+  expect(statSync(file).mode & 0o777).toBe(0o600);
+  // This process keeps one heartbeat for every folder it owns: let go, as a removal does.
+  forgetJobFolder(path);
+});
+
+it('removes the folder of a job whose process is gone, in each of the three kinds', async () => {
+  // Failure caught: a crash or a kill of `tenjin mcp` left the job's settings folder, which
+  // holds its bridge token and GitHub token, in the temp folder for good.
+  const owner = { pid: 4_000_001, startedAt: now - 9 * HOUR };
+  const settings = await folder('tenjin-worker-settings-AbCdEf', { ageMs: 3 * HOUR, owner });
+  const github = await folder('tenjin-worker-Gh1234', { ageMs: 3 * HOUR, owner });
+  const temp = await folder('tenjin-job-Tm5678', { ageMs: 3 * HOUR, owner });
+  const removed = await sweep(facts({ alive: () => false }));
+  expect(removed.sort()).toEqual([github, settings, temp].sort());
+  for (const path of [settings, github, temp]) expect(existsSync(path)).toBe(false);
+});
+
+it('leaves a folder whose owner is gone until it has been quiet for hours', async () => {
+  const young = await folder('tenjin-worker-settings-Young1', {
+    ageMs: 30 * 60_000,
+    owner: { pid: 4_000_004, startedAt: now - HOUR },
+  });
+  expect(await sweep(facts())).toEqual([]);
+  expect(existsSync(young)).toBe(true);
+});
+
+it('never removes the folder of a live owner in another process, whatever its start time reads', async () => {
+  // Failure caught: a sweep at one session's start taking the settings file out from under a
+  // worker another Claude Code session runs: `ps` printed local time, one hour early for a
+  // process started in the second 01:30 of a fall-back night, and the owner read as a reused pid.
+  const live = { pid: 4_000_002, startedAt: now - 20 * HOUR };
+  // Quiet for hours, as after a sleeping laptop.
+  const paths = [
+    await folder('tenjin-worker-settings-Live01', { ageMs: 5 * HOUR, owner: live }),
+    await folder('tenjin-worker-Live02', { ageMs: 5 * HOUR, owner: live }),
+    await folder('tenjin-job-Live03', { ageMs: 5 * HOUR, owner: live }),
+  ];
+  // A live pid is a live owner, whatever start time a clock step would make `ps` print.
+  const removed = await sweep(facts({ alive: (pid) => pid === live.pid }));
+  expect(removed).toEqual([]);
+  for (const path of paths) expect(existsSync(path), path).toBe(true);
+});
+
+it('keeps a live owner whose system clock moved between the mark and the sweep', async () => {
+  const live = { pid: 4_000_007, startedAt: now - 3 * HOUR };
+  const path = await folder('tenjin-worker-settings-Clock1', { ageMs: 0, owner: live });
+  // The clock jumped forward ten days: the beat looks ancient, the owner still holds its pid
+  // and started before that beat.
+  expect(
+    await sweepJobFolders({
+      directories: [scratch],
+      now: now + 10 * 24 * HOUR,
+      facts: facts({ alive: () => true }),
+      changedAt: (stat) => stat.mtimeMs,
+    }),
+  ).toEqual([]);
+  // The clock jumped back: the beat lies in the future.
+  expect(
+    await sweepJobFolders({
+      directories: [scratch],
+      now: now - 10 * 24 * HOUR,
+      facts: facts({ alive: () => false }),
+      changedAt: (stat) => stat.mtimeMs,
+    }),
+  ).toEqual([]);
+  expect(existsSync(path)).toBe(true);
+});
+
+it('never takes a folder of its own process, however its owner reads', async () => {
+  const own = await folder('tenjin-worker-settings-Own001', {
+    ageMs: 3 * HOUR,
+    owner: { pid: process.pid, startedAt: 1 },
+  });
+  expect(await sweep(facts({ alive: () => false }))).toEqual([]);
+  expect(existsSync(own)).toBe(true);
+});
+
+it('keeps a folder whose pid is held, even by a process that looks newer than the owner', async () => {
+  const held = await folder('tenjin-worker-settings-Reuse1', {
+    ageMs: 5 * HOUR,
+    owner: { pid: 4_000_003, startedAt: now - 10 * HOUR },
+  });
+  expect(await sweep(facts({ alive: () => true }))).toEqual([]);
+  expect(existsSync(held)).toBe(true);
+});
+
+it.skipIf(process.platform === 'win32')(
+  'never follows a marker that is a link, and reads no marker over 1 KB',
+  async () => {
+    const target = join(scratch, 'target.txt');
+    await writeFile(target, 'x');
+    const old = new Date(now - 5 * HOUR);
+    await utimes(target, old, old);
+    const linked = await folder('tenjin-worker-settings-Link01', { ageMs: 5 * HOUR });
+    await symlink(target, join(linked, JOB_FOLDER_MARKER));
+    const big = await folder('tenjin-worker-settings-Big001', { ageMs: 5 * HOUR });
+    await writeFile(
+      join(big, JOB_FOLDER_MARKER),
+      JSON.stringify({ pid: 4_000_009, startedAt: 1, pad: 'x'.repeat(2000) }),
+    );
+    // Neither reads as a marker: both fall to the no-marker rule (old, named by no process).
+    await sweep(facts({ alive: () => true }));
+    expect(statSync(target).mtimeMs).toBeLessThan(now - HOUR);
+  },
+);
+
+it('touches the marker while the owner runs, and stops once the folder is removed', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    const path = join(scratch, 'tenjin-worker-settings-Beat01');
+    await mkdir(path);
+    markJobFolder(path);
+    const marker = join(path, JOB_FOLDER_MARKER);
+    const old = new Date(now - 5 * HOUR);
+    await utimes(marker, old, old);
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(statSync(marker).mtimeMs).toBeGreaterThan(now - HOUR);
+    await removeJobFolder(path);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('treats a folder with no marker as stale only when unchanged for hours and named by no process', async () => {
+  // The folders an older build left carry no marker.
+  const old = JOB_FOLDER_STALE_MS + HOUR;
+  const left = await folder('tenjin-worker-settings-Old001', { ageMs: old });
+  const named = await folder('tenjin-worker-settings-Old002', { ageMs: old });
+  const young = await folder('tenjin-worker-settings-Old003', { ageMs: 20 * 60_000 });
+  const removed = await sweep(
+    facts({ commandLines: async () => `claude --settings ${join(named, 'settings.json')}\n` }),
+  );
+  expect(removed).toEqual([left]);
+  expect(existsSync(named)).toBe(true);
+  expect(existsSync(young)).toBe(true);
+});
+
+it('keeps a folder with no marker where the process list cannot be read', async () => {
+  const unlisted = await folder('tenjin-worker-settings-Old004', {
+    ageMs: JOB_FOLDER_STALE_MS + HOUR,
+  });
+  expect(await sweep(facts({ commandLines: async () => undefined }))).toEqual([]);
+  expect(existsSync(unlisted)).toBe(true);
+});
+
+it('touches only folders of the names a job makes, and never follows a link', async () => {
+  const owner = { pid: 4_000_006, startedAt: now - 3 * HOUR };
+  const other = await folder('tenjin-worker-views-xyz', { ageMs: 3 * HOUR, owner });
+  const similar = await folder('tenjin-worker-AbCdEfG', { ageMs: 3 * HOUR, owner });
+  const target = await folder('keep-me', { ageMs: 3 * HOUR });
+  const { symlink } = await import('node:fs/promises');
+  await symlink(target, join(scratch, 'tenjin-job-Link01'));
+  expect(await sweep(facts())).toEqual([]);
+  for (const path of [other, similar, target]) expect(existsSync(path), path).toBe(true);
+});
+
+it('never throws, also where the folder list cannot be read', async () => {
+  await expect(
+    sweepJobFolders({ directories: [join(scratch, 'missing')], facts: facts() }),
+  ).resolves.toEqual([]);
+});
+
+it('removes a folder, and says it could not rather than throwing', async () => {
+  const path = await folder('tenjin-worker-settings-Rm0001', { ageMs: 0 });
+  expect(await removeJobFolder(path)).toBe(true);
+  expect(existsSync(path)).toBe(false);
+  expect(await removeJobFolder(path)).toBe(true);
+});

@@ -17,14 +17,17 @@ import type { RuntimeSetup, setupRuntime } from '../lib/runtime';
 import type { LauncherResult } from '../lib/runtime-launchers';
 import { hasRuntime, runtimeBuild, type RuntimePointer } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
-import {
-  loadRawConfig,
-  MAX_AUTO_SPEND_FLOOR_ATOMIC,
-  MAX_AUTO_SPEND_FLOOR_WHY,
-} from '../lib/config';
+import { loadRawConfig } from '../lib/config';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { readAliveStamp } from './alive';
+import {
+  captureNewInstall,
+  reserveNewInstall,
+  finishNewInstall,
+  type InstallSubagentChoice,
+  type NewInstallSession,
+} from './new-install';
 import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
@@ -190,11 +193,12 @@ export interface RouterInstallArgs {
    * for an agent running the person's answer.
    */
   yes?: boolean;
+  subagents?: InstallSubagentChoice;
   /** Create no wallet, for CI and scripted machines. */
   noWallet?: boolean;
   /**
    * `--session-budget` and `--max-auto-spend`: the person's own limits, in USD
-   * as typed (`none` for no daily limit; the per-call limit is at least $0.25).
+   * as typed (`none` for no daily limit; zero blocks positive automatic payments).
    * Either one answers the question; the other then takes the default. A named
    * limit replaces what the config file holds.
    */
@@ -203,6 +207,8 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps, FundingDeps {
+  /** Shared by both host installers; the core action finalizes it after every host succeeds. */
+  newInstall?: NewInstallSession;
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -221,6 +227,7 @@ export interface RouterInstallDeps extends WalletDeps, FundingDeps {
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
+  promptSubagents?: () => Promise<InstallSubagentChoice | null>;
   /** The spend-limit selector; defaults to the clack list. */
   promptLimits?: (message: string) => Promise<LimitsChoice | null>;
   /** One amount question; defaults to the clack text input. */
@@ -365,6 +372,7 @@ export async function runRouterInstall(
   ctx: CommandContext,
   deps: RouterInstallDeps = {},
 ): Promise<CommandResult> {
+  const newInstall = deps.newInstall ?? (await captureNewInstall(ctx.dataDir));
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
@@ -419,7 +427,7 @@ export async function runRouterInstall(
   }
   // The install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
-  // terminal. Install then writes no spend limit, the defaults ($0.25 a call,
+  // terminal. Install then writes no spend limit, the defaults ($1 a call,
   // $5 a day) hold as they do for any key the file leaves out, and its output hands
   // the question to whoever ran it (see {@link spendApproval}).
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
@@ -440,6 +448,12 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
+  if (args.refresh !== true)
+    await reserveNewInstall(
+      newInstall,
+      !legacy.present &&
+        (!newInstall.absent || !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))),
+    );
   // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
   // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
   // any version and would silence the settings install in every session,
@@ -636,7 +650,9 @@ export async function runRouterInstall(
     runtime: runtimeData(rt),
     launcher: rt?.launcher ?? null,
   };
-  return {
+  newInstall.completed.push(plugin.state !== 'failed' && plugin.state !== 'deferred');
+  newInstall.continueWith ??= installCommand(args, command);
+  const result: CommandResult = {
     data,
     humanLines: [
       ...lines(ctx, {
@@ -658,6 +674,14 @@ export async function runRouterInstall(
     ],
     humanTail: receiptTail(ctx, effective.policy, data.next),
   };
+  return deps.newInstall
+    ? result
+    : finishNewInstall(result, newInstall, ctx, {
+        ...(args.subagents !== undefined ? { choice: args.subagents } : {}),
+        yes: args.yes === true,
+        isInteractive: canPrompt,
+        ...(deps.promptSubagents ? { promptSubagents: deps.promptSubagents } : {}),
+      });
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
@@ -1169,7 +1193,7 @@ export function namedLimits(
         fix:
           per === 'day'
             ? `Give a positive USD amount or none, for example \`${flag} 5\`.`
-            : `Give 0.25 USD or more, for example \`${flag} 0.5\`. ${MAX_AUTO_SPEND_FLOOR_WHY}`,
+            : `Give a non-negative USD amount with up to 6 decimal places, for example \`${flag} 0.1\`. Zero blocks positive automatic payments.`,
       });
     }
     limits[key] = parsed.value;
@@ -1180,7 +1204,7 @@ export function namedLimits(
 
 /** A pending install step, handled according to its next instructions. */
 export interface QuestionStep {
-  id: 'spend' | 'fund';
+  id: 'spend' | 'subagents' | 'fund';
   /** Prompt text for the terminal choice or agent explanation; follow `next`. */
   question: string;
   options: {
@@ -1219,14 +1243,14 @@ export async function approveLimits(
   );
   const maxAutoSpend = await askLimit(
     ask,
-    'Most it may pay for one call, in USD, at least 0.25',
-    '0.25',
+    'Most it may pay for one call, in USD; 0 blocks positive automatic payments',
+    toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd,
     'call',
   );
   return { maxAutoSpend, sessionBudget };
 }
 
-/** Asks until the answer is a positive amount (or `none` for the daily limit). */
+/** Asks until the answer is a valid amount (or `none` for the daily limit). */
 async function askLimit(
   ask: NonNullable<RouterInstallDeps['promptAmount']>,
   question: string,
@@ -1243,9 +1267,7 @@ async function askLimit(
   }
 }
 
-/** A daily limit is positive or `none`; zero is refused, because
- *  `router.enabled false` is how to turn the router off. A per-call limit is
- *  at least the $1 floor. */
+/** A daily limit is positive or `none`; the per-call limit is non-negative. */
 function parseLimit(answer: string, per: 'call' | 'day'): { value: string } | { refusal: string } {
   const trimmed = answer.trim();
   if (per === 'day' && trimmed === 'none') return { value: 'none' };
@@ -1256,10 +1278,7 @@ function parseLimit(answer: string, per: 'call' | 'day'): { value: string } | { 
     if (err instanceof CliError) return { refusal: `${err.message}.` };
     throw err;
   }
-  if (per === 'call' && BigInt(atomic) < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
-    return { refusal: 'The per-call limit is at least $0.25.' };
-  }
-  if (atomic === '0') {
+  if (per === 'day' && atomic === '0') {
     return {
       refusal:
         'The limit must be more than zero; `tenjin config set router.enabled false` turns the router off.',

@@ -3421,3 +3421,19 @@ describe('a direct pay the seller refused', () => {
     expect(await readPaidRecords(dir)).toEqual([]);
   });
 });
+
+it('refuses inherited-worker Tenjin CLI payments before any fetch, wallet access or spend authorization', async () => {
+  vi.stubEnv('TENJIN_MODEL_WORKER', '1');
+  const provider = testWalletProvider();
+  const getSigner = vi.spyOn(provider, 'getSigner');
+  const fetchImpl = vi.fn<typeof fetch>();
+  try {
+    await expect(
+      runPay({ url: TENJIN_URL, yes: true }, makeCtx(), { provider, fetchImpl }),
+    ).rejects.toMatchObject({ code: 'REFUSED' });
+    expect(getSigner).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

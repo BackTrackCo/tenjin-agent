@@ -94,6 +94,7 @@ export class FakeRouter {
 
   constructor(
     private readonly opts: {
+      path?: string;
       paid?: boolean;
       amount?: string;
       charge?: string;
@@ -157,7 +158,7 @@ export class FakeRouter {
     // field, after verify and before settle, so nothing is charged.
     const refusesWarm = warm && this.opts.warm === false;
     // The fee off (development): the paid route answers with no 402.
-    if (url.pathname !== ROUTE_PAID_PATH || this.opts.paid === false) {
+    if (url.pathname !== (this.opts.path ?? ROUTE_PAID_PATH) || this.opts.paid === false) {
       if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
       return json(warm ? WARM : this.body, 200);
     }

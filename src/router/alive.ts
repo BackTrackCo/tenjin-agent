@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_MAX_AUTO_SPEND, loadRawConfig, type PartialConfig } from '../lib/config';
 import { walletPath } from '../lib/paths';
@@ -7,6 +7,7 @@ import { DEFAULT_RPC_URL, readUsdcBalanceWithFallback } from '../lib/usdc-balanc
 import { readWalletFacts } from '../lib/wallet-facts';
 import { noticeFor } from './notice-markers';
 import { routerSettings } from './settings';
+import { PRIVATE, writePrivate } from './store-files';
 import { sessionStartMessage } from './wallet-reasons';
 
 /**
@@ -44,6 +45,17 @@ const MAX_SESSION_ID = 200;
 
 export function aliveDir(dataDir: string): string {
   return join(dataDir, 'alive');
+}
+
+/**
+ * The alive folder, the user's alone whatever the umask: made 0700, and one an older
+ * build left wider is narrowed. Each file in it is written through {@link writePrivate}.
+ */
+async function privateAliveDir(dataDir: string): Promise<string> {
+  const dir = aliveDir(dataDir);
+  await mkdir(dir, { recursive: true, mode: PRIVATE.dirMode });
+  if (process.platform !== 'win32') await chmod(dir, PRIVATE.dirMode);
+  return dir;
 }
 
 function markerName(sessionId: string): string {
@@ -89,12 +101,12 @@ export async function runAliveHook(
   const now = opts.now ?? Date.now();
   const dir = aliveDir(opts.dataDir);
   try {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await privateAliveDir(opts.dataDir);
     if (sessionId !== null) {
-      await writeFile(join(dir, markerName(sessionId)), `${new Date(now).toISOString()}\n`);
+      await writePrivate(join(dir, markerName(sessionId)), `${new Date(now).toISOString()}\n`);
     }
     const stamp: AliveStamp = { at: new Date(now).toISOString(), version: opts.version };
-    await writeFile(join(dir, STAMP), `${JSON.stringify(stamp)}\n`);
+    await writePrivate(join(dir, STAMP), `${JSON.stringify(stamp)}\n`);
     await pruneMarkers(dir, now);
   } catch {
     // A marker that could not be written costs only a duplicate offer.
@@ -240,7 +252,7 @@ export async function walletNotice(
   // come back at every session start.
   try {
     await mkdir(aliveDir(dataDir), { recursive: true, mode: 0o700 });
-    await writeFile(noticePath, JSON.stringify({ at: now }), { mode: 0o600 });
+    await writePrivate(noticePath, JSON.stringify({ at: now }));
   } catch {
     return null;
   }
@@ -380,8 +392,8 @@ export async function markSessionServed(dataDir: string, event: unknown): Promis
   const path = join(aliveDir(dataDir), markerName(sessionId));
   if ((await stat(path).catch(() => null)) !== null) return;
   try {
-    await mkdir(aliveDir(dataDir), { recursive: true, mode: 0o700 });
-    await writeFile(path, `${new Date().toISOString()}\n`);
+    await privateAliveDir(dataDir);
+    await writePrivate(path, `${new Date().toISOString()}\n`);
   } catch {
     // Costs only a duplicate offer.
   }

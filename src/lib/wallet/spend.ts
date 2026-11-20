@@ -318,4 +318,73 @@ export async function releaseUnchargedExposure(
   }
 }
 
+/**
+ * GIVE BACK WHAT A CONFIRMED REFUND RETURNED. A worker run's own channel was closed and
+ * the chain shows its unused deposit back in the wallet. The run's deposits were counted
+ * in full as they were sent, under `run.prefix`; what came back comes off the committed
+ * totals, so the budget counts what the run cost. Never more than those deposits still
+ * count in this window: a refund cannot offset other spend or lift the budget above its
+ * size. The run's entries are replaced by one for what it kept (`run.kept`), so a second
+ * call for the same run, in this process or after a restart, finds nothing and changes
+ * nothing, and so does one after the window rolled. Returns the amount given back, or
+ * null when the ledger could not be updated, so the caller keeps the refund pending.
+ */
+export async function creditRefundedExposure(
+  dir: string,
+  run: { prefix: string; kept: string },
+  refundedAtomic: bigint,
+  opts: { now?: () => number; windowMs?: number } = {},
+): Promise<bigint | null> {
+  const path = spendLedgerPath(dir);
+  const nowMs = (opts.now ?? Date.now)();
+  try {
+    return await withFileLock(`${path}.lock`, async () => {
+      const { ledger } = await readLedger(path);
+      if (ledger === null || nowMs - ledger.windowStartMs >= (opts.windowMs ?? DEFAULT_WINDOW_MS)) {
+        return 0n;
+      }
+      const exposures = ledger.exposures ?? [];
+      // A run's deposits are automatic. Anything else under its prefix is not its deposit.
+      const own = exposures.filter((e) => e.nonce.startsWith(run.prefix) && e.mode !== 'manual');
+      if (own.length === 0) return 0n;
+      const counted = own.reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
+      const amount = refundedAtomic < counted ? refundedAtomic : counted;
+      const less = (value: string | undefined, fallback: string): string => {
+        const current = BigInt(value ?? fallback);
+        return (current > amount ? current - amount : 0n).toString();
+      };
+      await writeFileAtomic(
+        path,
+        `${JSON.stringify(
+          {
+            ...ledger,
+            committedAtomic: less(ledger.committedAtomic, '0'),
+            automaticCommittedAtomic: less(ledger.automaticCommittedAtomic, ledger.committedAtomic),
+            settledAtomic: less(ledger.settledAtomic, ledger.committedAtomic),
+            exposures: [
+              ...exposures.filter((e) => !own.includes(e)),
+              ...(counted > amount
+                ? [
+                    {
+                      nonce: run.kept,
+                      amountAtomic: (counted - amount).toString(),
+                      atMs: nowMs,
+                      mode: 'automatic' as const,
+                    },
+                  ]
+                : []),
+            ],
+          },
+          null,
+          2,
+        )}\n`,
+        { mode: 0o600, dirMode: 0o700 },
+      );
+      return amount;
+    });
+  } catch {
+    return null;
+  }
+}
+
 export { readSpendSummary, type SpendSummary } from '../spend-ledger';

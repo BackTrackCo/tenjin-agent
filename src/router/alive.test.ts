@@ -219,3 +219,34 @@ describe('aliveMain', () => {
     expect(write).not.toHaveBeenCalled();
   });
 });
+
+// Failure caught on CI (umask 022): the marker a DeepSeek worker writes for its session
+// left 0644, beside data the user's alone, where a local umask of 077 hid it.
+describe.skipIf(process.platform === 'win32')("alive's files are the user's alone", () => {
+  it('writes the marker, the stamp and the folder private whatever the umask, and narrows an older folder', async () => {
+    const { chmod, mkdir, stat } = await import('node:fs/promises');
+    const { markSessionServed, aliveDir } = await import('./alive');
+    const mode = async (path: string) => (await stat(path)).mode & 0o777;
+    let previous: number | undefined;
+    try {
+      previous = process.umask(0o022);
+    } catch {
+      // A worker thread cannot set the umask; the modes are still checked.
+    }
+    try {
+      await mkdir(aliveDir(dir), { mode: 0o755 });
+      await chmod(aliveDir(dir), 0o755);
+      await markSessionServed(dir, { session_id: 'worker-session' });
+      // At the real time: markers older than a week are pruned.
+      await runAliveHook({ session_id: 'sess-1' }, { dataDir: dir, version: '1.0.0', env: {} });
+      const files = (await (await import('node:fs/promises')).readdir(aliveDir(dir))).map((name) =>
+        join(aliveDir(dir), name),
+      );
+      expect(files.length).toBeGreaterThanOrEqual(3);
+      for (const file of files) expect(await mode(file)).toBe(0o600);
+      expect(await mode(aliveDir(dir))).toBe(0o700);
+    } finally {
+      if (previous !== undefined) process.umask(previous);
+    }
+  });
+});
