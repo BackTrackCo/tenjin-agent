@@ -15,7 +15,6 @@ import {
   type EarlyWorkerAccept,
 } from './model-worker';
 import type { ModelTransport } from './model-transport';
-import type { ModelInferenceSlot } from './model-channel';
 import { hasModelRefundRecords, readModelRefundResult } from './model-refund';
 import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
@@ -54,8 +53,6 @@ type ActiveConversation = {
   owner: ModelConversationOwner;
   continuationId: string;
 };
-
-type InferenceLease = { slot: ModelInferenceSlot; release: () => void };
 
 type WarmWorker = {
   sdkSessionId: string;
@@ -611,21 +608,6 @@ export function registerModelTool(
   const registerSubagent = (
     inWorker ? () => undefined : server.registerTool.bind(server)
   ) as typeof server.registerTool;
-  // THE TWO INFERENCE CHANNELS, for every worker of this process: a batch's workers and
-  // background workers that outlive their accept call run side by side, so each takes
-  // the channel fewer workers hold. Allocated only when a freshly accepted job is ready
-  // to run: a refused offer or a stored handback never funds another channel.
-  const occupied: [number, number] = [0, 0];
-  const leaseInferenceSlot = (): InferenceLease => {
-    const slot = occupied[0] <= occupied[1] ? 0 : 1;
-    occupied[slot]++;
-    return {
-      slot,
-      release: () => {
-        occupied[slot]--;
-      },
-    };
-  };
   const withBatchAccepts =
     (
       run: (
@@ -991,9 +973,6 @@ export function registerModelTool(
                 }
               }
               startMarks.checked = Date.now();
-              // The run's refund-support question waits for none of the checks below.
-              const refundSupport =
-                options.harness === 'claude' ? transport.askRefundSupport(signal) : undefined;
               const qualified = await qualifiedModelWorker(
                 session.cwd,
                 String(
@@ -1215,18 +1194,13 @@ export function registerModelTool(
                   jobId: job.id,
                 });
               const done = (async () => {
-                let inference: InferenceLease | undefined;
                 const omitted = new Set<string>();
                 try {
                   signal.throwIfAborted();
-                  // One worker alone keeps the first channel, as before.
-                  inference = options.harness === 'claude' ? leaseInferenceSlot() : undefined;
                   const runOptions: Parameters<typeof runModelWorker>[1] = {
                     dataDir: options.dataDir,
                     accepted: { at: acceptedAt, marks: startMarks },
-                    transport: inference?.slot
-                      ? transport.forInferenceSlot(inference.slot)
-                      : transport,
+                    transport,
                     signal: abort.signal,
                     omitted,
                     ...(activeConversation ? { inbox } : {}),
@@ -1281,6 +1255,7 @@ export function registerModelTool(
                     return runModelWorker(executionJob, workerOptions);
                   };
                   // A continuation can spend from an earlier job but must close its own channel.
+                  // Codex workers keep the temporary shared channel until they are removed.
                   const result =
                     options.harness === 'claude'
                       ? await runOptions.transport.withInferenceRun(
@@ -1288,9 +1263,8 @@ export function registerModelTool(
                           abort.signal,
                           run,
                           (name) => {
-                            (name === 'refundProbed' ? startMarks : endMarks)[name] = Date.now();
+                            endMarks[name] = Date.now();
                           },
-                          refundSupport,
                         )
                       : await run(runOptions.transport);
                   const envelope = {
@@ -1401,7 +1375,7 @@ export function registerModelTool(
                     // though it runs with the original job's fields.
                     nextStep:
                       notStarted && !resumed && job.nativeTool
-                        ? `No worker started: ${stop?.reason === 'router_unreachable' ? 'the Tenjin router did not answer when the job started' : 'Claude Code did not start within its start-up window'}. Keep it native: send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
+                        ? `No worker started: Claude Code did not start within its start-up window. Keep it native: send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
                         : activeConversation
                           ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                           : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
@@ -1416,7 +1390,6 @@ export function registerModelTool(
                   if (activeConversation && inboxes.get(activeConversation.handle)?.inbox === inbox)
                     inboxes.delete(activeConversation.handle);
                   inbox.close();
-                  inference?.release();
                   // Not awaited: removing a display file never delays the handback.
                   void progress?.stop().catch(() => undefined);
                   await warm?.stop();

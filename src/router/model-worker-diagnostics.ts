@@ -24,24 +24,20 @@ const whole = (value: unknown, max = MAX_MS): number | undefined =>
  * read (`budgetMs`), the wait for room in the wallet's call rate (`paceWaitMs`: before the
  * quote for a router that advertises its rate, before the signed request for one that does
  * not), the unpaid quote round trip (`quoteMs`; `requoteMs` when a call that waited long
- * for its channel asked for the quote again under the lock), the reservation (`reserveMs`),
- * the wait for a channel's payment lock (`laneWaitMs`; `slot` is the shared lane the call
- * paid on, `laneMoved` says it was the other lane than its worker's own, and `waitedOn`
- * says who held its own channel when every channel it could pay on was held: this process
- * or another one), the checks under it (`gateMs`), the payer from its start to the paid request leaving (`signMs`:
- * policy, signer, signing, a deposit; `journalMs` of it is the refund journal's write), the
- * paid request to its response headers (`answerMs`), the headers to the payer's return
- * (`bodyMs`: the body read and the payment SDK's accounting), the payer's drain (`drainMs`)
- * and the local settlement (`settleMs`). `fetches` counts the other HTTP requests the payer
- * made, `outputCap` is the `max_tokens` the call asked for. The router answers a call whole, so no first token is seen here: `answerMs` is the
- * model's whole answer unless the router sends its headers early.
+ * for the run's channel asked for the quote again under the lock), the reservation
+ * (`reserveMs`), the checks under the channel's lock (`gateMs`), the payer from its start
+ * to the paid request leaving (`signMs`: policy, signer, signing, a deposit; `journalMs`
+ * of it is the refund journal's write), the paid request to its response headers
+ * (`answerMs`), the headers to the payer's return (`bodyMs`: the body read and the payment
+ * SDK's accounting), the payer's drain (`drainMs`) and the local settlement (`settleMs`).
+ * `fetches` counts the other HTTP requests the payer made, `outputCap` is the `max_tokens`
+ * the call asked for. A streamed reply also records the paid request to its first provider
+ * event (`ttfbMs`); `answerMs` is then the time to the last event.
  */
 export type ModelCallTiming = {
-  slot: number;
   budgetMs?: number;
   quoteMs?: number;
   reserveMs?: number;
-  laneWaitMs?: number;
   gateMs?: number;
   signMs?: number;
   journalMs?: number;
@@ -61,16 +57,11 @@ export type ModelCallTiming = {
   paceWaitMs?: number;
   /** The quote asked again under the channel's lock, because the first had grown old. */
   requoteMs?: number;
-  /** The call paid on the other shared lane, because another call held its worker's own. */
-  laneMoved?: true;
-  /** Every channel the call could pay on was held when it came: who held its own. */
-  waitedOn?: 'this_process' | 'other_process' | 'unknown';
 };
 const CALL_TIMES = [
   'budgetMs',
   'quoteMs',
   'reserveMs',
-  'laneWaitMs',
   'gateMs',
   'signMs',
   'journalMs',
@@ -233,7 +224,7 @@ export type WorkerDiagnostics = {
    * which the viewer's first row draws from). A worker's preparation: `workerStart`,
    * `workspaceRead` (settings and private paths), `sdkInitialized` (the SDK's initialize
    * answer), `released` (the checks after the accept). The run's
-   * ends: `refundProbed` (the router's refund-support answer), `lastAnswer` (the last
+   * ends: `lastAnswer` (the last
    * model answer sent to the worker), `resultMessage` (the SDK's result), `childClosed`
    * (its process gone), `workerReturned`, `refundClosed` (the run's channel closed),
    * `handbackStored` and `answered` (the accept call's answer handed to the host). With
@@ -416,14 +407,6 @@ export class WorkerDiagnosticsRecord {
           if (value !== undefined) entry[name as keyof typeof counts] = value;
         const timing = outcome.timing;
         if (timing) {
-          entry.slot = whole(timing.slot, 16) ?? 0;
-          if (timing.laneMoved === true) entry.laneMoved = true;
-          if (
-            timing.waitedOn === 'this_process' ||
-            timing.waitedOn === 'other_process' ||
-            timing.waitedOn === 'unknown'
-          )
-            entry.waitedOn = timing.waitedOn;
           for (const name of [...CALL_TIMES, 'fetches', 'requestBytes', 'outputCap'] as const) {
             const value = whole(timing[name], Number.MAX_SAFE_INTEGER);
             if (value !== undefined) entry[name] = value;

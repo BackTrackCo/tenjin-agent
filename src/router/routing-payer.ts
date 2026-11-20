@@ -24,7 +24,6 @@ import {
   modelInferenceRunDir,
   modelInferenceRunScope,
   modelRunDepositKeys,
-  type ModelInferenceSlot,
   type ModelPaymentPath,
 } from './model-channel';
 import {
@@ -276,7 +275,6 @@ export interface RoutingPayerDeps {
     path: ModelPaymentPath;
     ceilingAtomic: bigint;
     origin: string;
-    inferenceSlot?: ModelInferenceSlot;
     inferenceRun?: string;
   };
   /** The wallet signer, unlocked without a prompt; it signs deposits and vouchers. */
@@ -1590,9 +1588,9 @@ export class RoutingPayer {
   }
 
   /**
-   * The stock client uses the wallet's channel for this lane and inference
-   * slot. A replaced wallet gets its own folder, and the old channel stays
-   * in the old one.
+   * The stock client uses the wallet's channel for this lane, or the run's
+   * own inference channel. A replaced wallet gets its own folder, and the old
+   * channel stays in the old one.
    */
   private channelFor(signer: ClientEvmSigner): Channel {
     const payer = signer.address.toLowerCase() as `0x${string}`;
@@ -1604,13 +1602,13 @@ export class RoutingPayer {
       lane && modelLane
         ? runId
           ? modelInferenceRunScope(lane.origin, runId).salt
-          : modelChannelScope(lane.origin, modelLane, lane.inferenceSlot).salt
+          : modelChannelScope(lane.origin, modelLane).salt
         : undefined;
     const dir =
       lane && modelLane
         ? runId
           ? modelInferenceRunDir(this.deps.dataDir, payer, lane.origin, runId)
-          : modelChannelDir(this.deps.dataDir, payer, modelLane, lane.origin, lane.inferenceSlot)
+          : modelChannelDir(this.deps.dataDir, payer, modelLane, lane.origin)
         : payerDir(this.deps.dataDir, payer);
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),

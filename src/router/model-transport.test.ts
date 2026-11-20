@@ -3,19 +3,19 @@ import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from '@x402/core/http';
+import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as locks from '../lib/lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
-import { modelChannelScope, modelInferenceRunScope } from './model-channel';
+import { modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
 import { modelPeakQuoteAtomic } from './model-limits';
 import { workerSearchMessages } from './model-messages';
-import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
+import { ModelCallFailed, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
 
 const made: string[] = [];
@@ -41,10 +41,10 @@ function signedRequest(input: Parameters<typeof fetch>[0], init?: RequestInit): 
 
 function watchPaymentLock() {
   const waiting = deferred();
-  const withFileLock = locks.withFirstFileLock;
-  const spy = vi.spyOn(locks, 'withFirstFileLock').mockImplementation((paths, run, opts) => {
-    if (paths[0]!.endsWith('.payment.lock')) waiting.resolve();
-    return withFileLock(paths, run, opts);
+  const withFileLock = locks.withFileLock;
+  const spy = vi.spyOn(locks, 'withFileLock').mockImplementation((path, run, opts) => {
+    if (path.endsWith('.payment.lock')) waiting.resolve();
+    return withFileLock(path, run, opts);
   });
   return { waiting: waiting.promise, restore: () => spy.mockRestore() };
 }
@@ -59,7 +59,6 @@ async function fixture(
     charge?: string;
     minDeposit?: string;
     maxAutoSpendAtomic?: bigint;
-    refundCapability?: 'enabled' | 'legacy';
     onPaidSend?: () => Promise<void>;
   } = {},
 ) {
@@ -138,20 +137,6 @@ async function fixture(
   const fetchImpl: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     if (request.method === 'GET') {
-      if (options.refundCapability && !new URL(request.url).search) {
-        if (options.refundCapability === 'legacy') return new Response(null, { status: 405 });
-        return new Response(null, {
-          status: 402,
-          headers: {
-            'tenjin-inference-refunds': 'worker-v1',
-            'payment-required': encodePaymentRequiredHeader({
-              x402Version: 2,
-              resource: { url: request.url },
-              accepts: [{ ...router.requirement, amount: '0' }],
-            }),
-          },
-        });
-      }
       gets++;
       if (request.headers.has(SIWX_HEADER)) signedGets++;
       if (recoveryStatus !== 200) return new Response(null, { status: recoveryStatus });
@@ -212,6 +197,8 @@ async function fixture(
       dataDir: dir,
       baseUrl: BASE,
       payerDeps: deps,
+      // The fixture's own run channel: every model call runs inside one in production.
+      inferenceRun: 'test-run',
     });
   return {
     dir,
@@ -249,7 +236,6 @@ it('journals each accepted run before signing requests reach the router and clos
   const f = await fixture({
     quote: '60000',
     maxAutoSpendAtomic: 500000n,
-    refundCapability: 'enabled',
     onPaidSend: async () => {
       expect(await readModelRefundResult(f.dir, BASE, activeRun)).toEqual({ state: 'pending' });
       expect((await lstat(modelRefundRunLock(f.dir, BASE, activeRun))).isDirectory()).toBe(true);
@@ -290,7 +276,7 @@ it('journals each accepted run before signing requests reach the router and clos
 });
 
 it('attempts a refund with its own signal when an accepted worker is cancelled', async () => {
-  const f = await fixture({ refundCapability: 'enabled' });
+  const f = await fixture();
   const controller = new AbortController();
   const close = vi
     .spyOn(ModelRefundJournal.prototype, 'close')
@@ -312,125 +298,6 @@ it('attempts a refund with its own signal when an accepted worker is cancelled',
   }
 });
 
-it('continues to use shared inference credit on a legacy router', async () => {
-  const f = await fixture({ refundCapability: 'legacy' });
-  const transport = f.make();
-  await expect(
-    transport.withInferenceRun('legacy', new AbortController().signal, async (shared) => shared),
-  ).resolves.toBe(transport);
-});
-
-it('takes a refund-support answer asked ahead of the run, asks no second time, and does not wait for it past a cancel', async () => {
-  // Operator item of 2026-11-18: the question was asked only when the run began, after
-  // the accept's own checks; asked while they run, the run waits for the one answer.
-  const f = await fixture({ refundCapability: 'legacy' });
-  const real = f.deps.fetchImpl!;
-  let asked = 0;
-  let answer!: () => void;
-  const held = new Promise<void>((resolve) => {
-    answer = resolve;
-  });
-  f.deps.fetchImpl = async (input, init) => {
-    if (new Request(input, init).method === 'GET') {
-      asked++;
-      await held;
-    }
-    return real(input, init);
-  };
-  const transport = f.make();
-  const ahead = transport.askRefundSupport(new AbortController().signal);
-  // A run cancelled while the answer is out ends at the cancel.
-  const cancelled = new AbortController();
-  const stopped = transport.withInferenceRun(
-    'cancelled-ahead',
-    cancelled.signal,
-    async (shared) => shared,
-    undefined,
-    ahead,
-  );
-  cancelled.abort(new Error('cancelled'));
-  await expect(stopped).rejects.toThrow('cancelled');
-  const marks: string[] = [];
-  const run = transport.withInferenceRun(
-    'asked-ahead',
-    new AbortController().signal,
-    async (shared) => shared,
-    (name) => marks.push(name),
-    ahead,
-  );
-  answer();
-  await expect(run).resolves.toBe(transport);
-  expect(asked).toBe(1);
-  expect(marks).toEqual(['refundProbed', 'workerReturned']);
-});
-
-// Live case (job 77f41059, 2026-11-18): of two workers accepted together, one got no answer
-// to this question inside 3 s. Its job ended `unknown` after 3.0 s with no cause and no record.
-it('asks again when the refund-support question gets no answer, then runs the worker', async () => {
-  const f = await fixture({ refundCapability: 'legacy' });
-  const real = f.deps.fetchImpl!;
-  let asked = 0;
-  f.deps.fetchImpl = async (input, init) => {
-    if (new Request(input, init).method === 'GET' && ++asked === 1)
-      throw new DOMException('The operation timed out.', 'TimeoutError');
-    return real(input, init);
-  };
-  vi.useFakeTimers();
-  const transport = f.make();
-  const run = transport.withInferenceRun(
-    'slow-answer',
-    new AbortController().signal,
-    async (shared) => shared,
-  );
-  await vi.advanceTimersByTimeAsync(1_000);
-  await expect(run).resolves.toBe(transport);
-  expect(asked).toBe(2);
-});
-
-// The probe signs nothing, so an answer that is neither a refund challenge nor a retryable
-// status means no refunds. It used to end the job `unknown` after the routing fee was paid.
-it.each([200, 400, 401, 403])(
-  'runs the worker on the shared channels when the refund-support question is answered %i',
-  async (status) => {
-    const f = await fixture();
-    let asked = 0;
-    f.deps.fetchImpl = async () => {
-      asked++;
-      return new Response('{}', { status });
-    };
-    const transport = f.make();
-    await expect(
-      transport.withInferenceRun('odd-answer', new AbortController().signal, async (run) => run),
-    ).resolves.toBe(transport);
-    expect(asked).toBe(1);
-  },
-);
-
-it('ends a run as not started, with the router as the cause, when that question is never answered', async () => {
-  const f = await fixture();
-  let asked = 0;
-  f.deps.fetchImpl = async () => {
-    asked++;
-    return new Response('busy', { status: 503 });
-  };
-  const worker = vi.fn(async () => 'ran');
-  vi.useFakeTimers();
-  const run = f
-    .make()
-    .withInferenceRun('no-router', new AbortController().signal, worker)
-    .catch((error: unknown) => error);
-  await vi.advanceTimersByTimeAsync(5_000);
-  const stopped = await run;
-  expect(stopped).toBeInstanceOf(ModelWorkerStopped);
-  expect((stopped as ModelWorkerStopped).stop).toEqual({
-    kind: 'not_started',
-    reason: 'router_unreachable',
-    status: 503,
-  });
-  expect(asked).toBe(3);
-  expect(worker).not.toHaveBeenCalled();
-});
-
 // A job is one call to the person. The consent's $1 ceiling used to stand in for the
 // per-call limit, so a $0.50 quote was funded under a $0.25 limit.
 it('refuses a Messages quote above the per-call limit, whatever ceiling the consent names', async () => {
@@ -445,7 +312,7 @@ it('refuses a Messages quote above the per-call limit, whatever ceiling the cons
 // Greptile on 3e3837c4: a quote reserved under the cap as it stood could wait for its
 // inference lane, and a per-call limit lowered meanwhile was held against that one quote
 // only, so the job's total passed the new cap.
-it("holds a job's reserved total against a cap lowered while a call waited for its lane, and releases that call unpaid", async () => {
+it("holds a job's reserved total against a cap lowered while a call waited for its channel, and releases that call unpaid", async () => {
   // The first deposit covers both quotes, so the second call needs no top-up: only the
   // job's cap can stop it.
   const f = await fixture({ quote: '300000', minDeposit: '900000' });
@@ -464,14 +331,14 @@ it("holds a job's reserved total against a cap lowered while a call waited for i
       JSON.stringify({ ...config, maxAutoSpend: (spent + 300000n - 1n).toString() }),
     );
   };
-  // Lowered when the call, its quote already reserved, takes its turn at the lane.
-  const withFirstFileLock = locks.withFirstFileLock;
-  const lane = vi.spyOn(locks, 'withFirstFileLock').mockImplementation(async (paths, run, opts) => {
-    if (paths[0]!.endsWith('.payment.lock')) {
+  // Lowered when the call, its quote already reserved, takes its turn at the channel.
+  const withFileLock = locks.withFileLock;
+  const lane = vi.spyOn(locks, 'withFileLock').mockImplementation(async (path, run, opts) => {
+    if (path.endsWith('.payment.lock')) {
       expect(BigInt(JSON.parse(await readFile(budget, 'utf8')).charged)).toBe(spent + 300000n);
       await lower();
     }
-    return withFirstFileLock(paths, run, opts);
+    return withFileLock(path, run, opts);
   });
   try {
     await expect(
@@ -592,7 +459,6 @@ it('tells where a model call spent its time, once, and nothing for a call replay
     'budgetMs',
     'quoteMs',
     'reserveMs',
-    'laneWaitMs',
     'gateMs',
     'signMs',
     'answerMs',
@@ -600,99 +466,21 @@ it('tells where a model call spent its time, once, and nothing for a call replay
     'drainMs',
     'settleMs',
   ];
-  expect(Object.keys(seen[0]!)).toEqual(expect.arrayContaining(['slot', 'requestBytes', ...steps]));
+  expect(Object.keys(seen[0]!)).toEqual(expect.arrayContaining(['requestBytes', ...steps]));
   for (const name of steps) expect(seen[0]![name]).toBeGreaterThanOrEqual(0);
-  expect(seen[0]!.slot).toBe(0);
   expect(f.router.paidRequests()).toBe(1);
-  // The kept result answers the same request again: no quote, no lane, no payment.
+  // The kept result answers the same request again: no quote, no payment.
   await f
     .make()
     .messages(f.job, request, new AbortController().signal, undefined, (timing) =>
       seen.push({ ...timing }),
     );
   expect(f.router.paidRequests()).toBe(1);
-  expect(Object.keys(seen[1]!).sort()).toEqual(['budgetMs', 'slot']);
-});
-
-it('settles overlapping inference on two reusable channels with a $0.50 funding budget', async ({
-  onTestFinished,
-}) => {
-  const f = await fixture({ quote: '120000' });
-  f.deps.policy = async () => ({ ...TEST_POLICY, sessionBudgetAtomic: 500000n });
-  const primary = f.make();
-  const secondary = primary.forInferenceSlot(1);
-  const stop = new AbortController();
-  const message = (content: string) => ({ messages: [{ role: 'user', content }] });
-  const anotherJob = () => ({
-    ...f.job,
-    id: randomUUID(),
-    decision: { ...f.job.decision, jobId: randomUUID() },
-  });
-  await primary.messages(f.job, message('Fund the original channel'), stop.signal);
-  const [originalChannel] = f.router.channels.keys();
-  expect(f.router.deposits).toBe(1);
-
-  const held = deferred();
-  const firstEntered = deferred();
-  const secondEntered = deferred();
-  let entered = 0;
-  f.router.hold = held.promise;
-  f.router.onDelayArmed = () => {
-    if (++entered === 1) firstEntered.resolve();
-    else secondEntered.resolve();
-  };
-  onTestFinished(() => {
-    held.resolve();
-    stop.abort();
-  });
-  const first = primary.messages(f.job, message('First worker'), stop.signal);
-  await Promise.race([firstEntered.promise, first]);
-  const secondJob = anotherJob();
-  const second = secondary.messages(secondJob, message('Second worker'), stop.signal);
-  const results = Promise.allSettled([first, second]);
-  try {
-    // The fake provider keeps both requests pending until the test releases it.
-    await Promise.race([secondEntered.promise, first, second]);
-    expect([...f.router.channels.values()].filter((channel) => channel.pending)).toHaveLength(2);
-    expect(f.router.settledFees).toBe(1);
-    expect(f.router.paidRequests()).toBe(3);
-  } finally {
-    held.resolve();
-  }
-  expect(await results).toEqual([
-    { status: 'fulfilled', value: f.message },
-    { status: 'fulfilled', value: f.message },
-  ]);
-  expect(await primary.summary(f.job)).toMatchObject({
-    actualAtomic: '5000',
-    reservedAtomic: '5000',
-    uncertain: [],
-  });
-  expect(await secondary.summary(secondJob)).toMatchObject({
-    actualAtomic: '4000',
-    reservedAtomic: '4000',
-    uncertain: [],
-  });
-  expect(f.router.deposits).toBe(2);
-  expect(f.router.settledFees).toBe(3);
-
-  await expect(
-    f.make().forInferenceSlot(1).messages(anotherJob(), message('Next batch'), stop.signal),
-  ).resolves.toEqual(f.message);
-  expect(f.router.channels.size).toBe(2);
-  expect(f.router.channels.get(originalChannel!)?.charged).toBe(2000n);
-  expect([...f.router.channels.values()].map((channel) => channel.balance)).toEqual([
-    250000n,
-    250000n,
-  ]);
-  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('500000');
-  expect(f.router.deposits).toBe(2);
-  expect(f.router.settledFees).toBe(4);
-  expect(f.router.paidRequests()).toBe(4);
+  expect(Object.keys(seen[1]!).sort()).toEqual(['budgetMs']);
 });
 
 it('refills a worker channel in $0.25 deposits as inference consumes its credit', async () => {
-  const f = await fixture({ quote: '120000', charge: '100000', refundCapability: 'enabled' });
+  const f = await fixture({ quote: '120000', charge: '100000' });
   const signal = new AbortController().signal;
   const transport = f.make();
   await transport.withInferenceRun(f.job.id, signal, async (worker) => {
@@ -717,32 +505,6 @@ it('funds only the deficit for an inference quote that needs more than $0.25', a
   expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('400000');
 });
 
-it('applies the same rolling deposit budget to both inference channels', async () => {
-  const f = await fixture({ quote: '50000', minDeposit: '50000' });
-  f.deps.policy = async () => ({ ...TEST_POLICY, sessionBudgetAtomic: 50000n });
-  const transport = f.make();
-  const signal = new AbortController().signal;
-  await transport.messages(f.job, { messages: [] }, signal);
-  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('50000');
-
-  const secondJob = {
-    ...f.job,
-    id: randomUUID(),
-    decision: { ...f.job.decision, jobId: randomUUID() },
-  };
-  const secondary = transport.forInferenceSlot(1);
-  await expect(secondary.messages(secondJob, { messages: [] }, signal)).rejects.toMatchObject({
-    detail: { cause: 'payment_refused' },
-  });
-  expect(await secondary.summary(secondJob)).toMatchObject({
-    actualAtomic: '3000',
-    reservedAtomic: '3000',
-    uncertain: [],
-  });
-  expect(f.router.deposits).toBe(1);
-  expect(f.router.paidRequests()).toBe(1);
-});
-
 const say = (content: string) => ({ messages: [{ role: 'user', content }] });
 const jobLike = (job: ModelJob): ModelJob => ({
   ...job,
@@ -750,158 +512,10 @@ const jobLike = (job: ModelJob): ModelJob => ({
   decision: { ...job.decision, jobId: randomUUID() },
 });
 
-// Live fault of 2026-11-18: a 4-call job took 97.8 s beside its batch sibling's 43.2 s.
-// Each of three of its calls ended 2.0 to 2.6 s after a call of another session's job
-// ended: both processes started at lane 0, whose payment lock one call holds for a whole
-// model call, while lane 1 stood idle between the sibling's calls.
-it("pays on the other shared lane when another process's call holds a worker's own, without waiting for it", async ({
-  onTestFinished,
-}) => {
-  const f = await fixture({ quote: '120000' });
-  const stop = new AbortController();
-  const held = deferred();
-  const entered = deferred();
-  f.router.hold = held.promise;
-  f.router.onDelayArmed = entered.resolve;
-  onTestFinished(() => {
-    held.resolve();
-    stop.abort();
-  });
-  // Two transports that share only the data folder, as two `tenjin mcp` processes do.
-  const first = f.make().messages(f.job, say('A long call of the first session'), stop.signal);
-  await Promise.race([entered.promise, first]);
-  f.router.hold = null;
-  const timings: Record<string, unknown>[] = [];
-  const other = jobLike(f.job);
-  await expect(
-    f
-      .make()
-      .messages(other, say('A call of the second session'), stop.signal, undefined, (timing) =>
-        timings.push({ ...timing }),
-      ),
-  ).resolves.toEqual(f.message);
-  // The first call is still in flight on lane 0: the second paid on lane 1 meanwhile.
-  expect([...f.router.channels.values()].map((channel) => channel.pending)).toEqual([true, false]);
-  expect(timings[0]).toMatchObject({ slot: 1, laneMoved: true });
-  expect(timings[0]).not.toHaveProperty('waitedOn');
-  held.resolve();
-  await expect(first).resolves.toEqual(f.message);
-  expect(f.vouchers.map((voucher) => voucher.status)).toEqual([200, 200]);
-  expect(new Set(f.vouchers.map((voucher) => voucher.channel)).size).toBe(2);
-});
-
-it.each(['settles', 'cancels'] as const)(
-  '%s an inference call queued while both shared lanes are held, and signs nothing for it meanwhile',
-  async (outcome) => {
-    const f = await fixture({ quote: '120000' });
-    const signal = new AbortController().signal;
-    const held = deferred();
-    let armed = deferred();
-    f.router.hold = held.promise;
-    f.router.onDelayArmed = () => armed.resolve();
-    const first = f.make().messages(f.job, say('Holds lane 0'), signal);
-    await armed.promise;
-    armed = deferred();
-    const secondJob = jobLike(f.job);
-    const second = f.make().messages(secondJob, say('Holds lane 1'), signal);
-    await armed.promise;
-    expect([...f.router.channels.values()].map((channel) => channel.pending)).toEqual([true, true]);
-
-    const channel = watchPaymentLock();
-    const thirdJob = jobLike(f.job);
-    const third = f.make();
-    const abort = new AbortController();
-    const timings: Record<string, unknown>[] = [];
-    const queued = third.messages(thirdJob, say('Queued'), abort.signal, undefined, (timing) =>
-      timings.push({ ...timing }),
-    );
-    const pending = Promise.allSettled([first, second, queued]);
-    const reason = new Error('Third worker stopped');
-    try {
-      await Promise.race([channel.waiting, queued]);
-      // Both channels are held. The third call has only a local quote.
-      expect(f.vouchers).toHaveLength(2);
-      expect(await third.summary(thirdJob)).toMatchObject({ reservedAtomic: '123000' });
-      if (outcome === 'cancels') {
-        abort.abort(reason);
-        await expect(queued).rejects.toBe(reason);
-        expect(await third.summary(thirdJob)).toMatchObject({
-          reservedAtomic: '3000',
-          uncertain: [],
-        });
-      }
-    } finally {
-      held.resolve();
-      channel.restore();
-    }
-    const [one, two, waited] = await pending;
-    expect([one, two]).toEqual([
-      { status: 'fulfilled', value: f.message },
-      { status: 'fulfilled', value: f.message },
-    ]);
-    if (outcome === 'settles') {
-      expect(waited).toEqual({ status: 'fulfilled', value: f.message });
-      expect(await third.summary(thirdJob)).toMatchObject({
-        reservedAtomic: '4000',
-        uncertain: [],
-      });
-      // It waited on a holder in this process (the test's transports share one).
-      expect(timings[0]).toMatchObject({ waitedOn: 'this_process' });
-    } else expect(waited).toEqual({ status: 'rejected', reason });
-    expect(f.vouchers.map((voucher) => voucher.status)).toEqual(
-      outcome === 'settles' ? [200, 200, 200] : [200, 200],
-    );
-    expect(f.router.channels.size).toBe(2);
-    expect(f.router.deposits).toBe(2);
-  },
-);
-
-// Money rule: no amount is signed twice or skipped, and a channel's voucher never goes
-// down. The fake router accepts a voucher only when it claims exactly the channel's
-// charged total plus the quote, and refuses a second payment on a channel in flight.
-it('signs each channel total once and in rising order for five jobs of three transports paying at once', async () => {
-  const f = await fixture({ quote: '20000', charge: '7000', minDeposit: '900000' });
-  const signal = new AbortController().signal;
-  // Three processes' worth of transports: two prefer lane 0, one prefers lane 1.
-  const transports = [f.make(), f.make(), f.make().forInferenceSlot(1)];
-  const jobs = [f.job, jobLike(f.job), jobLike(f.job), jobLike(f.job), jobLike(f.job)];
-  const turns = [0, 1, 2, 3];
-  await Promise.all(
-    jobs.map(async (job, index) => {
-      // One job's calls follow one another, as a worker's turns do.
-      for (const turn of turns)
-        await transports[index % transports.length]!.messages(
-          job,
-          say(`Job ${index} turn ${turn}`),
-          signal,
-        );
-    }),
-  );
-  const calls = jobs.length * turns.length;
-  // Every signed request was accepted: none claimed a stale or a repeated total.
-  expect(f.vouchers.map((voucher) => voucher.status)).toEqual(Array(calls).fill(200));
-  const byChannel = new Map<string, bigint[]>();
-  for (const voucher of f.vouchers)
-    byChannel.set(voucher.channel, [...(byChannel.get(voucher.channel) ?? []), voucher.max]);
-  expect(byChannel.size).toBe(2);
-  for (const totals of byChannel.values())
-    // Each claims what the calls before it on that channel were charged, plus its quote.
-    expect(totals).toEqual(totals.map((_, n) => BigInt(n) * 7000n + 20000n));
-  expect([...f.router.channels.values()].reduce((sum, channel) => sum + channel.charged, 0n)).toBe(
-    BigInt(calls) * 7000n,
-  );
-  for (const [index, job] of jobs.entries())
-    expect(await transports[index % transports.length]!.summary(job)).toEqual({
-      actualAtomic: (3000 + turns.length * 7000).toString(),
-      reservedAtomic: (3000 + turns.length * 7000).toString(),
-      uncertain: [],
-    });
-});
-
 it("runs two runs' calls at once on a router that refunds, each under its own channel's lock", async ({
   onTestFinished,
 }) => {
-  const f = await fixture({ quote: '120000', refundCapability: 'enabled' });
+  const f = await fixture({ quote: '120000' });
   const stop = new AbortController();
   const held = deferred();
   const both = deferred();
@@ -915,7 +529,7 @@ it("runs two runs' calls at once on a router that refunds, each under its own ch
     stop.abort();
   });
   const secondJob = jobLike(f.job);
-  // Both workers hold lane 0 in their own process. Each run pays on its own channel.
+  // Each run pays on its own channel, under that channel's lock.
   const runs = [f.job, secondJob].map((job) =>
     f
       .make()
@@ -928,115 +542,6 @@ it("runs two runs' calls at once on a router that refunds, each under its own ch
   held.resolve();
   await expect(Promise.all(runs)).resolves.toEqual([f.message, f.message]);
   expect(f.vouchers.map((voucher) => voucher.status)).toEqual([200, 200]);
-});
-
-it('waits for its own lane when the other lane cannot be funded within the daily budget, and pays there', async () => {
-  // One deposit is all the budget allows: it funded lane 0 for several calls.
-  const f = await fixture({ quote: '50000', minDeposit: '200000' });
-  f.deps.policy = async () => ({ ...TEST_POLICY, sessionBudgetAtomic: 200000n });
-  const signal = new AbortController().signal;
-  await f.make().messages(f.job, say('Funds lane 0'), signal);
-  const held = deferred();
-  const entered = deferred();
-  f.router.hold = held.promise;
-  f.router.onDelayArmed = entered.resolve;
-  const first = f.make().messages(f.job, say('Holds lane 0'), signal);
-  await entered.promise;
-  f.router.hold = null;
-  const channel = watchPaymentLock();
-  const other = jobLike(f.job);
-  const timings: Record<string, unknown>[] = [];
-  const second = f
-    .make()
-    .messages(other, say('Meets lane 0 held'), signal, undefined, (timing) =>
-      timings.push({ ...timing }),
-    );
-  try {
-    await Promise.race([channel.waiting, second]);
-  } finally {
-    held.resolve();
-    channel.restore();
-  }
-  // Lane 1 needed a deposit the budget refuses. Nothing was signed for it: the call
-  // waited for lane 0, as it did before lanes were shared out, and paid from its credit.
-  await expect(Promise.all([first, second])).resolves.toEqual([f.message, f.message]);
-  expect(timings[0]).toMatchObject({ slot: 0 });
-  expect(timings[0]).not.toHaveProperty('laneMoved');
-  expect(f.router.deposits).toBe(1);
-  expect(f.router.channels.size).toBe(1);
-  expect(f.vouchers.map((voucher) => voucher.status)).toEqual([200, 200, 200]);
-  expect((await readSpendSummary(f.dir))?.committedAtomic).toBe('200000');
-});
-
-it("holds a job's total against a lowered cap when its call takes the other lane, and signs nothing", async () => {
-  const f = await fixture({ quote: '300000', minDeposit: '900000' });
-  const signal = new AbortController().signal;
-  await f.make().messages(f.job, say('first'), signal);
-  const budget = join(f.dir, 'model-jobs', `${f.job.id}.budget.json`);
-  const spent = BigInt(JSON.parse(await readFile(budget, 'utf8')).charged);
-  const held = deferred();
-  const entered = deferred();
-  f.router.hold = held.promise;
-  f.router.onDelayArmed = entered.resolve;
-  const blocker = f.make().messages(jobLike(f.job), say('Holds lane 0'), signal);
-  await entered.promise;
-  f.router.hold = null;
-  // Lowered when the call, its quote already reserved, takes its turn to pay.
-  const withFirstFileLock = locks.withFirstFileLock;
-  const lane = vi.spyOn(locks, 'withFirstFileLock').mockImplementation(async (paths, run, opts) => {
-    if (paths[0]!.endsWith('.payment.lock')) {
-      const path = join(f.dir, 'config.json');
-      const config = JSON.parse(await readFile(path, 'utf8'));
-      await writeFile(
-        path,
-        JSON.stringify({ ...config, maxAutoSpend: (spent + 300000n - 1n).toString() }),
-      );
-    }
-    return withFirstFileLock(paths, run, opts);
-  });
-  try {
-    await expect(f.make().messages(f.job, say('second'), signal)).rejects.toMatchObject({
-      message: expect.stringContaining('remaining job ceiling'),
-      detail: { cause: 'budget' },
-    });
-  } finally {
-    lane.mockRestore();
-    held.resolve();
-  }
-  await blocker;
-  // The job's first call and the blocker's: no voucher for the refused call, on any lane.
-  expect(f.vouchers).toHaveLength(2);
-  expect(JSON.parse(await readFile(budget, 'utf8')).charged).toBe(spent.toString());
-});
-
-it('never signs again for a call left uncertain on the other lane, on either lane', async () => {
-  const f = await fixture({ quote: '120000' });
-  const signal = new AbortController().signal;
-  const held = deferred();
-  const entered = deferred();
-  f.router.hold = held.promise;
-  f.router.onDelayArmed = entered.resolve;
-  const blocker = f.make().messages(f.job, say('Holds lane 0'), signal);
-  await entered.promise;
-  f.router.hold = null;
-  // The router settles the call on lane 1 and its answer is lost.
-  f.router.abortAfterSettle = true;
-  f.setRecoveryState('running');
-  const other = jobLike(f.job);
-  const transport = f.make();
-  await expect(transport.messages(other, say('Lost answer'), signal)).rejects.toMatchObject({
-    message: expect.stringContaining('uncertain'),
-  });
-  held.resolve();
-  await blocker;
-  expect(f.vouchers).toHaveLength(2);
-  // Both lanes are free now. The same request is not bought again.
-  await expect(f.make().messages(other, say('Lost answer'), signal)).rejects.toThrow(
-    'no new authorization sent',
-  );
-  expect(f.vouchers).toHaveLength(2);
-  expect(await transport.summary(other)).toMatchObject({ reservedAtomic: '123000' });
-  expect((await transport.summary(other)).uncertain).toHaveLength(1);
 });
 
 it('recovers after a process that died between signing and sending: its lock is taken over, its call stays reserved and unsigned again, and the next voucher claims the same total once', async () => {
@@ -1056,12 +561,12 @@ it('recovers after a process that died between signing and sending: its lock is 
   });
   expect(f.vouchers).toHaveLength(1);
   die = false;
-  // What a killed process leaves: the lane's lock, held by a pid that is gone.
+  // What a killed process leaves: the run channel's lock, held by a pid that is gone.
   const gone = spawnSync(process.execPath, ['-e', '']).pid;
   const lock = join(
     f.dir,
     'model-jobs',
-    `${modelChannelScope(BASE, 'model-inference', 0).id}.payment.lock`,
+    `${modelInferenceRunScope(BASE, 'test-run').id}.payment.lock`,
   );
   await mkdir(lock);
   await writeFile(join(lock, 'meta'), JSON.stringify({ pid: gone, acquiredAt: Date.now() }));
@@ -1073,8 +578,8 @@ it('recovers after a process that died between signing and sending: its lock is 
     'no new authorization sent',
   );
   expect(f.vouchers).toHaveLength(1);
-  // Its next call takes over the dead lock on the same lane and claims the total the lost
-  // voucher claimed. The router never saw that one, so the total is charged once.
+  // Its next call takes over the dead lock on the run's channel and claims the total the
+  // lost voucher claimed. The router never saw that one, so the total is charged once.
   await expect(next.messages(f.job, say('The next call'), signal)).resolves.toEqual(f.message);
   expect(f.vouchers.map((voucher) => [voucher.max, voucher.status])).toEqual([
     [120000n, 200],
@@ -2122,23 +1627,6 @@ it('preserves a second queued reservation when the first call settles', async ()
     firstEntered = resolve;
   });
   f.router.onDelayArmed = firstEntered;
-  let releaseSecond!: () => void;
-  const heldSigner = new Promise<void>((resolve) => {
-    releaseSecond = resolve;
-  });
-  let secondEntered!: () => void;
-  const secondReserved = new Promise<void>((resolve) => {
-    secondEntered = resolve;
-  });
-  const getSigner = f.deps.getSigner;
-  let signers = 0;
-  f.deps.getSigner = async () => {
-    if (++signers === 2) {
-      secondEntered();
-      await heldSigner;
-    }
-    return getSigner();
-  };
   const first = f
     .make()
     .messages(
@@ -2157,14 +1645,12 @@ it('preserves a second queued reservation when the first call settles', async ()
     );
   try {
     await Promise.race([channel.waiting, second]);
+    // The second call has its quote reserved while the first holds the run's channel.
     expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '1003000' });
     finishFirst();
     await expect(first).resolves.toEqual(f.message);
-    await secondReserved;
-    expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '504000' });
   } finally {
     finishFirst();
-    releaseSecond();
     channel.restore();
   }
   await expect(second).resolves.toEqual(f.message);
@@ -2304,6 +1790,7 @@ it('waits before the unpaid quote at the rate an offer advertises, and never bet
     baseUrl: BASE,
     payerDeps: f.deps,
     paceClock: paced.paceClock,
+    inferenceRun: 'paced-run',
   });
   const timings: Record<string, unknown>[] = [];
   for (let n = 0; n < 7; n++)
@@ -2363,7 +1850,7 @@ it('keeps a signed call the router refuses for rate as uncertain, and never trie
 it.each(['advertised', 'changed'] as const)(
   'asks for the quote again before signing when a call waited past 100 s for its channel (%s rate)',
   async (rate) => {
-    const f = await fixture({ quote: '120000', refundCapability: 'enabled' });
+    const f = await fixture({ quote: '120000' });
     const job: ModelJob = {
       ...f.job,
       decision: { ...f.job.decision, callLimit: { max: 120, windowSeconds: 60 } },

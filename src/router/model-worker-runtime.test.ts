@@ -200,6 +200,7 @@ const job = {
     maxCallDurationMs: 540_000,
     callIdleLimitMs: 300_000,
     callLimit: { max: 120, windowSeconds: 60 },
+    messagesStream: 1,
     claudePermissionMode: 'default',
     claudeWorkspace: {
       version: 1,
@@ -984,7 +985,7 @@ it.each([['an offer that names 256,000', { maxOutputTokens: 256_000 }, 256_000, 
         _beforeSend: unknown,
         observe?: (timing: Record<string, number>) => void,
       ) => {
-        observe?.({ slot: 0, outputCap: sent.max_tokens });
+        observe?.({ outputCap: sent.max_tokens });
         return {
           id: 'msg',
           type: 'message',
@@ -1089,7 +1090,7 @@ it("keeps each model call's timing, token counts and the worker's start and end 
       _beforeSend: unknown,
       observe?: (timing: Record<string, number>) => void,
     ) => {
-      observe?.({ slot: 1, quoteMs: 210, laneWaitMs: 9_000, signMs: 35, answerMs: 2_800 });
+      observe?.({ quoteMs: 210, gateMs: 9_000, signMs: 35, answerMs: 2_800 });
       return {
         role: 'assistant',
         content: [{ type: 'text', text: 'PRIVATE_ANSWER' }],
@@ -1177,14 +1178,13 @@ it("keeps each model call's timing, token counts and the worker's start and end 
       inputTokens: 900,
       cachedTokens: 27_000,
       outputTokens: 120,
-      slot: 1,
       quoteMs: 210,
-      laneWaitMs: 9_000,
+      gateMs: 9_000,
       signMs: 35,
       answerMs: 2_800,
     },
   ]);
-  expect(diagnostics.callTotals).toMatchObject({ count: 1, laneWaitMs: 9_000, outputTokens: 120 });
+  expect(diagnostics.callTotals).toMatchObject({ count: 1, gateMs: 9_000, outputTokens: 120 });
   expect(Object.keys(diagnostics.phases)).toEqual(
     expect.arrayContaining([
       'workerStart',

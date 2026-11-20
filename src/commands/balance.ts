@@ -148,9 +148,6 @@ export async function runBalance(
       ...(creditAtomic > 0n
         ? [`${label('Set aside')}about ${dollars(creditAtomic)} for routing`]
         : []),
-      ...(modelCreditAtomic > 0n
-        ? [`${label('Subagents')}about ${dollars(modelCreditAtomic)} set aside for model calls`]
-        : []),
       ...(modelRoutingCreditAtomic > 0n
         ? [
             `${label('Model fee')}about ${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
