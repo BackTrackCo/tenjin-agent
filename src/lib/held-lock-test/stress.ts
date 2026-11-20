@@ -16,7 +16,7 @@ const workers = Number(workersArg);
 const dir = dirArg ?? mkdtempSync(join(tmpdir(), 'held-stress-'));
 mkdirSync(dir, { recursive: true });
 const worker = fileURLToPath(new URL('./stress-worker.ts', import.meta.url));
-const register = fileURLToPath(new URL('./register.mjs', import.meta.url));
+const register = new URL('./register.mjs', import.meta.url).href;
 
 type Totals = { rounds: number; overlaps: number; timeouts: number; errors: number };
 const last = new Map<number, Totals>();

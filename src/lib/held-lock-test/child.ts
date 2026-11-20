@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Helper children for tests of locks across processes. Not a test file. */
 const dir = fileURLToPath(new URL('.', import.meta.url));
@@ -14,7 +14,7 @@ export function child(file: string, ...args: string[]) {
       '--experimental-strip-types',
       '--no-warnings',
       '--import',
-      join(dir, 'register.mjs'),
+      pathToFileURL(join(dir, 'register.mjs')).href,
       join(dir, file),
       ...args,
     ],
