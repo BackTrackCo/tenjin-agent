@@ -296,7 +296,7 @@ export async function runConfigSubagents(
     }. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results; the worker’s web searches run inside the DeepSeek call, with no search charge, and Exa receives the address of a public page its WebFetch could not fetch. Your Tenjin block and only rules apply to that Exa page read as they do to what Tenjin picks on its own.`,
     windowsWorker
       ? NATIVE_WINDOWS_DISCLOSURE
-      : `Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. ${
+      : `Native global, ancestor and repository instructions retain their normal scope. ${
           limited
             ? 'A Claude worker may read and write in every named directory, subfolders included'
             : 'A Claude worker may read and write in its session’s own workspace'

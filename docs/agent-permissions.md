@@ -136,6 +136,8 @@ Run `tenjin wallet repair` yourself in a terminal when the saved passphrase is m
 
 Codex support is experimental. It shares the wallet, limits and request executor, but activation and permission behavior differ.
 
+DeepSeek subagents run on Claude Code only. Codex runs its own subagents natively and Tenjin offers none of them to DeepSeek.
+
 Installation uses Codex's plugin commands and trusts only Tenjin's own hook rows through Codex's configuration API. It leaves hooks you disabled off. If trust cannot be saved, approve the hooks in `/hooks`.
 
 The request permission hook permits calls under your spending policy, including with `approval_policy = "never"`. It also overrides `approval_mode = "prompt"` for this tool. Disable that one hook in `/hooks` to require your host's approval; with approvals forbidden, the call is refused. Internal model calls to the hook tool remain denied. [Host details →](./router-reference.md#host-integration)

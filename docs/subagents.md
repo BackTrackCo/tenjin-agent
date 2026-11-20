@@ -343,6 +343,6 @@ These run natively:
 
 Claude Code is primary and requires a qualified installed version with observed Manual, Accept edits, Auto, `dontAsk` or bypass-permissions mode. In auto mode the worker's native classifier runs on Flash. Plan mode, a bypass mode that settings disable, and unavailable modes stay native.
 
-Codex uses the router's existing experimental support. Only independent foreground calls with explicit `fork_turns: "none"`, fully covered native access and the existing Never/user approval policy qualify. Other modes and history-inheriting calls stay native. Codex worker resume and background-agent UI are outside this pilot.
+DeepSeek subagents run on Claude Code only. Codex and other agents keep running their own subagents natively, with no offer and no routing fee, and Tenjin's tool routing there is unchanged.
 
 Contributors: how the worker is built is in [DeepSeek subagents: internals](./subagents-internals.md).
