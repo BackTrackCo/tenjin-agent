@@ -35,14 +35,22 @@ for (;;) {
         try {
           linkSync(tmp, marker);
         } catch {
-          await delay(1500);
-          let other = Number.NaN;
-          try {
-            other = Number(readFileSync(marker, 'utf8'));
-          } catch {
-            // Gone meanwhile: its holder finished.
+          // A marker is already there. One whose maker is gone (a killed holder) is stale and
+          // replaced at once. One whose maker still runs gets a second look 1.5 s later, which
+          // allows for a killed holder that is not reaped yet: still there, and alive, is an overlap.
+          const makerOf = () => {
+            try {
+              return Number(readFileSync(marker, 'utf8'));
+            } catch {
+              return Number.NaN;
+            }
+          };
+          let other = makerOf();
+          if (Number.isFinite(other) && alive(other)) {
+            await delay(1500);
+            other = makerOf();
+            if (Number.isFinite(other) && alive(other)) counts.overlaps++;
           }
-          if (Number.isFinite(other) && alive(other)) counts.overlaps++;
           try {
             unlinkSync(marker);
             linkSync(tmp, marker);
