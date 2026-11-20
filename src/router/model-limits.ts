@@ -99,7 +99,7 @@ export function fittingOutputTokens(bytes: number, asked: number, remaining: big
 }
 /** The least quote a worker's request can have: no body, the output cap every router takes. */
 export const MODEL_MINIMUM_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_TOKENS);
-/** A floor in dollars as the CLI prints it: `$0.086866`. */
+/** A floor in dollars as the CLI prints it: `$0.083866`. */
 export const usdOfAtomic = (atomic: bigint): string => '$' + (Number(atomic) / 1e6).toFixed(6);
 /** Full hosted POST receipt or owner-GET JSON envelope, including escaped wire and metadata. */
 export const MODEL_RESPONSE_ENVELOPE_BYTES = 4_500_000;

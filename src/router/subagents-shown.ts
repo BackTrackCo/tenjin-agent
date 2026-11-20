@@ -65,14 +65,14 @@ export type SubagentsShown = {
 /** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
 function costWords({ perCall, named, wasCap, daily }: SubagentsShown): string {
   const now = named !== undefined && named < perCall ? named : perCall;
-  const change = wasCap !== undefined && wasCap !== now ? ` (was ${usd(wasCap)})` : '';
+  const was = wasCap !== undefined && wasCap !== now ? `; was ${usd(wasCap)}` : '';
   const cap =
     named === undefined
-      ? `Up to ${usd(perCall)} a job (your per-call limit)`
+      ? `Up to ${usd(perCall)} a job (your per-call limit${was})`
       : named < perCall
-        ? `Up to ${usd(named)} a job (your --max-job)`
-        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it)`;
-  return daily ? `${cap}${change} · your daily budget applies` : cap + change;
+        ? `Up to ${usd(named)} a job (your --max-job${was})`
+        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it${was})`;
+  return daily ? `${cap} · your daily budget applies` : cap;
 }
 
 const ROW_LABEL = 9;

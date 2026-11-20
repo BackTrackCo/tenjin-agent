@@ -268,13 +268,17 @@ export async function finishNewInstall(
                 notes:
                   saved && perCall <= MODEL_MINIMUM_CALL_ATOMIC
                     ? [
-                        `No job is offered while that limit is not above the ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} one model call needs before its routing fee. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
+                        `No job is offered while that limit is not above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the smallest reservation of one model call. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
                       ]
                     : [],
               },
             ),
           ]
-        : ['', ...SUBAGENTS_KEPT_OFF_LINES]),
+        : // The line after it already names the command: not twice.
+          [
+            '',
+            ...(stands.length ? SUBAGENTS_KEPT_OFF_LINES.slice(0, 1) : SUBAGENTS_KEPT_OFF_LINES),
+          ]),
       ...stands,
     ],
   };
