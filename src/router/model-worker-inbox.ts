@@ -25,8 +25,9 @@ export class WorkerInbox {
     return this.queue.length;
   }
 
-  /** The next message, in order; null once the inbox is closed and empty. */
+  /** The next message, in order; null once the inbox is closed. */
   next(): Promise<string | null> {
+    if (this.shut) return Promise.resolve(null);
     const first = this.queue.shift();
     if (first !== undefined) return Promise.resolve(first);
     if (this.shut) return Promise.resolve(null);
@@ -46,7 +47,17 @@ export class WorkerInbox {
     return true;
   }
 
-  /** Closes for good, whatever is queued (the worker ended another way). */
+  /**
+   * Stops taking messages and ends the worker's reader, and keeps what was queued and never
+   * read, for whoever reports the end: {@link close} returns it.
+   */
+  seal(): void {
+    this.shut = true;
+    this.waiting?.(null);
+    this.waiting = undefined;
+  }
+
+  /** Closes for good, whatever is queued (the worker ended another way), and returns it. */
   close(): string[] {
     this.shut = true;
     const left = this.queue.splice(0);

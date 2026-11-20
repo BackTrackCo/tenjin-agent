@@ -3635,3 +3635,30 @@ it('ends the job as refused when DeepSeek refuses after events reached the child
   ).rejects.toMatchObject({ stop: { reason: 'provider_failed', status: 502 } });
   expect(messages).toHaveBeenCalledTimes(1);
 });
+
+// Failure caught (Greptile): the real worker closed its inbox in its cleanup before it
+// rejected, which dropped the queued messages, so the stopped handback listed none of the
+// messages the parent had been told were delivered. The mocked worker of the MCP test skipped
+// that cleanup. Here the real cleanup runs.
+it('keeps the messages a failed worker never read for whoever reports its end', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const inbox = new WorkerInbox();
+  expect(inbox.push('Use the new head.')).toBe('delivered');
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        // The child fails before it reads its input at all.
+        // eslint-disable-next-line require-yield
+        async *[Symbol.asyncIterator]() {
+          throw new Error('worker error');
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  await expect(runModelWorker(job, { ...options(), inbox })).rejects.toThrow();
+  // The inbox takes nothing more, and what it held is still there to report.
+  expect(inbox.push('too late')).toBe('closed');
+  expect(inbox.close()).toEqual(['Use the new head.']);
+});

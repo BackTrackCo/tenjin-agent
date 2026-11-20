@@ -1419,7 +1419,8 @@ async function runQualifiedWorker(
     executionFailure = proxyFailure ?? { error };
   } finally {
     authorizePrompt(false);
-    options.inbox?.close();
+    // Seal, not close: what was queued and never read is the caller's to report.
+    options.inbox?.seal();
     clearTimeout(initTimer);
     initialized(false);
     controller.signal.removeEventListener('abort', denyInitialization);
