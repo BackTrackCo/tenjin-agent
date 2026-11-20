@@ -581,6 +581,33 @@ const reading = (over: Partial<Parameters<typeof readMessagesStream>[1]> = {}) =
   ...over,
 });
 
+// Failure caught (vraspar's repro, two signed requests): the fallback after a refused stream
+// reused a request whose output cap the first attempt had already stepped down, so its
+// reservation sat under another hash than the worker's own request, and an identical resend
+// bought the same call again.
+it('reserves the fallback under the request as the worker made it, so a resend is not bought again', async () => {
+  const f = await fixture({ drive: () => expect.unreachable('refused before payment') });
+  const transport = f.make();
+  const original = (transport as unknown as { options: { payerDeps: { fetchImpl: typeof fetch } } })
+    .options.payerDeps;
+  const inner = original.fetchImpl;
+  original.fetchImpl = async (input, init) => {
+    const body = JSON.parse(String(init?.body ?? 'null')) as { stream?: boolean } | null;
+    if (body?.stream === true)
+      return Response.json({ error: { code: 'invalid_model_request' } }, { status: 400 });
+    return inner(input, init);
+  };
+  const big = () => ({ ...say('One'), max_tokens: 4_000_000 });
+  await expect(
+    transport.messages(f.job, big(), new AbortController().signal, undefined, undefined, () => {}),
+  ).resolves.toEqual(reply);
+  expect(f.signed()).toBe(1);
+  await expect(
+    transport.messages(f.job, big(), new AbortController().signal, undefined, undefined, () => {}),
+  ).resolves.toEqual(reply);
+  expect(f.signed()).toBe(1);
+});
+
 it('reads frames split across chunks and CRLF, and answers the last event as the whole response', async () => {
   const seen: string[] = [];
   const text =

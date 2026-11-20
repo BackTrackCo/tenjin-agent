@@ -540,6 +540,10 @@ export class ModelTransport {
   ) {
     const open =
       stream !== undefined && messagesStreamOffered(job.decision) && !streamRefused.has(job.id);
+    // Each attempt starts from the request as the worker made it: the output cap is stepped
+    // down in the request an attempt is given, and the call's identity is its hash, so a retry
+    // that inherited the lowered cap would reserve under another hash than a plain resend.
+    const original = structuredClone(messages);
     const seen = { relayed: false };
     const relay = open
       ? (event: StreamEvent) => {
@@ -548,7 +552,15 @@ export class ModelTransport {
         }
       : undefined;
     try {
-      return await this.invokeOnce(job, messages, signal, protocol, beforeSend, timing, relay);
+      return await this.invokeOnce(
+        job,
+        structuredClone(original),
+        signal,
+        protocol,
+        beforeSend,
+        timing,
+        relay,
+      );
     } catch (error) {
       if (
         relay &&
@@ -560,7 +572,14 @@ export class ModelTransport {
       ) {
         streamRefused.add(job.id);
         try {
-          return await this.invokeOnce(job, messages, signal, protocol, beforeSend, timing);
+          return await this.invokeOnce(
+            job,
+            structuredClone(original),
+            signal,
+            protocol,
+            beforeSend,
+            timing,
+          );
         } catch (again) {
           // The same refusal without a stream was never about the stream.
           if (again instanceof ModelCallFailed && again.detail.code === 'invalid_model_request')
