@@ -1,5 +1,4 @@
 import {
-  MODEL_CODEX_TASK_BYTES,
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
@@ -10,12 +9,10 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, routingAuthorizedAtomic, type NoOffer } from './model-job';
-import { disclosureCovers, modelSettings, type ModelSettings } from './model-settings';
+import { modelSettings, type ModelSettings } from './model-settings';
 import { modelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
-import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
-import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
 import { RouteSkipped } from './decision';
@@ -30,7 +27,7 @@ import {
   type ClaudeWorkspace,
 } from './claude-workspace';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
 import {
@@ -87,20 +84,8 @@ export interface ModelSession {
   turnId: string;
   cwd: string;
   transcript: string;
-  harness?: 'claude' | 'codex';
-  codexPolicy?: CodexModelPolicy;
   claudePermissionMode?: ClaudeWorkerPermissionMode;
 }
-
-const codexOptions = (native: Record<string, unknown>) =>
-  Object.fromEntries(Object.entries(native).filter(([key]) => key !== 'message'));
-const held = (reason: string) => ({
-  hookSpecificOutput: {
-    hookEventName: 'PreToolUse',
-    permissionDecision: 'deny',
-    permissionDecisionReason: reason,
-  },
-});
 
 /**
  * What the offer tells the parent of its consent: under the wide scope the directories are
@@ -131,20 +116,14 @@ function droppedNote(workspace: ClaudeWorkspace) {
     : {};
 }
 
-function nativeRepositories(job: ModelJob, workspace: ClaudeWorkspace | null): string[] | null {
-  if (workspace)
-    return [
-      ...new Set([
-        ...workspace.workingDirectories,
-        ...workspace.readExceptions,
-        ...workspace.writeExceptions,
-      ]),
-    ];
-  const parsed = z
-    .array(z.string().refine(isAbsolute))
-    .min(1)
-    .safeParse(job.decision.disclosureRepositories);
-  return parsed.success ? parsed.data : null;
+function nativeRepositories(workspace: ClaudeWorkspace): string[] {
+  return [
+    ...new Set([
+      ...workspace.workingDirectories,
+      ...workspace.readExceptions,
+      ...workspace.writeExceptions,
+    ]),
+  ];
 }
 
 type Admission = {
@@ -251,109 +230,6 @@ export class ModelHandoff {
     const settings = await modelSettings(this.options.dataDir, cwd);
     return settings?.routerOrigin === this.options.transport.origin ? settings : null;
   }
-  async captureCodex(
-    session: ModelSession,
-    callId: string,
-    native: Record<string, unknown>,
-    signal?: AbortSignal,
-  ) {
-    signal?.throwIfAborted();
-    if (isModelWorkerProcess()) return null;
-    const old = await this.store.pending(session.sessionId, session.turnId);
-    if (old) {
-      // A completed foreground worker is quiescent. Do not hold later native
-      // calls behind an already resolved offer in this turn.
-      if (old.state === 'native' || old.state === 'completed') return null;
-      if (await this.store.nativeRetry(session.sessionId, session.turnId, native, codexOptions))
-        return null;
-      return held(
-        'This turn already has a held or selected delegation. No additional child started. Cancel or finish it before continuing.',
-      );
-    }
-    const settings = await this.currentConsent(session.cwd);
-    if (
-      !settings ||
-      !session.codexPolicy ||
-      typeof native.message !== 'string' ||
-      native.fork_turns !== 'none' ||
-      Object.keys(native).some((key) => !['message', 'task_name', 'fork_turns'].includes(key))
-    )
-      return null;
-    const worker = await qualifiedModelWorker(
-      session.cwd,
-      'general-purpose',
-      session.codexPolicy,
-      this.options.dataDir,
-      signal,
-    );
-    if (
-      !worker?.instructionContext ||
-      (settings.scope === 'native-workspace' && !worker.disclosureRepositories?.length)
-    )
-      return null;
-    signal?.throwIfAborted();
-    const job = await this.store.offer(
-      {
-        sessionId: session.sessionId,
-        turnId: session.turnId,
-        callId,
-        root: settings.root,
-        task: '',
-        native,
-        decision: {
-          routerOrigin: this.options.transport.origin,
-          instructionContext: worker.instructionContext,
-          ...(worker.nativeSnapshot ? { nativeSnapshot: worker.nativeSnapshot } : {}),
-          ...(worker.disclosureRepositories
-            ? { disclosureRepositories: worker.disclosureRepositories }
-            : {}),
-        },
-        capAtomic: settings.maxJobAtomic.toString(),
-      },
-      'awaiting_prompt',
-      'turn',
-    );
-    return held(
-      `The native child has not started. Submit the same complete plaintext assignment through the Tenjin subagent tool with delegation_id=${job.id} and task=<the full assignment text>. ${MODEL_BRIEF_GUIDANCE} Tenjin attaches parent context itself. This obtains a recommendation only. Accept its offer_id or keep native by retrying the original native call unchanged; it bypasses this hold once. Ignoring this launches neither worker.`,
-    );
-  }
-  async submitCodex(session: ModelSession, id: string, task: string, signal?: AbortSignal) {
-    signal?.throwIfAborted();
-    const settings = await this.currentConsent(session.cwd);
-    if (
-      !settings ||
-      !session.codexPolicy ||
-      !task.trim() ||
-      Buffer.byteLength(task) > MODEL_CODEX_TASK_BYTES
-    )
-      return {
-        action: 'native',
-        reason:
-          'Host policy or complete assignment unavailable; retry the original native call unchanged',
-      };
-    const worker = await qualifiedModelWorker(
-      session.cwd,
-      'general-purpose',
-      session.codexPolicy,
-      this.options.dataDir,
-      signal,
-    );
-    const pending = await this.store.pending(session.sessionId, session.turnId);
-    if (
-      !worker?.instructionContext ||
-      JSON.stringify(worker.nativeSnapshot) !== JSON.stringify(pending?.decision.nativeSnapshot) ||
-      worker.instructionContext.fingerprint !==
-        savedInstructionContext(pending?.decision.instructionContext)?.fingerprint
-    )
-      return {
-        action: 'native',
-        reason: 'Initial instructions changed or are unavailable; retry native unchanged',
-      };
-    signal?.throwIfAborted();
-    const job = await this.store.submit(id, session.sessionId, session.turnId, task);
-    if (!job) return { action: 'native', reason: 'Stale, changed or foreign delegation' };
-    return this.route(session, job, signal);
-  }
   /** Records why a call got no offer and answers that it runs natively. Codes only. */
   private async stay(
     session: ModelSession,
@@ -448,7 +324,6 @@ export class ModelHandoff {
     const worker = await qualifiedModelWorker(
       session.cwd,
       agentType,
-      undefined,
       dataDir,
       signal,
       session.claudePermissionMode,
@@ -493,7 +368,6 @@ export class ModelHandoff {
     const { dataDir, transport } = this.options;
     const settings = await this.currentConsent(session.cwd);
     if (
-      session.harness === 'codex' ||
       !settings ||
       isModelWorkerProcess() ||
       !claudeWorkerPermissionMode(session.claudePermissionMode)
@@ -526,7 +400,6 @@ export class ModelHandoff {
     const worker = await qualifiedModelWorker(
       settings.root,
       String(original.native.subagent_type ?? 'general-purpose'),
-      undefined,
       dataDir,
       signal,
       session.claudePermissionMode,
@@ -619,26 +492,15 @@ export class ModelHandoff {
     if (!settings) return native('no_consent');
     if (settings.root !== job.root) return native('scope_not_covered');
     const task = job.task;
-    const instructions = savedInstructionContext(job.decision.instructionContext);
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
-    if (
-      session.harness !== 'codex' &&
-      (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
-    )
+    if (!claudeWorkspace || !modelClaudeWorkspaceCovered(claudeWorkspace, settings))
       return native('scope_not_covered');
-    const disclosureRepositories = nativeRepositories(job, claudeWorkspace);
-    if (settings.scope === 'native-workspace' && !disclosureRepositories)
-      return native('scope_not_covered');
-    if (
-      session.harness === 'codex' &&
-      (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
-    )
-      return native('worker_unqualified');
+    const disclosureRepositories = nativeRepositories(claudeWorkspace);
     const packet = await buildPromptPacket(
       session.transcript,
       session.sessionId,
       task,
-      session.harness ?? 'claude',
+      'claude',
       // A subagent's call is judged with that subagent's own conversation after the session's.
       job.caller ? { agentId: job.caller } : {},
     );
@@ -664,12 +526,7 @@ export class ModelHandoff {
     // A cap under the one the job was held at is the person lowering their per-call limit,
     // or naming a lower ceiling, in between: its own reason, not a scope one.
     const covered = (consent: ModelSettings) =>
-      claudeWorkspace
-        ? modelClaudeWorkspaceCovered(claudeWorkspace, consent)
-        : consent.scope === 'native-workspace' ||
-          (disclosureRepositories ?? []).every((path) =>
-            disclosureCovers(consent.repositories, path),
-          );
+      modelClaudeWorkspaceCovered(claudeWorkspace, consent);
     const uncovered = (consent: ModelSettings): NoOffer['code'] | null =>
       consent.root !== job.root || consent.context !== settings.context || !covered(consent)
         ? 'scope_not_covered'
@@ -690,15 +547,11 @@ export class ModelHandoff {
     let changedBeforeFee: NoOffer['code'] | null = null;
     try {
       signal?.throwIfAborted();
-      // By its own id on Claude: another call of the session never stands in its way.
-      const pending =
-        session.harness === 'codex'
-          ? await this.store.pending(session.sessionId, session.turnId)
-          : await this.store.owned(job.id, session.sessionId);
+      // By its own id: another call of the session never stands in its way.
+      const pending = await this.store.owned(job.id, session.sessionId);
       signal?.throwIfAborted();
       if (pending?.id !== job.id || !['routing', 'offered'].includes(pending.state))
         return native('superseded');
-      if (instructions) await assertInstructionMetadataCurrent(instructions);
       const consent = await this.currentConsent(session.cwd);
       if (!consent) return native('no_consent');
       const changed = uncovered(consent);
@@ -712,22 +565,19 @@ export class ModelHandoff {
               input,
               signal,
               async () => {
-                if (claudeWorkspace) {
-                  const worker = await qualifiedModelWorker(
-                    session.cwd,
-                    String(job.native.subagent_type ?? 'general-purpose'),
-                    undefined,
-                    this.options.dataDir,
-                    signal,
-                    session.claudePermissionMode,
-                  );
-                  if (
-                    !worker?.claudeWorkspace ||
-                    !sameClaudeWorkspace(claudeWorkspace, worker.claudeWorkspace) ||
-                    worker.windows?.fingerprint !== job.decision.windowsWorker
-                  )
-                    throw new Error('Native Claude workspace scope changed');
-                } else if (instructions) await assertInstructionMetadataCurrent(instructions);
+                const worker = await qualifiedModelWorker(
+                  session.cwd,
+                  String(job.native.subagent_type ?? 'general-purpose'),
+                  this.options.dataDir,
+                  signal,
+                  session.claudePermissionMode,
+                );
+                if (
+                  !worker?.claudeWorkspace ||
+                  !sameClaudeWorkspace(claudeWorkspace, worker.claudeWorkspace) ||
+                  worker.windows?.fingerprint !== job.decision.windowsWorker
+                )
+                  throw new Error('Native Claude workspace scope changed');
                 const current = await this.currentConsent(session.cwd);
                 changedBeforeFee = current ? uncovered(current) : 'no_consent';
                 if (changedBeforeFee)
@@ -777,14 +627,9 @@ export class ModelHandoff {
       // Measured here, never taken from the offer: the job's budget starts from it.
       routingAuthorizedAtomic: authorizedAtomic.toString(),
       routerOrigin: transport.origin,
-      ...(instructions ? { instructionContext: instructions } : {}),
-      ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),
-      ...(disclosureRepositories ? { disclosureRepositories } : {}),
-      ...(claudeWorkspace ? { claudeWorkspace } : {}),
+      claudeWorkspace,
       ...(job.decision.windowsWorker ? { windowsWorker: job.decision.windowsWorker } : {}),
-      ...(session.harness !== 'codex'
-        ? { claudePermissionMode: job.decision.claudePermissionMode }
-        : {}),
+      claudePermissionMode: job.decision.claudePermissionMode,
     });
     if (timing) timing.marks.decided = Date.now();
     return {
@@ -797,38 +642,19 @@ export class ModelHandoff {
       capAtomic: job.capAtomic,
       reason: parsed.data.reason,
       parentPolicy,
-      ...(claudeWorkspace
-        ? { workspace: claudeWorkspace, ...droppedNote(claudeWorkspace) }
-        : {
-            workspace: {
-              root: settings.root,
-              workingDirectories: session.codexPolicy?.parent?.runtimeWorkspaceRoots ?? [
-                settings.root,
-              ],
-            },
-          }),
-      consent: offerConsent(consent, disclosureRepositories ?? []),
+      workspace: claudeWorkspace,
+      ...droppedNote(claudeWorkspace),
+      consent: offerConsent(consent, disclosureRepositories),
       instruction: `The user has installed Tenjin and turned DeepSeek subagents on. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek, and its web searches run inside the DeepSeek call, while the address of a public page its WebFetch could not fetch goes to Exa. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. ${
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
-      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap.${
-        session.harness === 'claude'
-          ? ' When accepting several offers together, put only the chosen ids into one subagent({offer_ids: [id1, id2, ...]}) call so their workers run in parallel. Claude Code runs separate acceptance calls in order.'
-          : ''
-      }${
+      } This offer is for this one call: each held call gets its own offer, its own offer_id and its own routing fee, within the person's spend limits and each job's cap. When accepting several offers together, put only the chosen ids into one subagent({offer_ids: [id1, id2, ...]}) call so their workers run in parallel. Claude Code runs separate acceptance calls in order.${
         nativeBackground(job.native) === true
           ? " This call asked to run in the background, so its worker does: the accept call returns at once, and the worker's result arrives later as a notification, as a native background agent's does. Sent again unchanged, the call runs natively in the background."
           : ''
-      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto.${
-        // In Claude Code the hook's refusal line already says the call was held and has not run.
-        session.harness === 'claude' ? '' : ' No assignment has been sent to a worker.'
-      }${
-        session.harness === 'claude'
-          ? ` Once accepted, the worker's address is ${workerHandleFor(job.id)}: to tell it something while it runs, call SendMessage({to:"${workerHandleFor(job.id)}",message:"<complete message>"}); it reaches the worker at its next turn, as a native subagent's message does. Such a message goes to DeepSeek at once, with no held offer to cancel, so apply this offer's parentPolicy to its text before you send it.`
-          : ''
-      }`,
-      ...(session.harness === 'claude' ? { worker_handle: workerHandleFor(job.id) } : {}),
+      } Do either as one call with no comment on the choice: the call itself shows it. You retain the final veto. Once accepted, the worker's address is ${workerHandleFor(job.id)}: to tell it something while it runs, call SendMessage({to:"${workerHandleFor(job.id)}",message:"<complete message>"}); it reaches the worker at its next turn, as a native subagent's message does. Such a message goes to DeepSeek at once, with no held offer to cancel, so apply this offer's parentPolicy to its text before you send it.`,
+      worker_handle: workerHandleFor(job.id),
       ...(nativeBackground(job.native) === true ? { background: true } : {}),
     };
   }

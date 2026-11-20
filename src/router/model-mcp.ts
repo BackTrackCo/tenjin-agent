@@ -129,8 +129,7 @@ const jobOwner = (job: ModelJob): ModelConversationOwner => ({
       : claudeWorkerConfigDir(job.root),
 });
 
-/** What one fence ends: a Codex turn, one Claude job, and nothing for a Claude offer request. */
-const turnWindow = (session: ModelSession) => JSON.stringify([session.sessionId, session.turnId]);
+/** What one fence ends: one job, and nothing for an offer request. */
 const jobWindow = (job: Pick<ModelJob, 'sessionId' | 'id'>) =>
   JSON.stringify([job.sessionId, 'job', job.id]);
 
@@ -151,7 +150,6 @@ export function registerModelTool(
   server: McpServer,
   options: {
     dataDir: string;
-    harness: 'claude' | 'codex';
     session: () => ModelSession | undefined;
     /**
      * The host said this session closed while the process goes on (`/clear` in Claude
@@ -275,28 +273,27 @@ export function registerModelTool(
         await sweepModelRecords(options.dataDir);
       })().catch(() => undefined);
   const refundRecovery = new AbortController();
-  const refundsRecovered =
-    options.harness === 'claude' && !isModelWorkerProcess()
-      ? repaired.then(async () => {
-          const { signal } = refundRecovery;
-          while (!signal.aborted) {
-            try {
-              if ((await hasModelRefundRecords(options.dataDir)) && !signal.aborted) {
-                const transport = await options.transport();
-                await transport.recoverInferenceRefunds(
-                  AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
-                );
-              }
-            } catch {
-              // The next pass can retry, including when the signer is available again.
+  const refundsRecovered = !isModelWorkerProcess()
+    ? repaired.then(async () => {
+        const { signal } = refundRecovery;
+        while (!signal.aborted) {
+          try {
+            if ((await hasModelRefundRecords(options.dataDir)) && !signal.aborted) {
+              const transport = await options.transport();
+              await transport.recoverInferenceRefunds(
+                AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+              );
             }
-            // Retry while the session is open without keeping the process alive.
-            await delay(REFUND_RECOVERY_INTERVAL_MS, undefined, { signal, ref: false }).catch(
-              () => undefined,
-            );
+          } catch {
+            // The next pass can retry, including when the signer is available again.
           }
-        })
-      : Promise.resolve();
+          // Retry while the session is open without keeping the process alive.
+          await delay(REFUND_RECOVERY_INTERVAL_MS, undefined, { signal, ref: false }).catch(
+            () => undefined,
+          );
+        }
+      })
+    : Promise.resolve();
   let handoff: ModelHandoff | undefined;
   const getHandoff = async () =>
     (handoff ??= new ModelHandoff({
@@ -413,7 +410,7 @@ export function registerModelTool(
     const model = await getHandoff();
     const pending = await current();
     const fenceConversation = async () => {
-      if (options.harness !== 'claude' || !pending) return;
+      if (!pending) return;
       const active = controllers.get(pending.id)?.conversation;
       const owner = active?.owner ?? jobOwner(pending);
       const conversation = active
@@ -428,13 +425,7 @@ export function registerModelTool(
     await fenceConversation();
     await mark('cancelled');
   };
-  const fence = (session: ModelSession) =>
-    fenceWindow(
-      turnWindow(session),
-      (state) => jobs.fence(session.sessionId, session.turnId, state),
-      () => jobs.pending(session.sessionId, session.turnId),
-    );
-  /** One Claude job by its own id: its session's other offers and workers go on. */
+  /** One job by its own id: its session's other offers and workers go on. */
   const fenceJob = (job: ModelJob) =>
     Promise.all([
       fenceWindow(
@@ -464,7 +455,7 @@ export function registerModelTool(
   // worker's host registered it: a worker starts no DeepSeek worker and reads none (operator
   // ruling 2026-11-17). It once listed both under a second registration's name.
   const inWorker = options.modelWorker ?? isModelWorkerProcess();
-  if (options.harness === 'claude' && !inWorker)
+  if (!inWorker)
     server.registerTool(
       'subagent_activity',
       {
@@ -586,15 +577,11 @@ export function registerModelTool(
           .optional(),
       })
       .optional(),
-    delegation_id: z.string().uuid().optional(),
-    task: z.string().optional(),
     // With cancel, from the plugin alone: the person stopped the worker's agent, or the
     // session ended (`/clear` too) with a background worker still running. A label for the
     // job's record, never a permission.
     reason: z.enum(['agent_stopped', 'session_ended']).optional(),
-    ...(options.harness === 'claude'
-      ? { offer_ids: z.array(z.string().uuid()).min(2).optional() }
-      : {}),
+    offer_ids: z.array(z.string().uuid()).min(2).optional(),
   };
   const parseAnswer = (reply: { content: Array<{ type: string; text?: string }> }) => {
     try {
@@ -692,9 +679,9 @@ export function registerModelTool(
     {
       title: 'Tenjin subagent',
       description:
-        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or on Claude accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
-      ...(options.harness === 'claude' ? { _meta: { 'anthropic/alwaysLoad': true } } : {}),
+      _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: subagentInput,
     },
     continueDirect(
@@ -736,16 +723,12 @@ export function registerModelTool(
               ? current?.claudePermissionMode
               : undefined;
           };
-          if (
-            !session ||
-            isModelWorkerProcess() ||
-            (options.harness === 'codex' && extra._meta?.['threadId'] !== session.sessionId)
-          ) {
+          if (!session || isModelWorkerProcess()) {
             await noOffer(session ? 'host_unqualified' : 'no_session');
             return unavailable('Host worker permission bridge is not qualified');
           }
           if (
-            [args.offer_id, args.cancel, args.capture, args.delegation_id, args.end_session].filter(
+            [args.offer_id, args.cancel, args.capture, args.end_session].filter(
               (v) => v !== undefined,
             ).length !== 1
           )
@@ -753,38 +736,24 @@ export function registerModelTool(
           await repaired;
           if (args.end_session) {
             // Only the session this process serves, and only from its own host.
-            if (options.harness !== 'claude' || args.end_session !== session.sessionId)
-              return answer({ status: 'not_owned' });
+            if (args.end_session !== session.sessionId) return answer({ status: 'not_owned' });
             await endSession(session.sessionId);
             options.sessionEnded?.(session.sessionId);
             return answer({ status: 'ended' });
           }
           if (args.cancel) {
-            if (options.harness === 'claude') {
-              // By its own id, in any turn and any process: the session's other jobs go on.
-              const record = await jobs.owned(args.cancel, session.sessionId);
-              if (!record) return answer({ status: 'not_owned' });
-              cancelledBy.set(record.id, args.reason ?? 'parent_cancel');
-              await fenceJob(record);
-              return answer({ status: 'cancelled' });
-            }
-            // A worker outlives the parent turn it was accepted in, so it is found by its own turn.
-            const running = controllers.get(args.cancel)?.session;
-            const owned = running?.sessionId === session.sessionId ? running : session;
-            const pending = await (await getHandoff()).store.pending(owned.sessionId, owned.turnId);
-            if (pending?.id !== args.cancel) return answer({ status: 'not_owned' });
-            cancelledBy.set(pending.id, 'parent_cancel');
-            await fence(owned);
+            // By its own id, in any turn and any process: the session's other jobs go on.
+            const record = await jobs.owned(args.cancel, session.sessionId);
+            if (!record) return answer({ status: 'not_owned' });
+            cancelledBy.set(record.id, args.reason ?? 'parent_cancel');
+            await fenceJob(record);
             return answer({ status: 'cancelled' });
           }
-          // A Claude offer is found by its own id in any turn of its session, and its
-          // operations run in its own window: a cancel ends that job and no other. A
-          // Claude offer request has no window a fence could close.
-          let window =
-            options.harness === 'claude'
-              ? JSON.stringify([session.sessionId])
-              : turnWindow(session);
-          const offered = args.offer_id && options.harness === 'claude' ? args.offer_id : undefined;
+          // An offer is found by its own id in any turn of its session, and its
+          // operations run in its own window: a cancel ends that job and no other. An
+          // offer request has no window a fence could close.
+          let window = JSON.stringify([session.sessionId]);
+          const offered = args.offer_id;
           const refuseOffer = async (reason: string) => {
             if (offered) await warming.get(offered)?.stop();
             return unavailable(reason);
@@ -807,7 +776,6 @@ export function registerModelTool(
             .run(window, extra.signal, async (signal) => {
               if (args.capture) {
                 if (
-                  options.harness !== 'claude' ||
                   args.capture.session_id !== session.sessionId ||
                   !server.server.getClientCapabilities()?.elicitation
                 ) {
@@ -902,41 +870,19 @@ export function registerModelTool(
                   return unavailable('Model routing unavailable');
                 }
               }
-              if (args.delegation_id) {
-                if (options.harness !== 'codex' || typeof args.task !== 'string')
-                  return answer({
-                    action: 'native',
-                    reason: 'Complete plaintext assignment required',
-                  });
-                try {
-                  return answer(
-                    await (
-                      await getHandoff()
-                    ).submitCodex(session, args.delegation_id, args.task, signal),
-                  );
-                } catch {
-                  return answer({
-                    action: 'native',
-                    reason: 'Routing unavailable; retry the original native call unchanged',
-                  });
-                }
-              }
               if (!args.offer_id)
                 return answer({ action: 'native', reason: 'Unsupported submission on this host' });
               const model = await getHandoff();
-              const pending = offered
-                ? await model.store.owned(offered, session.sessionId)
-                : await model.store.pending(session.sessionId, session.turnId);
+              const pending = offered ? await model.store.owned(offered, session.sessionId) : null;
               const owner: ModelConversationOwner = {
                 parentSessionId: session.sessionId,
                 root: session.cwd,
                 configDir: claudeWorkerConfigDir(session.cwd),
               };
               let conversation: ModelConversation | null = null;
-              const resumed =
-                options.harness === 'claude' && typeof pending?.decision.workerHandle === 'string';
+              const resumed = typeof pending?.decision.workerHandle === 'string';
               ownedContinuation ||= resumed;
-              if (options.harness === 'claude' && pending?.id === args.offer_id) {
+              if (pending?.id === args.offer_id) {
                 conversation = resumed
                   ? await model.conversations.lookup(pending.decision.workerHandle as string, owner)
                   : await model.conversations.findByJob(pending.id, owner);
@@ -947,9 +893,8 @@ export function registerModelTool(
               if (!current || current.routerOrigin !== transport.origin)
                 return refuseOffer('Inference consent revoked or endpoint changed');
               if (
-                options.harness === 'claude' &&
-                (!claudeWorkerPermissionMode(currentClaudeMode()) ||
-                  pending?.decision.claudePermissionMode !== currentClaudeMode())
+                !claudeWorkerPermissionMode(currentClaudeMode()) ||
+                pending?.decision.claudePermissionMode !== currentClaudeMode()
               )
                 return refuseOffer(
                   ownedContinuation
@@ -980,23 +925,18 @@ export function registerModelTool(
                     ? conversation?.originalJob.native.subagent_type
                     : pending?.native.subagent_type) ?? 'general-purpose',
                 ),
-                session.codexPolicy,
                 options.dataDir,
                 signal,
-                options.harness === 'claude' ? currentClaudeMode() : undefined,
+                currentClaudeMode(),
               );
               startMarks.qualified = Date.now();
               const offeredWorkspace = savedClaudeWorkspace(pending?.decision.claudeWorkspace);
               if (
                 !qualified ||
-                (options.harness === 'claude' &&
-                  (!offeredWorkspace ||
-                    !qualified.claudeWorkspace ||
-                    qualified.windows?.fingerprint !== pending?.decision.windowsWorker ||
-                    !sameClaudeWorkspace(offeredWorkspace, qualified.claudeWorkspace))) ||
-                (options.harness === 'codex' &&
-                  JSON.stringify(qualified.nativeSnapshot) !==
-                    JSON.stringify(pending?.decision.nativeSnapshot))
+                !offeredWorkspace ||
+                !qualified.claudeWorkspace ||
+                qualified.windows?.fingerprint !== pending?.decision.windowsWorker ||
+                !sameClaudeWorkspace(offeredWorkspace, qualified.claudeWorkspace)
               )
                 return refuseOffer(
                   ownedContinuation
@@ -1004,11 +944,7 @@ export function registerModelTool(
                     : 'Host permissions changed; retry original native call',
                 );
               signal.throwIfAborted();
-              const job = await model.store.accept(
-                args.offer_id,
-                session.sessionId,
-                offered ? undefined : session.turnId,
-              );
+              const job = await model.store.accept(args.offer_id, session.sessionId);
               const warm = job && warming.get(job.id);
               if (job) warming.delete(job.id);
               if (
@@ -1034,10 +970,7 @@ export function registerModelTool(
                     : 'Offer expired, changed, already selected or consent revoked; retry original native call unchanged',
                 );
               }
-              if (
-                options.harness === 'claude' &&
-                job.decision.claudePermissionMode !== currentClaudeMode()
-              ) {
+              if (job.decision.claudePermissionMode !== currentClaudeMode()) {
                 await warm?.stop();
                 await model.store.finish(job.id, 'cancelled');
                 return unavailable(
@@ -1048,45 +981,41 @@ export function registerModelTool(
               }
               // The mode accepted with the job holds for the job's life. A later parent
               // prompt, mode switch or cd must not end a running worker.
-              const acceptedClaudeMode =
-                options.harness === 'claude'
-                  ? claudeWorkerPermissionMode(job.decision.claudePermissionMode)
-                  : null;
+              const acceptedClaudeMode = claudeWorkerPermissionMode(
+                job.decision.claudePermissionMode,
+              );
               const jobClaudeMode = () =>
                 options.session()?.sessionId === ownedSessionId ? acceptedClaudeMode : undefined;
               let activeConversation: ActiveConversation | undefined;
               let executionJob = job;
-              if (options.harness === 'claude') {
-                try {
-                  if (!resumed) {
-                    conversation = await model.conversations.create({
-                      job,
-                      parentSessionId: session.sessionId,
-                      sdkSessionId: warm?.sdkSessionId ?? randomUUID(),
-                      configDir: owner.configDir,
-                    });
-                  }
-                  if (!conversation) throw new Error('Owned conversation unavailable');
-                  ownedContinuation = true;
-                  const accepted = await model.conversations.accept(
-                    conversation.handle,
-                    owner,
-                    job.id,
-                  );
-                  if (accepted?.action !== 'start')
-                    throw new Error('Continuation already selected');
-                  conversation = accepted.conversation;
-                  activeConversation = {
-                    handle: conversation.handle,
-                    owner,
-                    continuationId: job.id,
-                  };
-                  if (resumed) executionJob = continuationExecution(job, conversation);
-                } catch {
-                  await warm?.stop();
-                  await model.store.finish(job.id, 'unknown');
-                  return unavailable('Owned conversation could not be selected; no worker started');
+              try {
+                if (!resumed) {
+                  conversation = await model.conversations.create({
+                    job,
+                    parentSessionId: session.sessionId,
+                    sdkSessionId: warm?.sdkSessionId ?? randomUUID(),
+                    configDir: owner.configDir,
+                  });
                 }
+                if (!conversation) throw new Error('Owned conversation unavailable');
+                ownedContinuation = true;
+                const accepted = await model.conversations.accept(
+                  conversation.handle,
+                  owner,
+                  job.id,
+                );
+                if (accepted?.action !== 'start') throw new Error('Continuation already selected');
+                conversation = accepted.conversation;
+                activeConversation = {
+                  handle: conversation.handle,
+                  owner,
+                  continuationId: job.id,
+                };
+                if (resumed) executionJob = continuationExecution(job, conversation);
+              } catch {
+                await warm?.stop();
+                await model.store.finish(job.id, 'unknown');
+                return unavailable('Owned conversation could not be selected; no worker started');
               }
               const abort = new AbortController();
               // WHO OR WHAT ABORTED IT, read at the abort itself: a cancel call names its
@@ -1175,7 +1104,6 @@ export function registerModelTool(
                 }
               };
               const refundOutcome = async () => {
-                if (options.harness !== 'claude') return {};
                 const refund = await readModelRefundResult(
                   options.dataDir,
                   transport.origin,
@@ -1205,26 +1133,19 @@ export function registerModelTool(
                     omitted,
                     ...(activeConversation ? { inbox } : {}),
                     ...(activity ? { activity } : {}),
-                    ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
-                    ...(options.harness === 'claude'
-                      ? {
-                          ...(options.web ? { web: options.web } : {}),
-                          ...(options.webIdentities
-                            ? { webIdentities: options.webIdentities }
-                            : {}),
-                          claudePermissionMode: acceptedClaudeMode ?? undefined,
-                          currentClaudePermissionMode: jobClaudeMode,
-                          claudeSession: {
-                            ...(resumed
-                              ? { resume: conversation!.sdkSessionId }
-                              : { sessionId: conversation!.sdkSessionId }),
-                            onSession: async (id: string) => {
-                              if (id !== conversation!.sdkSessionId)
-                                throw new Error('Native Claude changed the owned session');
-                            },
-                          },
-                        }
-                      : {}),
+                    ...(options.web ? { web: options.web } : {}),
+                    ...(options.webIdentities ? { webIdentities: options.webIdentities } : {}),
+                    claudePermissionMode: acceptedClaudeMode ?? undefined,
+                    currentClaudePermissionMode: jobClaudeMode,
+                    claudeSession: {
+                      ...(resumed
+                        ? { resume: conversation!.sdkSessionId }
+                        : { sessionId: conversation!.sdkSessionId }),
+                      onSession: async (id: string) => {
+                        if (id !== conversation!.sdkSessionId)
+                          throw new Error('Native Claude changed the owned session');
+                      },
+                    },
                     permission: async (tool, input, signal, ask) => {
                       if (!server.server.getClientCapabilities()?.elicitation || signal.aborted)
                         return false;
@@ -1235,7 +1156,7 @@ export function registerModelTool(
                       return server.server
                         .elicitInput(
                           workerPermissionForm(tool, input, ask, {
-                            jobChoice: options.harness === 'claude',
+                            jobChoice: true,
                           }),
                           { signal, timeout: PROMPT_WAIT_MS },
                         )
@@ -1255,18 +1176,14 @@ export function registerModelTool(
                     return runModelWorker(executionJob, workerOptions);
                   };
                   // A continuation can spend from an earlier job but must close its own channel.
-                  // Codex workers keep the temporary shared channel until they are removed.
-                  const result =
-                    options.harness === 'claude'
-                      ? await runOptions.transport.withInferenceRun(
-                          job.id,
-                          abort.signal,
-                          run,
-                          (name) => {
-                            endMarks[name] = Date.now();
-                          },
-                        )
-                      : await run(runOptions.transport);
+                  const result = await runOptions.transport.withInferenceRun(
+                    job.id,
+                    abort.signal,
+                    run,
+                    (name) => {
+                      endMarks[name] = Date.now();
+                    },
+                  );
                   const envelope = {
                     status: 'completed',
                     label: 'DeepSeek V4.1 Flash 1017',
@@ -1455,33 +1372,5 @@ export function registerModelTool(
   workerShutdown.set(server, shutdown);
   return {
     shutdown,
-    fence,
-    async codexHook(session: ModelSession, raw: Record<string, unknown>) {
-      if (isModelWorkerProcess()) return null;
-      if (
-        !['collaborationspawn_agent', 'spawn_agent', 'Agent'].includes(String(raw.tool_name)) ||
-        typeof raw.tool_use_id !== 'string' ||
-        !raw.tool_input ||
-        typeof raw.tool_input !== 'object' ||
-        Array.isArray(raw.tool_input)
-      )
-        return null;
-      return lifecycle
-        .run(turnWindow(session), undefined, async (signal) =>
-          (await getHandoff()).captureCodex(
-            session,
-            raw.tool_use_id as string,
-            raw.tool_input as Record<string, unknown>,
-            signal,
-          ),
-        )
-        .catch(() => ({
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-            permissionDecisionReason: 'This delegation window was interrupted; start a new turn.',
-          },
-        }));
-    },
   };
 }

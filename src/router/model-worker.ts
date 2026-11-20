@@ -36,12 +36,6 @@ import {
   type PermissionUpdate,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk/core';
-import type { CodexModelPolicy } from './codex-model-gates';
-import {
-  qualifyNativeCodexWorker,
-  runNativeCodexWorker,
-  type NativeCodexSnapshot,
-} from './codex-native-worker';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { markSessionServed } from './alive';
 import { modelSettings } from './model-settings';
@@ -66,7 +60,6 @@ import {
   CLAUDE_WORKER_THINKING_ENV,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
-import type { InstructionContext } from './model-instructions';
 import {
   claudeWorkerPrivatePaths,
   jobTempPatterns,
@@ -138,9 +131,6 @@ import {
 type QualifiedWorker = {
   path: string;
   source?: string;
-  instructionContext?: InstructionContext;
-  nativeSnapshot?: NativeCodexSnapshot;
-  disclosureRepositories?: string[];
   claudeWorkspace?: ClaudeWorkspace;
   windows?: WindowsWorkerLaunch;
   customAgent?: WorkerAgent;
@@ -158,13 +148,11 @@ function readWorkerClaudeCode(cwd: string, windows?: WindowsWorkerLaunch) {
 export async function qualifiedModelWorker(
   cwd: string,
   agentType = 'general-purpose',
-  codexPolicy?: CodexModelPolicy,
   dataDir?: string,
   signal?: AbortSignal,
   claudePermissionMode?: ClaudeWorkerPermissionMode,
 ): Promise<QualifiedWorker | null> {
   if (!dataDir) return null;
-  if (codexPolicy) return qualifyNativeCodexWorker({ cwd, policy: codexPolicy, dataDir, signal });
   if (!claudeWorkerAuthCompatible(process.env)) return null;
   const windows = await windowsWorkerLaunch(dataDir, cwd);
   if (process.platform === 'win32' && !windows) return null;
@@ -265,7 +253,6 @@ export async function runModelWorker(
     dataDir: string;
     transport: ModelTransport;
     signal: AbortSignal;
-    codexPolicy?: CodexModelPolicy;
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
@@ -313,14 +300,6 @@ export async function runModelWorker(
   const run = async (signal: AbortSignal) => {
     const current = { ...options, signal };
     signal.throwIfAborted();
-    if (current.codexPolicy)
-      return runNativeCodexWorker(job, {
-        ...current,
-        codexPolicy: current.codexPolicy,
-        // Codex has no job-wide allow; any allow is for this call only.
-        permission: async (tool, input, signal) =>
-          (await current.permission(tool, input, signal)) !== false,
-      });
     assertClaudeWorkerMode(job.decision.claudePermissionMode, current.claudePermissionMode);
     if (!current.currentClaudePermissionMode)
       throw new Error('Owned Claude mode observer is unavailable');
@@ -332,7 +311,6 @@ export async function runModelWorker(
     const binary = await qualifiedModelWorker(
       job.root,
       agentType,
-      undefined,
       current.dataDir,
       signal,
       current.claudePermissionMode,

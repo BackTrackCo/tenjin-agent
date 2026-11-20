@@ -3,7 +3,6 @@ import { isModelWorkerProcess } from './model-worker-context';
 import { registerModelTool, stopModelWorkers } from './model-mcp';
 import { ModelTransport } from './model-transport';
 import type { ModelSession } from './model-handoff';
-import { codexModelPolicy } from './codex-model-context';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -299,7 +298,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // not unlocked a second time beside it: both share the wallet layer's signer
   // cache, so the payer's unlock serves a paid lookup too.
   if (isModelWorkerProcess(opts.env)) {
-    // Native worker qualification lists tools without unlocking or funding the wallet.
+    // A worker's own `tenjin mcp` never unlocks or funds the wallet.
   } else if (opts.payer !== undefined) {
     void opts.payer.prewarm();
   } else if (opts.handlerDeps?.provider === undefined) {
@@ -317,84 +316,85 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
    */
   const sessions = new Map<string, { transcript_path?: unknown; cwd?: unknown }>();
   let modelSession: ModelSession | undefined;
-  const seenModelTurns = new Set<string>();
   // A `tenjin mcp` STARTED INSIDE A MODEL WORKER, under whatever name the worker's host
   // registered it, lists and runs one tool: `hook`, which the host's hook legs call and
   // which answers nothing there. A worker pays for nothing outside its job's budget and
   // starts no DeepSeek worker (operator ruling 2026-11-17).
   const inWorker = isModelWorkerProcess(opts.env);
-  const modelTool = registerModelTool(server, {
-    modelWorker: inWorker,
-    dataDir: ctx.dataDir,
-    harness: opts.harness ?? 'claude',
-    session: () => modelSession,
-    // Claude Code keeps this process across `/clear`, which starts another session id.
-    // The record of the closed one would refuse every call of the new one (`no_session`).
-    sessionEnded: (sessionId) => {
-      if (modelSession?.sessionId === sessionId) modelSession = undefined;
-    },
-    transport: async () => {
-      const settings = await resolveContextSettings(ctx);
-      return new ModelTransport({
-        dataDir: ctx.dataDir,
-        baseUrl: settings.baseUrl,
-        payerDeps: {
+  // Only Claude Code runs DeepSeek workers: a Codex host gets no `subagent` tool, no offer
+  // and no fee, and its subagent calls run natively.
+  if (opts.harness !== 'codex')
+    registerModelTool(server, {
+      modelWorker: inWorker,
+      dataDir: ctx.dataDir,
+      session: () => modelSession,
+      // Claude Code keeps this process across `/clear`, which starts another session id.
+      // The record of the closed one would refuse every call of the new one (`no_session`).
+      sessionEnded: (sessionId) => {
+        if (modelSession?.sessionId === sessionId) modelSession = undefined;
+      },
+      transport: async () => {
+        const settings = await resolveContextSettings(ctx);
+        return new ModelTransport({
           dataDir: ctx.dataDir,
-          getSigner: () => provider.getSigner(),
-          policy: async () => (await resolveContextSettings(ctx)).policy,
-          authorizer: (policy) => createLocalSpendAuthorizer({ dir: ctx.dataDir, policy }),
-          walletBalance: (address, timeoutMs) =>
-            readUsdcBalanceWithFallback(address, settings.rpcUrl, { timeoutMs }),
-          readContract: chainReader(settings.rpcUrl),
-          ...chainRefundReads(settings.rpcUrl),
-        },
-      });
-    },
-    // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it
-    // (`model-worker-web.ts`): the person's wallet, limits and settings in the job's root,
-    // no routing fee and no approval, so a call over the limits is refused, never kept.
-    web: async (args, { cwd, watch, signal }) => {
-      const settings = await resolveContextSettings(ctx);
-      const authorizer = watch(
-        opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
-      );
-      const payDeps = opts.handlerDeps?.payDeps;
-      return runRequestTool(args, {
-        ctx,
-        provider,
-        authorizer,
-        cwd,
-        ...(signal !== undefined ? { paymentSignal: signal } : {}),
-        approves: false,
-        harness: 'claude',
-        ...(opts.handlerDeps?.fetchImpl !== undefined
-          ? { fetchImpl: opts.handlerDeps.fetchImpl }
-          : {}),
-        ...(payDeps !== undefined
-          ? {
-              payDeps: {
-                ...payDeps,
-                ...(payDeps.authorizer !== undefined
-                  ? { authorizer: watch(payDeps.authorizer) }
-                  : {}),
-              },
-            }
-          : {}),
-      });
-    },
-    // The identities a worker's searches are checked against when the person saved a block
-    // or only rule: read now, free, else the copy the last read kept.
-    webIdentities: async () => {
-      const settings = await resolveContextSettings(ctx);
-      const read = await fetchIdentities(ctx, {
-        baseUrl: settings.baseUrl,
-        ...(opts.handlerDeps?.fetchImpl !== undefined
-          ? { fetchImpl: opts.handlerDeps.fetchImpl }
-          : {}),
-      });
-      return read.ok ? read.identities : cachedIdentities(ctx.dataDir);
-    },
-  });
+          baseUrl: settings.baseUrl,
+          payerDeps: {
+            dataDir: ctx.dataDir,
+            getSigner: () => provider.getSigner(),
+            policy: async () => (await resolveContextSettings(ctx)).policy,
+            authorizer: (policy) => createLocalSpendAuthorizer({ dir: ctx.dataDir, policy }),
+            walletBalance: (address, timeoutMs) =>
+              readUsdcBalanceWithFallback(address, settings.rpcUrl, { timeoutMs }),
+            readContract: chainReader(settings.rpcUrl),
+            ...chainRefundReads(settings.rpcUrl),
+          },
+        });
+      },
+      // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it
+      // (`model-worker-web.ts`): the person's wallet, limits and settings in the job's root,
+      // no routing fee and no approval, so a call over the limits is refused, never kept.
+      web: async (args, { cwd, watch, signal }) => {
+        const settings = await resolveContextSettings(ctx);
+        const authorizer = watch(
+          opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
+        );
+        const payDeps = opts.handlerDeps?.payDeps;
+        return runRequestTool(args, {
+          ctx,
+          provider,
+          authorizer,
+          cwd,
+          ...(signal !== undefined ? { paymentSignal: signal } : {}),
+          approves: false,
+          harness: 'claude',
+          ...(opts.handlerDeps?.fetchImpl !== undefined
+            ? { fetchImpl: opts.handlerDeps.fetchImpl }
+            : {}),
+          ...(payDeps !== undefined
+            ? {
+                payDeps: {
+                  ...payDeps,
+                  ...(payDeps.authorizer !== undefined
+                    ? { authorizer: watch(payDeps.authorizer) }
+                    : {}),
+                },
+              }
+            : {}),
+        });
+      },
+      // The identities a worker's searches are checked against when the person saved a block
+      // or only rule: read now, free, else the copy the last read kept.
+      webIdentities: async () => {
+        const settings = await resolveContextSettings(ctx);
+        const read = await fetchIdentities(ctx, {
+          baseUrl: settings.baseUrl,
+          ...(opts.handlerDeps?.fetchImpl !== undefined
+            ? { fetchImpl: opts.handlerDeps.fetchImpl }
+            : {}),
+        });
+        return read.ok ? read.identities : cachedIdentities(ctx.dataDir);
+      },
+    });
   const rememberSession = (raw: Record<string, unknown>): void => {
     const id = raw['session_id'];
     if (typeof id !== 'string') return;
@@ -419,10 +419,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         turnId: randomUUID(),
         cwd: raw['cwd'],
         transcript: raw['transcript_path'],
-        harness: 'claude',
       };
     }
-    if (modelSession?.harness === 'claude' && opts.harness !== 'codex') {
+    if (modelSession) {
       const observed = observeClaudeWorkerMode(raw, modelSession);
       if (observed) modelSession.claudePermissionMode = observed.mode;
     }
@@ -705,41 +704,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // is plain arguments, so each call must still carry its session's own
   // transcript (`admitHookEvent`); any other call answers "no opinion" with
   // nothing sent.
-  if (opts.harness === 'codex')
-    return registerCodexHookTool(server, ctx, opts, async (kind, raw) => {
-      const id = raw.session_id;
-      if (typeof id !== 'string' || (modelSession && modelSession.sessionId !== id)) return null;
-      if (kind === 'interrupt' || kind === 'end') {
-        if (kind === 'interrupt' && raw.turn_id !== modelSession?.turnId) return null;
-        if (modelSession) await modelTool.fence(modelSession);
-        if (raw.hook_event_name === 'SessionEnd') modelSession = undefined;
-        return null;
-      }
-      if (
-        typeof raw.turn_id !== 'string' ||
-        typeof raw.cwd !== 'string' ||
-        typeof raw.transcript_path !== 'string'
-      )
-        return null;
-      const turnKey = JSON.stringify([id, raw.turn_id]);
-      if (kind === 'prompt' && seenModelTurns.has(turnKey) && modelSession?.turnId !== raw.turn_id)
-        return null;
-      if (kind !== 'prompt' && (!modelSession || modelSession.turnId !== raw.turn_id)) return null;
-      if (kind === 'prompt' && modelSession && modelSession.turnId !== raw.turn_id)
-        await modelTool.fence(modelSession);
-      if (kind === 'prompt') seenModelTurns.add(turnKey);
-      modelSession = {
-        sessionId: id,
-        turnId: raw.turn_id,
-        cwd: raw.cwd,
-        transcript: raw.transcript_path,
-        harness: 'codex',
-      };
-      const policy = await codexModelPolicy(raw.transcript_path, id, raw.turn_id, raw.cwd);
-      if (modelSession?.turnId !== raw.turn_id || modelSession.sessionId !== id) return null;
-      if (policy) modelSession.codexPolicy = policy;
-      return kind === 'delegation' ? modelTool.codexHook(modelSession, raw) : null;
-    });
+  if (opts.harness === 'codex') return registerCodexHookTool(server, ctx, opts);
   const env = opts.env ?? process.env;
   const fromPlugin = launchedByPlugin(env);
   server.registerTool(
@@ -826,7 +791,6 @@ function registerCodexHookTool(
   server: McpServer,
   ctx: CommandContext,
   opts: RouterMcpOptions,
-  modelEvent: (kind: string, event: Record<string, unknown>) => Promise<unknown>,
 ): McpServer {
   server.registerTool(
     HOOK_TOOL,
@@ -843,7 +807,6 @@ function registerCodexHookTool(
       },
     },
     async (args, extra): Promise<CallToolResult> => {
-      if (isModelWorkerProcess(opts.env)) return { content: [{ type: 'text', text: '' }] };
       let response: unknown = null;
       try {
         const event = await admitCodexHookEvent(codexEventFromToolInput(args), {
@@ -851,16 +814,6 @@ function registerCodexHookTool(
           ...(opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {}),
         });
         if (event !== null) {
-          const modelResponse =
-            extra._meta?.['threadId'] === event.session_id
-              ? await modelEvent(args.kind, event)
-              : null;
-          if (args.kind === 'delegation' || args.kind === 'interrupt' || args.kind === 'end')
-            return {
-              content: [
-                { type: 'text', text: modelResponse === null ? '' : JSON.stringify(modelResponse) },
-              ],
-            };
           const { codexResponse } = await import('./codex-event');
           response = codexResponse(
             await runHookKind(args.kind, event, {

@@ -24,7 +24,6 @@ const jobSchema = z.object({
   decision: z.record(z.string(), z.unknown()),
   capAtomic: z.string().regex(/^\d+$/),
   state: z.enum([
-    'awaiting_prompt',
     'routing',
     'offered',
     'native',
@@ -177,7 +176,7 @@ function repeatKey(native: Record<string, unknown>): Record<string, unknown> {
   );
 }
 
-/** Immutable held calls, atomic selection: a job a call on Claude, one delegation a turn on Codex. */
+/** Immutable held calls, atomic selection: a job a call. */
 export class ModelJobStore {
   private dir: string;
   constructor(dataDir: string) {
@@ -186,9 +185,6 @@ export class ModelJobStore {
   private path(id: string) {
     if (!z.uuid().safeParse(id).success) throw new Error('Invalid model job');
     return join(this.dir, `${id}.json`);
-  }
-  private window(sessionId: string, turnId: string) {
-    return join(this.dir, `window-${canonicalHash({ sessionId, turnId })}.json`);
   }
   private callPath(sessionId: string, callId: string) {
     return join(this.dir, `call-${canonicalHash({ sessionId, callId })}.json`);
@@ -220,20 +216,10 @@ export class ModelJobStore {
     const p = jobSchema.safeParse(raw);
     return p.success ? p.data : null;
   }
-  /**
-   * `call` (Claude): every held call is its own job, whatever else its session
-   * has open or running. `turn` (Codex): one unresolved delegation a turn.
-   */
-  async offer(
-    input: NewJob,
-    state: 'awaiting_prompt' | 'routing' | 'offered' = 'offered',
-    scope: 'call' | 'turn' = 'call',
-  ): Promise<ModelJob> {
+  /** Every held call is its own job, whatever else its session has open or running. */
+  async offer(input: NewJob, state: 'routing' | 'offered' = 'offered'): Promise<ModelJob> {
     return this.locked(async () => {
-      const index =
-        scope === 'turn'
-          ? this.window(input.sessionId, input.turnId)
-          : this.callPath(input.sessionId, input.callId);
+      const index = this.callPath(input.sessionId, input.callId);
       const previous = await readJsonFile(index, 1000);
       const old = typeof previous?.id === 'string' ? await this.read(previous.id) : null;
       if (old && unresolved(old)) {
@@ -243,11 +229,7 @@ export class ModelJobStore {
           canonicalHash(old.native) === canonicalHash(input.native)
         )
           return old;
-        throw new Error(
-          scope === 'turn'
-            ? 'An unresolved delegation already owns this turn'
-            : 'This call id already names another unresolved delegation',
-        );
+        throw new Error('This call id already names another unresolved delegation');
       }
       const job: ModelJob = {
         ...input,
@@ -268,12 +250,6 @@ export class ModelJobStore {
       return job;
     });
   }
-  async pending(session: string, turn: string): Promise<ModelJob | null> {
-    const window = await readJsonFile(this.window(session, turn), 1000);
-    if (typeof window?.id !== 'string') return null;
-    const job = await this.read(window.id);
-    return job?.sessionId === session && job.turnId === turn ? job : null;
-  }
   /**
    * A job by its own id, in any turn and from any process, for the session
    * that owns it. Another session gets nothing, as for an id that never was.
@@ -282,34 +258,6 @@ export class ModelJobStore {
     if (!z.uuid().safeParse(id).success) return null;
     const job = await this.read(id);
     return job?.sessionId === session ? job : null;
-  }
-  /** Bind the one plaintext resubmission before paying. Replays must be exact. */
-  async submit(id: string, session: string, turn: string, task: string): Promise<ModelJob | null> {
-    return this.locked(async () => {
-      const job = await this.read(id);
-      if (!job || job.sessionId !== session || job.turnId !== turn || job.expiresAt <= Date.now())
-        return null;
-      if (job.state !== 'awaiting_prompt')
-        return ['routing', 'offered'].includes(job.state) && job.task === task ? job : null;
-      job.task = task;
-      job.state = 'routing';
-      await writePrivate(this.path(id), JSON.stringify(job));
-      return job;
-    });
-  }
-  /** Fence selection first. A running worker must be drained by its owner separately. */
-  async fence(
-    session: string,
-    turn: string,
-    state: 'cancelling' | 'cancelled' = 'cancelled',
-  ): Promise<void> {
-    try {
-      await lstat(this.window(session, turn));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
-    return this.locked(async () => this.fenced(await this.pending(session, turn), state));
   }
   /** Fences one job by its own id, for its session: nothing else of the session is touched. */
   async fenceOwned(
@@ -354,14 +302,13 @@ export class ModelJobStore {
     }
     return found;
   }
-  /** Once, on disk. Without `turn` the offer is accepted from any turn of its session. */
-  async accept(id: string, session: string, turn?: string): Promise<ModelJob | null> {
+  /** Once, on disk. The offer is accepted from any turn of its session. */
+  async accept(id: string, session: string): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.read(id);
       if (
         !job ||
         job.sessionId !== session ||
-        (turn !== undefined && job.turnId !== turn) ||
         job.expiresAt <= Date.now() ||
         job.state !== 'offered'
       )
@@ -402,27 +349,6 @@ export class ModelJobStore {
       };
       await writePrivate(this.path(id), JSON.stringify(ended));
       return ended;
-    });
-  }
-  /** Codex: the held call retried unchanged in its own turn passes the hold once. */
-  async nativeRetry(
-    session: string,
-    turn: string,
-    native: Record<string, unknown>,
-    comparable: (value: Record<string, unknown>) => unknown,
-  ): Promise<boolean> {
-    return this.locked(async () => {
-      const window = await readJsonFile(this.window(session, turn), 1000);
-      if (typeof window?.id !== 'string') return false;
-      const job = await this.read(window.id);
-      if (
-        !job ||
-        !['awaiting_prompt', ...REPEATABLE].includes(job.state) ||
-        canonicalHash(comparable(job.native)) !== canonicalHash(comparable(native))
-      )
-        return false;
-      await writePrivate(this.path(job.id), JSON.stringify({ ...job, state: 'native' }));
-      return true;
     });
   }
   /**
