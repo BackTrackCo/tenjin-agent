@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { chmodSync, statSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Attempt } from './held-lock';
 
@@ -76,6 +76,9 @@ export function sqliteAttempt(file: string, sqlite: Sqlite): Attempt {
       // The parent folder must exist. Opening creates the zero-byte file and takes no lock.
       if (!db) {
         db = new sqlite.DatabaseSync(file);
+        // SQLite creates the file with the umask's mode; the lock file is the user's alone. A
+        // chmod opens no descriptor, so it cannot drop a lock this process holds.
+        chmodSync(file, 0o600);
         ino = inoOf(file);
       }
       try {

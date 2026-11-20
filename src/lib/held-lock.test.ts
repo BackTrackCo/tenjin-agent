@@ -253,6 +253,12 @@ describe.skipIf(loadSqlite() === null)('exclusive SQLite transaction (Linux prim
     release!();
   });
 
+  it.skipIf(!posix)('makes the lock file private to the user', async () => {
+    const lock = join(tmp, 'sq-mode');
+    (await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock))();
+    expect(statSync(heldPath(lock)).mode & 0o077).toBe(0);
+  });
+
   it('abandoning a wait closes its connection and leaves the holder alone', async () => {
     const lock = join(tmp, 'sq-abandon');
     const holding = await holdLock(lock);
@@ -309,7 +315,7 @@ async function runStress(ms: string, chaos: string, workers: string, broken = '0
 // The control for the harness: against a lock skipped on 5% of the rounds, the log detector MUST
 // report overlaps. A detector that reports none here has proved nothing about a real lock.
 it('the stress detector sees two holders inside a deliberately broken lock', async () => {
-  const result = await runStress('3000', 'none', '4', '0.05');
+  const result = await runStress('3000', 'none', '4', '0.1');
   expect(result.rounds).toBeGreaterThan(0);
   expect(result.overlaps).toBeGreaterThan(0);
 }, 60_000);

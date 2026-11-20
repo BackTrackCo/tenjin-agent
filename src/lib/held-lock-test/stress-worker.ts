@@ -1,5 +1,5 @@
 import { appendFileSync } from 'node:fs';
-import { setImmediate as yieldTurn } from 'node:timers/promises';
+import { setTimeout as pause } from 'node:timers/promises';
 import { withHeldLock } from '../held-lock';
 
 /**
@@ -21,7 +21,8 @@ process.on('SIGTERM', () => {
 
 const critical = async () => {
   appendFileSync(log, `E ${process.pid}\n`);
-  await yieldTurn();
+  // Long enough that a second holder arriving meanwhile is seen, even on one busy core.
+  await pause(1);
   appendFileSync(log, `X ${process.pid}\n`);
   counts.rounds++;
 };
