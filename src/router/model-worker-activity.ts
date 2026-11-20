@@ -134,6 +134,44 @@ export function activityAnswer(
   };
 }
 
+/** The most one `subagent_activity` answer may hold, whatever the job did: it can reach the model. */
+export const ACTIVITY_ANSWER_MAX_BYTES = 32 * 1024;
+/** The most of a finished worker's answer text an activity answer carries; the handback has it whole. */
+const ACTIVITY_RESULT_BYTES = 8 * 1024;
+/**
+ * AN ACTIVITY ANSWER A MODEL COULD READ IS BOUNDED: the counts and the state whole, the answer
+ * text cut at 8 KiB, and the newest rows that fit 32 KiB in all (the older ones counted in
+ * `droppedRows`). A live viewer reads a few rows at a time, so it loses nothing it shows; the
+ * finished job's full result is its handback's.
+ */
+export function boundActivityAnswer<T extends ReturnType<typeof activityAnswer>>(shown: T): T {
+  const activity = { ...shown.activity } as T['activity'] & {
+    rows?: ModelWorkerActivityRow[];
+    result?: string;
+    droppedRows?: number;
+  };
+  if (activity.result !== undefined) {
+    const bytes = Buffer.from(activity.result);
+    if (bytes.length > ACTIVITY_RESULT_BYTES)
+      activity.result =
+        bytes.subarray(0, ACTIVITY_RESULT_BYTES).toString('utf8') +
+        ' [shortened here; the full result is the handback]';
+  }
+  if (activity.rows) {
+    const rows = [...activity.rows];
+    let dropped = activity.droppedRows ?? 0;
+    const size = () =>
+      Buffer.byteLength(JSON.stringify({ ...shown, activity: { ...activity, rows } }));
+    while (rows.length > 0 && size() > ACTIVITY_ANSWER_MAX_BYTES) {
+      rows.shift();
+      dropped++;
+    }
+    activity.rows = rows;
+    activity.droppedRows = dropped;
+  }
+  return { ...shown, activity };
+}
+
 /**
  * How an ended job ended, as its row shows it: from the job's state and the
  * handback kept for it (the completed envelope or the stopped one). Its status,
@@ -199,8 +237,9 @@ function usageTokens(value: unknown): number | undefined {
   return Number.isSafeInteger(total) ? total : undefined;
 }
 
-const PARTIAL_ROWS = 24;
-const PARTIAL_BYTES = 24 * 1024;
+/** A stopped worker's handback reaches the parent model, so it stays small. */
+const PARTIAL_ROWS = 12;
+const PARTIAL_BYTES = 8 * 1024;
 export type ModelWorkerPartial = {
   lastText?: string;
   rows: Omit<ModelWorkerActivityRow, 'id' | 'sequence' | 'elapsedSeconds'>[];
