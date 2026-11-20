@@ -1152,7 +1152,9 @@ it.each([
   } finally {
     spy.mockRestore();
   }
-  expect(timeouts).toContain(expected);
+  // The payer's timer is its deadline minus the clock read after it was set, so it can lose a
+  // millisecond or more under load (359999 for 360000): the offer's own deadline, never above it.
+  expect(timeouts.some((ms) => ms <= expected && ms > expected - 5_000)).toBe(true);
 });
 
 // A running job's budget file never reads as a fresh budget: a missing one (swept, deleted)
@@ -1242,6 +1244,22 @@ it("asks again with less output when the router's quote is above what the job ha
   expect(f.router.log.filter((line) => line.endsWith(' paid')).length).toBe(1);
   // The routing fee and the one call at its real charge: the earlier quotes reserved nothing.
   expect((await f.make().summary(f.job)).reservedAtomic).toBe('4000');
+});
+
+it('sends no second quote request once the sharing consent changed after the first', async () => {
+  const f = await ruledFixture(1);
+  let sends = 0;
+  const failure = await f
+    .make()
+    .messages(f.job, bigRequest, new AbortController().signal, async () => {
+      if (++sends > 1) throw new Error('Sharing consent changed');
+    })
+    .catch((error: unknown) => error as Error);
+  expect(failure.message).toBe('Sharing consent changed');
+  // The first quote was asked; the one for a lower limit never left, and nothing was reserved.
+  expect(f.router.log.filter((line) => line.endsWith('unpaid')).length).toBe(1);
+  expect(f.router.log.filter((line) => line.endsWith(' paid')).length).toBe(0);
+  expect((await f.make().summary(f.job)).reservedAtomic).toBe('3000');
 });
 
 it("sends the client's own guess at once when the router counts fewer bytes than the client does", async () => {

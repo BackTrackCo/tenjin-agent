@@ -595,8 +595,6 @@ export class ModelTransport {
         await assertCanTransmit();
       }
     };
-    // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
-    await assertCanTransmit();
     let wire = JSON.stringify(body);
     // AN OUTPUT CAP ABOVE 8,192 IS STEPPED DOWN TO WHAT THE JOB CAN STILL RESERVE, before
     // the quote is asked: the largest cap whose peak quote fits what is left of the job's
@@ -622,6 +620,10 @@ export class ModelTransport {
     let relayed = false;
     /** The unpaid request: the router's quote for this call, and the amount it names. */
     const askQuote = async (): Promise<{ challenge: Response; amount: bigint }> => {
+      // EVERY QUOTE REQUEST sends the conversation, the first and each asked again for a lower
+      // output limit, so each passes the transmit check (consent, workspace, mode) first. Nothing
+      // is reserved or signed yet, so a failure here leaves nothing uncertain.
+      await assertCanTransmit();
       const from = performance.now();
       await paced();
       // The wait is `paceWaitMs`, not the round trip's time.
