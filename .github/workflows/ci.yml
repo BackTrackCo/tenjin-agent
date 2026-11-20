@@ -148,7 +148,7 @@ jobs:
       # normal suite, and the Windows job runs them too.
       - run: pnpm install --frozen-lockfile
         if: matrix.os == 'macos-latest'
-      - run: pnpm exec vitest run src/lib/held-lock.test.ts
+      - run: pnpm exec vitest run src/lib/held-lock.test.ts src/router/model-job.test.ts src/router/model-refund.test.ts src/router/model-channel-turn.test.ts
         if: matrix.os == 'macos-latest'
 
   # Opt in: kills and stops lock holders at random and counts overlaps (must be 0).
