@@ -23,10 +23,9 @@ it('initializes the real worker MCP tool catalog without unlocking a wallet or s
   vi.spyOn(context, 'resolveContextSettings').mockResolvedValue({
     baseUrl: 'https://router.test',
   } as never);
-  const client = new Client({ name: 'native-worker-proof', version: '1' });
+  const client = new Client({ name: 'worker-proof', version: '1' });
   const server = await createRouterMcpServer({
     dataDir: dir,
-    harness: 'codex',
     env: { ...process.env, TENJIN_MODEL_WORKER: '1' },
     topUpAtStart: true,
     payer,

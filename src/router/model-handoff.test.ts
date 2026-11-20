@@ -7,7 +7,6 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
 import { qualifiedModelWorker } from './model-worker';
-import { makeInstructionContext } from './model-instructions';
 import {
   fitAdmission,
   ModelHandoff,
@@ -28,7 +27,7 @@ import { modelConsent } from './model-settings';
 import { RouteSkipped } from './decision';
 import { offeredOutputTokens, paidCallTimeoutMs } from './model-limits';
 import { advertisedCallLimit } from './model-pace';
-import { FEE_ABOVE_CEILING, ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { FEE_ABOVE_CEILING } from './fee';
 let dir: string;
 /**
  * The transport's `route` as the handoff reads it: the router's answer, and what the call
@@ -153,7 +152,6 @@ async function continuationFixture(multiple = false) {
     turnId: 'later-turn',
     cwd: repo,
     transcript: '',
-    harness: 'claude',
     claudePermissionMode: 'default',
   };
   return {
@@ -351,7 +349,7 @@ it('names a withheld native directory in the offer beside its keep-native path a
   });
 });
 
-it('keeps native tool guidance aligned with the complete Codex resubmission brief', async () => {
+it('keeps native tool guidance aligned with the held-call brief', async () => {
   const hook = await readFile(
     new URL('../../hosts/claude/tenjin/hooks/register.tsx', import.meta.url),
     'utf8',
@@ -405,7 +403,6 @@ it('refuses sibling disclosure revoked during qualification before routing or of
       'SendMessage',
     ),
   ).toMatchObject({ action: 'refused' });
-  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
   expect(f.route).not.toHaveBeenCalled();
   expect(
     await f.model.capture({ ...f.session, turnId: 'initial-new-turn' }, 'new-worker', {
@@ -539,7 +536,6 @@ it('refuses owned handles for missing history, foreign parents, revocation and u
   await writeFile(join(dir, 'config.json'), '{}');
   expect(await f.model.capture(f.session, 'revoked', native)).toMatchObject({ action: 'refused' });
   expect(f.route).not.toHaveBeenCalled();
-  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
 });
 
 it('refuses a complete follow-up whose encoded private record would be unreadable without truncating or selecting it', async () => {
@@ -555,250 +551,8 @@ it('refuses a complete follow-up whose encoded private record would be unreadabl
     'SendMessage',
   );
   expect(result).toMatchObject({ action: 'refused', started: false });
-  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
   expect((await f.model.conversations.lookup(f.conversation.handle, f.owner))?.state).toBe('idle');
   expect(f.route).not.toHaveBeenCalled();
-});
-
-it.each([
-  ['names the repository', true],
-  ['names no directory', false],
-] as const)('routes with a consent that %s and preserves parent veto', async (_what, named) => {
-  dir = await realpath(await mkdtemp(join(tmpdir(), 'model-handoff-')));
-  const repo = join(dir, 'repo');
-  await mkdir(repo);
-  await mkdir(join(repo, '.git'));
-  await writeFile(
-    join(repo, '.git/config'),
-    '[remote "origin"]\nurl = git@github.com:Acme/repo.git\n',
-  );
-  const instructionFile = join(repo, 'AGENTS.md');
-  await writeFile(instructionFile, 'Ask before publishing. Keep guarded Neon jobs native.');
-  const instructionContext = await makeInstructionContext({
-    harness: 'codex',
-    root: repo,
-    documents: [
-      {
-        path: instructionFile,
-        content: 'Ask before publishing. Keep guarded Neon jobs native.',
-        source: 'Codex project',
-      },
-    ],
-    configHash: 'fixture',
-    watchPaths: [instructionFile],
-  });
-  vi.mocked(qualifiedModelWorker).mockResolvedValue({
-    path: '/fixture/worker',
-    source: 'path',
-    instructionContext,
-    disclosureRepositories: [repo],
-  });
-  await writeFile(
-    join(dir, 'config.json'),
-    JSON.stringify({
-      router: {
-        subagents: true,
-        subagentConsent: !named
-          ? modelConsent({ routerOrigin: 'http://localhost:3939' })
-          : {
-              version: 2,
-              instructions: 'applicable',
-              reads: 'claude-home',
-              recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-              repositories: [repo],
-              githubRepositories: ['Acme/repo'],
-              maxJobAtomic: '1000000',
-              routerOrigin: 'http://localhost:3939',
-            },
-      },
-    }),
-  );
-  const transcript = join(dir, 'owned.jsonl');
-  const savedConfig = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
-  await writeFile(
-    transcript,
-    [
-      {
-        type: 'session_meta',
-        payload: {
-          id: 'root',
-          session_id: 'root',
-          source: 'vscode',
-          thread_source: null,
-          cli_version: '0.163.0',
-        },
-      },
-      {
-        type: 'event_msg',
-        payload: {
-          type: 'item_completed',
-          thread_id: 'root',
-          item: {
-            type: 'UserMessage',
-            id: 'u1',
-            content: [
-              { type: 'text', text: 'Keep Neon guarded and report factual findings only.' },
-            ],
-          },
-        },
-      },
-    ]
-      .map((row) => JSON.stringify(row))
-      .join('\n'),
-  );
-  const route = vi.fn(async (body: { jobId: string }) => ({ ...offer, jobId: body.jobId }));
-  const model = new ModelHandoff({
-    dataDir: dir,
-    transport: {
-      origin: 'http://localhost:3939',
-      route: answering(route),
-    } as unknown as ModelTransport,
-  });
-  const session: ModelSession = {
-    sessionId: 'root',
-    turnId: 'turn',
-    cwd: repo,
-    transcript,
-    harness: 'codex',
-    codexPolicy: { approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: {} },
-  };
-  const native = { message: 'encrypted assignment', task_name: 'check', fork_turns: 'none' };
-  const hold = await model.captureCodex(session, 'native-call', native);
-  expect(hold?.hookSpecificOutput.permissionDecision).toBe('deny');
-  expect(route).not.toHaveBeenCalled();
-  const pending = await model.store.pending('root', 'turn');
-  const task =
-    'Read the current implementation.\nPreserve literal command: pnpm check\nReturn JSON with findings and evidence.';
-  const recommendation = await model.submitCodex(session, pending!.id, task);
-  expect(recommendation).toMatchObject({
-    action: 'offer',
-    started: false,
-    parentPolicy,
-    consent: {
-      version: 2,
-      repository: repo,
-      githubRepositories: ['Acme/repo'],
-      routerOrigin: 'http://localhost:3939',
-      recipients: ['Tenjin', 'DeepSeek', 'Exa'],
-    },
-    instruction: expect.stringMatching(/Exa\..*binding instructions.*forbid disclosure/),
-  });
-  expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
-  // Codex has no refusal line above the offer, so its instruction still says it.
-  expect(recommendation).toHaveProperty(
-    'instruction',
-    expect.stringContaining('No assignment has been sent to a worker.'),
-  );
-  expect(recommendation).toHaveProperty(
-    'instruction',
-    expect.stringContaining('turned DeepSeek subagents on'),
-  );
-  expect('instruction' in recommendation ? recommendation.instruction : '').not.toMatch(
-    /opt[ -]?in/i,
-  );
-  expect(recommendation).toHaveProperty(
-    'parentPolicy',
-    expect.stringContaining(
-      "A live no-pay instruction vetoes the paid offer only when it bans paying or spending on the whole assignment, bans the worker's paid model or outside inference, requires only free models, or requires human approval for the worker's inference or any whole-assignment spending that has not been given. A limit the worker must obey on its own tool calls, commands, tests or live checks is an action rule and does not veto; for a human-authored instruction (a message, CLAUDE.md or a memory rule), a blanket no-pay form with no narrower object keeps the veto.",
-    ),
-  );
-  expect(route).toHaveBeenCalledWith(
-    expect.objectContaining({
-      subagentTask: task,
-      parentContext: [
-        { role: 'user', content: 'Keep Neon guarded and report factual findings only.' },
-      ],
-    }),
-    undefined,
-    expect.any(Function),
-    undefined,
-    ROUTING_FEE_CEILING_ATOMIC,
-  );
-  expect(await model.submitCodex(session, pending!.id, 'changed')).toMatchObject({
-    action: 'native',
-  });
-  expect(await model.captureCodex(session, 'native-retry', native)).toBeNull();
-  expect(await model.store.accept(pending!.id, 'root', 'turn')).toBeNull();
-  expect(route).toHaveBeenCalledTimes(1);
-  expect(JSON.stringify(route.mock.calls[0]?.slice(0, 3))).not.toContain(
-    'Ask before publishing. Keep guarded Neon jobs native.',
-  );
-  const routed = await model.store.pending('root', 'turn');
-  expect(routed?.decision.instructionContext).toEqual(instructionContext);
-
-  const changed = { ...session, turnId: 'changed-turn' };
-  await model.captureCodex(changed, 'next-native-call', native);
-  const next = await model.store.pending('root', 'changed-turn');
-  await writeFile(instructionFile, 'A binding instruction changed after capture.');
-  expect(await model.submitCodex(changed, next!.id, task)).toMatchObject({ action: 'native' });
-  expect(route).toHaveBeenCalledTimes(1);
-
-  // Revocation while the paid classifier runs cannot manufacture a current
-  // consent statement or an inference offer from the earlier saved settings.
-  await writeFile(instructionFile, 'Ask before publishing. Keep guarded Neon jobs native.');
-  vi.mocked(qualifiedModelWorker).mockResolvedValue({
-    path: '/fixture/worker',
-    instructionContext: await makeInstructionContext({
-      harness: 'codex',
-      root: repo,
-      documents: instructionContext.documents,
-      configHash: 'fixture',
-      watchPaths: [instructionFile],
-    }),
-    disclosureRepositories: [repo],
-  });
-  const revoking = { ...session, turnId: 'revoking' };
-  await model.captureCodex(revoking, 'revoking-call', native);
-  const revokingJob = await model.store.pending('root', 'revoking');
-  route.mockImplementationOnce(async (body) => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ router: { subagents: true, subagentConsent: { version: 1 } } }),
-    );
-    return { ...offer, jobId: body.jobId };
-  });
-  expect(await model.submitCodex(revoking, revokingJob!.id, task)).toEqual({ action: 'native' });
-  expect(route).toHaveBeenCalledTimes(2);
-  expect(
-    await model.captureCodex({ ...session, turnId: 'revoked' }, 'revoked-call', native),
-  ).toBeNull();
-  expect(route).toHaveBeenCalledTimes(2);
-  // The consent statement is about the current endpoint and ceiling, not an
-  // earlier configuration that happened to authorize classification.
-  for (const [turnId, consentChange, limits, code] of [
-    ['origin-changed', { routerOrigin: 'https://other-router.example' }, {}, 'no_consent'],
-    // A ceiling the person named meanwhile, under the cap the call was held at. Its record
-    // read `scope_not_covered`, which names no cap (review of b7974566).
-    ['cap-lowered', { maxJobAtomic: '500000' }, {}, 'job_cap_lowered'],
-    // The cap is the per-call limit, so a limit lowered during routing lowers it too.
-    ['limit-lowered', {}, { maxAutoSpend: '500000' }, 'job_cap_lowered'],
-  ] as const) {
-    await writeFile(join(dir, 'config.json'), JSON.stringify(savedConfig));
-    const guarded = { ...session, turnId };
-    await model.captureCodex(guarded, `${turnId}-call`, native);
-    const guardedJob = await model.store.pending('root', guarded.turnId);
-    expect(guardedJob).not.toBeNull();
-    route.mockImplementationOnce(async (body) => {
-      await writeFile(
-        join(dir, 'config.json'),
-        JSON.stringify({
-          ...savedConfig,
-          ...limits,
-          router: {
-            ...savedConfig.router,
-            subagentConsent: { ...savedConfig.router.subagentConsent, ...consentChange },
-          },
-        }),
-      );
-      return { ...offer, jobId: body.jobId };
-    });
-    expect(await model.submitCodex(guarded, guardedJob!.id, task)).toEqual({
-      action: 'native',
-    });
-    expect(await model.store.pending('root', guarded.turnId)).toMatchObject({ state: 'native' });
-    expect((await model.store.noOffers()).at(-1)).toMatchObject({ code });
-  }
-  expect(route).toHaveBeenCalledTimes(5);
 });
 
 it('native-workspace routing follows later native projects and discloses only their current qualified roots', async () => {

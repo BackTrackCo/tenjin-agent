@@ -34,14 +34,6 @@ async function heldAgentCall() {
   return { store, job };
 }
 
-it('does not persist windows for turns with no delegation', async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-unused-fence-'));
-  const store = new ModelJobStore(dir);
-  await store.fence('unused-session', 'unused-turn', 'cancelling');
-  await store.fence('unused-session', 'unused-turn');
-  expect(await readdir(dir)).toEqual([]);
-});
-
 it('keeps a held Agent call native once when it is sent again unchanged, in a later turn too', async () => {
   const { store, job } = await heldAgentCall();
   // Key order, surrounding whitespace and fields at their defaults leave the call unchanged.
@@ -55,7 +47,7 @@ it('keeps a held Agent call native once when it is sent again unchanged, in a la
   expect(await store.nativeRepeat('root', '/repo', 'Agent', repeat)).toBe(job.id);
   expect(await store.nativeRepeat('root', '/repo', 'Agent', repeat)).toBeNull();
   expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBeNull();
-  expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
+  expect(await store.accept(job.id, 'root')).toBeNull();
 });
 
 it('treats a changed, foreign, other-root or other-tool call as a new call and leaves the repeat unused', async () => {
@@ -193,7 +185,7 @@ it.each([
   const { store, job } = await heldAgentCall();
   for (const step of steps)
     if (step === 'fence') await store.fenceOwned(job.id, 'root');
-    else if (step === 'accept') await store.accept(job.id, 'root', 'turn');
+    else if (step === 'accept') await store.accept(job.id, 'root');
     else await store.finish(job.id, step);
   expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBe(matches ? job.id : null);
 });
@@ -202,7 +194,7 @@ it('lets exactly one of a repeat and an acceptance win across stores', async () 
   const { store, job } = await heldAgentCall();
   const outcomes = await Promise.all([
     store.nativeRepeat('root', '/repo', 'Agent', HELD),
-    new ModelJobStore(dir).accept(job.id, 'root', 'turn'),
+    new ModelJobStore(dir).accept(job.id, 'root'),
   ]);
   expect(outcomes.filter(Boolean)).toHaveLength(1);
 });
@@ -221,57 +213,10 @@ it('claims acceptance once across processes and refuses a foreign root or change
     decision: { action: 'model' },
     capAtomic: '100000',
   });
-  expect(await b.accept(job.id, 's2', 't1')).toBeNull();
-  const claims = await Promise.all([a.accept(job.id, 's1', 't1'), b.accept(job.id, 's1', 't1')]);
+  expect(await b.accept(job.id, 's2')).toBeNull();
+  const claims = await Promise.all([a.accept(job.id, 's1'), b.accept(job.id, 's1')]);
   expect(claims.filter(Boolean)).toHaveLength(1);
 });
-it('binds one Codex plaintext submission and fences stale selection on interruption', async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-jobs-'));
-  const store = new ModelJobStore(dir);
-  const job = await store.offer(
-    {
-      sessionId: 'root',
-      turnId: 'turn',
-      callId: 'encrypted-call',
-      task: '',
-      root: '/repo',
-      native: { message: 'ciphertext', fork_turns: 'none' },
-      decision: {},
-      capAtomic: '1000000',
-    },
-    'awaiting_prompt',
-    'turn',
-  );
-  expect(await store.submit(job.id, 'foreign', 'turn', 'assignment')).toBeNull();
-  expect(await store.submit(job.id, 'root', 'old-turn', 'assignment')).toBeNull();
-  expect(await store.submit(job.id, 'root', 'turn', 'assignment')).toMatchObject({
-    state: 'routing',
-    task: 'assignment',
-  });
-  expect(await store.submit(job.id, 'root', 'turn', 'changed assignment')).toBeNull();
-  await store.decided(job.id, { action: 'model' });
-  await store.fence('root', 'turn');
-  expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
-});
-it('never permits a second held assignment to take the first assignment’s window', async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-jobs-'));
-  const store = new ModelJobStore(dir);
-  const input = {
-    sessionId: 'root',
-    turnId: 'turn',
-    callId: 'first',
-    task: '',
-    root: '/repo',
-    native: { message: 'ciphertext' },
-    decision: {},
-    capAtomic: '1000000',
-  };
-  await store.offer(input, 'awaiting_prompt', 'turn');
-  await expect(
-    store.offer({ ...input, callId: 'second' }, 'awaiting_prompt', 'turn'),
-  ).rejects.toThrow('unresolved');
-});
-
 it('finds an offer by its own id in a later turn and from another process, for its own session only', async () => {
   const { store, job } = await heldAgentCall();
   const restarted = new ModelJobStore(dir);
@@ -282,7 +227,7 @@ it('finds an offer by its own id in a later turn and from another process, for i
   const accepted = await restarted.accept(job.id, 'root');
   expect(accepted).toMatchObject({ state: 'running', runner: { pid: process.pid } });
   expect(await store.accept(job.id, 'root')).toBeNull();
-  expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
+  expect(await store.accept(job.id, 'root')).toBeNull();
 });
 
 it('ends a running record only once the process that accepted it is gone', async () => {
@@ -445,7 +390,7 @@ it('keeps the original job files and conversation of a running continuation, wha
 // start token, compared for equality only: no wall clock, no timer, no beat.
 async function runningAs(runner: { pid: number; token?: string }) {
   const { store, job } = await heldAgentCall();
-  const accepted = await store.accept(job.id, 'root', 'turn');
+  const accepted = await store.accept(job.id, 'root');
   const path = join(dir, 'model-jobs', `${job.id}.json`);
   await writeFile(
     path,
@@ -456,7 +401,7 @@ async function runningAs(runner: { pid: number; token?: string }) {
 
 it('records the runner with its start token, in a file only the user can read', async () => {
   const { store, job } = await heldAgentCall();
-  const accepted = await store.accept(job.id, 'root', 'turn');
+  const accepted = await store.accept(job.id, 'root');
   expect(accepted?.runner?.pid).toBe(process.pid);
   expect(accepted?.runner?.token).toBe(processStartToken(process.pid));
   const files = await readdir(join(dir, 'model-jobs'));

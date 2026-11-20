@@ -26,7 +26,7 @@ it('keeps an auto parent native when managed settings disable native auto mode',
     effective: { permissions: { disableAutoMode: 'disable' } },
   } as never);
   expect(
-    await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data', undefined, 'auto'),
+    await qualifiedModelWorker('/repo', 'general-purpose', '/data', undefined, 'auto'),
   ).toBeNull();
   expect(query).not.toHaveBeenCalled();
 });
@@ -41,14 +41,7 @@ it('keeps a bypass parent native when settings disable bypass mode', async () =>
     effective: { permissions: { disableBypassPermissionsMode: 'disable' } },
   } as never);
   expect(
-    await qualifiedModelWorker(
-      '/repo',
-      'general-purpose',
-      undefined,
-      '/data',
-      undefined,
-      'bypassPermissions',
-    ),
+    await qualifiedModelWorker('/repo', 'general-purpose', '/data', undefined, 'bypassPermissions'),
   ).toBeNull();
   expect(query).not.toHaveBeenCalled();
 });
@@ -66,7 +59,7 @@ it('keeps a conflicting managed provider native before starting a worker', async
     ],
   } as never);
   expect(
-    await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data', undefined, 'auto'),
+    await qualifiedModelWorker('/repo', 'general-purpose', '/data', undefined, 'auto'),
   ).toBeNull();
   expect(query).not.toHaveBeenCalled();
 });

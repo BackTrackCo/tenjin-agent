@@ -949,11 +949,11 @@ test('mixed accept operations pass through without spawning an observer', async 
     return { result: 'original operation' };
   };
   await remember($);
-  for (const operation of [{ cancel: OFFER }, { task: 'capture' }, { delegation_id: OFFER }])
+  for (const operation of [{ cancel: OFFER }, { task: 'capture' }])
     expect((await $.tool.call({ tool: ACCEPT, offer_id: OFFER, ...operation })).result).toBe(
       'original operation',
     );
-  expect(work).toBe(3);
+  expect(work).toBe(2);
   expect(f.state.calls).toBe(0);
 });
 
@@ -3172,7 +3172,7 @@ test("the accept and cancel of an offer are allowed by the mod, and every other 
     { offer_ids: [OFFER, SECOND_OFFER], cancel: OFFER },
     { offer_id: OFFER, reason: 'agent_stopped' },
     { capture: { tool: 'Agent' } },
-    { delegation_id: OFFER, task: 'do it' },
+    { task: 'do it' },
     {},
   ])
     expect(await check(input)).toBe('ask');

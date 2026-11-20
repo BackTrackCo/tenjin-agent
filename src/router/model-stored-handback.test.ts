@@ -102,7 +102,6 @@ it.each(['completed', 'stopped'] as const)(
       const qualified = await qualifiedModelWorker(
         root,
         'general-purpose',
-        undefined,
         dataDir,
         undefined,
         'default',
@@ -149,7 +148,6 @@ it.each(['completed', 'stopped'] as const)(
         turnId: 'turn',
         cwd: root,
         transcript: 'unused',
-        harness: 'claude',
         claudePermissionMode: 'default',
       };
       const store = new ModelJobStore(dataDir);
@@ -189,7 +187,6 @@ it.each(['completed', 'stopped'] as const)(
       const server = new McpServer({ name: 'test', version: '1' });
       const model = registerModelTool(server, {
         dataDir,
-        harness: 'claude',
         session: () => session,
         transport: async () => transport,
       });
@@ -230,7 +227,6 @@ it.each(['completed', 'stopped'] as const)(
           const later = new McpServer({ name: 'test', version: '1' });
           const tool = registerModelTool(later, {
             dataDir,
-            harness: 'claude',
             session: () => ({ ...session, sessionId }),
             transport: async () => transport,
           });

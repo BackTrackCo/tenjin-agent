@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { hookToolInput } from './hook-tool';
+import { CODEX_HOOK_KINDS, hookToolInput } from './hook-tool';
 import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { handlersIn } from './hook-form';
 import { commandForm, shellDependence } from './hook-form-test-utils';
@@ -451,10 +451,6 @@ describe('the checked-in hosts/codex templates', () => {
       PreToolUse: [
         { matcher: 'webrun', hooks: leg({ kind: 'native', ...call }) },
         {
-          matcher: 'collaborationspawn_agent|spawn_agent|Agent',
-          hooks: leg({ kind: 'delegation', ...call }, 15),
-        },
-        {
           matcher: 'mcp__router__hook',
           hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: 5 }],
         },
@@ -465,10 +461,9 @@ describe('the checked-in hosts/codex templates', () => {
           hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
         },
       ],
-      Interrupt: [{ hooks: leg({ kind: 'interrupt', ...common }, 3) }],
       PermissionRequest: [
         {
-          matcher: 'mcp__router__request|mcp__router__subagent',
+          matcher: 'mcp__router__request',
           hooks: [
             {
               type: 'command',
@@ -480,6 +475,13 @@ describe('the checked-in hosts/codex templates', () => {
         },
       ],
     });
+  });
+
+  it('carries no leg for a subagent, so a Codex agent starts its own subagents natively, with no offer and no fee', () => {
+    // DeepSeek workers run on Claude Code only: nothing in the Codex plugin sees a delegation.
+    const text = JSON.stringify(renderCodexHooks());
+    expect(text).not.toMatch(/delegation|spawn_agent|"Agent"|Interrupt|mcp__router__subagent/);
+    expect(CODEX_HOOK_KINDS).toEqual(['prompt', 'native', 'shortfall']);
   });
 
   it('allows the request tool with the static answer Codex documents for PermissionRequest', () => {
@@ -519,7 +521,7 @@ describe('the checked-in hosts/codex templates', () => {
         router: {
           command: 'tenjin',
           args: ['mcp', '--harness', 'codex'],
-          env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
+          env_vars: ['CODEX_HOME'],
         },
       },
     });
@@ -535,7 +537,7 @@ describe('the checked-in hosts/codex templates', () => {
     // (openai/codex `rmcp-client/src/utils.rs`, DEFAULT_ENV_VARS); `env_vars` adds it.
     for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
       expect(JSON.parse(files['tenjin/.mcp.json']!)).toMatchObject({
-        mcpServers: { router: { env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'] } },
+        mcpServers: { router: { env_vars: ['CODEX_HOME'] } },
       });
     }
   });
@@ -577,7 +579,7 @@ describe('the Codex runtime render', () => {
         router: {
           command: `${binDir}/tenjin`,
           args: ['mcp', '--harness', 'codex'],
-          env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
+          env_vars: ['CODEX_HOME'],
         },
       },
     });
@@ -622,7 +624,7 @@ describe('the Codex runtime render', () => {
           router: {
             command: `${win.binDir}\\tenjin.cmd`,
             args: ['mcp', '--harness', 'codex'],
-            env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
+            env_vars: ['CODEX_HOME'],
           },
         },
       });

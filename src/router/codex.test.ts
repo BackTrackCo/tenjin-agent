@@ -664,10 +664,7 @@ const listed = (...rows: unknown[]) => ({
 /** A routing leg as Codex 0.157 lists it: an `mcp_tool` hook into the plugin's server. */
 const legRow = (key: string, over: Record<string, unknown> = {}) =>
   row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
-const allRows = () =>
-  ['prompt', 'native', 'shortfall', 'delegation', 'interrupt']
-    .map((key) => legRow(key))
-    .concat([row('deny'), allowRow()]);
+const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
 
 /** What a person reads: the receipt, then its tail (limits, next step, disclosure). */
 function receipt(r: { humanLines?: string[]; humanTail?: string[] }): string[] {
@@ -1104,8 +1101,6 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
     PreToolUse: 'pre_tool_use',
     PostToolUse: 'post_tool_use',
     PermissionRequest: 'permission_request',
-    Interrupt: 'interrupt',
-    SessionEnd: 'session_end',
   };
   /** Every handler the plugin renders, as Codex 0.157 lists it. */
   const ownRows = (over: Record<string, unknown> = {}) =>
@@ -1153,7 +1148,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
 
   it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
     const rows = [...ownRows(), foreign];
-    expect(rows.filter(ownCodexRow)).toHaveLength(7);
+    expect(rows.filter(ownCodexRow)).toHaveLength(5);
     expect(ownCodexRow(foreign)).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
@@ -1243,7 +1238,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       'codex plugin marketplace add /package/dist/hosts/codex',
       'codex plugin add tenjin@tenjin',
     ]);
-    expect(trustedKeys).toHaveLength(7);
+    expect(trustedKeys).toHaveLength(5);
     expect(line).toBe(CODEX_REFRESH_LINES.done);
   });
 

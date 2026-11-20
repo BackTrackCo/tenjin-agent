@@ -387,7 +387,7 @@ it.each(incompatibleSandboxes)(
   'keeps an unconfined shell configuration native before creating a worker: %j',
   async (effective) => {
     vi.mocked(resolveSettings).mockResolvedValue({ effective } as never);
-    expect(await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data')).toBeNull();
+    expect(await qualifiedModelWorker('/repo', 'general-purpose', '/data')).toBeNull();
   },
 );
 
@@ -396,7 +396,7 @@ it.each(['*', '?', '[', ']'])(
   async (glob) => {
     const root = `/client ${glob}archive`;
     vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
-    expect(await qualifiedModelWorker(root, 'general-purpose', undefined, '/data')).toBeNull();
+    expect(await qualifiedModelWorker(root, 'general-purpose', '/data')).toBeNull();
   },
 );
 
@@ -410,7 +410,7 @@ it('keeps a managed read-path restriction native even when the merged setting is
       },
     ],
   } as never);
-  expect(await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data')).toBeNull();
+  expect(await qualifiedModelWorker('/repo', 'general-purpose', '/data')).toBeNull();
 });
 
 it('checks the physical startup directory when a harmless alias hides glob characters', async () => {
@@ -421,9 +421,7 @@ it('checks the physical startup directory when a harmless alias hides glob chara
     root: '/client[archive]',
     repositories: ['/client[archive]'],
   } as never);
-  expect(
-    await qualifiedModelWorker('/repo-alias', 'general-purpose', undefined, '/data'),
-  ).toBeNull();
+  expect(await qualifiedModelWorker('/repo-alias', 'general-purpose', '/data')).toBeNull();
 });
 
 it('preserves ordinary startup spaces and explicitly false confinement exceptions', async () => {
@@ -443,7 +441,7 @@ it('preserves ordinary startup spaces and explicitly false confinement exception
       },
     ],
   } as never);
-  expect(await qualifiedModelWorker(root, 'general-purpose', undefined, '/data')).toMatchObject({
+  expect(await qualifiedModelWorker(root, 'general-purpose', '/data')).toMatchObject({
     claudeWorkspace: { root },
   });
 });
@@ -2919,7 +2917,7 @@ it('still starts, with the main prompt and the note, and says why when the nativ
 
 it("qualifies a custom type and the two built-ins, never a plugin's agent or a built-in a file redefines", async () => {
   const qualifies = async (type: string) =>
-    (await qualifiedModelWorker('/repo', type, undefined, '/data', undefined, 'default')) !== null;
+    (await qualifiedModelWorker('/repo', type, '/data', undefined, 'default')) !== null;
   expect(await qualifies('general-purpose')).toBe(true);
   vi.mocked(workerAgent).mockResolvedValueOnce({
     agent: { description: 'loop-worker', prompt: 'You are a worker.', tools: ['Read'] },

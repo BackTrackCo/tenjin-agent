@@ -11,7 +11,7 @@ const sessions = vi.hoisted(() => [] as Array<() => ModelSession | undefined>);
 vi.mock('./model-mcp', () => ({
   registerModelTool: (_server: unknown, options: { session: () => ModelSession | undefined }) => {
     sessions.push(options.session);
-    return { shutdown: async () => {}, fence: async () => {}, codexHook: async () => null };
+    return { shutdown: async () => {} };
   },
   stopModelWorkers: async () => {},
 }));

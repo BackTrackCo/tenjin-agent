@@ -299,8 +299,9 @@ describe('the router MCP server', () => {
       try {
         const names = (await client.listTools()).tools.map((t) => t.name);
         expect(names).toEqual(
+          // DeepSeek workers run on Claude Code only: a Codex host is offered no subagent tool.
           harness === 'codex'
-            ? ['subagent', 'request', 'hook']
+            ? ['request', 'hook']
             : ['subagent_activity', 'subagent', 'request', 'hook'],
         );
         await client.callTool({ name: 'request', arguments: { query: 'weather' } });

@@ -1473,15 +1473,11 @@ function displayState(item: TenjinModelViewerRecord): string {
 
 /**
  * An accept call whose input does not yet say what it is: the model is still writing
- * it. A cancel, a capture and a Codex delegation name themselves by their own field.
+ * it. A cancel and a capture name themselves by their own field.
  */
 function undecided(input: unknown): boolean {
   const given = record(input) ?? {};
-  if (
-    !['offer_id', 'offer_ids', 'cancel', 'capture', 'delegation_id', 'task'].some(
-      (key) => given[key] !== undefined,
-    )
-  )
+  if (!['offer_id', 'offer_ids', 'cancel', 'capture'].some((key) => given[key] !== undefined))
     return true;
   // ITS OFFER ID STILL STREAMING: the host draws the input as it arrives, so for that
   // moment the call holds part of an id (live on alpha.64: the host's own
