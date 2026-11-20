@@ -99,11 +99,19 @@ const sum = [...dead, ...last.values()].reduce(
 );
 // Replay the log: an enter while another holder is inside, and not killed, is an overlap.
 const inside = new Set<string>();
+const killed = new Set<string>();
 let overlaps = 0;
 let entries = 0;
 for (const line of readFileSync(log, 'utf8').split('\n')) {
   const [kind, pid] = line.split(' ');
   if (!pid) continue;
+  // A holder logs its own lines until the kill lands: once it is marked killed, none count.
+  if (kind === 'K') {
+    killed.add(pid);
+    inside.delete(pid);
+    continue;
+  }
+  if (killed.has(pid)) continue;
   if (kind === 'E') {
     entries++;
     if (inside.size > 0) overlaps++;
