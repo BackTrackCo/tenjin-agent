@@ -3374,6 +3374,72 @@ test("a foreground accept the host ended for its idle limit hands the worker's r
   expect(submitted).toHaveLength(1);
 });
 
+// Failure caught (live, two workers accepted together): one finished at 191 s, the other hung
+// until the host ended the call, and the finished worker's report never reached the parent
+// until its offer was accepted again by hand.
+test('a batch the host ended for its idle limit hands over the worker that ended and follows the one that runs, each once', async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  on('ui.render', { component: 'UserMessage' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: [e.props.text] }),
+  );
+  await remember($);
+  f.state.offer = SECOND_OFFER;
+  await remember($, { ...INPUT, description: 'Read another file' });
+  const aborted =
+    'MCP server "plugin:tenjin:router" tool "subagent" sent no response or progress for 1802s; aborting.';
+  let abort: () => void = () => undefined;
+  const hosting = new Promise<void>((resolve) => {
+    abort = resolve;
+  });
+  f.state.work = async () => {
+    await hosting;
+    return { result: aborted, text: aborted };
+  };
+  const input = { offer_ids: [OFFER, SECOND_OFFER] };
+  const running = $.tool.call({ tool: ACCEPT, tool_use_id: 'idle_batch', ...input });
+  await f.clock.settle();
+  // The first worker ends while the call waits for the second.
+  const handback = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 191_000,
+    toolUses: 3,
+    tokens: 9_000,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'the first report',
+    worker_handle: WORKER,
+  });
+  f.state.per[OFFER] = { phase: 'completed' };
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(191_000);
+  await f.clock.settle();
+  expect(submitted).toEqual([]);
+  abort();
+  await running;
+  await f.clock.advance(2000);
+  await f.clock.settle();
+  // The ended worker's result is handed over now, once; the running one sends nothing.
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain(`(offer ${OFFER}) finished. This is the result`);
+  await f.clock.advance(120_000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  // The second ends later and is handed over on its own, once.
+  f.state.per[SECOND_OFFER] = { phase: 'completed' };
+  await f.clock.advance(5000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(2);
+  expect(submitted[1]).toContain(`(offer ${SECOND_OFFER}) finished. This is the result`);
+  await f.clock.advance(120_000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(2);
+});
+
 // Operator ruling 2026-11-18: "background calls should get an offer". An Agent call with
 // `run_in_background` was never offered; now its worker runs in the background, the accept
 // answers at once, and the result reaches the parent when the worker ends.

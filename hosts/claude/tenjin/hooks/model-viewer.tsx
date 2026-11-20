@@ -2097,7 +2097,13 @@ export function registerModelViewer(on: On): void {
         } catch {
           /* The row still follows; the stored result stays readable by accepting again. */
         }
-        watcher.follow();
+        // A worker of the batch that ended before the host gave up has stopped its own
+        // watch, and its delivery was skipped while its offer was a foreground one: it is
+        // handed over now, once. A worker still running is followed to its end.
+        const row = (await $.state.get({ ...WORKERS, id }).catch(() => undefined))?.value;
+        if (row?.ended && ENDED.includes(row.ended))
+          void deliverBackground($, id, row.title ?? 'subagent');
+        else watcher.follow();
       }
     } else {
       const results = batched ? batchOutcomes(answer) : undefined;
