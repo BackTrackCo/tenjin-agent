@@ -239,6 +239,9 @@ export class ModelTransport {
     mark?: (name: 'workerReturned' | 'refundClosed') => void,
   ): Promise<T> {
     const journal = this.refundJournal();
+    // A refund an earlier run left pending is tried again at every accept, in the background:
+    // a run's lock keeps it off a live run's channel, and it never delays this one.
+    void journal.recoverPending(AbortSignal.timeout(15_000)).catch(() => undefined);
     const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
     await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
     const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
@@ -1235,6 +1238,19 @@ export class ModelTransport {
     } catch {
       // Whatever could not be read stays reserved.
     }
+    await this.closeRefundOfSettled(job).catch(() => undefined);
+  }
+
+  /**
+   * THE REFUND OF A RUN WHOSE LAST UNCERTAIN CALL IS SETTLED. A run cancelled with a call
+   * still in flight closed its channel at once and may have been refused or left pending; the
+   * call is settled only here, so the refund is tried again here rather than only when a
+   * recovery pass comes round. A channel with a call still uncertain is not closed.
+   */
+  private async closeRefundOfSettled(job: ModelJob) {
+    const spend = await this.summary(job).catch(() => undefined);
+    if (!spend || spend.uncertain.length > 0) return;
+    await this.refundJournal().close(job.id, AbortSignal.timeout(8_000));
   }
 
   /** Actual completed usage plus conservative reservations for uncertain calls. */

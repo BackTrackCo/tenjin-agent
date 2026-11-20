@@ -1749,6 +1749,37 @@ it('settles what an ended run left uncertain from the server record: spent at it
   expect((await r.read()).charged).toBe(budget.charged);
 });
 
+// Failure caught (live run on the new server): a run cancelled with a call in flight closed its
+// channel at once, was left pending, and was tried again only by a recovery pass; the reconcile
+// that settled the call never tried it, so the unused deposit stayed in the channel.
+it('tries the refund of a run again when its reconcile settles the last uncertain call, and not while one is left', async () => {
+  const closed: string[] = [];
+  const spy = vi
+    .spyOn(ModelRefundJournal.prototype, 'close')
+    .mockImplementation(async (runId: string) => {
+      closed.push(runId);
+      return { state: 'pending' };
+    });
+  try {
+    const settled = await reconcileFixture({
+      finished: { state: 'completed', voucherState: 'accepted', actualAtomic: '1000' },
+    });
+    await settled.transport.reconcile(settled.job, new AbortController().signal);
+    expect((await settled.transport.summary(settled.job)).uncertain).toEqual([]);
+    expect(closed).toEqual([settled.job.id]);
+    closed.length = 0;
+    const open = await reconcileFixture({
+      finished: { state: 'completed', voucherState: 'accepted', actualAtomic: '1000' },
+      going: { state: 'running', voucherState: 'unknown' },
+    });
+    await open.transport.reconcile(open.job, new AbortController().signal);
+    expect((await open.transport.summary(open.job)).uncertain).toHaveLength(1);
+    expect(closed).toEqual([]);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it.each(['revoked', 'other router'] as const)(
   'asks the server nothing about a job whose consent is %s, and keeps every reservation',
   async (kind) => {

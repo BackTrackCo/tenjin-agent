@@ -97,6 +97,8 @@ const record = z.object({
   sealed: z.boolean(),
   submitted: receipt.extend({ balance: uint }).optional(),
   state: z.enum(['pending', 'no_balance', 'closed', 'refunded']),
+  /** Why the last try left it pending, for whoever looks at a refund that waits. No secrets. */
+  note: z.string().max(200).optional(),
 });
 const settlement = z.object({
   success: z.literal(true),
@@ -410,8 +412,29 @@ export class ModelRefundJournal {
         },
         { timeoutMs: 150, retryMs: 25, takeOverDead: true, signal },
       );
-    } catch {
+    } catch (error) {
+      // Why it waits, kept with the record: a refund that cannot close says so.
+      await this.noteFailure(path, error).catch(() => undefined);
       return readModelRefundResult(this.dataDir, this.origin, runId);
+    }
+  }
+
+  /** Records why a pending refund was left pending, once per reason. */
+  private async wait(path: string, saved: RunRecord, why: string): Promise<ModelRefundResult> {
+    if (saved.note !== why) {
+      saved.note = why;
+      await writeRecord(path, saved).catch(() => undefined);
+    }
+    return { state: 'pending' };
+  }
+
+  private async noteFailure(path: string, error: unknown) {
+    const why = `failed: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 150)}`;
+    // Unlocked: the note is a diagnostic, and only a still-pending record is touched.
+    const saved = await readRecord(path);
+    if (saved && saved.state === 'pending' && saved.note !== why) {
+      saved.note = why;
+      await writeRecord(path, saved);
     }
   }
 
@@ -421,11 +444,12 @@ export class ModelRefundJournal {
     signal: AbortSignal,
   ): Promise<ModelRefundResult> {
     const readContract = this.deps.readContract;
-    if (!readContract || !this.deps.readChainId) return { state: 'pending' };
+    if (!readContract || !this.deps.readChainId) return this.wait(path, saved, 'no chain reads');
     const signer = await this.deps.getSigner();
-    if (saved.channel.payer !== signer.address.toLowerCase()) return { state: 'pending' };
+    if (saved.channel.payer !== signer.address.toLowerCase())
+      return this.wait(path, saved, 'another wallet');
     if (saved.network !== `eip155:${await this.deps.readChainId(RPC_TIMEOUT_MS)}`) {
-      return { state: 'pending' };
+      return this.wait(path, saved, 'another chain');
     }
     const clientSigner = toClientEvmSigner(
       {
@@ -442,14 +466,15 @@ export class ModelRefundJournal {
         },
       },
     );
-    if (!(await this.fundingSettled(saved, readContract, signal))) return { state: 'pending' };
+    if (!(await this.fundingSettled(saved, readContract, signal)))
+      return this.wait(path, saved, 'deposit not settled');
     const [balance, totalClaimed] = await readChannelBalanceAndTotalClaimed(
       clientSigner,
       saved.channelId,
     );
     if (balance === totalClaimed) return this.finish(path, saved, balance);
     if (balance < totalClaimed || saved.submitted || saved.retryAfter > this.now()) {
-      return { state: 'pending' };
+      return this.wait(path, saved, 'waiting to retry');
     }
 
     const storage = new FileClientChannelStorage({
@@ -540,7 +565,7 @@ export class ModelRefundJournal {
         }
       },
     });
-    if (!saved.submitted) return { state: 'pending' };
+    if (!saved.submitted) return this.wait(path, saved, 'no refund receipt');
     const [after, claimed] = await readChannelBalanceAndTotalClaimed(clientSigner, saved.channelId);
     return after === claimed ? this.finish(path, saved, after) : { state: 'pending' };
   }

@@ -264,6 +264,18 @@ it('skips a live run, and later refuses a changed router identity', async () => 
   expect(fetchImpl).toHaveBeenCalledTimes(1);
 });
 
+// A refund that waits says why, with its record, so a pending one is not a mystery.
+it('keeps the reason a pending refund could not close with its record', async () => {
+  const { dataDir, runId, record, state, journal } = await fixture();
+  await record();
+  state.probe = () => challenge({ ...requirements, amount: '0', payTo: requirements.asset });
+  await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
+  const dir = join(dataDir, 'model-refunds');
+  const [file] = await readdir(dir);
+  const saved = JSON.parse(await readFile(join(dir, file!), 'utf8')) as { note?: string };
+  expect(saved.note).toMatch(/^(failed: |waiting|deposit)/);
+});
+
 // After a base URL change `tenjin balance` showed nothing of these. A refund request carries
 // a wallet proof, so one for a router the person no longer configured is counted, not sent.
 it('counts a pending refund recorded for an earlier router origin, and sends that router nothing', async () => {
