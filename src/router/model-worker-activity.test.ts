@@ -6,6 +6,8 @@ import {
   endedDisplay,
   ModelWorkerActivity,
   activityAnswer,
+  ACTIVITY_ANSWER_MAX_BYTES,
+  boundActivityAnswer,
   partialHandback,
   type ModelWorkerActivityBinding,
 } from './model-worker-activity';
@@ -634,4 +636,47 @@ it('keeps the omitted-block count in what an ended job shows, as the viewer read
   expect(endedDisplay('completed', JSON.stringify({ status: 'completed' }))).toEqual({
     status: 'completed',
   });
+});
+
+// Failure caught live: a finished long job's activity read reached the parent model as a
+// notification of 109,160 characters, and a stopped job's partial as about 12,000.
+it('bounds an activity answer for a job with 300 tool uses, and keeps its counts and newest rows', () => {
+  const f = fixture();
+  f.activity.running();
+  for (let i = 0; i < 300; i++) {
+    f.activity.observe(f.tool(`t${i}`, 'Read', { file_path: `/repo/file-${i}.ts` }));
+    f.activity.observe(
+      f.result(`t${i}`, [{ type: 'text', text: `output ${i} ` + 'y'.repeat(900) }]),
+    );
+  }
+  f.activity.handback('A long answer. ' + 'z'.repeat(60_000));
+  f.activity.finish('completed');
+  const snapshot = f.activity.snapshot();
+  const whole = activityAnswer(snapshot, { rows: true, result: true });
+  expect(Buffer.byteLength(JSON.stringify(whole))).toBeGreaterThan(ACTIVITY_ANSWER_MAX_BYTES);
+  const bounded = boundActivityAnswer(whole);
+  expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(ACTIVITY_ANSWER_MAX_BYTES);
+  expect(bounded.activity).toMatchObject({ toolUses: 300, state: 'completed' });
+  const rows = bounded.activity.rows!;
+  expect(rows.at(-1)?.id).toBe(snapshot.rows.at(-1)?.id);
+  expect(bounded.activity.droppedRows).toBe(
+    whole.activity.droppedRows! + whole.activity.rows!.length - rows.length,
+  );
+  expect(bounded.activity.result).toContain('[shortened here');
+  // A small answer is returned as it was.
+  const small = activityAnswer(snapshot, { rows: true, maxRows: 2 });
+  expect(boundActivityAnswer(small)).toEqual(small);
+});
+
+it("keeps a stopped job's partial handback small, whatever its rows hold", () => {
+  const f = fixture();
+  f.activity.running();
+  for (let i = 0; i < 100; i++) {
+    f.activity.observe(f.tool(`p${i}`, 'Read', { file_path: `/repo/file-${i}.ts` }));
+    f.activity.observe(f.result(`p${i}`, [{ type: 'text', text: 'w'.repeat(1000) }]));
+  }
+  f.activity.finish('unknown');
+  const partial = partialHandback(f.activity.snapshot())!;
+  expect(Buffer.byteLength(JSON.stringify(partial))).toBeLessThanOrEqual(8 * 1024);
+  expect(partial.rows.length).toBeLessThanOrEqual(12);
 });

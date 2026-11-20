@@ -37,6 +37,7 @@ import {
   activityAnswer,
   endedDisplay,
   partialHandback,
+  boundActivityAnswer,
 } from './model-worker-activity';
 import { startWorkerProgress, workerProgressPath } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
@@ -538,11 +539,13 @@ export function registerModelTool(
         )
           return answer({ status: 'unavailable' });
         const delta = args.follow === true && args.after !== undefined;
-        const shown = activityAnswer(activity, {
-          rows: !args.follow || delta,
-          result: !args.follow,
-          ...(delta ? { after: args.after } : {}),
-        });
+        const shown = boundActivityAnswer(
+          activityAnswer(activity, {
+            rows: !args.follow || delta,
+            result: !args.follow,
+            ...(delta ? { after: args.after } : {}),
+          }),
+        );
         // The live view does not hold the job's own time.
         const end = ['completed', 'cancelled', 'unknown'].includes(activity.state)
           ? await ended().catch(() => undefined)
