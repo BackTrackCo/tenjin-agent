@@ -222,13 +222,13 @@ function routingTransport(server: FakeRouter, policy = {}) {
   return transport;
 }
 
-// Production states and charges $0.003; the next server states 15% of a measured job spend
-// (about 8,100 today). Nothing in the client names either number.
+// The router states the fee on its 402 and this client pays it. Nothing in the client
+// names a number: it authorizes exactly what the call stated.
 it.each([
-  ['production today', '3000'],
-  ['the next server', '8100'],
-  ['a fee under the old fixed one', '1200'],
-  ['a fee at the ceiling', ROUTING_FEE_CEILING_ATOMIC.toString()],
+  ['a small one', '1200'],
+  ['about 8,100', '8100'],
+  ['a larger one', '200000'],
+  ['one at the ceiling', ROUTING_FEE_CEILING_ATOMIC.toString()],
 ])('pays and records the fee %s states, and authorizes exactly it', async (_name, amount) => {
   dir = await mkdtemp(join(tmpdir(), 'model-route-compat-'));
   const server = new FakeRouter({ path: '/api/model-router/route', amount, charge: amount });
