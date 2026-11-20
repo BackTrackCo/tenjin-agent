@@ -225,6 +225,13 @@ const adopted = new Set<string>();
  * parent reads this notice in place of the worker's answer until the task ends.
  */
 const HOST_MOVED = /still running after[\s\S]{0,80}moved to the background/;
+/**
+ * What the host answers an accept call it ended itself because the call sent no response or
+ * progress for its idle limit (30 minutes by default). The worker runs on in the CLI and
+ * keeps its result with the job: this module follows it to its end and hands the result
+ * over as a background worker's, once.
+ */
+const HOST_IDLE_ABORT = /sent no response or progress for \d+s/;
 /** Those tasks, by the id the notice names, so the task's own lines can name their worker. */
 const movedTasks = new Map<string, readonly string[]>();
 /** Accept calls by their tool use id, for the same. */
@@ -2080,6 +2087,18 @@ export function registerModelViewer(on: On): void {
       for (const watcher of watchers.values()) watcher.move();
       const task = /\btask ([A-Za-z0-9_-]{1,64})\b/.exec(said)?.[1];
       if (task && watchers.size) movedTasks.set(task, offerIds);
+    } else if (!answer && HOST_IDLE_ABORT.test(said)) {
+      // The host ended the call; the workers did not end. Each is a background worker now.
+      for (const [id, watcher] of watchers) {
+        try {
+          const ref = { ...OFFERS, id };
+          const held = (await $.state.get(ref)).value;
+          if (held) await $.state.set(ref, { ...held, background: true as const });
+        } catch {
+          /* The row still follows; the stored result stays readable by accepting again. */
+        }
+        watcher.follow();
+      }
     } else {
       const results = batched ? batchOutcomes(answer) : undefined;
       for (const [id, watcher] of watchers) {

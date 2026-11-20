@@ -62,7 +62,7 @@ vi.mock('./model-worker', () => ({
   WorkerStartUnconfirmed: class extends Error {},
   qualifiedModelWorker: worker.qualified,
 }));
-import { registerModelTool } from './model-mcp';
+import { ACCEPT_PROGRESS_INTERVAL_MS, acceptProgress, registerModelTool } from './model-mcp';
 import { WorkerStartUnconfirmed, type EarlyWorkerAccept } from './model-worker';
 import { MODEL_RECORD_TTL_MS, ModelJobStore } from './model-job';
 import type { ModelSession } from './model-handoff';
@@ -2740,4 +2740,49 @@ it.each([
     ended: { endedBy },
   });
   await f.close();
+});
+
+const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+afterEach(() => {
+  vi.useRealTimers();
+});
+const extra = (meta?: { progressToken: number }) => ({
+  ...(meta ? { _meta: meta } : {}),
+  sendNotification: async (notification: unknown) => {
+    sent.push(notification as (typeof sent)[number]);
+  },
+});
+
+it('sends progress on the call token every interval while it waits, and none after it ends', async () => {
+  sent.length = 0;
+  vi.useFakeTimers();
+  const stop = acceptProgress(extra({ progressToken: 9 }));
+  // Three quiet minutes of a job that has no wall time: the host hears three times.
+  await vi.advanceTimersByTimeAsync(3 * ACCEPT_PROGRESS_INTERVAL_MS);
+  expect(sent.map((n) => [n.method, n.params.progressToken, n.params.progress])).toEqual([
+    ['notifications/progress', 9, 60],
+    ['notifications/progress', 9, 120],
+    ['notifications/progress', 9, 180],
+  ]);
+  // Well inside the host's 1,800 s idle limit.
+  expect(ACCEPT_PROGRESS_INTERVAL_MS).toBeLessThanOrEqual(120_000);
+  stop();
+  await vi.advanceTimersByTimeAsync(5 * ACCEPT_PROGRESS_INTERVAL_MS);
+  expect(sent).toHaveLength(3);
+});
+
+it('sends nothing when the host sent no progress token, and a failed send never throws', async () => {
+  sent.length = 0;
+  vi.useFakeTimers();
+  const none = acceptProgress(extra());
+  const failing = acceptProgress({
+    _meta: { progressToken: 1 },
+    sendNotification: async () => {
+      throw new Error('closed');
+    },
+  });
+  await vi.advanceTimersByTimeAsync(2 * ACCEPT_PROGRESS_INTERVAL_MS);
+  none();
+  failing();
+  expect(sent).toHaveLength(0);
 });

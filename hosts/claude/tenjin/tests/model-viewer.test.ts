@@ -3332,6 +3332,48 @@ test("a held Agent row drawn after a resume ends from the accept call's own answ
   });
 });
 
+// Failure caught: a foreground accept the host ended after its idle limit (the job has no
+// wall time) lost the worker's result, though the worker went on and kept it with the job.
+test("a foreground accept the host ended for its idle limit hands the worker's result to the parent once when the worker ends", async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  on('ui.render', { component: 'UserMessage' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: [e.props.text] }),
+  );
+  await remember($);
+  const aborted =
+    'MCP server "plugin:tenjin:router" tool "subagent" sent no response or progress for 1802s; aborting. Set CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT to raise the limit.';
+  f.state.work = () => ({ result: aborted, text: aborted });
+  await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'idle_accept' });
+  await f.clock.settle();
+  expect(submitted).toEqual([]);
+  const handback = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 2_000_000,
+    toolUses: 12,
+    tokens: 41_234,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'the long report',
+    worker_handle: WORKER,
+  });
+  f.state.phase = 'completed';
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(1000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain(`(offer ${OFFER}) finished. This is the result`);
+  expect(submitted[0]!.endsWith(handback)).toBe(true);
+  // Once, however long the session goes on.
+  await f.clock.advance(120_000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+});
+
 // Operator ruling 2026-11-18: "background calls should get an offer". An Agent call with
 // `run_in_background` was never offered; now its worker runs in the background, the accept
 // answers at once, and the result reaches the parent when the worker ends.
