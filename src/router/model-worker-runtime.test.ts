@@ -587,11 +587,11 @@ it("keeps the job's GitHub token out of the activity, whose rows reach the progr
   );
   const activity = { running: vi.fn(), observe: vi.fn() };
   await expect(runModelWorker(job, { ...options(), activity })).resolves.toBe(
-    'pushed with [redacted GitHub token]',
+    'pushed with [redacted job secret]',
   );
   const observed = JSON.stringify(activity.observe.mock.calls);
   expect(observed).not.toContain(GITHUB_TOKEN);
-  expect(observed).toContain('GH_TOKEN=[redacted GitHub token]');
+  expect(observed).toContain('GH_TOKEN=[redacted job secret]');
 });
 
 it('completes and drains the worker when the activity observer fails', async () => {
@@ -923,8 +923,8 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   // Nothing sent on to Tenjin and DeepSeek, nor handed back, carries the token.
   const forwarded = JSON.stringify(messages.mock.calls);
   expect(forwarded).not.toContain(GITHUB_TOKEN);
-  expect(forwarded).toContain('GH_TOKEN=[redacted GitHub token]');
-  expect(result).toBe('pushed with [redacted GitHub token]');
+  expect(forwarded).toContain('GH_TOKEN=[redacted job secret]');
+  expect(result).toBe('pushed with [redacted job secret]');
   // Nor the name of a directory outside consent; a longer sibling name is untouched.
   expect(forwarded).toContain('- [withheld directory]\\n  - /elsewhere-kept');
   const call = vi.mocked(query).mock.calls[0]![0];
@@ -1454,8 +1454,8 @@ it("masks the job's own bridge token and GitHub token by value in what it forwar
   for (const text of [forwarded, observed, handedBack]) {
     expect(text).not.toContain(GITHUB_TOKEN);
     expect(text).not.toContain(bridge);
-    expect(text).toContain('GH_TOKEN=[redacted GitHub token]');
-    expect(text).toContain('ANTHROPIC_API_KEY=[redacted GitHub token]');
+    expect(text).toContain('GH_TOKEN=[redacted job secret]');
+    expect(text).toContain('ANTHROPIC_API_KEY=[redacted job secret]');
   }
 });
 
@@ -1707,7 +1707,7 @@ it('waits for a slow Claude Code start as a native subagent does, and still canc
       settled = true;
     });
     await spawned;
-    // Far past the old 30 s window and any MCP_TIMEOUT: only the wall time bounds a start.
+    // Far past the old 30 s window and any MCP_TIMEOUT: nothing bounds a start but a cancel.
     await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
     expect(settled).toBe(false);
     allow({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' });
@@ -2712,6 +2712,18 @@ it('keeps the Tenjin data folder, keys and login files closed, and leaves creden
     expect(sent.sandbox?.filesystem?.denyRead).toContain(path);
     expect(sent.sandbox?.filesystem?.denyWrite).toContain(path);
   }
+});
+
+// Another running job's settings file holds its live bridge and GitHub tokens: its folders are
+// closed to this worker also when this job's own temp or GitHub setup did not work.
+it("keeps other jobs' temp, GitHub and settings folders closed when this job's own setup failed", async () => {
+  vi.mocked(prepareWorkerGithub).mockRejectedValueOnce(new Error('no github setup'));
+  sdkResult({ subtype: 'success', result: 'static fixture' });
+  await runModelWorker(job, options());
+  const { denyRead = [] } =
+    given(vi.mocked(query).mock.calls.at(-1)![0].options).sandbox?.filesystem ?? {};
+  expect(denyRead.some((glob) => /\/tenjin-job-\*$/.test(glob))).toBe(true);
+  expect(denyRead.some((glob) => /\/tenjin-worker-\*$/.test(glob))).toBe(true);
 });
 
 it('leaves a credential command and a push to the permission flow of the mode', async () => {

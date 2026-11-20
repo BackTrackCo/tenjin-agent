@@ -65,6 +65,7 @@ import {
 import type { InstructionContext } from './model-instructions';
 import {
   claudeWorkerPrivatePaths,
+  jobTempPatterns,
   prepareClaudeWorkerSession,
   prepareClaudeWorkerTemp,
   type ClaudeWorkerSession,
@@ -111,6 +112,7 @@ import {
   redactWorkerSecrets,
   sessionTokenClears,
   WORKER_ALLOWED_DOMAINS,
+  workerGithubPatterns,
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
@@ -882,6 +884,8 @@ async function runQualifiedWorker(
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
+    const otherTemps = await jobTempPatterns();
+    const otherGithub = await workerGithubPatterns();
     if (!managedPolicyHolds({ resolved, disclosure }))
       throw new Error('Managed Claude worker policy changed; keep native');
     const startSettings = ({
@@ -1070,8 +1074,10 @@ async function runQualifiedWorker(
                       // Other jobs' temp, GitHub and settings folders: their commands' output and
                       // files as written, gh caches, and their bridge and GitHub tokens. The file
                       // tools already refuse them, as folders outside the working directories.
-                      ...(temp?.others ?? []),
-                      ...(github?.others ?? []),
+                      // Built without this job's own setup, so another job's folders stay closed
+                      // when its GitHub or temp setup failed.
+                      ...(temp?.others ?? otherTemps),
+                      ...(github?.others ?? otherGithub),
                     ],
                     denyWrite: [...privatePaths.paths, ...privatePaths.readable, ...dropped],
                   },
