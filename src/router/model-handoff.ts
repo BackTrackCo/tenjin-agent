@@ -116,7 +116,7 @@ function offerConsent(settings: ModelSettings, nativeRepositories: readonly stri
     repositories,
     githubRepositories: modelGithubRepositories(repositories),
     routerOrigin: settings.routerOrigin,
-    // As the consent record names them: a worker's web searches go to Exa.
+    // As the consent record names them: Exa reads a page the worker's WebFetch could not fetch.
     recipients: ['Tenjin', 'DeepSeek', 'Exa'],
   };
 }
@@ -808,7 +808,7 @@ export class ModelHandoff {
             },
           }),
       consent: offerConsent(consent, disclosureRepositories ?? []),
-      instruction: `The user has installed Tenjin and turned DeepSeek subagents on. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek, and the worker's web searches go to Exa. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. ${
+      instruction: `The user has installed Tenjin and turned DeepSeek subagents on. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek, and its web searches run inside the DeepSeek call, while the address of a public page its WebFetch could not fetch goes to Exa. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. ${
         job.nativeTool
           ? `To keep it native, send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
           : 'Otherwise retry the original native Agent call unchanged.'
