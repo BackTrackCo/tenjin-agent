@@ -62,7 +62,7 @@ Local GitHub origin names for the offer's directories and their direct child rep
 - With no `--max-job`, the cap is your per-call spend limit as it stands at each offer ($1 unless you chose another). A changed limit changes the next offer, up or down, and lowers a running job's remaining cap at once.
 - `--max-job <USD>` names a lower ceiling. The cap is then the smaller of that ceiling and the limit, and a higher limit never lifts a ceiling you named. Each `on` sets the ceiling from its own flags, so running it without `--max-job` drops a ceiling named earlier.
 - Your daily budget applies on top.
-- Where the cap is not above $0.083866, the smallest reservation of one model call, no job is offered; a routing fee the cap leaves no room for is skipped the same way. `tenjin config subagents why` says so, and `tenjin config subagents on` refuses to turn DeepSeek subagents on under such a limit and names the command that raises it.
+- Where the cap is not above $0.083866, the least one model call reserves, no job is offered. The cap must also leave room for the routing fee above that (production's is $0.003 an offer), so a cap just above $0.083866 gets no offer either, and the router is asked before that is known. `tenjin config subagents why` says so, and `tenjin config subagents on` refuses to turn DeepSeek subagents on under such a limit and names the command that raises it.
 - A call held at one cap whose cap is lowered before its offer is made stays native.
 
 ### Linux and Windows
@@ -337,7 +337,7 @@ These run natively:
 
 - Jobs have no time limit and no turn limit, as a native subagent and the DeepSeek harness have none: a job ends when it completes, reaches its dollar cap or your daily budget, you or the parent cancel it, its session ends or you run `/clear`, or its worker fails.
 - Native compaction remains enabled, given the window where the DeepSeek harness triggers it at its defaults: `min(0.8 * 1,048,576, 1,048,576 - reply cap - 65,536)`, which is 838,860 at the 65,536 reply cap of production and 727,040 at 256,000. Claude Code treats that value as a window and takes 33,000 tokens off it (a reserve of up to 20,000 for the summary plus 13,000 of headroom), so compaction fires about 33,000 tokens earlier: near 805,860 and 694,040.
-- One model call waits for the router's answer for the call duration the router's offer names plus a minute, so Tenjin never gives up on a call the router is still serving. Where the offer names none, as in production, it waits 10 minutes.
+- One model call waits for the router's answer a minute longer than the router lets a call run, so Tenjin never gives up on a call the router is still serving: the call duration the router's offer names plus a minute, or 10 minutes where the offer names none. The HTTP client's own waits for headers and body are at least that long.
 - A worker has no separate start-up window, as a native subagent has none: its Claude Code takes the time the machine needs to start, with no limit. Cancel or interrupt a start that takes too long.
 - A job whose first question to the router got no answer in three tries reports `not_started` (`endedBy: "router_unreachable"`). No inference was bought, the routing fee for the offer was already paid, and sending the original call again unchanged runs it natively with no second fee.
 

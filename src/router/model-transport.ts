@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RoutingPayerDeps } from './routing-payer';
 import { LocalSendBlocked, RoutingPayer as Payer } from './routing-payer';
+import { paidCallDispatcher } from './paid-call-dispatcher';
 import {
   messagesStreamOffered,
   readMessagesStream,
@@ -899,7 +900,20 @@ export class ModelTransport {
           step('signMs');
         }
         const callSignal = AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]);
-        const sent = await fetchFn(input, { ...init, signal: callSignal });
+        // A paid call waits for its headers or its body as long as its own deadline and idle
+        // limit say, not the 300 s Node's fetch allows (`paid-call-dispatcher.ts`).
+        const sent = await fetchFn(input, {
+          ...init,
+          signal: callSignal,
+          ...(paying && !payerDeps.fetchImpl
+            ? {
+                dispatcher: paidCallDispatcher(
+                  paidCallTimeoutMs(job.decision),
+                  streamIdleMs(job.decision),
+                ),
+              }
+            : {}),
+        } as RequestInit);
         // A reply that begins as a stream is read to its last event, which is the response
         // the whole answer would have been. A request that ended before any event answers as
         // a whole answer does (a refusal, an error, the stored JSON for a paid replay).

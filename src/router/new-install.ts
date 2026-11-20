@@ -268,7 +268,7 @@ export async function finishNewInstall(
                 notes:
                   saved && perCall <= MODEL_MINIMUM_CALL_ATOMIC
                     ? [
-                        `No job is offered while that limit is not above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the smallest reservation of one model call. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
+                        `No job is offered while that limit is not above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the least one model call reserves. Raise it with \`tenjin config set maxAutoSpend <usd>\`.`,
                       ]
                     : [],
               },

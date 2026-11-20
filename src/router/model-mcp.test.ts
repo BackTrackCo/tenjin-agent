@@ -1211,6 +1211,42 @@ it('ends a one-call follow-up when it is cancelled by its offer id', async () =>
   }
 });
 
+// Failure caught: a message the parent was told was delivered was dropped when the job
+// failed before the worker read it, and nothing said so.
+it('hands back the messages a failed worker never read', async () => {
+  const f = await ownedClaudeFixture();
+  let fail!: () => void;
+  const failing = new Promise<void>((_resolve, reject) => {
+    fail = () => reject(new Error('worker error'));
+  });
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => (started = resolve));
+  worker.run.mockImplementation(async () => {
+    started();
+    await failing;
+    return 'never';
+  });
+  try {
+    const accepted = f.call({ offer_id: f.job.id });
+    await ready;
+    const sent = await f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: 'unread',
+        tool: 'SendMessage',
+        input: { to: `tenjin-worker-${f.job.id}`, message: 'Use the new head.' },
+      },
+    });
+    expect(sent.action).toBe('delivered');
+    fail();
+    const ended = await accepted;
+    expect(ended.messagesNotRead).toMatchObject({ count: 1, messages: ['Use the new head.'] });
+  } finally {
+    fail();
+    await f.close();
+  }
+});
+
 it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
   const f = await ownedClaudeFixture();
   let release!: () => void;
