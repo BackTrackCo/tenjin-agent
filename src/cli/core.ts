@@ -485,6 +485,23 @@ Examples:
       });
     });
 
+  // A one-time recovery for machines that ran a dev build of the DeepSeek subagents: delete it
+  // with `modelCredit` once no such state remains.
+  leaf(
+    WALLET,
+    'reclaim-subagent-credit',
+    'return credit parked in the old shared subagent channels',
+  )
+    .description(
+      'One time, for a machine that ran an early build of DeepSeek subagents: refund to your wallet the credit that build left in its two shared inference channels (shown as `modelCredit` by `tenjin balance --json`). It asks the router for the same cooperative refund a worker run gets at its end and prints what came back with its transaction. Run it twice and the second finds nothing.',
+    )
+    .action(async function (this: Command) {
+      await runCommand('wallet.reclaim-subagent-credit', this, async (ctx) => {
+        const { runReclaimSubagentCredit } = await import('../commands/reclaim-subagent-credit');
+        return runReclaimSubagentCredit(ctx);
+      });
+    });
+
   leaf(WALLET, 'pay <url>', 'pay an x402 endpoint with explicit user consent')
     .description(
       'Pay an x402 endpoint (exact scheme, USDC on Base) with explicit user consent. Manual pay ignores automatic router limits and always confirms; --yes records prior consent for this quote. Never use it as an autonomous workaround for router refusal. Unlisted endpoints need no warning flag. Registry lookup failures or listed-term mismatches require --ignore-warnings separately. Every paid call pays; entitled delivery remains free.',

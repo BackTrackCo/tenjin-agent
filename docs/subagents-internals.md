@@ -52,6 +52,7 @@ Where no prompt was typed since Tenjin's process started (a resumed session woke
 - Each worker run has its own inference channel for the wallet, and its model calls take turns on that channel alone. A call's payment is signed from the channel's charged total, which the router's answer to the call before it settles, so the next voucher on the channel cannot be signed before the previous call's answer.
 - No worker waits for another worker's call: two workers, in one batch or in two sessions, run inference at the same time.
 - When the run ends, Tenjin closes its channel and returns the unused USDC to the funding wallet. The refund journal and its recovery keep that work separate from the run's result.
+- `tenjin wallet reclaim-subagent-credit` refunds, once, the credit that early dev builds parked in two shared inference channels (`modelCredit` in `tenjin balance --json`). It reuses the run-channel refund and can go, with `modelCredit`, when no machine holds such a channel.
 
 ## Call pacing and fresh quotes
 

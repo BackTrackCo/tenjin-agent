@@ -51,6 +51,28 @@ export function modelInferenceRunDir(
 }
 
 /**
+ * THE OLD SHARED INFERENCE CHANNELS of earlier dev builds: two per wallet and router, slot 0
+ * (the scope `modelChannelScope(origin, 'model-inference')` still names) and slot 1, which
+ * had a `1` in its scope. Nothing opens or pays on them any more; only the one-time recovery
+ * of what they hold reads them (`tenjin wallet reclaim-subagent-credit`). Delete with it.
+ */
+export function legacySharedInferenceChannel(origin: string, slot: 0 | 1) {
+  const canonicalOrigin = new URL(origin).origin;
+  const id = createHash('sha256')
+    .update(
+      JSON.stringify([
+        'tenjin-model-channel',
+        1,
+        canonicalOrigin,
+        'model-inference',
+        ...(slot === 1 ? [1] : []),
+      ]),
+    )
+    .digest('hex');
+  return { id, salt: `0x${id}` as `0x${string}` };
+}
+
+/**
  * THE LEDGER KEYS OF ONE RUN'S DEPOSITS. A run's own channel is refunded when the run
  * ends, so its deposits are counted under the run (`prefix`): a confirmed refund gives
  * back that run's own exposure and no other spend. What the run kept is then counted

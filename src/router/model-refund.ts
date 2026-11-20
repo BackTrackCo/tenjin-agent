@@ -10,7 +10,7 @@ import {
   readChannelBalanceAndTotalClaimed,
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
-import { lstat, opendir, readFile, rm } from 'node:fs/promises';
+import { lstat, opendir, readdir, readFile, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
   encodeAbiParameters,
@@ -23,7 +23,13 @@ import { z } from 'zod';
 import { LockTimeoutError, withFileLock } from '../lib/lock';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { creditRefundedExposure } from '../lib/wallet/spend';
-import { modelInferenceRunDir, modelInferenceRunScope, modelRunDepositKeys } from './model-channel';
+import {
+  legacySharedInferenceChannel,
+  modelInferenceRunDir,
+  modelInferenceRunScope,
+  modelRunDepositKeys,
+} from './model-channel';
+import { payerDir } from './fee';
 import { RPC_TIMEOUT_MS, type RoutingPayerDeps } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 
@@ -95,6 +101,8 @@ const record = z.object({
   funding: z.array(funding),
   retryAfter: z.number().int().nonnegative(),
   sealed: z.boolean(),
+  /** Set only on the one-time recovery of an old shared channel (slot 0 or 1), never on a run's. */
+  legacy: z.union([z.literal(0), z.literal(1)]).optional(),
   submitted: receipt.extend({ balance: uint }).optional(),
   state: z.enum(['pending', 'no_balance', 'closed', 'refunded']),
 });
@@ -190,7 +198,10 @@ async function readRecord(path: string) {
   if (
     value.url !== exactEndpoint(origin, value.url) ||
     basename(path) !== basename(recordPath('', origin, value.runId)) ||
-    value.channel.salt !== modelInferenceRunScope(origin, value.runId).salt ||
+    value.channel.salt !==
+      (value.legacy === undefined
+        ? modelInferenceRunScope(origin, value.runId).salt
+        : legacySharedInferenceChannel(origin, value.legacy).salt) ||
     computeChannelId(value.channel, value.network) !== value.channelId ||
     (value.state === 'refunded' && !value.submitted)
   ) {
@@ -300,7 +311,7 @@ function verifyOffer(value: z.infer<typeof offer>, config: z.infer<typeof channe
   }
 }
 
-function verifyChallenge(response: Response, saved?: RunRecord) {
+function readChallenge(response: Response, saved?: RunRecord) {
   const required = response.headers.get('payment-required');
   if (response.status !== 402 || required === null) {
     throw new Error('Router did not provide an inference refund challenge');
@@ -313,7 +324,11 @@ function verifyChallenge(response: Response, saved?: RunRecord) {
     throw new Error('Router provided an incompatible inference refund challenge');
   }
   if (saved) verifyOffer(quote, saved.channel);
-  return parsed.error;
+  return { quote, error: parsed.error };
+}
+
+function verifyChallenge(response: Response, saved?: RunRecord) {
+  return readChallenge(response, saved).error;
 }
 
 function fundingAttempt(raw: unknown, channelId: `0x${string}`): Funding {
@@ -405,6 +420,81 @@ export class ModelRefundJournal {
     await writeRecord(path, next);
   }
 
+  /**
+   * THE ONE-TIME RECOVERY of what earlier dev builds left in the two old shared inference
+   * channels: each channel that still holds credit gets a journal record (marked `legacy`,
+   * sealed, no deposit to wait for) and goes through the same refund as a run's channel, one
+   * at a time, under its own lock. A channel with nothing left, or one already refunded,
+   * returns nothing, so a second run finds nothing. Never a background pass.
+   */
+  async reclaimSharedCredit(signal?: AbortSignal) {
+    const deadline = boundedSignal(REFUND_TIMEOUT_MS * 3, signal);
+    const signer = await this.deps.getSigner();
+    const chainId = await this.deps.readChainId?.(RPC_TIMEOUT_MS);
+    const found: { slot: 0 | 1; channelId: string; result: ModelRefundResult }[] = [];
+    if (chainId === undefined) return found;
+    const network = `eip155:${chainId}`;
+    for (const slot of [0, 1] as const) {
+      const shared = legacySharedInferenceChannel(this.origin, slot);
+      const directory = join(payerDir(this.dataDir, signer.address), 'model-inference', shared.id);
+      const storage = new FileClientChannelStorage({ directory });
+      for (const name of await readdir(join(directory, 'client')).catch(() => [] as string[])) {
+        const channelId = /^(0x[0-9a-f]{64})\.json$/.exec(name)?.[1] as `0x${string}` | undefined;
+        const stored =
+          channelId === undefined ? undefined : await storage.get(channelId).catch(() => undefined);
+        if (channelId === undefined || stored === undefined) continue;
+        const left = BigInt(stored.balance ?? '0') - BigInt(stored.chargedCumulativeAmount ?? '0');
+        const runId = `legacy-${slot}-${channelId}`;
+        const path = recordPath(this.dataDir, this.origin, runId);
+        let existing = await readRecord(path).catch(() => null);
+        if (existing === null && left <= 0n) continue;
+        // Dealt with by an earlier run: nothing to report again.
+        if (existing !== null && existing.state !== 'pending') continue;
+        if (existing === null) {
+          // The channel's terms are the router's own, asked unsigned: what the refund of a
+          // run's channel is checked against, so the stored id must be the one they make.
+          const url = new URL('/api/model-proxy/messages', this.origin).href;
+          const challenge = await this.fetchImpl(url, {
+            method: 'GET',
+            redirect: 'error',
+            signal: deadline,
+          });
+          const { quote } = await Promise.resolve(readChallenge(challenge)).finally(
+            () => void challenge.body?.cancel().catch(() => undefined),
+          );
+          const config = {
+            payer: signer.address.toLowerCase() as `0x${string}`,
+            payerAuthorizer: signer.address.toLowerCase() as `0x${string}`,
+            receiver: quote.payTo,
+            receiverAuthorizer: quote.extra.receiverAuthorizer,
+            token: quote.asset,
+            withdrawDelay: quote.extra.withdrawDelay,
+            salt: shared.salt,
+          };
+          if (quote.network !== network || computeChannelId(config, network) !== channelId)
+            continue;
+          existing = {
+            v: 1,
+            runId,
+            url,
+            network,
+            channel: config,
+            channelId,
+            funding: [],
+            retryAfter: 0,
+            sealed: true,
+            legacy: slot,
+            state: 'pending',
+          };
+          await writeRecord(path, existing);
+        }
+        const result = await this.closeLocked(runId, deadline);
+        if (result.state !== 'none') found.push({ slot, channelId, result });
+      }
+    }
+    return found;
+  }
+
   async close(runId: string, signal?: AbortSignal): Promise<ModelRefundResult> {
     return this.closeLocked(runId, boundedSignal(REFUND_TIMEOUT_MS, signal));
   }
@@ -414,7 +504,12 @@ export class ModelRefundJournal {
     for await (const path of recordFiles(this.dataDir)) {
       if (deadline.aborted) return;
       const saved = await readRecord(path).catch(() => null);
-      if (saved?.state === 'pending' && new URL(saved.url).origin === this.origin) {
+      // An old shared channel's recovery is an action the person runs, never a pass.
+      if (
+        saved?.state === 'pending' &&
+        saved.legacy === undefined &&
+        new URL(saved.url).origin === this.origin
+      ) {
         await this.closeLocked(saved.runId, deadline);
       }
     }
@@ -499,7 +594,14 @@ export class ModelRefundJournal {
     }
 
     const storage = new FileClientChannelStorage({
-      directory: modelInferenceRunDir(this.dataDir, signer.address, this.origin, saved.runId),
+      directory:
+        saved.legacy === undefined
+          ? modelInferenceRunDir(this.dataDir, signer.address, this.origin, saved.runId)
+          : join(
+              payerDir(this.dataDir, signer.address),
+              'model-inference',
+              legacySharedInferenceChannel(this.origin, saved.legacy).id,
+            ),
     });
     const scheme = new BatchSettlementEvmScheme(clientSigner, {
       storage,

@@ -24,7 +24,7 @@ import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { SIWX_HEADER } from '../lib/siwx';
 import { MISMATCH, TEST_POLICY, testSigner } from './fee-test-utils';
-import { modelInferenceRunScope } from './model-channel';
+import { legacySharedInferenceChannel, modelInferenceRunScope } from './model-channel';
 import {
   ModelRefundJournal,
   hasModelRefundRecords,
@@ -74,7 +74,7 @@ function challenge(
   return new Response(null, { status: 402, headers });
 }
 
-async function fixture() {
+async function fixture(shared?: 0 | 1) {
   const dataDir = await mkdtemp(join(tmpdir(), 'model-refund-'));
   dirs.push(dataDir);
   const runId = randomUUID();
@@ -90,7 +90,10 @@ async function fixture() {
     receiverAuthorizer: requirements.extra.receiverAuthorizer as `0x${string}`,
     token: requirements.asset as `0x${string}`,
     withdrawDelay: requirements.extra.withdrawDelay as number,
-    salt: modelInferenceRunScope(origin, runId).salt,
+    salt:
+      shared === undefined
+        ? modelInferenceRunScope(origin, runId).salt
+        : legacySharedInferenceChannel(origin, shared).salt,
   };
   const channelId = computeChannelId(channelConfig, network);
   const signed = await createBatchSettlementEIP3009DepositPayload(
@@ -462,4 +465,59 @@ it('lets the SDK correct a stale voucher once under a new wallet proof', async (
   expect(fetchImpl).toHaveBeenCalledTimes(3);
   expect(nonces).toHaveLength(2);
   expect(nonces[0]).not.toBe(nonces[1]);
+});
+
+// Earlier dev builds parked credit in two shared channels that nothing refunded. A one-time
+// action refunds each through the run-channel refund, once.
+const parkLegacyCredit = async (f: Awaited<ReturnType<typeof fixture>>, slot: 0 | 1) => {
+  const { FileClientChannelStorage } =
+    await import('@x402/evm/batch-settlement/client/file-storage');
+  const { payerDir } = await import('./fee');
+  const directory = join(
+    payerDir(f.dataDir, f.signer.address),
+    'model-inference',
+    legacySharedInferenceChannel(origin, slot).id,
+  );
+  await new FileClientChannelStorage({ directory }).set(f.channelId, {
+    balance: '1000',
+    chargedCumulativeAmount: '300',
+  });
+  return directory;
+};
+
+it('refunds the credit parked in an old shared channel once, and a second run finds nothing', async () => {
+  const f = await fixture(0);
+  const directory = await parkLegacyCredit(f, 0);
+  const first = await f.journal.reclaimSharedCredit();
+  expect(first).toEqual([
+    {
+      slot: 0,
+      channelId: f.channelId,
+      result: { state: 'refunded', amountAtomic: '700', transaction },
+    },
+  ]);
+  const paidRequests = f.fetchImpl.mock.calls.length;
+  expect(await f.newJournal().reclaimSharedCredit()).toEqual([]);
+  expect(f.fetchImpl.mock.calls.length).toBe(paidRequests);
+  // The recovery never runs as a background pass.
+  await f.journal.recoverPending();
+  expect(directory).toContain('model-inference');
+});
+
+it('finds nothing parked and asks the router nothing', async () => {
+  const f = await fixture(0);
+  expect(await f.journal.reclaimSharedCredit()).toEqual([]);
+  expect(f.fetchImpl).not.toHaveBeenCalled();
+});
+
+it('leaves the old channel and the journal unchanged when the router gives no refund challenge', async () => {
+  const f = await fixture(1);
+  const directory = await parkLegacyCredit(f, 1);
+  const before = await readFile(join(directory, 'client', `${f.channelId}.json`), 'utf8');
+  f.state.probe = () => new Response(null, { status: 500 });
+  await expect(f.journal.reclaimSharedCredit()).rejects.toThrow(
+    /did not provide an inference refund challenge/,
+  );
+  expect(await readFile(join(directory, 'client', `${f.channelId}.json`), 'utf8')).toBe(before);
+  await expect(readdir(join(f.dataDir, 'model-refunds'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
