@@ -126,7 +126,7 @@ it('settles one of two open offers for identical assignments a repeat, the oldes
   expect((await store.owned(job.id, 'root'))?.state).toBe('native');
 });
 
-it('still repeats an offer whose index an earlier build wrote', async () => {
+it('ignores a repeat index an earlier dev build wrote in the older shape', async () => {
   const { store, job } = await heldAgentCall();
   const index = join(
     dir,
@@ -134,7 +134,7 @@ it('still repeats an offer whose index an earlier build wrote', async () => {
     `repeat-${canonicalHash({ sessionId: 'root', root: '/repo', tool: 'Agent', native: HELD })}.json`,
   );
   await writeFile(index, JSON.stringify({ id: job.id }));
-  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBe(job.id);
+  expect(await store.nativeRepeat('root', '/repo', 'Agent', HELD)).toBeNull();
 });
 
 it('keeps why a call got no offer as codes in one private bounded file, with no text of the call', async () => {

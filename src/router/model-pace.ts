@@ -8,38 +8,24 @@ import { readJsonFile, writePrivate } from './store-files';
 
 /**
  * THE ROUTER'S CALL RATE FOR ONE WALLET, and this machine's count against it. The router
- * allows a wallet a number of model calls per window, over all its jobs and processes. A
- * router whose offer says its rate (`callLimit`) counts a call at the unpaid quote, where
- * a refusal costs nothing. A router that says nothing counts after the signature, 30 per
- * 60 s together with its routing decisions, and a signed call it refuses for rate ends
- * the job as uncertain. So every process counts what it sends in one file under the data
- * folder, and a call waits there for room before the request the router counts.
+ * allows a wallet a number of model calls per window, over all its jobs and processes, and
+ * counts a call at the unpaid quote, where a refusal costs nothing. Every process counts
+ * the quotes it sends in one file under the data folder, and a call waits there for room
+ * before it asks for its quote. The offer always names the rate.
  */
 export type ModelCallLimit = { max: number; windowMs: number };
-/** What a router that advertises no rate allows: production as of 2026-11-18. */
-export const UNADVERTISED_CALL_LIMIT: ModelCallLimit = { max: 30, windowMs: 60_000 };
 
-/** The offer's own schema field: absent or malformed reads as not advertised. */
-export const callLimitSchema = z
-  .object({
-    max: z.number().int().min(1).max(100_000),
-    windowSeconds: z.number().min(1).max(600),
-  })
-  .optional()
-  .catch(undefined);
+/** The offer's own schema field. */
+export const callLimitSchema = z.object({
+  max: z.number().int().min(1).max(100_000),
+  windowSeconds: z.number().min(1).max(600),
+});
 
-/** The rate a job's offer advertised, or undefined when it advertised none. */
-export function advertisedCallLimit(decision: Record<string, unknown>): ModelCallLimit | undefined {
+/** The rate a job's offer names. An offer that names none is invalid. */
+export function advertisedCallLimit(decision: Record<string, unknown>): ModelCallLimit {
   const said = callLimitSchema.parse(decision.callLimit);
-  return said ? { max: said.max, windowMs: Math.round(said.windowSeconds * 1000) } : undefined;
+  return { max: said.max, windowMs: Math.round(said.windowSeconds * 1000) };
 }
-
-/**
- * What is counted: an unpaid inference quote (`quote`, the count of a router that
- * advertises its rate), a signed inference request (`paid`) and a signed routing request
- * (`route`), the two a router that advertises nothing counts together.
- */
-export type PaceKind = 'quote' | 'paid' | 'route';
 
 const CELLS = 60;
 /** Room kept free: this send, and one a difference between clocks could move across a window. */
@@ -78,7 +64,7 @@ export function paceDelayMs(times: readonly number[], now: number, limit: ModelC
 
 const logSchema = z.object({
   v: z.literal(1),
-  sent: z.array(z.tuple([z.number(), z.enum(['quote', 'paid', 'route'])])).max(20_000),
+  sent: z.array(z.number()).max(20_000),
 });
 /** The longest window a router may advertise, twice: what one estimate can look back on. */
 const KEPT_MS = 2 * 600_000;
@@ -104,7 +90,7 @@ export class ModelPace {
   /** Reads the count, lets `act` decide and add to it, and keeps what is still in reach. */
   private async update<T>(
     signal: AbortSignal | undefined,
-    act: (sent: [number, PaceKind][], now: number) => T,
+    act: (sent: number[], now: number) => T,
   ): Promise<T> {
     await mkdir(join(this.dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     return withFileLock(
@@ -112,7 +98,7 @@ export class ModelPace {
       async () => {
         const kept = logSchema.safeParse(await readJsonFile(this.path, 2_000_000));
         const now = this.clock.now();
-        const sent = (kept.success ? kept.data.sent : []).filter(([time]) => time > now - KEPT_MS);
+        const sent = (kept.success ? kept.data.sent : []).filter((time) => time > now - KEPT_MS);
         const before = sent.length;
         const result = act(sent, now);
         if (sent.length !== before)
@@ -124,26 +110,20 @@ export class ModelPace {
   }
 
   /**
-   * Waits until one more send of `kind` fits `limit` beside the sends of the `counted`
-   * kinds, counts it, and says how long it waited. The check and the count are one step
-   * across processes. A count that cannot be read or written holds nothing up: the call
-   * goes on unpaced, as it did before there was a count. A cancel during the wait throws.
+   * Waits until one more unpaid quote fits `limit`, counts it, and says how long it waited.
+   * The check and the count are one step across processes. A count that cannot be read or
+   * written holds nothing up: the call goes on unpaced, as it did before there was a count.
+   * A cancel during the wait throws.
    */
-  async take(
-    kind: PaceKind,
-    counted: readonly PaceKind[],
-    limit: ModelCallLimit,
-    signal: AbortSignal,
-  ): Promise<number> {
+  async take(limit: ModelCallLimit, signal: AbortSignal): Promise<number> {
     let waited = 0;
     for (;;) {
       signal.throwIfAborted();
       let delay: number;
       try {
         delay = await this.update(signal, (sent, now) => {
-          const times = sent.filter(([, was]) => counted.includes(was)).map(([time]) => time);
-          const wait = paceDelayMs(times, now, limit);
-          if (wait === 0) sent.push([now, kind]);
+          const wait = paceDelayMs(sent, now, limit);
+          if (wait === 0) sent.push(now);
           return wait;
         });
       } catch (error) {
@@ -154,10 +134,5 @@ export class ModelPace {
       await this.clock.wait(delay, signal);
       waited += delay;
     }
-  }
-
-  /** Counts a send that waits for nothing. Never throws. */
-  async note(kind: PaceKind): Promise<void> {
-    await this.update(undefined, (sent, now) => void sent.push([now, kind])).catch(() => undefined);
   }
 }

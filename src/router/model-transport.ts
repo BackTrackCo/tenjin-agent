@@ -45,13 +45,7 @@ import {
 } from './model-worker-control';
 import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
 import type { ModelCallTiming } from './model-worker-diagnostics';
-import {
-  advertisedCallLimit,
-  ModelPace,
-  UNADVERTISED_CALL_LIMIT,
-  type PaceClock,
-  type PaceKind,
-} from './model-pace';
+import { advertisedCallLimit, ModelPace, type PaceClock } from './model-pace';
 
 /**
  * How long each try of a run's refund-support question may take. A first accept once got
@@ -77,19 +71,19 @@ const PROVIDER_FAILURES = new Set([
 ]);
 
 /**
- * THE RESULT SIZE A MESSAGES CALL STATES (`maxResultBytes`), for a job whose router said
- * in its offer that it honours one: that size, up to what this CLI reads. The router then
- * fails a larger reply before it charges for it. Undefined for a router that said nothing,
- * such as one that refuses the field: nothing is stated, and a reply is read through
- * 2,000,000 bytes, the most such a router delivers.
+ * THE RESULT SIZE A MESSAGES CALL STATES (`maxResultBytes`): the size the job's offer says
+ * its router honours, up to what this CLI reads. The router then fails a larger reply
+ * before it charges for it. The offer always names it; one that does not is invalid.
  */
-function statedResultBytes(job: ModelJob): number | undefined {
+function statedResultBytes(job: ModelJob): number {
   const honoured = job.decision.maxResultBytes;
-  return typeof honoured === 'number' &&
-    Number.isSafeInteger(honoured) &&
-    honoured >= MODEL_MESSAGES_RESULT_BYTES
-    ? Math.min(honoured, MODEL_MESSAGES_RESULT_BYTES_MAX)
-    : undefined;
+  if (
+    typeof honoured !== 'number' ||
+    !Number.isSafeInteger(honoured) ||
+    honoured < MODEL_MESSAGES_RESULT_BYTES
+  )
+    throw new Error('The offer names no result size');
+  return Math.min(honoured, MODEL_MESSAGES_RESULT_BYTES_MAX);
 }
 
 /** Jobs whose router refused `stream` after offering it (its flag was turned off again). */
@@ -221,11 +215,10 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 /**
  * WHAT A JOB'S ROUTING CALL COULD HAVE CHARGED, which its budget starts from: the amount this
- * client authorized for that call, recorded when it was made. An offer's own fee cannot lower
- * it. A job that carries none is held at the most a routing call may pay.
+ * client authorized for that call, recorded when it was made. An offer's own fee cannot
+ * lower it.
  */
-const routingExposure = (job: ModelJob): bigint =>
-  routingAuthorizedAtomic(job.decision) ?? ROUTING_FEE_CEILING_ATOMIC;
+const routingExposure = (job: ModelJob): bigint => routingAuthorizedAtomic(job.decision);
 
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 /** A reserved quote that no longer fits the job's cap as it stands when its turn to pay comes. */
@@ -388,12 +381,6 @@ export class ModelTransport {
         } catch (cause) {
           throw new LocalSendBlocked(cause);
         }
-        // A router that advertises no call rate counts a signed routing request in the
-        // one window its model calls share: counted here, where it waits for nothing.
-        const headers = new Headers(
-          init?.headers ?? (input instanceof Request ? input.headers : undefined),
-        );
-        if (headers.has('payment-signature')) await this.pace.note('route');
         const sent = performance.now();
         return fetchFn(input, {
           ...init,
@@ -627,6 +614,7 @@ export class ModelTransport {
     // Messages alone: the Responses contract refuses the field.
     const stated = protocol === 'messages' ? statedResultBytes(job) : undefined;
     const readable = stated ?? MODEL_MESSAGES_RESULT_BYTES;
+
     const { dataDir, baseUrl, payerDeps, inferenceRun } = this.options;
     const journal = inferenceRun ? this.refundJournal() : undefined;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
@@ -712,19 +700,12 @@ export class ModelTransport {
     };
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;
-    // THE CALL RATE. A router whose offer says its rate counts a call at this unpaid
-    // quote, so the call waits here for room in the wallet's count. A router that says
-    // nothing counts the signed request, so there the wait comes before that request
-    // leaves (`cachedFetch`), at the rate production has. A WAIT PRECEDES A SEND: after
-    // one, the request passes again every check it passed before it.
-    const advertised = advertisedCallLimit(job.decision);
-    const paced = async (kind: PaceKind) => {
-      const waited = await this.pace.take(
-        kind,
-        advertised ? ['quote'] : ['paid', 'route'],
-        advertised ?? UNADVERTISED_CALL_LIMIT,
-        signal,
-      );
+    // THE CALL RATE. The router's offer names the wallet's rate and counts a call at this
+    // unpaid quote, so the call waits here for room in the wallet's count. A WAIT PRECEDES
+    // A SEND: after one, the request passes again every check it passed before it.
+    const limit = advertisedCallLimit(job.decision);
+    const paced = async () => {
+      const waited = await this.pace.take(limit, signal);
       if (waited > 0) {
         timing.paceWaitMs = (timing.paceWaitMs ?? 0) + waited;
         await assertCanTransmit();
@@ -757,12 +738,10 @@ export class ModelTransport {
     let relayed = false;
     /** The unpaid request: the router's quote for this call, and the amount it names. */
     const askQuote = async (): Promise<{ challenge: Response; amount: bigint }> => {
-      if (advertised) {
-        const from = performance.now();
-        await paced('quote');
-        // The wait is `paceWaitMs`, not the round trip's time.
-        stepFrom += performance.now() - from;
-      }
+      const from = performance.now();
+      await paced();
+      // The wait is `paceWaitMs`, not the round trip's time.
+      stepFrom += performance.now() - from;
       const challenge = await fetchFn(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -893,13 +872,6 @@ export class ModelTransport {
             await journal.record(inferenceRun, url, signature, signal);
             timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
             await assertCanTransmit();
-          }
-          if (paying && !advertised) {
-            // The signed request waits for room before it leaves: nothing was sent yet,
-            // so a cancel during the wait releases the quote as any local refusal does.
-            step('signMs');
-            await paced('paid');
-            stepFrom = performance.now();
           }
           signal.throwIfAborted();
           init?.signal?.throwIfAborted();
@@ -1040,7 +1012,7 @@ export class ModelTransport {
             // same invocation, before it signs. A fresh quote that cannot be had, or that
             // names another amount than the one reserved, ends this try unsigned and
             // uncharged, for the retry rule to take up with a new reservation.
-            if (advertised && now() - quotedAt > QUOTE_FRESH_MS) {
+            if (now() - quotedAt > QUOTE_FRESH_MS) {
               const from = performance.now();
               const fresh = await askQuote().catch((error: unknown) => {
                 if (error instanceof ModelCallFailed) paid.requote = error;
@@ -1323,7 +1295,7 @@ export class ModelTransport {
     invocationId: string,
     quote: bigint,
     protocol: 'messages' | 'responses',
-    messageBytes = MODEL_MESSAGES_RESULT_BYTES,
+    messageBytes: number,
   ) {
     const value = z
       .object({

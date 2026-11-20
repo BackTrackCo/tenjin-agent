@@ -231,8 +231,8 @@ export class TooManyTools extends Error {
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
 export function workerMessages(
   raw: Record<string, unknown>,
-  /** The output cap the job's router offers, when its offer names one. */
-  outputCap?: number,
+  /** The output cap the job's router names in its offer. */
+  outputCap: number,
   /** The job collects the image and document blocks it sends as text: one identity each. */
   omitted?: Set<string>,
 ) {
@@ -353,14 +353,12 @@ export function workerMessages(
     model: 'deepseek-flash',
     // A WORKER'S OWN TURN ASKS FOR THE OUTPUT CAP ITS ROUTER OFFERS. Claude Code clamps
     // what it asks for itself to 128,000, so the cap is set here; it takes a longer reply
-    // than it asked for as it is. A side request keeps its own small cap, and so does every
-    // request to a router whose offer names none.
-    max_tokens:
-      ownTurn && outputCap !== undefined
-        ? outputCap
-        : raw.max_tokens === undefined
-          ? 16384
-          : z.number().int().min(1).max(MODEL_OUTPUT_TOKENS).parse(raw.max_tokens),
+    // than it asked for as it is. A side request keeps its own small cap.
+    max_tokens: ownTurn
+      ? outputCap
+      : raw.max_tokens === undefined
+        ? 16384
+        : z.number().int().min(1).max(MODEL_OUTPUT_TOKENS).parse(raw.max_tokens),
     thinking: { type: mode === 'adaptive' ? 'enabled' : mode },
     ...(stopSequences ? { stop_sequences: stopSequences } : {}),
     messages,

@@ -44,7 +44,7 @@ it("keeps the parent's provider, wallet and login keys out of the worker's Claud
     options: {
       pathToClaudeCodeExecutable: stub,
       spawnClaudeCodeProcess: claudeWorkerProcess().spawn,
-      env: claudeDeepSeekWorkerEnv(process.env, 'http://127.0.0.1:9', 'worker-token'),
+      env: claudeDeepSeekWorkerEnv(process.env, 'http://127.0.0.1:9', 'worker-token', 65_536),
     },
   });
   try {
@@ -84,7 +84,7 @@ it("hands the SDK the worker's settings as a file, so the arguments its debug lo
         return owned.spawn(options);
       },
       env: {
-        ...claudeDeepSeekWorkerEnv(process.env, 'http://127.0.0.1:9', bridge),
+        ...claudeDeepSeekWorkerEnv(process.env, 'http://127.0.0.1:9', bridge, 65_536),
         DEBUG_CLAUDE_AGENT_SDK: '1',
       },
     },

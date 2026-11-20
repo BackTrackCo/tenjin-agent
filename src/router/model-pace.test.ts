@@ -3,13 +3,7 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import {
-  advertisedCallLimit,
-  ModelPace,
-  paceDelayMs,
-  UNADVERTISED_CALL_LIMIT,
-  type ModelCallLimit,
-} from './model-pace';
+import { advertisedCallLimit, ModelPace, paceDelayMs, type ModelCallLimit } from './model-pace';
 
 const made: string[] = [];
 afterEach(async () => {
@@ -52,10 +46,13 @@ function clock(start = 1_000_000) {
   };
 }
 
-// A signed call the router refuses for rate ends its job as uncertain. A plain count of
+// A quote over the advertised rate is refused before anything is signed. A plain count of
 // the last 60 s is refused by the router's weighted estimate after a burst. The rule is
 // driven here with no clock and no file: each send happens at the instant the rule gives.
-it.each([UNADVERTISED_CALL_LIMIT, { max: 120, windowMs: 60_000 }])(
+it.each([
+  { max: 30, windowMs: 60_000 },
+  { max: 120, windowMs: 60_000 },
+])(
   'never sends what the router would refuse at $max per window, in bursts or steadily, wherever its windows start',
   (limit) => {
     let now = 1_000_000;
@@ -86,24 +83,18 @@ it.each([UNADVERTISED_CALL_LIMIT, { max: 120, windowMs: 60_000 }])(
   },
 );
 
-it('counts every process of the wallet together, and only the kinds the router counts together', async () => {
+it('counts every process of the wallet together', async () => {
   const dir = await folder();
   const time = clock();
   const signal = new AbortController().signal;
   const [one, two] = [new ModelPace(dir, ORIGIN, time), new ModelPace(dir, ORIGIN, time)];
   const limit = { max: 6, windowMs: 60_000 };
-  // Two processes' sends and a routing request fill the room one window has.
-  for (const pace of [one, two, one, two])
-    expect(await pace.take('paid', ['paid', 'route'], limit, signal)).toBe(0);
-  await two.note('route');
-  // A quote is another router's count: it finds the window empty.
-  expect(await one.take('quote', ['quote'], limit, signal)).toBe(0);
+  // Two processes' quotes fill the room one window has, less the spare two.
+  for (const pace of [one, two, one, two, one]) expect(await pace.take(limit, signal)).toBe(0);
   expect(time.state.waits).toEqual([]);
-  expect(await two.take('paid', ['paid', 'route'], limit, signal)).toBeGreaterThan(0);
+  expect(await two.take(limit, signal)).toBeGreaterThan(0);
   // Another router's wallet count is its own.
-  expect(
-    await new ModelPace(dir, 'https://other.example', time).take('paid', ['paid'], limit, signal),
-  ).toBe(0);
+  expect(await new ModelPace(dir, 'https://other.example', time).take(limit, signal)).toBe(0);
 });
 
 it('stops waiting at a cancel, and holds nothing up when its count cannot be read', async () => {
@@ -118,25 +109,25 @@ it('stops waiting at a cancel, and holds nothing up when its count cannot be rea
     },
   });
   const limit = { max: 3, windowMs: 60_000 };
-  expect(await pace.take('paid', ['paid'], limit, stop.signal)).toBe(0);
-  expect(await pace.take('paid', ['paid'], limit, stop.signal)).toBe(0);
-  await expect(pace.take('paid', ['paid'], limit, stop.signal)).rejects.toBe(reason);
+  expect(await pace.take(limit, stop.signal)).toBe(0);
+  expect(await pace.take(limit, stop.signal)).toBe(0);
+  await expect(pace.take(limit, stop.signal)).rejects.toBe(reason);
   // A damaged count reads as empty, and a count that cannot be written is no refusal.
   const broken = await folder();
   await mkdir(join(broken, 'model-jobs'));
   const free = new ModelPace(broken, ORIGIN, clock());
-  expect(await free.take('paid', ['paid'], limit, new AbortController().signal)).toBe(0);
+  expect(await free.take(limit, new AbortController().signal)).toBe(0);
   const [file] = readdirSync(join(broken, 'model-jobs')).filter((name) => name.endsWith('.json'));
   await writeFile(join(broken, 'model-jobs', file!), '{"v":1,"sent":"PRIVATE"');
-  expect(await free.take('paid', ['paid'], limit, new AbortController().signal)).toBe(0);
+  expect(await free.take(limit, new AbortController().signal)).toBe(0);
 });
 
-it('reads the rate an offer advertises, and none from an offer that says nothing usable', () => {
+it('reads the rate an offer names, and refuses an offer that names none', () => {
   expect(advertisedCallLimit({ callLimit: { max: 120, windowSeconds: 60 } })).toEqual({
     max: 120,
     windowMs: 60_000,
   });
   for (const callLimit of [undefined, null, 120, { max: 0, windowSeconds: 60 }, { max: 120 }])
-    expect(advertisedCallLimit({ callLimit })).toBeUndefined();
-  expect(paceDelayMs([], 0, UNADVERTISED_CALL_LIMIT)).toBe(0);
+    expect(() => advertisedCallLimit({ callLimit })).toThrow();
+  expect(paceDelayMs([], 0, { max: 30, windowMs: 60_000 })).toBe(0);
 });

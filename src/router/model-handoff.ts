@@ -66,22 +66,20 @@ export const modelOfferSchema = z.object({
   routingFeeAtomic: z.string().regex(/^\d+$/),
   proxyFeePercent: z.literal(5),
   started: z.literal(false),
-  /** The largest `maxResultBytes` this router honours on a Messages call. A router that
-   *  does not say so refuses the field, so none is sent to it. */
-  maxResultBytes: z.number().int().positive().optional().catch(undefined),
-  /** The largest `max_tokens` this router's Messages endpoint accepts. A router that does
-   *  not say so accepts 65,536. */
-  maxOutputTokens: z.number().int().positive().optional().catch(undefined),
+  /** The largest `maxResultBytes` this router honours on a Messages call, and the size the
+   *  call states: the router's own floor is 2,000,000 bytes. */
+  maxResultBytes: z.number().int().min(2_000_000),
+  /** The largest `max_tokens` this router's Messages endpoint accepts. */
+  maxOutputTokens: z.number().int().positive(),
   /** The wallet's model-call rate over all its jobs and processes, counted at the unpaid
-   *  quote. A router that does not say so counts after the signature. */
+   *  quote. */
   callLimit: callLimitSchema,
-  /** The router's total deadline for one paid model call, in ms. A router that does not say
-   *  so is waited on for the constant. */
-  maxCallDurationMs: z.number().int().nonnegative().optional().catch(undefined),
-  /** The router's idle limit for one call, in ms. Kept with the job; no wait derives from it. */
-  callIdleLimitMs: z.number().int().nonnegative().optional().catch(undefined),
-  /** The version of the streamed Messages reply this router speaks. Only `1` opens the
-   *  client's `stream`; a router that does not say so, or says another value, gets none. */
+  /** The router's total deadline for one paid model call, in ms. */
+  maxCallDurationMs: z.number().int().nonnegative(),
+  /** The router's idle limit for one call, in ms. */
+  callIdleLimitMs: z.number().int().nonnegative(),
+  /** The version of the streamed Messages reply this router speaks. It is sent only behind
+   *  the router's own flag; an offer without it, or with another value, gets none. */
   messagesStream: z.literal(1).optional().catch(undefined),
 });
 export interface ModelSession {
@@ -709,7 +707,7 @@ export class ModelHandoff {
       if (timing) timing.marks.routeSent = Date.now();
       const answered =
         job.state === 'offered'
-          ? { json: job.decision, authorizedAtomic: routingAuthorizedAtomic(job.decision) ?? 0n }
+          ? { json: job.decision, authorizedAtomic: routingAuthorizedAtomic(job.decision) }
           : await transport.route(
               input,
               signal,

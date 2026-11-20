@@ -14,6 +14,7 @@ import {
 import { claudeConfigDir } from './claude-cli';
 import { claudeWorkerProcess, type WindowsWorkerProcess } from './claude-worker-process';
 import { completedMessageSse } from './model-messages';
+import { MODEL_OUTPUT_TOKENS } from './model-limits';
 import { isRecord } from '../lib/guards';
 
 /** What Claude Code gives a native subagent of one type, as it builds that subagent's first request. */
@@ -202,7 +203,11 @@ export async function readNativeAgentPrompt(input: {
         ...(input.additionalDirectories?.length
           ? { additionalDirectories: [...input.additionalDirectories] }
           : {}),
-        env: { ...claudeDeepSeekWorkerEnv(process.env, url, token), ...listAll },
+        // The cap only sets the compaction window, which this read never reaches.
+        env: {
+          ...claudeDeepSeekWorkerEnv(process.env, url, token, MODEL_OUTPUT_TOKENS),
+          ...listAll,
+        },
         // An empty prompt of its own: the main thread's blocks are then only those Claude
         // Code adds to every request, and are told apart from the subagent's prompt.
         systemPrompt: '',
@@ -218,7 +223,10 @@ export async function readNativeAgentPrompt(input: {
           disableAllHooks: true,
           autoMemoryEnabled: false,
           ...(!input.windows ? { apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper() } : {}),
-          env: { ...claudeDeepSeekWorkerSettingsEnv(url, token), ...listAll },
+          env: {
+            ...claudeDeepSeekWorkerSettingsEnv(url, token, MODEL_OUTPUT_TOKENS),
+            ...listAll,
+          },
         }),
         permissionMode: 'default',
         canUseTool: async (tool, toolInput) =>

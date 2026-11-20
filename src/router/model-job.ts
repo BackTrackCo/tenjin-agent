@@ -104,11 +104,13 @@ const unresolved = (job: ModelJob) =>
 /** Why a subagent call the hook saw got no offer. Codes only: never the assignment. */
 /**
  * What a job's routing call was authorized to charge, as this client recorded it when the
- * call was made: null for a decision that carries none.
+ * call was made. Every job this client stores carries it; one that does not is invalid.
  */
-export function routingAuthorizedAtomic(decision: Record<string, unknown>): bigint | null {
+export function routingAuthorizedAtomic(decision: Record<string, unknown>): bigint {
   const value = decision.routingAuthorizedAtomic;
-  return typeof value === 'string' && /^\d{1,30}$/.test(value) ? BigInt(value) : null;
+  if (typeof value !== 'string' || !/^\d{1,30}$/.test(value))
+    throw new Error('The job has no routing authorization');
+  return BigInt(value);
 }
 export const NO_OFFER_CODES = [
   'kept_native',
@@ -193,8 +195,9 @@ export class ModelJobStore {
   /** The held Claude calls with this content in this session and root, oldest first. */
   private async repeatIds(path: string): Promise<string[]> {
     const index = await readJsonFile(path, 4000);
-    const ids = Array.isArray(index?.ids) ? index.ids : [index?.id];
-    return ids.filter((id): id is string => z.uuid().safeParse(id).success);
+    return (Array.isArray(index?.ids) ? index.ids : []).filter(
+      (id): id is string => z.uuid().safeParse(id).success,
+    );
   }
   private repeatPath(
     sessionId: string,

@@ -119,7 +119,7 @@ export function claudeDeepSeekWorkerEnv(
   parent: NodeJS.ProcessEnv,
   baseUrl: string,
   token: string,
-  outputCap?: number,
+  outputCap: number,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...parent,
@@ -136,7 +136,7 @@ export function claudeDeepSeekWorkerSettingsEnv(
   baseUrl: string,
   token: string,
   /** The reply cap of the job's own model calls: where its compaction triggers follows it. */
-  outputCap?: number,
+  outputCap: number,
 ): Record<string, string> {
   return {
     ...Object.fromEntries(CLEARED_ENV.map((key) => [key, ''])),
@@ -172,7 +172,7 @@ export function claudeDeepSeekWorkerSettingsEnv(
 export function claudeManagedProviderCompatible(
   resolved: Partial<Pick<ResolvedSettings, 'sources'>>,
 ): boolean {
-  const fixed = claudeDeepSeekWorkerSettingsEnv('', '');
+  const fixed = claudeDeepSeekWorkerSettingsEnv('', '', MODEL_OUTPUT_TOKENS);
   return !(resolved.sources ?? []).some(
     ({ source, settings }) =>
       source === 'managed' &&

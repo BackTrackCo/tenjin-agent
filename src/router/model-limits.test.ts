@@ -6,7 +6,6 @@ import {
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_OUTPUT_TOKENS,
   modelPeakQuoteAtomic,
-  MODEL_PAID_CALL_TIMEOUT_MS,
   paidCallTimeoutMs,
   usdOfAtomic,
 } from './model-limits';
@@ -26,14 +25,15 @@ it('derives the call floor from the output cap with the router quote formula', (
 });
 
 // Operator ruling 2026-11-18: 256,000 output tokens, the DeepSeek harness's cap, on a
-// router that says it accepts them. A worker asked 65,536 of every router.
+// router that says it accepts them.
 it("reads a job's output cap from its offer alone, up to 256,000", () => {
   expect(offeredOutputTokens({ maxOutputTokens: 256_000 })).toBe(256_000);
   expect(offeredOutputTokens({ maxOutputTokens: 128_000 })).toBe(128_000);
+  expect(offeredOutputTokens({ maxOutputTokens: 65_536 })).toBe(65_536);
   expect(offeredOutputTokens({ maxOutputTokens: 1_000_000 })).toBe(256_000);
-  // Production's offer names none: 65,536 as before, whatever its version is.
-  for (const decision of [{}, { maxOutputTokens: '256000' }, { maxOutputTokens: 65_536 }])
-    expect(offeredOutputTokens(decision)).toBeUndefined();
+  // The offer always names it; one that names none or a non-number is invalid.
+  for (const decision of [{}, { maxOutputTokens: '256000' }, { maxOutputTokens: 0 }])
+    expect(() => offeredOutputTokens(decision)).toThrow();
 });
 
 // A 256,000-token call reserves $0.365784 for a 130 KiB request where a 65,536-token one
@@ -64,16 +64,16 @@ it('steps the output cap down to the largest one whose reserve fits what a job h
 it('compacts where the DeepSeek harness does for the reply cap of the job', () => {
   expect(compactWindowTokens(65_536)).toBe(838_860);
   expect(compactWindowTokens(256_000)).toBe(727_040);
-  expect(compactWindowTokens()).toBe(compactWindowTokens(MODEL_OUTPUT_TOKENS));
   // A reply and the headroom always fit under the trigger's context.
   for (const cap of [65_536, 128_000, 256_000])
     expect(compactWindowTokens(cap) + cap).toBeLessThanOrEqual(1_048_576 - 65_536);
 });
 
 it("waits for a paid call as long as its offer's deadline plus the constant's minute", () => {
-  expect(paidCallTimeoutMs({ maxCallDurationMs: 540_000 })).toBe(MODEL_PAID_CALL_TIMEOUT_MS);
+  expect(paidCallTimeoutMs({ maxCallDurationMs: 540_000 })).toBe(600_000);
   expect(paidCallTimeoutMs({ maxCallDurationMs: 900_000 })).toBe(960_000);
   expect(paidCallTimeoutMs({ maxCallDurationMs: 0 })).toBe(60_000);
+  // The offer always names it; one that names none or a non-number is invalid.
   for (const decision of [
     {},
     { maxCallDurationMs: '540000' },
@@ -81,5 +81,5 @@ it("waits for a paid call as long as its offer's deadline plus the constant's mi
     { maxCallDurationMs: 1.5 },
     { maxCallDurationMs: null },
   ])
-    expect(paidCallTimeoutMs(decision)).toBe(MODEL_PAID_CALL_TIMEOUT_MS);
+    expect(() => paidCallTimeoutMs(decision)).toThrow();
 });

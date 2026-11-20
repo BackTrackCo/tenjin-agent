@@ -80,7 +80,7 @@ it('keeps provider, aliases and the native auto classifier inside the disposable
     TYPESAFE_KEY: 'router-secret',
     NEON_API_KEY: 'mcp-secret',
   };
-  const env = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1:1234', 'worker-token');
+  const env = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1:1234', 'worker-token', 65_536);
   expect(env).toMatchObject({
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:1234',
     ANTHROPIC_API_KEY: 'worker-token',
@@ -122,6 +122,7 @@ it("clears the person's ways to turn thinking off from the worker's env, and fro
     { MAX_THINKING_TOKENS: '0', CLAUDE_CODE_DISABLE_THINKING: '1' },
     'http://127.0.0.1:1234',
     'worker-token',
+    65_536,
   );
   expect(env.MAX_THINKING_TOKENS).toBeUndefined();
   expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined();
@@ -139,7 +140,9 @@ it("clears the person's ways to turn thinking off from the worker's env, and fro
 
 it('pins the native settings flag layer and clears inherited provider credentials in JSON', () => {
   const env = JSON.parse(
-    JSON.stringify(claudeDeepSeekWorkerSettingsEnv('http://127.0.0.1:1234', 'worker-token')),
+    JSON.stringify(
+      claudeDeepSeekWorkerSettingsEnv('http://127.0.0.1:1234', 'worker-token', 65_536),
+    ),
   );
   expect(env).toMatchObject({
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:1234',
@@ -166,7 +169,7 @@ it('pins the native settings flag layer and clears inherited provider credential
 it('reads the generated worker credential without embedding it in the helper command', async () => {
   const parent = { ANTHROPIC_API_KEY: 'parent-key' };
   const token = 'ab'.repeat(32);
-  const env = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', token);
+  const env = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', token, 65_536);
   const command = claudeDeepSeekWorkerApiKeyHelper();
   const executable = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/sh';
   const args = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-c', command];
@@ -189,9 +192,9 @@ it.each([
     expect(claudeWorkerAuthCompatible({ [key]: value })).toBe(false);
     expect(claudeWorkerAuthCompatible({}, { [key]: value })).toBe(false);
   }
-  expect(claudeDeepSeekWorkerEnv({ [key]: 'true' }, 'http://127.0.0.1', 'worker-token')[key]).toBe(
-    'true',
-  );
+  expect(
+    claudeDeepSeekWorkerEnv({ [key]: 'true' }, 'http://127.0.0.1', 'worker-token', 65_536)[key],
+  ).toBe('true');
 });
 
 it.each([
@@ -244,7 +247,9 @@ it.each(['claude-desktop', 'claude-desktop-3p', 'local-agent', 'claude-vscode', 
   (entrypoint) => {
     const parent = { CLAUDE_CODE_ENTRYPOINT: entrypoint, CLAUDE_CONFIG_DIR: '/normal/.claude' };
     expect(claudeWorkerAuthCompatible(parent)).toBe(true);
-    expect(claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', 'worker-token')).toMatchObject({
+    expect(
+      claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', 'worker-token', 65_536),
+    ).toMatchObject({
       CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
       CLAUDE_CONFIG_DIR: '/normal/.claude',
     });
@@ -325,7 +330,7 @@ it('excludes the inherited wallet signer and overrides native forced-on auto mem
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
     NEON_API_KEY: 'ordinary-mcp-key',
   };
-  const child = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', 'worker-token');
+  const child = claudeDeepSeekWorkerEnv(parent, 'http://127.0.0.1', 'worker-token', 65_536);
   expect(child.TENJIN_WALLET_KEY).toBeUndefined();
   expect(child.TENJIN_WALLET_PASSPHRASE).toBeUndefined();
   expect(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1');
@@ -356,11 +361,11 @@ it("leaves tool search as the person's session has it, a managed setting include
   // loads MCP tools on demand (the proxy takes 256 tools at most), and a managed tool
   // search setting keeping the work native because the worker overrode it.
   const url = 'http://127.0.0.1:1234';
-  expect(claudeDeepSeekWorkerSettingsEnv(url, 'worker-token')).not.toHaveProperty(
+  expect(claudeDeepSeekWorkerSettingsEnv(url, 'worker-token', 65_536)).not.toHaveProperty(
     'ENABLE_TOOL_SEARCH',
   );
   expect(
-    claudeDeepSeekWorkerEnv({ ENABLE_TOOL_SEARCH: 'auto:5' }, url, 'worker-token')
+    claudeDeepSeekWorkerEnv({ ENABLE_TOOL_SEARCH: 'auto:5' }, url, 'worker-token', 65_536)
       .ENABLE_TOOL_SEARCH,
   ).toBe('auto:5');
   expect(

@@ -884,39 +884,43 @@ it('native-workspace continuation keeps its original scope and budget with a tru
 });
 
 it('consumes the server canonical offer contract without enabling an alias or provider switch', () => {
-  expect(
-    modelOfferSchema.parse({ ...offer, maxCallDurationMs: 540_000, callIdleLimitMs: 300_000 }),
-  ).toMatchObject({
+  expect(modelOfferSchema.parse(offer)).toMatchObject({
+    maxResultBytes: 4_000_000,
+    maxOutputTokens: 256_000,
     maxCallDurationMs: 540_000,
     callIdleLimitMs: 300_000,
+    callLimit: { max: 120, windowSeconds: 60 },
   });
-  for (const bad of ['540000', -1, 1.5, null])
-    expect(modelOfferSchema.parse({ ...offer, maxCallDurationMs: bad }).maxCallDurationMs).toBe(
-      undefined,
-    );
   expect(modelOfferSchema.safeParse(offer).success).toBe(true);
   expect(modelOfferSchema.safeParse({ ...offer, model: 'other-model' }).success).toBe(false);
   expect(
     modelOfferSchema.safeParse({ ...offer, endpoint: 'https://elsewhere.test/messages' }).success,
   ).toBe(false);
-  // The result size a router honours is kept with the job; an offer with none, or with a
-  // value that is no size, is still an offer.
-  expect(modelOfferSchema.parse({ ...offer, maxResultBytes: 4_000_000 }).maxResultBytes).toBe(
-    4_000_000,
-  );
-  expect(modelOfferSchema.parse(offer)).not.toHaveProperty('maxResultBytes');
-  expect(modelOfferSchema.parse({ ...offer, maxResultBytes: '4MB' }).maxResultBytes).toBe(
-    undefined,
-  );
-  // So is the output cap its Messages endpoint accepts: dropped from the job, a worker
-  // would ask 65,536 of a router that takes 256,000.
-  expect(modelOfferSchema.parse({ ...offer, maxOutputTokens: 256_000 }).maxOutputTokens).toBe(
-    256_000,
-  );
-  expect(modelOfferSchema.parse(offer)).not.toHaveProperty('maxOutputTokens');
-  expect(modelOfferSchema.parse({ ...offer, maxOutputTokens: 'many' }).maxOutputTokens).toBe(
-    undefined,
-  );
+  // Each field the server always sends is required: one omitted gives an invalid offer, so
+  // the call stays native.
+  for (const key of [
+    'maxResultBytes',
+    'maxOutputTokens',
+    'maxCallDurationMs',
+    'callIdleLimitMs',
+    'callLimit',
+  ]) {
+    const rest: Record<string, unknown> = { ...offer };
+    delete rest[key];
+    expect(modelOfferSchema.safeParse(rest).success).toBe(false);
+  }
+  // And so is a malformed one.
+  for (const patch of [
+    { maxResultBytes: '4MB' },
+    { maxResultBytes: 1_000 },
+    { maxOutputTokens: 'many' },
+    { maxOutputTokens: 0 },
+    { maxCallDurationMs: '540000' },
+    { maxCallDurationMs: -1 },
+    { callIdleLimitMs: null },
+    { callLimit: {} },
+  ])
+    expect(modelOfferSchema.safeParse({ ...offer, ...patch }).success).toBe(false);
 });
 
 it('keeps a legacy undersized job native before purchasing model routing', async () => {
@@ -1081,7 +1085,7 @@ it('keeps the optional offer fields in the stored job, and the call wait reads t
 
 it('takes the authorization from the call, never from a field the offer carries', async () => {
   const f = await routedFixture();
-  authorize(f.route, 3000n);
+  authorize(f.route, 8100n);
   f.route.mockImplementation(async (input: { jobId: string }) => ({
     ...offer,
     jobId: input.jobId,
@@ -1089,7 +1093,7 @@ it('takes the authorization from the call, never from a field the offer carries'
   }));
   const made = await f.model.capture(f.session, 'forged', { prompt: 'Read the fixture.' });
   expect((await f.model.store.owned(offerId(made), 'root'))?.decision).toMatchObject({
-    routingAuthorizedAtomic: '3000',
+    routingAuthorizedAtomic: '8100',
   });
 });
 

@@ -13,8 +13,7 @@ import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test
 import { modelChannelScope, modelInferenceRunScope } from './model-channel';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
-import { MODEL_PAID_CALL_TIMEOUT_MS, modelPeakQuoteAtomic } from './model-limits';
-import { ModelPace } from './model-pace';
+import { modelPeakQuoteAtomic } from './model-limits';
 import { workerSearchMessages } from './model-messages';
 import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
@@ -93,7 +92,16 @@ async function fixture(
     root: repo,
     task: 'Read the fixture',
     native: {},
-    decision: { jobId: randomUUID(), routingFeeAtomic: '3000', routingAuthorizedAtomic: '3000' },
+    decision: {
+      jobId: randomUUID(),
+      routingFeeAtomic: '3000',
+      routingAuthorizedAtomic: '3000',
+      maxResultBytes: 4_000_000,
+      maxOutputTokens: 256_000,
+      maxCallDurationMs: 540_000,
+      callIdleLimitMs: 300_000,
+      callLimit: { max: 120, windowSeconds: 60 },
+    },
     capAtomic: '1000000',
     state: 'running',
     expiresAt: Date.now() + 60_000,
@@ -1552,14 +1560,10 @@ it('bounds escaped Responses envelopes on both paid results and owner recovery w
 // tenjin#1153 review: its server settled a reply through 4,000,000 bytes while this parser
 // refused one above 2,000,000 on the paid reply and on recovery, after the charge. That
 // server now settles only up to the size a call states, and refuses a larger reply unpaid.
-it('states the result size it reads only to a router whose offer says it honours one, and then reads that much', async () => {
+it('states the result size its offer names, up to what this CLI reads, and reads that much', async () => {
   const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'long' }] };
   const signal = new AbortController().signal;
-  // Production today: its strict schema refuses the field, so none is sent.
-  const today = await fixture();
-  await today.make().messages(today.job, request, signal);
-  expect(today.last()).not.toHaveProperty('maxResultBytes');
-  // A router whose offer names the size it honours: stated, up to what this CLI reads.
+  // The offer names 8,000,000: stated, up to what this CLI reads, and read that far.
   const f = await fixture({ drop: true });
   f.job.decision.maxResultBytes = 8_000_000;
   f.message.content[0]!.text = 'x'.repeat(2_100_000);
@@ -1569,23 +1573,23 @@ it('states the result size it reads only to a router whose offer says it honours
   expect(await f.make().messages(f.job, request, signal)).toEqual(f.message);
   expect(f.router.paidRequests()).toBe(1);
   const paid = await fixture();
-  paid.job.decision.maxResultBytes = 4_000_000;
   paid.message.content[0]!.text = 'x'.repeat(2_100_000);
   expect(await paid.make().messages(paid.job, request, signal)).toEqual(paid.message);
-  // An offer that names less than a router delivers unasked is no statement at all.
+  // A size below the router's own floor is an invalid offer: the call fails closed.
   const odd = await fixture();
   odd.job.decision.maxResultBytes = 1_000;
-  await odd.make().messages(odd.job, request, signal);
-  expect(odd.last()).not.toHaveProperty('maxResultBytes');
+  await expect(odd.make().messages(odd.job, request, signal)).rejects.toThrow(
+    /names no result size/,
+  );
+  expect(odd.last()).toBeUndefined();
   // Responses has no such field: its contract refuses it.
   const responses = await fixture({ protocol: 'responses' });
-  responses.job.decision.maxResultBytes = 4_000_000;
   await responses.make().responses(responses.job, { model: 'deepseek-flash', input: [] }, signal);
   expect(responses.last()).not.toHaveProperty('maxResultBytes');
 });
 
-// The router serves one call up to 540 s (300 s in production), so the client's wait for
-// the paid answer, 360 s before, ended a call the router was still serving.
+// The router serves one call up to 540 s, so the client's wait for the paid answer, 360 s
+// before, ended a call the router was still serving.
 it('waits for a paid answer longer than the router allows a call, 540 s with a margin', async () => {
   const timeouts: number[] = [];
   const real = globalThis.setTimeout;
@@ -1607,23 +1611,17 @@ it('waits for a paid answer longer than the router allows a call, 540 s with a m
   } finally {
     spy.mockRestore();
   }
-  expect(MODEL_PAID_CALL_TIMEOUT_MS).toBeGreaterThanOrEqual(540_000 + 30_000);
-  const paidWait = timeouts.filter((ms) => ms > 300_000 && ms <= MODEL_PAID_CALL_TIMEOUT_MS);
+  const paidWait = timeouts.filter((ms) => ms > 300_000 && ms <= 600_000);
   expect(paidWait.length).toBeGreaterThan(0);
   expect(Math.max(...paidWait)).toBeGreaterThan(540_000);
 });
 
-// The next server's offer names the router's own deadline for one call: the client waits that
-// long plus the constant's minute, a bigger or a smaller figure alike, and the constant when
-// the offer names none or names it badly.
+// The offer names the router's own deadline for one call: the client waits that long plus
+// the constant's minute, a bigger or a smaller figure alike.
 it.each([
-  ['absent', undefined, 600_000],
   ['present', 540_000, 600_000],
-  ['larger than today', 900_000, 960_000],
-  ['smaller than today', 300_000, 360_000],
-  ['malformed (text)', '540000', 600_000],
-  ['malformed (negative)', -1, 600_000],
-  ['malformed (fraction)', 1.5, 600_000],
+  ['larger', 900_000, 960_000],
+  ['smaller', 300_000, 360_000],
 ])('waits for a paid answer by the offer: %s', async (_name, offered, expected) => {
   const timeouts: number[] = [];
   const real = globalThis.setTimeout;
@@ -1694,9 +1692,9 @@ it('asks for the largest output cap the rest of the job ceiling can reserve, nev
   expect((await sent('80000', '50000')).asked).toBe(65_536);
 });
 
-it('rejects a Messages result above the server message ceiling even when the receipt envelope fits', async () => {
+it('rejects a Messages result above the size the call states even when the receipt envelope fits', async () => {
   const f = await fixture();
-  f.message.content[0]!.text = 'x'.repeat(2_000_000);
+  f.message.content[0]!.text = 'x'.repeat(4_100_000);
   const failure = await f
     .make()
     .messages(f.job, { messages: [] }, new AbortController().signal)
@@ -1843,10 +1841,11 @@ it.each([
   ).toBe((BigInt(seeded) + 1000n).toString());
 });
 
-it('holds a job that records no authorization at the most a routing call may pay', async () => {
+it('refuses a job that records no routing authorization, and signs nothing', async () => {
   const f = await fixture({ cap: '1000000' });
   delete f.job.decision.routingAuthorizedAtomic;
-  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '250000' });
+  await expect(f.make().summary(f.job)).rejects.toThrow(/no routing authorization/);
+  expect(f.router.paidRequests()).toBe(0);
 });
 
 it('refuses a call that would pass the cap by the authorized fee, whatever the offer said', async () => {
@@ -2292,51 +2291,6 @@ function pacedBy(sentSoFar: () => number, start = 1_000_000) {
   };
 }
 
-// Production allows a wallet 30 signed model calls per 60 s, and a signed call it refuses
-// for rate ends the job as uncertain. With lanes shared out, two sessions reach that rate.
-it('holds a signed call back until the unadvertised rate has room, counting every transport of the wallet', async () => {
-  const f = await fixture({ quote: '2000', charge: '1000', minDeposit: '900000' });
-  const signal = new AbortController().signal;
-  const paced = pacedBy(() => f.vouchers.length);
-  const sentAt: number[] = [];
-  const real = f.deps.fetchImpl!;
-  f.deps.fetchImpl = async (input, init) => {
-    if (signedRequest(input, init)) sentAt.push(paced.state.now);
-    return real(input, init);
-  };
-  // Two processes' worth of transports for one wallet.
-  const transports = [0, 1].map(
-    () =>
-      new ModelTransport({
-        dataDir: f.dir,
-        baseUrl: BASE,
-        payerDeps: f.deps,
-        paceClock: paced.paceClock,
-      }),
-  );
-  const timings: Record<string, unknown>[] = [];
-  for (let n = 0; n < 34; n++)
-    await transports[n % 2]!.messages(f.job, say(`Call ${n}`), signal, undefined, (timing) =>
-      timings.push({ ...timing }),
-    );
-  // The 30th call waited, signed and unsent, and nothing left during its wait.
-  expect(paced.state.waits[0]).toMatchObject({ sent: 29 });
-  expect(timings.slice(0, 29).every((timing) => timing.paceWaitMs === undefined)).toBe(true);
-  expect(timings[29]!.paceWaitMs).toBeGreaterThan(50_000);
-  expect(f.vouchers.map((voucher) => voucher.status)).toEqual(Array(34).fill(200));
-  // The router's own estimate (the current window plus a share of the one before) would
-  // have let every send through, wherever its windows start against this clock.
-  for (const [index, at] of sentAt.entries())
-    for (let offset = 0; offset < 60_000; offset += 1_000) {
-      const window = (time: number) => Math.floor((time + offset) / 60_000);
-      const before = sentAt.slice(0, index);
-      const current = before.filter((time) => window(time) === window(at)).length;
-      const previous = before.filter((time) => window(time) === window(at) - 1).length;
-      const share = ((at + offset) % 60_000) / 60_000;
-      expect(Math.floor((1 - share) * previous) + current).toBeLessThan(30);
-    }
-});
-
 it('waits before the unpaid quote at the rate an offer advertises, and never between signature and send', async () => {
   const f = await fixture({ quote: '2000', charge: '1000', minDeposit: '900000' });
   const job: ModelJob = {
@@ -2368,33 +2322,6 @@ it('waits before the unpaid quote at the rate an offer advertises, and never bet
   );
   expect(timings[5]!.paceWaitMs).toBeGreaterThan(0);
   expect(f.vouchers.map((voucher) => voucher.status)).toEqual(Array(7).fill(200));
-});
-
-it("counts a signed routing request in the unadvertised rate's window", async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'model-route-pace-'));
-  made.push(dir);
-  const router = new FakeRouter({ path: '/api/model-router/route' });
-  const signal = new AbortController().signal;
-  // One clock for the transport's count and the count the test reads.
-  const paced = pacedBy(() => router.paidRequests());
-  const transport = new ModelTransport({
-    dataDir: dir,
-    baseUrl: BASE,
-    payerDeps: payerDeps(router, dir, privateKeyToAccount(generatePrivateKey())),
-    paceClock: paced.paceClock,
-  });
-  const pace = () =>
-    new ModelPace(dir, BASE, paced.paceClock).take(
-      'paid',
-      ['paid', 'route'],
-      { max: 3, windowMs: 60_000 },
-      signal,
-    );
-  expect(await pace()).toBe(0);
-  await transport.route({ schemaVersion: 1 }, signal);
-  expect(router.paidRequests()).toBe(1);
-  // One model call and the routing request: the window of three has no room for a third.
-  expect(await pace()).toBeGreaterThan(0);
 });
 
 it('keeps a signed call the router refuses for rate as uncertain, and never tries or signs it again', async () => {
@@ -2433,14 +2360,14 @@ it('keeps a signed call the router refuses for rate as uncertain, and never trie
 
 // A router that counts a call at its quote keeps that quote's place for 120 s. A call that
 // waits longer for its channel would be counted again after its signature.
-it.each(['advertised', 'unadvertised', 'changed'] as const)(
+it.each(['advertised', 'changed'] as const)(
   'asks for the quote again before signing when a call waited past 100 s for its channel (%s rate)',
   async (rate) => {
     const f = await fixture({ quote: '120000', refundCapability: 'enabled' });
-    const job: ModelJob =
-      rate === 'unadvertised'
-        ? f.job
-        : { ...f.job, decision: { ...f.job.decision, callLimit: { max: 120, windowSeconds: 60 } } };
+    const job: ModelJob = {
+      ...f.job,
+      decision: { ...f.job.decision, callLimit: { max: 120, windowSeconds: 60 } },
+    };
     const paced = pacedBy(() => f.vouchers.length);
     const asked: unknown[] = [];
     const real = f.deps.fetchImpl!;
@@ -2498,11 +2425,6 @@ it.each(['advertised', 'unadvertised', 'changed'] as const)(
       ]);
       expect(outcome[1]).toEqual(f.message);
       expect(timings[0]!.requoteMs).toBeGreaterThanOrEqual(0);
-    } else if (rate === 'unadvertised') {
-      // That router counts after the signature: an older quote is no different to it.
-      expect(asked).toHaveLength(4);
-      expect(outcome[1]).toEqual(f.message);
-      expect(timings[0]).not.toHaveProperty('requoteMs');
     } else {
       // The fresh quote names another amount than the one reserved: nothing is signed,
       // the reservation is released, and the retry rule may take the call up again.

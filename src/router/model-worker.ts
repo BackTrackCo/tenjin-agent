@@ -50,7 +50,6 @@ import {
   MODEL_MESSAGES_MAX_TOOLS,
   MODEL_NATIVE_TEXT_BYTES,
   compactWindowTokens,
-  MODEL_OUTPUT_TOKENS,
   offeredOutputTokens,
 } from './model-limits';
 import type { ModelJob } from './model-job';
@@ -915,7 +914,7 @@ async function runQualifiedWorker(
   const diagnostics = new WorkerDiagnosticsRecord(
     job.root,
     compactWindowTokens(outputCap),
-    outputCap ?? MODEL_OUTPUT_TOKENS,
+    outputCap,
   );
   if (options.accepted && !early) diagnostics.accepted(options.accepted.at, options.accepted.marks);
   diagnostics.mark('workerStart', workerStart);

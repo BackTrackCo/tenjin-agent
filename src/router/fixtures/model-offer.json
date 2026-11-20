@@ -8,11 +8,19 @@
   "thinking": true,
   "effort": "high",
   "reason": "bounded_work",
-  "policyHash": "615e9eba8dce47585122be56cdf1e39e5dd0de052ffd9988b9036ee7f17d4cf8",
+  "policyHash": "0275bb8f0cfa9a409f08f00d36395ad524abe87dbd52ab7514e6318ef342d14b",
   "rateVersion": "deepseek-flash-1017-2026-11-13",
-  "routingFeeAtomic": "3000",
+  "routingFeeAtomic": "8100",
   "proxyFeePercent": 5,
   "started": false,
-  "expectedSpendAtomic": "20000",
-  "estimateVersion": "bounded-helper-v1"
+  "expectedSpendAtomic": "54000",
+  "estimateVersion": "bounded-helper-v2",
+  "maxResultBytes": 4000000,
+  "maxOutputTokens": 256000,
+  "maxCallDurationMs": 540000,
+  "callIdleLimitMs": 300000,
+  "callLimit": {
+    "max": 120,
+    "windowSeconds": 60
+  }
 }

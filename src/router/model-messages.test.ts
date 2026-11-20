@@ -1,6 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { expect, it } from 'vitest';
 import { completedMessageSse, workerMessages } from './model-messages';
+
+/** Most tests need no particular cap: they exercise the request, not the offer. */
+const build = (
+  raw: Record<string, unknown>,
+  outputCap = 65_536,
+  omitted?: Set<string>,
+): ReturnType<typeof workerMessages> => workerMessages(raw, outputCap, omitted);
 it('roundtrips completed thinking, tool IDs/JSON and cumulative usage through the maintained SDK parser', async () => {
   const message = {
     id: 'msg_test',
@@ -39,7 +46,7 @@ it('roundtrips completed thinking, tool IDs/JSON and cumulative usage through th
   expect(result.usage).toMatchObject(message.usage);
 });
 it('does not rewrite a tool JSON key named cache_control and refuses provider tools', () => {
-  const result = workerMessages({
+  const result = build({
     model: 'deepseek-flash',
     messages: [
       {
@@ -51,9 +58,9 @@ it('does not rewrite a tool JSON key named cache_control and refuses provider to
     ],
   });
   expect(JSON.stringify(result)).toContain('keep this input');
-  expect(() => workerMessages({ model: 'claude-opus' })).toThrow();
+  expect(() => build({ model: 'claude-opus' })).toThrow();
   expect(() =>
-    workerMessages({
+    build({
       model: 'deepseek-flash',
       tools: [{ type: 'web_search', name: 'search', input_schema: {} }],
     }),
@@ -61,7 +68,7 @@ it('does not rewrite a tool JSON key named cache_control and refuses provider to
 });
 it('preserves the native auto classifier stop sequence and non-thinking request', () => {
   const messages = [{ role: 'user', content: [{ type: 'text', text: 'Review the tool call' }] }];
-  const result = workerMessages({
+  const result = build({
     model: 'deepseek-flash',
     messages,
     max_tokens: 2112,
@@ -88,28 +95,24 @@ it("sends a worker's own turn with thinking on, whatever the request asks", () =
     { stream: true },
     { tools },
   ])
-    expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000, ...turn })).toMatchObject({
+    expect(build({ model: 'deepseek-flash', max_tokens: 32000, ...turn })).toMatchObject({
       thinking: { type: 'enabled' },
     });
 });
 it('keeps worker adaptive thinking enabled and rejects unknown thinking instead of changing it', () => {
   expect(
-    workerMessages({ model: 'deepseek-flash', thinking: { type: 'adaptive', display: 'updates' } }),
+    build({ model: 'deepseek-flash', thinking: { type: 'adaptive', display: 'updates' } }),
   ).toMatchObject({ thinking: { type: 'enabled' } });
   expect(
-    workerMessages({ model: 'deepseek-flash', thinking: { type: 'enabled', budget_tokens: 1024 } }),
+    build({ model: 'deepseek-flash', thinking: { type: 'enabled', budget_tokens: 1024 } }),
   ).toMatchObject({ thinking: { type: 'enabled' } });
-  expect(() =>
-    workerMessages({ model: 'deepseek-flash', thinking: { type: 'unknown' } }),
-  ).toThrow();
-  expect(() =>
-    workerMessages({ model: 'deepseek-flash', stop_sequences: ['x'.repeat(257)] }),
-  ).toThrow();
+  expect(() => build({ model: 'deepseek-flash', thinking: { type: 'unknown' } })).toThrow();
+  expect(() => build({ model: 'deepseek-flash', stop_sequences: ['x'.repeat(257)] })).toThrow();
 });
 // The router's Messages contract takes text only in a message and in a tool result
-// (checked against its schema, production's and the next one's): a request with one image
-// or document block was refused whole with 400 `invalid_model_request`, which is not tried
-// again, so the job ended, and a follow-up carried the same block.
+// (checked against its strict schema): a request with one image or document block was
+// refused whole with 400 `invalid_model_request`, which is not tried again, so the job
+// ended, and a follow-up carried the same block.
 it('sends an image or a document block as a stable text placeholder, in a tool result and beside one', () => {
   const png = {
     type: 'image',
@@ -143,7 +146,7 @@ it('sends an image or a document block as a stable text placeholder, in a tool r
       },
     ],
   });
-  const sent = workerMessages(request());
+  const sent = build(request());
   const image = '[image omitted because this model route accepts text only; attachment sha256:';
   expect(sent.messages).toEqual([
     {
@@ -177,7 +180,7 @@ it('sends an image or a document block as a stable text placeholder, in a tool r
   ]);
   // No image bytes leave, and the same block reads the same on the next turn.
   expect(JSON.stringify(sent)).not.toContain('iVBORw0KGgo=');
-  expect(workerMessages(request()).messages).toEqual(sent.messages);
+  expect(build(request()).messages).toEqual(sent.messages);
 });
 // The parent has to know a job needed a screenshot or a PDF that the text-only route
 // could not send. Each block counts once, however many turns carry it again.
@@ -194,40 +197,40 @@ it('counts each image or document block it sends as text once, across turns', ()
     messages: [{ role: 'user', content }],
   });
   const omitted = new Set<string>();
-  workerMessages(request([png, pdf, byUrl]), undefined, omitted);
+  build(request([png, pdf, byUrl]), undefined, omitted);
   expect(omitted.size).toBe(3);
   // The same blocks again, as a later turn re-sends its history: still three.
-  workerMessages(request([png, pdf, byUrl]), undefined, omitted);
+  build(request([png, pdf, byUrl]), undefined, omitted);
   expect(omitted.size).toBe(3);
   // A different image is another block.
-  workerMessages(request([other]), undefined, omitted);
+  build(request([other]), undefined, omitted);
   expect(omitted.size).toBe(4);
 });
 it('preserves the native worker output allowance instead of silently halving it', () => {
-  expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000 }).max_tokens).toBe(32000);
-  expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
-  expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 0 })).toThrow();
+  expect(build({ model: 'deepseek-flash', max_tokens: 32000 }).max_tokens).toBe(32000);
+  expect(() => build({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
+  expect(() => build({ model: 'deepseek-flash', max_tokens: 0 })).toThrow();
 });
 // Claude Code clamps the output it asks for to 128,000, so a worker could never ask for
 // the 256,000 its router offers unless the bridge sets it.
 it("asks for the output cap the job's router offers on a worker's own turn, and leaves a side request's cap alone", () => {
   const tools = [{ name: 'Read', input_schema: { type: 'object' } }];
   const turn = { model: 'deepseek-flash', max_tokens: 65536, stream: true, tools };
-  expect(workerMessages(turn, 256_000).max_tokens).toBe(256_000);
+  expect(build(turn, 256_000).max_tokens).toBe(256_000);
   // The classifier's two requests keep their own caps.
   for (const max_tokens of [2112, 10240])
-    expect(workerMessages({ model: 'deepseek-flash', max_tokens }, 256_000).max_tokens).toBe(
-      max_tokens,
-    );
-  // A router whose offer names no cap: what the worker asked, 65,536 at most, as before.
-  expect(workerMessages(turn).max_tokens).toBe(65536);
-  expect(() => workerMessages({ ...turn, max_tokens: 65537 })).toThrow();
+    expect(build({ model: 'deepseek-flash', max_tokens }, 256_000).max_tokens).toBe(max_tokens);
+  // A worker's own turn takes the offer's cap, whatever the request asked for.
+  expect(build(turn).max_tokens).toBe(65_536);
+  expect(build({ ...turn, max_tokens: 65_537 }).max_tokens).toBe(65_536);
+  // A side request over the cap is still refused before anything is sent.
+  expect(() => build({ model: 'deepseek-flash', max_tokens: 65_537 })).toThrow();
 });
 it('serves tool search as the Messages API does, so a ToolSearch result never stops the job', () => {
   // The shape Claude Code 2.1.326 sends with tool search on, after one ToolSearch call:
   // the proxy and DeepSeek take neither `defer_loading` nor a `tool_reference` block.
   const schema = { type: 'object', properties: { offer_id: { type: 'string' } } };
-  const result = workerMessages({
+  const result = build({
     model: 'deepseek-flash',
     tools: [
       { name: 'Read', description: 'Read a file', input_schema: { type: 'object' } },
@@ -299,11 +302,11 @@ it('refuses a request that offers more tools than the router takes, counting onl
     ...(deferred ? { defer_loading: true } : {}),
   });
   const request = (tools: unknown[]) => ({ model: 'deepseek-flash', tools, messages: [] });
-  expect(() => workerMessages(request(Array.from({ length: 257 }, (_, n) => tool(n))))).toThrow(
+  expect(() => build(request(Array.from({ length: 257 }, (_, n) => tool(n))))).toThrow(
     expect.objectContaining({ count: 257 }),
   );
   // Tool search on: a deferred tool nothing loaded is not sent, so it does not count.
-  const sent = workerMessages(
+  const sent = build(
     request([
       ...Array.from({ length: 256 }, (_, n) => tool(n)),
       ...Array.from({ length: 300 }, (_, n) => tool(1000 + n, true)),
@@ -324,7 +327,7 @@ it('applies a tool change announced in a message to the tools it offers, and sen
   });
   const announced =
     'The following tools just became available and are ready to use:\nmcp__docs__search\nmcp__docs__read';
-  const result = workerMessages({
+  const result = build({
     model: 'deepseek-flash',
     tools: [
       tool('Bash'),
@@ -367,7 +370,7 @@ it('applies a tool change announced in a message to the tools it offers, and sen
 
 it('offers a tool defined in a tool change, stops offering a removed one, and sends no message of changes alone', () => {
   const schema = { type: 'object', properties: { query: { type: 'string' } } };
-  const result = workerMessages({
+  const result = build({
     model: 'deepseek-flash',
     tools: [
       { name: 'Bash', input_schema: { type: 'object' } },
@@ -401,7 +404,7 @@ it('offers a tool defined in a tool change, stops offering a removed one, and se
   expect(result.messages).toEqual([{ role: 'user', content: 'Search the notes.' }]);
   // A change the bridge cannot apply fails this request alone, before anything is sent.
   expect(() =>
-    workerMessages({
+    build({
       model: 'deepseek-flash',
       messages: [
         {

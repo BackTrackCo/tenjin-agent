@@ -2,8 +2,8 @@ export const MODEL_ROUTE_BODY_BYTES = 16_384;
 export const MODEL_ROUTE_ENVELOPE_BYTES = 64;
 export const MODEL_CODEX_TASK_BYTES = 16_000;
 export const MODEL_NATIVE_TEXT_BYTES = 256_000;
-/** A worker's output cap per request on a router whose offer names none: the most that
- *  router's contract takes. The least a job needs is derived from it for every router. */
+/** The least output a worker's own call asks for: the floor a call near the job's ceiling
+ *  steps down to, and the cap a side request keeps. */
 export const MODEL_OUTPUT_TOKENS = 65_536;
 /** The DeepSeek harness's output cap per request, and the most this CLI asks for: Claude
  *  Code 2.1.325 and 2.1.328 took a reply of that many reported tokens whole. */
@@ -11,16 +11,14 @@ export const MODEL_OUTPUT_TOKENS_MAX = 256_000;
 /**
  * THE OUTPUT CAP OF A JOB'S MODEL CALLS: what its router's offer says its Messages endpoint
  * accepts (`maxOutputTokens`), up to 256,000, the DeepSeek harness's cap (operator ruling
- * 2026-11-18). Undefined for an offer that names none, such as production's today, which
- * accepts 65,536: read from the offer alone, never guessed from a version.
+ * 2026-11-18). The offer always names it; an offer that does not is invalid and the call
+ * stays native.
  */
-export function offeredOutputTokens(decision: Record<string, unknown>): number | undefined {
+export function offeredOutputTokens(decision: Record<string, unknown>): number {
   const offered = decision.maxOutputTokens;
-  return typeof offered === 'number' &&
-    Number.isSafeInteger(offered) &&
-    offered > MODEL_OUTPUT_TOKENS
-    ? Math.min(offered, MODEL_OUTPUT_TOKENS_MAX)
-    : undefined;
+  if (typeof offered !== 'number' || !Number.isSafeInteger(offered) || offered <= 0)
+    throw new Error('The offer names no output cap');
+  return Math.min(offered, MODEL_OUTPUT_TOKENS_MAX);
 }
 /** The context of the DeepSeek model a worker runs on. */
 export const MODEL_CONTEXT_TOKENS = 1_048_576;
@@ -30,13 +28,13 @@ const COMPACT_HEADROOM_TOKENS = 65_536;
  * WHERE A WORKER COMPACTS ITS CONVERSATION, as the DeepSeek harness's `compaction-basic`
  * does at its defaults (read in its source, `config.ts`): `floor(min(0.8 * window, window -
  * reply cap - 65,536 headroom))`, with the reply cap of the job's own calls. 838,860 at
- * 65,536 (production today), 727,040 at 256,000. A fixed value leaves a reply that is
- * allowed to be longer without room: 786,432 and a 256,000 reply is 1,042,432 of 1,048,576.
+ * 65,536, 727,040 at 256,000. A fixed value leaves a reply that is allowed to be longer
+ * without room: 786,432 and a 256,000 reply is 1,042,432 of 1,048,576.
  * This is the WINDOW Claude Code reads from `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. It takes
  * `min(its max output tokens, 20,000) + 13,000` off the window (read in 2.1.327), so compaction
  * fires 33,000 tokens earlier than this value: about 805,860 and 694,040.
  */
-export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): number {
+export function compactWindowTokens(outputCap: number): number {
   return Math.floor(
     Math.min(
       MODEL_CONTEXT_TOKENS * 0.8,
@@ -45,28 +43,23 @@ export function compactWindowTokens(outputCap: number = MODEL_OUTPUT_TOKENS): nu
   );
 }
 /**
- * HOW LONG THE CLIENT WAITS FOR A PAID MODEL CALL'S ANSWER: never less than the router
- * allows it. The router's total deadline for one call is 540 s on the next server (its idle
- * limit is 300 s) and 300 s in production. Production's offer advertises neither, so the wait
- * is the longer one with a minute to spare. A client that gave up first would end a call the
- * router is still serving, and its charge would be uncertain.
+ * THE MINUTE THE CLIENT LEAVES over the deadline an offer names, so the router's own cut
+ * arrives before the client's. A client that gave up first would end a call the router is
+ * still serving, and its charge would be uncertain.
  */
-export const MODEL_PAID_CALL_TIMEOUT_MS = 600_000;
-/** The minute the constant leaves over the 540 s the next server allows one call. */
 const MODEL_PAID_CALL_MARGIN_MS = 60_000;
 /**
- * THE WAIT FOR ONE PAID CALL ON THIS JOB'S ROUTER. An offer with action `model` that names
- * `maxCallDurationMs` (an optional non-negative integer, the router's total deadline for one
- * call) is waited on for that long plus the constant's margin, whatever it is: a router that
- * allows longer is waited on longer, one that allows less is not waited on past its word. An
- * offer that names none, or names it malformed, gets the constant.
+ * THE WAIT FOR ONE PAID CALL ON THIS JOB'S ROUTER: the `maxCallDurationMs` its offer names
+ * (a non-negative integer, the router's total deadline for one call) plus the margin. A
+ * router that allows longer is waited on longer, one that allows less is not waited on past
+ * its word. The offer always names it; an offer that does not is invalid.
  */
 export function paidCallTimeoutMs(decision: Record<string, unknown>): number {
   const offered = decision.maxCallDurationMs;
-  return typeof offered === 'number' && Number.isSafeInteger(offered) && offered >= 0
-    ? // Clamped to the longest wait a timer holds: a longer one would fire after 1 ms.
-      Math.min(offered + MODEL_PAID_CALL_MARGIN_MS, 2 ** 31 - 1)
-    : MODEL_PAID_CALL_TIMEOUT_MS;
+  if (typeof offered !== 'number' || !Number.isSafeInteger(offered) || offered < 0)
+    throw new Error('The offer names no call deadline');
+  // Clamped to the longest wait a timer holds: a longer one would fire after 1 ms.
+  return Math.min(offered + MODEL_PAID_CALL_MARGIN_MS, 2 ** 31 - 1);
 }
 /**
  * The router's peak Messages quote, as its `quoteAtomic` makes it (tariff
@@ -104,8 +97,8 @@ export const MODEL_MINIMUM_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_TO
 export const usdOfAtomic = (atomic: bigint): string => '$' + (Number(atomic) / 1e6).toFixed(6);
 /** Full hosted POST receipt or owner-GET JSON envelope, including escaped wire and metadata. */
 export const MODEL_RESPONSE_ENVELOPE_BYTES = 4_500_000;
-/** The largest completed Messages `message` a router delivers to a client that states no
- *  size, and the largest this CLI reads from one. */
+/** The smallest result size a router's offer may name, and the smallest a call may state:
+ *  the floor the router's own contract takes. */
 export const MODEL_MESSAGES_RESULT_BYTES = 2_000_000;
 /** The largest this CLI reads from a router whose offer says it honours a stated size. */
 export const MODEL_MESSAGES_RESULT_BYTES_MAX = 4_000_000;

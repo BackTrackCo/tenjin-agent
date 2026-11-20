@@ -20,8 +20,6 @@ export const MESSAGES_STREAM_VERSION = 1;
 /** Beyond the router's own idle limit, so the router's cut arrives before the client's. The
  *  router sends a `: keep` comment every 15 s, so a live stream never nears it. */
 export const STREAM_IDLE_MARGIN_MS = 30_000;
-/** The router's idle limit when its offer states none. */
-export const STREAM_IDLE_DEFAULT_MS = 300_000;
 /** The most event bytes one reply may carry: the router's own bound. */
 export const STREAM_EVENT_BYTES = 64 * 1024 * 1024;
 
@@ -33,15 +31,14 @@ export function messagesStreamOffered(decision: Record<string, unknown>): boolea
   return decision.messagesStream === MESSAGES_STREAM_VERSION;
 }
 
-/** How long the client waits for the next received bytes of a stream. */
+/** How long the client waits for the next received bytes of a stream: the idle limit the
+ *  offer names plus the margin. The offer always names it; one that does not is invalid. */
 export function streamIdleMs(decision: Record<string, unknown>): number {
   const offered = decision.callIdleLimitMs;
-  const limit =
-    typeof offered === 'number' && Number.isSafeInteger(offered) && offered > 0
-      ? offered
-      : STREAM_IDLE_DEFAULT_MS;
+  if (typeof offered !== 'number' || !Number.isSafeInteger(offered) || offered < 0)
+    throw new Error('The offer names no idle limit');
   // A timer longer than 2^31 - 1 ms fires at once: a router's limit is clamped to the top.
-  return Math.min(limit + STREAM_IDLE_MARGIN_MS, MAX_TIMER_MS);
+  return Math.min(offered + STREAM_IDLE_MARGIN_MS, MAX_TIMER_MS);
 }
 
 export type StreamEvent = { type: string } & Record<string, unknown>;
