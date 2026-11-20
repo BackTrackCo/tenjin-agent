@@ -53,7 +53,7 @@ export type ModelWorkerActivityRow = {
   target?: string;
   /** A web call's own figures from Claude Code's record, for the viewer's native line. */
   figures?: ModelWorkerActivityFigures;
-  /** The router tool that served the call (`Exa search`, `Exa page read`), as its rows name it. */
+  /** What served the call (`DeepSeek web search`, `Exa page read`), as its rows name it. */
   via?: string;
 };
 export type ModelWorkerActivityFigures = {
@@ -659,10 +659,10 @@ export class ModelWorkerActivity {
   }
 
   /**
-   * A call a router tool served: a worker's WebSearch (Exa search, always), or a WebFetch
-   * whose local fetch failed and Exa page read stood in for (its figures are then Exa's
-   * page, not the failed fetch's). Display only; told by the worker's tool hooks, which
-   * may run before the call's result is seen.
+   * A web call and what served it: a worker's WebSearch (DeepSeek's own search inside the
+   * model call), or a WebFetch whose local fetch failed and Exa page read stood in for
+   * (its figures are then Exa's page, not the failed fetch's). Display only; told by the
+   * worker's tool hooks, which may run before the call's result is seen.
    */
   served(
     toolUseId: string,

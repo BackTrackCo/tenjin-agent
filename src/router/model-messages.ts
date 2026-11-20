@@ -1,7 +1,72 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { isRecord } from '../lib/guards';
+import { CLAUDE_DEEPSEEK_MODEL } from './claude-model-policy';
 import { MODEL_MESSAGES_MAX_TOOLS, MODEL_OUTPUT_TOKENS } from './model-limits';
+import type { WorkerWebSearch } from './model-worker-web';
+
+/** DeepSeek's own search, the one server tool the router takes on a Messages request. */
+export const WEB_SEARCH_TOOL = 'web_search_20250305';
+/** DeepSeek's documented default and service cap, as the router clamps it. */
+export const WEB_SEARCH_MAX_USES = 5;
+/**
+ * The output a search answer may use: the search's own blocks and a short text. A search
+ * returns its results as input tokens, so this cap also leaves the quote room for them.
+ */
+export const SEARCH_MAX_TOKENS = 8_192;
+
+/**
+ * ONE WORKER WEB SEARCH AS A MESSAGES CALL. Claude Code's WebSearch asks its model for a
+ * server-side search; DeepSeek runs that search inside the model call, so the nested
+ * request becomes one Messages body with its query and the one server tool. Thinking is
+ * off: a search needs none, and its text would spend the job's budget for nothing.
+ */
+export function workerSearchMessages(search: WorkerWebSearch): Record<string, unknown> {
+  return {
+    model: 'deepseek-flash',
+    max_tokens: SEARCH_MAX_TOKENS,
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'user', content: search.query }],
+    tools: [{ type: WEB_SEARCH_TOOL, name: 'web_search', max_uses: search.maxUses }],
+  };
+}
+
+/**
+ * THE NATIVE ERROR WebSearch READS when the bridge refuses the search before any model
+ * call: the error block and one plain sentence, so the worker's WebSearch fails alone.
+ */
+export function searchRefusedMessage(
+  search: WorkerWebSearch,
+  why: string,
+): Record<string, unknown> {
+  const toolUseId = `srvtoolu_${randomBytes(12).toString('hex')}`;
+  return {
+    id: `msg_tenjin_${randomBytes(12).toString('hex')}`,
+    type: 'message',
+    role: 'assistant',
+    model: CLAUDE_DEEPSEEK_MODEL,
+    content: [
+      {
+        type: 'server_tool_use',
+        id: toolUseId,
+        name: 'web_search',
+        input: { query: search.query },
+      },
+      {
+        type: 'web_search_tool_result',
+        tool_use_id: toolUseId,
+        content: { type: 'web_search_tool_result_error', error_code: 'unavailable' },
+      },
+      {
+        type: 'text',
+        text: `Web search is not available to this worker right now: ${why}. Continue without it.`,
+      },
+    ],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
+}
 /** The proxy's blocks, and the two of Tenjin's own answer to a worker's web search. */
 const block = z.object({
   type: z.enum(['text', 'thinking', 'tool_use', 'server_tool_use', 'web_search_tool_result']),

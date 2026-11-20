@@ -3036,10 +3036,40 @@ const NESTED_SEARCH = {
   ],
 };
 
-// Live case: one WebSearch in a worker reached the bridge as a server tool it refused,
-// and that refusal ended the whole job `unknown`.
-it("answers a worker's WebSearch at the bridge in WebSearch's own stream, sends nothing to the model, and the job goes on", async () => {
-  const messages = vi.fn();
+/** The reply a search call returns: the server tool, its results, then the model's text. */
+const SEARCH_REPLY = {
+  id: 'msg_search',
+  type: 'message',
+  role: 'assistant',
+  model: 'deepseek-flash',
+  content: [
+    {
+      type: 'server_tool_use',
+      id: 'srvtoolu_1',
+      name: 'web_search',
+      input: { query: 'x402 receipts' },
+    },
+    {
+      type: 'web_search_tool_result',
+      tool_use_id: 'srvtoolu_1',
+      content: [
+        {
+          type: 'web_search_result',
+          title: 'x402',
+          url: 'https://x402.org',
+          encrypted_content: '',
+        },
+      ],
+    },
+    { type: 'text', text: 'Found it.' },
+  ],
+  stop_reason: 'end_turn',
+  stop_sequence: null,
+  usage: { input_tokens: 10, output_tokens: 2 },
+};
+
+it("sends a worker's WebSearch to the model as one Messages call with DeepSeek's search tool, and answers in its stream", async () => {
+  const messages = vi.fn(async (..._args: unknown[]) => structuredClone(SEARCH_REPLY));
   let answered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
   sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
     answered = await oneBridgeRequest(JSON.stringify(NESTED_SEARCH));
@@ -3047,13 +3077,49 @@ it("answers a worker's WebSearch at the bridge in WebSearch's own stream, sends 
   await expect(
     runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
   ).resolves.toBe('done');
-  expect(messages).not.toHaveBeenCalled();
+  expect(messages).toHaveBeenCalledTimes(1);
+  // The nested request is one Messages body: the query, the one server tool at the
+  // router's cap, a small output cap and no thinking. No live stream is asked for.
+  expect(messages.mock.calls[0]![1]).toEqual({
+    model: 'deepseek-flash',
+    max_tokens: 8_192,
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'user', content: 'x402 receipts' }],
+    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+  });
+  expect(messages.mock.calls[0]![5]).toBeUndefined();
   expect(answered.status).toBe(200);
   expect(answered.headers).toEqual({ 'content-type': 'text/event-stream' });
-  // No executor in this test: the search's own native error, never the job's end.
   expect(answered.body).toContain('"type":"server_tool_use"');
-  expect(answered.body).toContain('"error_code":"unavailable"');
-  expect(answered.body).toContain('Web search is not available to this worker right now');
+  expect(answered.body).toContain('"type":"web_search_tool_result"');
+  expect(answered.body).toContain('"url":"https://x402.org"');
+  expect(answered.body).toContain('Found it.');
+});
+
+it('answers a whole search request with the whole message, and a filtered search with its tool error before any call', async () => {
+  const messages = vi.fn(async (..._args: unknown[]) => structuredClone(SEARCH_REPLY));
+  let whole: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+  let filtered: Awaited<ReturnType<typeof oneBridgeRequest>> = {};
+  sdkResult({ subtype: 'success', result: 'done' }, undefined, async () => {
+    whole = await oneBridgeRequest(JSON.stringify({ ...NESTED_SEARCH, stream: false }));
+    filtered = await oneBridgeRequest(
+      JSON.stringify({
+        ...NESTED_SEARCH,
+        tools: [{ ...NESTED_SEARCH.tools[0], allowed_domains: ['x402.org'] }],
+      }),
+    );
+  });
+  await expect(
+    runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+  ).resolves.toBe('done');
+  // A whole request gets JSON; the model's own answer carries the search blocks.
+  expect(whole.headers).toEqual({ 'content-type': 'application/json' });
+  expect(JSON.parse(whole.body!)).toMatchObject({ id: 'msg_search', type: 'message' });
+  // A filter the router's strict schema refuses ends the search alone, with nothing sent.
+  expect(messages).toHaveBeenCalledTimes(1);
+  expect(filtered.status).toBe(200);
+  expect(filtered.body).toContain('"error_code":"unavailable"');
+  expect(filtered.body).toContain('allowed_domains filter is not supported');
 });
 
 it.each([

@@ -1,10 +1,15 @@
 import { WorkerInbox } from './model-worker-inbox';
-import { completedMessageSse, TooManyTools, workerMessages } from './model-messages';
+import {
+  completedMessageSse,
+  searchRefusedMessage,
+  TooManyTools,
+  workerMessages,
+  workerSearchMessages,
+} from './model-messages';
 import { RelayedCut, sseError, sseFrame, type StreamEvent } from './model-stream';
 import { WorkerDiagnosticsRecord, type ModelCallTiming } from './model-worker-diagnostics';
 import type { Identities } from './identities';
 import {
-  answerWorkerWebSearch,
   workerFetchFallback,
   workerWebSearch,
   WORKER_PAGE_READ_LABEL,
@@ -272,10 +277,10 @@ export async function runModelWorker(
      * it, and nothing it needs from the accept is known.
      */
     early?: EarlyWorkerInput;
-    /** `tenjin mcp`'s request executor, which pays for the worker's web searches. Absent,
-     *  each search answers that it is not available. */
+    /** `tenjin mcp`'s request executor, which pays for a page the worker's WebFetch could
+     *  not fetch. Absent, each page read answers that it is not available. */
     web?: WorkerRequest;
-    /** The router's identities read, which the person's rules for those searches are
+    /** The router's identities read, which the person's rules for those page reads are
      *  checked against. Absent, the copy the last read kept. */
     webIdentities?: () => Promise<Identities | undefined>;
     /** Where a worker that starts without its native agent prompt says why. Default: stderr. */
@@ -608,8 +613,8 @@ async function runQualifiedWorker(
           worker?.close();
         }, options.startupMs);
   initTimer?.unref();
-  // The worker's web searches, and a page its WebFetch could not fetch, paid as Tenjin
-  // tool calls from the person's wallet and counted in this job's budget.
+  // A page the worker's WebFetch could not fetch, paid as a Tenjin tool call from the
+  // person's wallet and counted in this job's budget.
   const web: WorkerWebDeps = {
     job,
     transport: options.transport,
@@ -618,8 +623,8 @@ async function runQualifiedWorker(
     ...(options.webIdentities ? { identities: options.webIdentities } : {}),
     signal: controller.signal,
   };
-  // The viewer names a call a router tool served by that tool, as the router's rows do: a
-  // WebSearch is always Exa search here, a WebFetch only when Exa page read stood in.
+  // The viewer names a call by what served it: a WebSearch by DeepSeek's own search, a
+  // WebFetch by Exa page read only when that read stood in for a failed local fetch.
   const served = (id: unknown, via: string, bytes?: number) => {
     try {
       if (typeof id === 'string')
@@ -725,10 +730,46 @@ async function runQualifiedWorker(
                 res.write(sseFrame(event));
               }
             : undefined;
-        // A worker's WebSearch: answered here, never sent on to the model.
+        // A WORKER'S WEB SEARCH IS ONE MODEL CALL: the nested request becomes a Messages
+        // body holding DeepSeek's own search tool, paid, reserved, signed and settled as
+        // any model call. A tool field the router's schema refuses, or no query, ends the
+        // search alone here, before anything is sent or paid.
         const search = workerWebSearch(raw);
         if (search) {
-          send(await answerWorkerWebSearch(search, web));
+          const why =
+            search.refused !== null
+              ? `the request's ${search.refused} filter is not supported`
+              : search.query.length === 0
+                ? 'the search had no query'
+                : null;
+          if (why !== null) {
+            send(searchRefusedMessage(search, why));
+            return;
+          }
+          diagnostics.mark('firstRequest');
+          diagnostics.request(raw, workerSearchMessages(search));
+          timed.prepared();
+          let attempts = 0;
+          let timing: ModelCallTiming | undefined;
+          const message = await withModelRetry(
+            async () => {
+              attempts++;
+              return options.transport.messages(
+                job,
+                workerSearchMessages(search),
+                controller.signal,
+                assertCurrentSend,
+                (split) => {
+                  timing = split;
+                },
+              );
+            },
+            controller.signal,
+            (attempt, failure) => diagnostics.retry(attempt, failure.detail),
+            options.retryWait,
+          );
+          timed.done({ usage: message.usage, tries: attempts, ...(timing ? { timing } : {}) });
+          send(message);
           return;
         }
         let messages: ReturnType<typeof workerMessages>;
@@ -852,7 +893,7 @@ async function runQualifiedWorker(
           );
         else stop();
       } finally {
-        // A request that was no model call (a web search, one the bridge refused).
+        // A request the bridge refused, or one that ended before a reply.
         timed?.drop();
       }
     };
