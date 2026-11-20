@@ -3,6 +3,7 @@ import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { pidAlive, withFileLock } from '../lib/lock';
+import { systemProcessFacts } from './job-folders';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
@@ -92,6 +93,8 @@ export async function sweepModelRecords(dataDir: string, now = Date.now()): Prom
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 /** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
 const REPEATABLE: readonly ModelJob['state'][] = ['offered', 'cancelled', 'unknown'];
+/** How much later than a job's accept a process may have started and still be its runner. */
+const RUNNER_REUSE_GAP_MS = 10 * 60_000;
 /** How long an offer can be accepted, and how long after a worker stopped its call repeats free. */
 const OFFER_MS = 15 * 60_000;
 const unresolved = (job: ModelJob) =>
@@ -373,13 +376,25 @@ export class ModelJobStore {
    */
   async strand(
     id: string,
-    o: { isAlive?: (pid: number) => boolean } = {},
+    o: {
+      isAlive?: (pid: number) => boolean;
+      /** When a process started; default the system's, unless `isAlive` is injected. */
+      startedAt?: (pid: number) => Promise<number | undefined>;
+    } = {},
   ): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.read(id);
       if (!job || !['running', 'cancelling'].includes(job.state)) return job;
       const { runner } = job;
-      const gone = runner && (runner.pid === process.pid || !(o.isAlive ?? pidAlive)(runner.pid));
+      let gone = runner && (runner.pid === process.pid || !(o.isAlive ?? pidAlive)(runner.pid));
+      // A pid that is held now may belong to another process than the one that accepted the
+      // job (a pid reused, or a process this user cannot signal): one that started well after
+      // the accept is not its runner, and the record would stay running for good.
+      if (runner && !gone) {
+        const startedAt = o.startedAt ?? (o.isAlive ? undefined : systemProcessFacts.startedAt);
+        const started = await startedAt?.(runner.pid).catch(() => undefined);
+        gone = started !== undefined && started > runner.acceptedAt + RUNNER_REUSE_GAP_MS;
+      }
       if (!gone) return null;
       const ended: ModelJob = {
         ...job,
