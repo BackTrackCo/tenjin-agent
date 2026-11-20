@@ -119,10 +119,9 @@ export type TenjinModelWorker = {
   /**
    * How the worker ended, once it has: from the accept call's answer or, for a
    * call the host moved to the background, from the CLI. The row's end line
-   * reads this, never the absence of an answer. `unseen`: nothing here
-   * could say how it ended.
+   * reads this, never the absence of an answer.
    */
-  ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started' | 'unseen';
+  ended?: 'completed' | 'cancelled' | 'unknown' | 'not_started';
   /** Who or what ended a worker that did not complete: the CLI's fixed code. */
   endedBy?: string;
   /** The final spend still has an unsettled part. */

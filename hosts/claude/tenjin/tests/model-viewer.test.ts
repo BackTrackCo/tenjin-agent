@@ -1308,7 +1308,15 @@ test('a worker that did not see image or document content says how many on its r
   expect((await acceptRow($, 'parent_accept', OFFER, answer))[0]).toBe(line);
   f.state.liveView = false;
   f.state.liveFile = false;
-  f.state.ended = JSON.parse(answer);
+  // What the CLI sends for an ended job (`endedDisplay`): the counts and the blocks, never the
+  // whole handback.
+  f.state.ended = {
+    status: 'completed',
+    elapsedMs: 61_000,
+    toolUses: 3,
+    tokens: 900,
+    omitted: { blocks: 2 },
+  };
   await acceptRow($, 'accept_after_resume', OFFER, MOVED);
   await f.clock.settle();
   expect((await acceptRow($, 'accept_after_resume', OFFER, MOVED))[0]).toBe(line);

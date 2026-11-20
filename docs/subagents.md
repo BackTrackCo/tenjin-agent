@@ -276,7 +276,7 @@ These run natively:
 
 - `Done (…)`, like a native subagent's, when it completed.
 - When it did not complete, the line says who or what ended it: `Stopped by you (…)`, `Cancelled by the parent (…)`, `Interrupted (…)` when Claude Code ended the call that ran it, `Session ended (…)`, `Budget reached (…)`, `Model call failed (…)`, `Model call timed out (…)` or `Payment refused (…)` when a model call through Tenjin returned no result, `DeepSeek unavailable (…)` when DeepSeek could not take the request, `DeepSeek refused (…)` when DeepSeek refused to answer it, `Stopped (…)` for anything else, and `Not started (…)` when it never started.
-- If no read can say how the job ended, the line reads `Outcome not shown here (…)` with the counts seen so far and no time: the result still returns to the parent.
+- While no read can say how the job ended, its row keeps following it and shows no end line: a job has no time limit, so an unanswered row is never read as an end. The result still returns to the parent.
 - The worker's result to the parent carries the same cause as a fixed code (`endedBy`) with a sentence in plain words, and `status: "stopped"`, or `"unknown"` only when nothing said why. A failed model call also carries the router's HTTP status, the router's own error code (such as `invalid_model_request`) or the payer's code (such as `payment_failed`) when one is known, and the worker's last text.
 - `subagent` reports completion, elapsed time, tool uses, tokens, accounted spend and unresolved reservations.
 
