@@ -1598,6 +1598,9 @@ export class RoutingPayer {
     const lane = this.deps.modelLane;
     const modelLane = lane ? modelChannelLane(lane.path) : undefined;
     const runId = modelLane === 'model-inference' ? lane?.inferenceRun : undefined;
+    // An inference channel exists only as one run's own, refunded when the run ends.
+    if (modelLane === 'model-inference' && !runId)
+      throw new Error('An inference payment needs its run');
     const salt =
       lane && modelLane
         ? runId

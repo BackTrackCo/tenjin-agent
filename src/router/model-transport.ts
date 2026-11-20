@@ -12,7 +12,7 @@ import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import { modelLock, routingAuthorizedAtomic, type ModelJob } from './model-job';
-import { modelChannelScope, modelInferenceRunScope } from './model-channel';
+import { modelInferenceRunScope } from './model-channel';
 import { withFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
@@ -23,7 +23,6 @@ import {
   MODEL_OUTPUT_FLOOR_TOKENS,
   paidCallTimeoutMs,
   MODEL_RESPONSE_ENVELOPE_BYTES,
-  MODEL_RESPONSES_WIRE_BYTES,
 } from './model-limits';
 import {
   MODEL_CUT_REPLY_CODES,
@@ -337,29 +336,19 @@ export class ModelTransport {
      *  already in flight gets none. */
     stream?: (event: StreamEvent) => void,
   ) {
-    return this.invoke(job, messages, signal, 'messages', beforeSend, observe, stream);
-  }
-  async responses(
-    job: ModelJob,
-    responses: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<string> {
-    const result = await this.invoke(job, responses, signal, 'responses');
-    if (typeof result.wire !== 'string') throw new Error('Responses wire is unavailable');
-    return result.wire;
+    return this.invoke(job, messages, signal, beforeSend, observe, stream);
   }
   private async invoke(
     job: ModelJob,
     messages: Record<string, unknown>,
     signal: AbortSignal,
-    protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
     observe?: (timing: ModelCallTiming) => void,
     stream?: (event: StreamEvent) => void,
   ): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     // Do not share across changed job authority, even when the provider body is identical.
-    const key = canonicalHash({ job, protocol, messages });
+    const key = canonicalHash({ job, messages });
     let invocation = this.invocations.get(key);
     if (!invocation) {
       const abort = new AbortController();
@@ -368,11 +357,10 @@ export class ModelTransport {
         structuredClone(job),
         structuredClone(messages),
         abort.signal,
-        protocol,
         beforeSend,
         timing,
         // Only the caller that starts the call is given its events.
-        protocol === 'messages' ? stream : undefined,
+        stream,
       ).finally(() => {
         if (this.invocations.get(key)?.abort === abort) this.invocations.delete(key);
         try {
@@ -433,7 +421,6 @@ export class ModelTransport {
     job: ModelJob,
     messages: Record<string, unknown>,
     signal: AbortSignal,
-    protocol: 'messages' | 'responses',
     beforeSend: (() => Promise<void>) | undefined,
     timing: ModelCallTiming,
     stream: ((event: StreamEvent) => void) | undefined,
@@ -455,7 +442,6 @@ export class ModelTransport {
         job,
         structuredClone(original),
         signal,
-        protocol,
         beforeSend,
         timing,
         relay,
@@ -469,16 +455,11 @@ export class ModelTransport {
     job: ModelJob,
     messages: Record<string, unknown>,
     signal: AbortSignal,
-    protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
     timing: ModelCallTiming = {},
     relay?: (event: StreamEvent) => void,
   ) {
     signal.throwIfAborted();
-    // Codex's Responses calls keep the temporary shared channel until Codex workers are
-    // removed from this feature; every Messages call runs inside its run's own channel.
-    if (protocol === 'messages' && this.options.inferenceRun === undefined)
-      throw new Error('A Messages call runs only inside an inference run');
     // Diagnostics only: each step's milliseconds, read from a monotonic clock.
     let stepFrom = performance.now();
     const step = (
@@ -491,21 +472,19 @@ export class ModelTransport {
       timing[name] = (timing[name] ?? 0) + now - stepFrom;
       stepFrom = now;
     };
-    const endpoint =
-      protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
+    const endpoint = '/api/model-proxy/messages';
     const resultLimit = MODEL_RESPONSE_ENVELOPE_BYTES;
-    // Messages alone: the Responses contract refuses the field.
-    const stated = protocol === 'messages' ? statedResultBytes(job) : undefined;
+    const stated = statedResultBytes(job);
     const readable = stated ?? MODEL_MESSAGES_RESULT_BYTES;
 
     const { dataDir, baseUrl, payerDeps, inferenceRun } = this.options;
-    const journal = inferenceRun ? this.refundJournal() : undefined;
+    // Every call runs inside its run's own channel, which is refunded when the run ends.
+    if (inferenceRun === undefined)
+      throw new Error('A Messages call runs only inside an inference run');
+    const journal = this.refundJournal();
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
-    const key =
-      protocol === 'responses'
-        ? canonicalHash({ protocol, responses: messages })
-        : canonicalHash(messages);
+    const key = canonicalHash(messages);
     const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
     const load = () => this.loadBudget(job, path);
     const consent = () => this.jobConsent(job, signal);
@@ -546,13 +525,12 @@ export class ModelTransport {
     const existing = async (call: Call) => {
       if (call.completed) return keptResult();
       // Owner lookup is outside the lock and never creates another authorization.
-      const recovered = await this.recover(call.invocationId, signal, protocol);
+      const recovered = await this.recover(call.invocationId, signal);
       if (recovered?.state === 'completed' && recovered.voucherState === 'accepted') {
         const value = this.receipt(
           recovered.result,
           call.invocationId,
           BigInt(call.quote),
-          protocol,
           readable,
         );
         if (recovered.actualAtomic !== value.actual)
@@ -579,7 +557,7 @@ export class ModelTransport {
       invocationId: randomUUID(),
       ...(stated !== undefined ? { maxResultBytes: stated } : {}),
       ...(relay ? { stream: true as const } : {}),
-      ...(protocol === 'responses' ? { protocol, responses: messages } : { messages }),
+      messages,
     };
     const url = new URL(endpoint, baseUrl).toString();
     const fetchFn = payerDeps.fetchImpl ?? fetch;
@@ -748,7 +726,7 @@ export class ModelTransport {
         const paying = signature !== null;
         try {
           await assertCanTransmit();
-          if (signature !== null && journal && inferenceRun) {
+          if (signature !== null) {
             const from = performance.now();
             await journal.record(inferenceRun, url, signature, signal);
             timing.journalMs = (timing.journalMs ?? 0) + performance.now() - from;
@@ -864,7 +842,7 @@ export class ModelTransport {
             path: endpoint,
             ceilingAtomic: quote,
             origin: this.origin,
-            ...(inferenceRun ? { inferenceRun } : {}),
+            inferenceRun,
           },
           fetchImpl: cachedFetch,
         });
@@ -961,11 +939,7 @@ export class ModelTransport {
     const channelLock = join(
       dataDir,
       'model-jobs',
-      `${
-        inferenceRun
-          ? modelInferenceRunScope(this.origin, inferenceRun).id
-          : modelChannelScope(this.origin, 'model-inference').id
-      }.payment.lock`,
+      `${modelInferenceRunScope(this.origin, inferenceRun).id}.payment.lock`,
     );
     let quoted = () => challenge;
     const paid = await payOn();
@@ -998,7 +972,7 @@ export class ModelTransport {
       // stricter proof; a record that cannot be read, or one that does not hold that
       // proof, leaves the call uncertain and its reservation whole.
       if (paidError?.code !== undefined && PROVIDER_FAILURES.has(paidError.code)) {
-        const server = await this.recover(body.invocationId, signal, protocol).catch(() => null);
+        const server = await this.recover(body.invocationId, signal).catch(() => null);
         // After events reached the caller the call is released only on the strict proof, as a
         // cut reply is: a voucher cancelled together with a zero charge. A record that is
         // merely `unknown` and unaccepted stays uncertain, whatever the failure's code.
@@ -1043,7 +1017,7 @@ export class ModelTransport {
     stepFrom = performance.now();
     const settled = await settle(
       reservation,
-      this.receipt(result.json, body.invocationId, quote, protocol, readable),
+      this.receipt(result.json, body.invocationId, quote, readable),
     );
     step('settleMs');
     return settled;
@@ -1120,26 +1094,12 @@ export class ModelTransport {
     return ran.value;
   }
 
-  private receipt(
-    raw: unknown,
-    invocationId: string,
-    quote: bigint,
-    protocol: 'messages' | 'responses',
-    messageBytes: number,
-  ) {
+  private receipt(raw: unknown, invocationId: string, quote: bigint, messageBytes: number) {
     const value = z
       .object({
-        ...(protocol === 'responses'
-          ? {
-              wire: z
-                .string()
-                .refine((wire) => Buffer.byteLength(wire) <= MODEL_RESPONSES_WIRE_BYTES),
-            }
-          : {
-              message: z
-                .record(z.string(), z.unknown())
-                .refine((message) => Buffer.byteLength(JSON.stringify(message)) <= messageBytes),
-            }),
+        message: z
+          .record(z.string(), z.unknown())
+          .refine((message) => Buffer.byteLength(JSON.stringify(message)) <= messageBytes),
         receipt: z.object({
           invocationId: z.literal(invocationId),
           quoteAtomic: z.literal(quote.toString()),
@@ -1150,21 +1110,17 @@ export class ModelTransport {
     if (!value.success || BigInt(value.data.receipt.actualAtomic) > quote)
       throw new Error('Invalid model receipt; exposure remains reserved');
     return {
-      result: 'wire' in value.data ? { wire: value.data.wire } : value.data.message,
+      result: value.data.message,
       actual: value.data.receipt.actualAtomic,
     };
   }
 
-  private async recover(
-    invocationId: string,
-    signal: AbortSignal,
-    protocol: 'messages' | 'responses',
-  ) {
+  private async recover(invocationId: string, signal: AbortSignal) {
     const { payerDeps, baseUrl } = this.options;
     const signer = await payerDeps.getSigner();
     const auth = await buildSiwxHeader(signer, { baseUrl, chainId: SIWX_CHAIN_ID, ttlMs: 300_000 });
     const response = await (payerDeps.fetchImpl ?? fetch)(
-      new URL(`/api/model-proxy/${protocol}/${invocationId}`, baseUrl),
+      new URL(`/api/model-proxy/messages/${invocationId}`, baseUrl),
       {
         headers: { [SIWX_HEADER]: auth },
         redirect: 'error',
@@ -1197,11 +1153,7 @@ export class ModelTransport {
    * none, keeps the full reservation. Only for a job with no run going: a call
    * in flight is uncertain by design. Never throws.
    */
-  async reconcile(
-    job: ModelJob,
-    signal: AbortSignal,
-    protocol: 'messages' | 'responses' = 'messages',
-  ): Promise<void> {
+  async reconcile(job: ModelJob, signal: AbortSignal): Promise<void> {
     try {
       const { dataDir } = this.options;
       const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
@@ -1214,7 +1166,7 @@ export class ModelTransport {
       for (const [key, call] of Object.entries(kept.data.calls)) {
         // A tool call's id is local: the model proxy has no record of it to read.
         if (call.completed || call.tool !== undefined) continue;
-        const server = await this.recover(call.invocationId, signal, protocol).catch(() => null);
+        const server = await this.recover(call.invocationId, signal).catch(() => null);
         if (!server) continue;
         const spent = server.state === 'completed' && server.voucherState === 'accepted';
         // A call whose events reached its caller, or whose reply the router cut, needs the

@@ -1,7 +1,7 @@
 type Operation = { abort: AbortController; done: Promise<void> };
 /**
  * Register before the first await, so interruption also owns a selection in
- * flight. A window is what one fence ends: a Codex turn, or one Claude job.
+ * flight. A window is what one fence ends: one job.
  */
 export class ModelLifecycle {
   private windows = new Map<string, Set<Operation>>();

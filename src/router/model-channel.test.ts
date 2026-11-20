@@ -62,7 +62,12 @@ it('funds independent SDK channels for tools, model routing and inference at eac
     });
     const inference = new RoutingPayer({
       ...deps,
-      modelLane: { path: '/api/model-proxy/messages', origin, ceilingAtomic: 3000n },
+      modelLane: {
+        path: '/api/model-proxy/messages',
+        origin,
+        ceilingAtomic: 3000n,
+        inferenceRun: 'run-1',
+      },
     });
     payers.push(inference);
     await inference.routeFor(origin).send(`${origin}/api/model-proxy/messages`, {
@@ -80,10 +85,15 @@ it('funds independent SDK channels for tools, model routing and inference at eac
     });
     const inference = new RoutingPayer({
       ...deps,
-      modelLane: { path: '/api/model-proxy/responses', origin, ceilingAtomic: 3000n },
+      modelLane: {
+        path: '/api/model-proxy/messages',
+        origin,
+        ceilingAtomic: 3000n,
+        inferenceRun: 'run-1',
+      },
     });
     payers.push(inference);
-    await inference.routeFor(origin).send(`${origin}/api/model-proxy/responses`, {
+    await inference.routeFor(origin).send(`${origin}/api/model-proxy/messages`, {
       method: 'POST',
       jsonBody: {},
       timeoutMs: 5000,
@@ -91,6 +101,30 @@ it('funds independent SDK channels for tools, model routing and inference at eac
   }
   expect(new Set(server.channels.keys())).toEqual(before);
   expect(server.deposits).toBe(5);
+});
+
+it('opens no shared inference channel: an inference payment without its run is refused before it signs', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'model-channel-no-shared-'));
+  const server = new FakeRouter({ path: '/api/model-proxy/messages' });
+  const deps = payerDeps(server, dir, privateKeyToAccount(generatePrivateKey()));
+  const payer = new RoutingPayer({
+    ...deps,
+    modelLane: {
+      path: '/api/model-proxy/messages',
+      origin: 'https://router.test',
+      ceilingAtomic: 3000n,
+    },
+  });
+  payers.push(payer);
+  await expect(
+    payer.routeFor('https://router.test').send('https://router.test/api/model-proxy/messages', {
+      method: 'POST',
+      jsonBody: {},
+      timeoutMs: 5000,
+    }),
+  ).rejects.toThrow();
+  expect(server.paidRequests()).toBe(0);
+  expect(server.channels.size).toBe(0);
 });
 
 it('pays a model-routing fee up to the tool router ceiling with ordinary deposit liquidity while binding a lane to its origin', async () => {
@@ -117,7 +151,6 @@ it('pays a model-routing fee up to the tool router ceiling with ordinary deposit
   for (const path of [
     '/api/model-router/route',
     '/api/model-proxy/messages',
-    '/api/model-proxy/responses',
   ] as ModelPaymentPath[]) {
     const payer = new RoutingPayer({
       ...deps,

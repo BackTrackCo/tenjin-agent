@@ -131,7 +131,7 @@ function exactEndpoint(origin: string, rawUrl: string) {
     url.password ||
     url.search ||
     url.hash ||
-    (url.pathname !== '/api/model-proxy/messages' && url.pathname !== '/api/model-proxy/responses')
+    url.pathname !== '/api/model-proxy/messages'
   ) {
     throw new Error('Invalid inference refund URL');
   }

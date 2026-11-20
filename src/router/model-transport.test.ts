@@ -53,8 +53,6 @@ async function fixture(
   options: {
     drop?: boolean;
     cap?: string;
-    protocol?: 'messages' | 'responses';
-    wire?: string;
     quote?: string;
     charge?: string;
     minDeposit?: string;
@@ -106,7 +104,7 @@ async function fixture(
     expiresAt: Date.now() + 60_000,
   };
   const router = new FakeRouter({
-    path: `/api/model-proxy/${options.protocol ?? 'messages'}`,
+    path: '/api/model-proxy/messages',
     amount: options.quote ?? '500000',
     charge: options.charge ?? '1000',
     minDeposit: options.minDeposit ?? '50000',
@@ -154,9 +152,7 @@ async function fixture(
     }
     last = (await request.clone().json()) as Record<string, unknown>;
     result = {
-      ...(options.protocol === 'responses'
-        ? { wire: options.wire ?? 'event: response.completed\ndata: {"owned":"native wire"}\n\n' }
-        : { message }),
+      message,
       receipt: {
         invocationId: last.invocationId,
         quoteAtomic: options.quote ?? '500000',
@@ -593,50 +589,38 @@ it('recovers after a process that died between signing and sending: its lock is 
   expect((await next.summary(f.job)).uncertain).toHaveLength(1);
 });
 
-it.each(['messages', 'responses'] as const)(
-  'shares one live identical %s request instead of recovering an invocation still in flight',
-  async (protocol) => {
-    const f = await fixture({ protocol });
-    const transport = f.make();
-    const held = deferred();
-    const entered = deferred();
-    f.router.hold = held.promise;
-    f.router.onDelayArmed = entered.resolve;
-    const body = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'same task' }] };
-    const invoke = () => transport[protocol](f.job, body, new AbortController().signal);
-    const first = invoke();
-    await entered.promise;
-    const second = invoke();
-    const pending = Promise.all([first, second]);
-    held.resolve();
-    const results = await pending;
-    expect(results).toEqual([
-      protocol === 'responses'
-        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
-        : f.message,
-      protocol === 'responses'
-        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
-        : f.message,
-    ]);
-    if (protocol === 'messages') {
-      const [firstResult, secondResult] = results as [typeof f.message, typeof f.message];
-      expect(firstResult).not.toBe(secondResult);
-      firstResult.content[0]!.text = 'Only this caller changed its result';
-      expect(secondResult).toEqual(f.message);
-      await expect(transport.messages(f.job, body, new AbortController().signal)).resolves.toEqual(
-        f.message,
-      );
-    }
-    expect(f.router.paidRequests()).toBe(1);
-    expect(f.router.settledFees).toBe(1);
-    expect(f.gets()).toBe(0);
-    expect(await transport.summary(f.job)).toEqual({
-      actualAtomic: '4000',
-      reservedAtomic: '4000',
-      uncertain: [],
-    });
-  },
-);
+it('shares one live identical request instead of recovering an invocation still in flight', async () => {
+  const f = await fixture();
+  const transport = f.make();
+  const held = deferred();
+  const entered = deferred();
+  f.router.hold = held.promise;
+  f.router.onDelayArmed = entered.resolve;
+  const body = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'same task' }] };
+  const invoke = () => transport.messages(f.job, body, new AbortController().signal);
+  const first = invoke();
+  await entered.promise;
+  const second = invoke();
+  const pending = Promise.all([first, second]);
+  held.resolve();
+  const results = await pending;
+  expect(results).toEqual([f.message, f.message]);
+  const [firstResult, secondResult] = results as [typeof f.message, typeof f.message];
+  expect(firstResult).not.toBe(secondResult);
+  firstResult.content[0]!.text = 'Only this caller changed its result';
+  expect(secondResult).toEqual(f.message);
+  await expect(transport.messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+    f.message,
+  );
+  expect(f.router.paidRequests()).toBe(1);
+  expect(f.router.settledFees).toBe(1);
+  expect(f.gets()).toBe(0);
+  expect(await transport.summary(f.job)).toEqual({
+    actualAtomic: '4000',
+    reservedAtomic: '4000',
+    uncertain: [],
+  });
+});
 
 it('shares the first live uncertain failure and retains its reservation until owner recovery', async () => {
   const f = await fixture({ drop: true });
@@ -802,36 +786,27 @@ it('continues with the original ledger and refuses to recreate a missing resume 
   expect(await transport.summary(resumed)).toMatchObject({ actualAtomic: '5000' });
 });
 
-it.each(['messages', 'responses'] as const)(
-  'waits past the former 180-second paid %s deadline and settles once',
-  async (protocol) => {
-    const f = await fixture({ protocol });
-    const transport = f.make();
-    const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'first' }] };
-    const invoke = (body: Record<string, unknown>) =>
-      protocol === 'responses'
-        ? transport.responses(f.job, body, new AbortController().signal)
-        : transport.messages(f.job, body, new AbortController().signal);
-    await invoke(request); // Establish warm credit before the slow inference.
-    let entered!: () => void;
-    const started = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    f.router.delayMs = 200_000;
-    f.router.onDelayArmed = entered;
-    vi.useFakeTimers();
-    const pending = expect(invoke({ ...request, max_tokens: 200 })).resolves.toEqual(
-      protocol === 'responses'
-        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
-        : f.message,
-    );
-    await started;
-    await vi.advanceTimersByTimeAsync(200_000);
-    await pending;
-    expect(f.router.paidRequests()).toBe(2);
-    expect((await transport.summary(f.job)).uncertain).toEqual([]);
-  },
-);
+it('waits past the former 180-second paid deadline and settles once', async () => {
+  const f = await fixture();
+  const transport = f.make();
+  const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'first' }] };
+  const invoke = (body: Record<string, unknown>) =>
+    transport.messages(f.job, body, new AbortController().signal);
+  await invoke(request); // Establish warm credit before the slow inference.
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  f.router.delayMs = 200_000;
+  f.router.onDelayArmed = entered;
+  vi.useFakeTimers();
+  const pending = expect(invoke({ ...request, max_tokens: 200 })).resolves.toEqual(f.message);
+  await started;
+  await vi.advanceTimersByTimeAsync(200_000);
+  await pending;
+  expect(f.router.paidRequests()).toBe(2);
+  expect((await transport.summary(f.job)).uncertain).toEqual([]);
+});
 
 it('recovers a dropped paid response through signed owner lookup without another model authorization', async () => {
   const f = await fixture({ drop: true });
@@ -955,113 +930,6 @@ it('releases an unsent inference quote and inline deposit when workspace scope c
   });
 });
 
-it('keeps native Responses opaque fields intact and budgets worker plus Guardian in the same job', async () => {
-  const wire = 'event: response.completed\ndata: {"response":{"opaque":"unchanged"}}\n\n';
-  const f = await fixture({ protocol: 'responses', wire });
-  const transport = f.make();
-  const worker = {
-    model: 'deepseek-flash',
-    reasoning: { effort: 'high' },
-    stream: true,
-    input: [{ type: 'reasoning', encrypted_content: 'OPAQUE-native-signature-1234567890' }],
-    tools: [{ type: 'namespace', name: 'fixture', tools: [{ type: 'function', name: 'read' }] }],
-  };
-  expect(await transport.responses(f.job, worker, new AbortController().signal)).toBe(wire);
-  expect(f.last()).toMatchObject({
-    protocol: 'responses',
-    responses: worker,
-    jobId: f.job.decision.jobId,
-  });
-  expect(await f.make().responses(f.job, worker, new AbortController().signal)).toBe(wire);
-  await transport.responses(
-    f.job,
-    { ...worker, reasoning: { effort: 'low' } },
-    new AbortController().signal,
-  );
-  expect(f.router.paidRequests()).toBe(2);
-  expect(f.router.channels.size).toBe(1);
-  expect(await transport.summary(f.job)).toEqual({
-    actualAtomic: '5000',
-    reservedAtomic: '5000',
-    uncertain: [],
-  });
-});
-
-it('recovers the exact Responses wire through owner lookup without buying a replacement request', async () => {
-  const wire = 'event: response.completed\ndata: {"opaque":"native-result"}\n\n';
-  const f = await fixture({ protocol: 'responses', wire, drop: true });
-  const input = { model: 'deepseek-flash', reasoning: { effort: 'high' }, input: 'Once' };
-  await expect(f.make().responses(f.job, input, new AbortController().signal)).rejects.toThrow(
-    /uncertain/,
-  );
-  expect(await f.make().responses(f.job, input, new AbortController().signal)).toBe(wire);
-  expect(f.router.paidRequests()).toBe(1);
-  expect(f.gets()).toBe(1);
-  expect(f.signedGets()).toBe(1);
-  expect(await f.make().summary(f.job)).toEqual({
-    actualAtomic: '4000',
-    reservedAtomic: '4000',
-    uncertain: [],
-  });
-});
-
-it('accepts bounded native Responses receipts beyond the old Messages response size', async () => {
-  const wire = 'event: response.completed\ndata: ' + 'x'.repeat(2_200_000) + '\n\n';
-  const f = await fixture({ protocol: 'responses', wire });
-  expect(
-    await f
-      .make()
-      .responses(
-        f.job,
-        { model: 'deepseek-flash', input: 'Long native stream' },
-        new AbortController().signal,
-      ),
-  ).toBe(wire);
-  expect(f.router.paidRequests()).toBe(1);
-});
-
-it('preserves complete Responses wire near the hosted JSON receipt envelope ceiling', async () => {
-  const wire = 'event: response.completed\ndata: ' + 'x'.repeat(4_300_000) + '\n\n';
-  const f = await fixture({ protocol: 'responses', wire });
-  await expect(
-    f
-      .make()
-      .responses(
-        f.job,
-        { model: 'deepseek-flash', input: 'Exact wire' },
-        new AbortController().signal,
-      ),
-  ).resolves.toBe(wire);
-  expect(f.router.paidRequests()).toBe(1);
-});
-
-it('bounds escaped Responses envelopes on both paid results and owner recovery without releasing exposure', async () => {
-  // The raw wire fits 4.5MB, but JSON escaping exceeds the actual hosted POST/GET limit.
-  const f = await fixture({ protocol: 'responses', wire: '"'.repeat(2_300_000) });
-  const body = { model: 'deepseek-flash', input: 'Oversized escaped wire' };
-  const first = await f
-    .make()
-    .responses(f.job, body, new AbortController().signal)
-    .then(
-      () => 'unexpected success',
-      (error: Error) => error.message,
-    );
-  expect(first).toMatch(/uncertain/);
-  expect(await f.make().summary(f.job)).toMatchObject({
-    reservedAtomic: '503000',
-    uncertain: [expect.any(String)],
-  });
-  await expect(f.make().responses(f.job, body, new AbortController().signal)).rejects.toThrow(
-    /size limit/,
-  );
-  expect(f.router.paidRequests()).toBe(1);
-  expect(f.gets()).toBe(1);
-  expect(await f.make().summary(f.job)).toMatchObject({
-    reservedAtomic: '503000',
-    uncertain: [expect.any(String)],
-  });
-});
-
 // tenjin#1153 review: its server settled a reply through 4,000,000 bytes while this parser
 // refused one above 2,000,000 on the paid reply and on recovery, after the charge. That
 // server now settles only up to the size a call states, and refuses a larger reply unpaid.
@@ -1087,10 +955,6 @@ it('states the result size its offer names, up to what this CLI reads, and reads
     /names no result size/,
   );
   expect(odd.last()).toBeUndefined();
-  // Responses has no such field: its contract refuses it.
-  const responses = await fixture({ protocol: 'responses' });
-  await responses.make().responses(responses.job, { model: 'deepseek-flash', input: [] }, signal);
-  expect(responses.last()).not.toHaveProperty('maxResultBytes');
 });
 
 // The router serves one call up to 540 s, so the client's wait for the paid answer, 360 s
@@ -1218,39 +1082,32 @@ it('rejects a Messages result above the size the call states even when the recei
   });
 });
 
-it('sends known secret shapes in native instructions/text/tool outputs as written, with opaque pairings and schemas intact', async () => {
-  const f = await fixture({ protocol: 'responses' });
+it('sends known secret shapes in system text, messages and tool outputs as written, with tool schemas intact', async () => {
+  const f = await fixture();
   const secret = 'sk-proj-abc123DEF456ghi789JKL012_mno';
-  const native = {
+  const request = {
     model: 'deepseek-flash',
-    instructions: `base ${secret}`,
-    input: [
-      { role: 'developer', content: [{ type: 'input_text', text: `context ${secret}` }] },
-      { type: 'function_call', id: secret, call_id: secret, name: 'read', arguments: '{}' },
-      { type: 'function_call_output', call_id: secret, output: `tool ${secret}` },
-      { type: 'reasoning', encrypted_content: secret, signature: secret },
+    system: `base ${secret}`,
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: `context ${secret}` }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: secret, name: 'read', input: {} }] },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: secret, content: `tool ${secret}` }],
+      },
     ],
     tools: [
       {
-        type: 'function',
         name: 'read',
-        parameters: {
+        input_schema: {
           type: 'object',
           properties: { id: { type: 'string', pattern: '^sk-proj-abc123$' } },
         },
       },
     ],
   };
-  await f.make().responses(f.job, native, new AbortController().signal);
-  const sent = f.last()!.responses as typeof native;
-  expect(sent.instructions).toContain(secret);
-  expect((sent.input[0]!.content![0] as { text: string }).text).toContain(secret);
-  expect(sent.input[2]!.output).toContain(secret);
-  expect(sent.input[1]!.id).toBe(secret);
-  expect(sent.input[2]!.call_id).toBe(secret);
-  expect(sent.input[3]!.encrypted_content).toBe(secret);
-  expect(sent.input[3]!.signature).toBe(secret);
-  expect(sent.tools).toEqual(native.tools);
+  await f.make().messages(f.job, request, new AbortController().signal);
+  expect(f.last()!.messages).toEqual(request);
 });
 
 it('releases the job lock during inference and atomically refuses a concurrent over-cap call', async () => {
