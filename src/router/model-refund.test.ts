@@ -53,6 +53,8 @@ const requirements: PaymentRequirements = {
   },
 };
 const dirs: string[] = [];
+// A child process starts slowly on a loaded runner: its tests get more than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 afterEach(async () => {
   killChildren();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));

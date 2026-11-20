@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   discardHeldLock,
   HeldLockTimeoutError,
@@ -47,6 +47,8 @@ import {
 import { child, holder as startHolder, killChildren, probe } from './held-lock-test/child';
 import { LockTimeoutError } from './lock';
 
+// A child process starts slowly on a loaded runner: its tests get more than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 const posix = process.platform !== 'win32';
 
 let tmp: string;

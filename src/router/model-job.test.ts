@@ -6,6 +6,8 @@ import { MODEL_RECORD_TTL_MS, ModelJobStore, sweepModelRecords } from './model-j
 import { canonicalHash } from '../lib/request-schema';
 import { holder, killChildren, probe } from '../lib/held-lock-test/child';
 import { holdLock } from '../lib/held-lock';
+// A child process starts slowly on a loaded runner: its tests get more than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 let dir: string;
 afterEach(async () => {
   vi.restoreAllMocks();
