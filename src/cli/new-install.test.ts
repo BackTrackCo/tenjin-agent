@@ -7,7 +7,6 @@ import { captureIo, testCtx } from '../context-test-utils';
 import { persist } from '../commands/config';
 import { loadRawConfig } from '../lib/config';
 import type { RuntimeSetup } from '../lib/runtime';
-import { runCodexInstall } from '../router/codex-install';
 import { runRouterInstall } from '../router/install';
 import { SUBAGENT_TERMS } from '../router/subagents-shown';
 import { CODEX_PLUGIN } from '../router/codex-host';
