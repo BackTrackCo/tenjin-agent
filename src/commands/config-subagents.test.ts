@@ -309,7 +309,7 @@ it('prints one short terms text that names every recipient of the consent record
   expect(terms).toContain('~/.claude');
   expect(terms).toContain('session transcripts');
   expect(terms.length).toBeLessThan(1100);
-  // What the person agrees to, in plain words: unmasked, and the fee the next server quotes.
+  // What the person agrees to, in plain words: unmasked, and the fee the router quotes.
   expect(terms).toContain('unmasked');
   expect(terms).toContain('$0.0081');
   expect(terms).toContain('Tenjin and DeepSeek');

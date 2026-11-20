@@ -23,9 +23,9 @@ export const SUBAGENT_DETAILS_URL =
  * The full terms are the guide and the `disclosure` field of `on --json`.
  */
 export const SUBAGENT_TERMS: readonly string[] = [
-  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked ($0.0081, 15% of an expected job spend of $0.054), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job ceiling.',
-  'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results, unmasked: env file values and any other secret a worker reads go as written. Only the job’s tokens and your wallet key and passphrase are removed. A web search runs inside the DeepSeek call, with no search charge; the address of a public page the worker could not fetch goes to Exa.',
-  'In ~/.claude, Claude Code loads your CLAUDE.md, skills and plugins as the worker’s instructions. The worker’s file tools can read the session transcripts, prompt history and settings there, and what they read can reach Tenjin and DeepSeek.',
+  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs one fee for each offer, also when Claude declines it: what the router quotes ($0.0081), never more than $0.25, paid inside your per-call limit and the job ceiling.',
+  'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results, unmasked: only the job’s tokens and your wallet key and passphrase are removed. A web search runs inside the DeepSeek call; the address of a page the worker could not fetch goes to Exa.',
+  'Its instructions come from your ~/.claude (CLAUDE.md, skills, plugins). Its file tools can read the session transcripts, prompt history and settings there, and what they read can reach Tenjin and DeepSeek.',
   `Details: ${SUBAGENT_DETAILS_URL}`,
 ];
 

@@ -40,7 +40,7 @@ export type SubagentConfigFlags = {
 const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
 
 const NO_CLAUDE_NOTE =
-  'DeepSeek workers run on Claude Code only, and Tenjin is not set up for Claude Code on this machine, so no job is offered until it is (`tenjin install --harness claude`).';
+  'Workers run on Claude Code only, and it is not set up here, so no job is offered until it is (`tenjin install --harness claude`).';
 const NATIVE_WINDOWS_DISCLOSURE =
   'The Windows DeepSeek worker runs under the dedicated standard account with Claude’s native permissions and without its shell sandbox. Shell tools can reach files and networks available to that Windows account. Tenjin and DeepSeek can receive instructions and tool results from those resources. Exa can receive the addresses of public pages. Use a separate shared Claude profile and keep wallet, login and spend data under the controller account.';
 
