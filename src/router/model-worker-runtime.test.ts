@@ -2664,7 +2664,8 @@ it.skipIf(process.platform === 'win32')(
 );
 
 // The operator ruling of 2026-11-19 opened env files and kept these walls: the Tenjin data
-// folder (the wallet), key folders and login files, and the credential probes no path stops.
+// folder (the wallet), key folders and login files. Credential commands are left to the mode,
+// and the keychain files are closed to the sandbox.
 it('keeps the Tenjin data folder, keys and login files closed, and leaves credential helper and gh token commands to the mode', async () => {
   const decisions: unknown[] = [];
   const probes = [

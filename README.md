@@ -151,7 +151,7 @@ Calls on your own account bill its plan, not your Tenjin balance. [Your own acco
 
 ## Privacy and help
 
-Routing sends relevant task context to Tenjin, with known secrets masked. Tool-result bodies are excluded. The wallet key stays local. [What is sent and retained →](./docs/agent-permissions.md#what-the-hooks-send)
+Routing sends relevant task context to Tenjin, with known secrets masked. Tool-result bodies are excluded. The wallet key stays local, also for a DeepSeek worker, which masks nothing else it reads and forwards to Tenjin and DeepSeek; only its job's tokens and your wallet key and passphrase are removed. [What is sent and retained →](./docs/agent-permissions.md#what-the-hooks-send)
 
 - [Setup and permissions](./docs/agent-permissions.md): installation, activation, spending and sharing.
 - [Troubleshooting](./docs/troubleshooting.md): a failed install, locked wallet or missing tool.

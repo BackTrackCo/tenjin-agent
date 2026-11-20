@@ -308,7 +308,11 @@ it('prints one short terms text that names every recipient of the consent record
   for (const recipient of [...saved.recipients, 'TypeSafe']) expect(terms).toContain(recipient);
   expect(terms).toContain('~/.claude');
   expect(terms).toContain('session transcripts');
-  expect(terms.length).toBeLessThan(900);
+  expect(terms.length).toBeLessThan(1100);
+  // What the person agrees to, in plain words: unmasked, and the fee the next server quotes.
+  expect(terms).toContain('unmasked');
+  expect(terms).toContain('$0.0081');
+  expect(terms).toContain('Tenjin and DeepSeek');
   // The full terms stay in --json.
   expect((on.data as { disclosure: string }).disclosure).toContain('After acceptance');
   // A named ceiling under the limit is the cap, and the row says whose it is.
