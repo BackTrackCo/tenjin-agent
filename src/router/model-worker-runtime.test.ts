@@ -3595,3 +3595,31 @@ it('ends the job on a turn cut after its events when the charge is not proven aw
   expect(messages).toHaveBeenCalledTimes(1);
   expect(request!.seen.chunks.join('')).toContain('event: error');
 });
+
+// Failure caught: a refusal after events became a cut the child could retry, though the
+// internals say it ends the job as `refused`, as a refusal before any event does.
+it('ends the job as refused when DeepSeek refuses after events reached the child', async () => {
+  const messages = vi.fn(async (...args: unknown[]) => {
+    (args[5] as (event: { type: string }) => void)(streamEvents[0]!);
+    throw new ModelCallFailed('DeepSeek refused', {
+      cause: 'provider',
+      status: 502,
+      uncharged: true,
+      code: 'model_refused',
+      relayed: true,
+    });
+  });
+  sdkResult({ subtype: 'success', result: 'not reached' }, undefined, async () => {
+    const request = streamedBridgeRequest(streamRequest);
+    await request.done;
+    await tick();
+  });
+  await expect(
+    runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+      retryWait: async () => undefined,
+    }),
+  ).rejects.toMatchObject({ stop: { reason: 'provider_failed', status: 502 } });
+  expect(messages).toHaveBeenCalledTimes(1);
+});

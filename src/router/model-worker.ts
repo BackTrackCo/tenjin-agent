@@ -116,6 +116,7 @@ import {
 } from './worker-github';
 import {
   ModelCallFailed,
+  MODEL_REFUSED_CODE,
   modelCallStop,
   withModelRetry,
   ModelWorkerStopped,
@@ -755,7 +756,9 @@ async function runQualifiedWorker(
             live.started &&
             error instanceof ModelCallFailed &&
             error.detail.relayed === true &&
-            error.detail.uncharged === true
+            error.detail.uncharged === true &&
+            // A reply DeepSeek refused to give ends the job as `refused`, as before any event.
+            error.detail.code !== MODEL_REFUSED_CODE
           )
             throw new RelayedCut({ cause: error });
           throw modelCallStop(error);
