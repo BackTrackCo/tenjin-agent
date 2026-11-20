@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   prepareWorkerGithub,
+  redactGithubTokenShapes,
   redactWorkerSecrets,
+  settingsFileWalletValues,
+  workerWalletValues,
   workerGithubToken,
   workerTokenValues,
   type WorkerGithub,
@@ -162,4 +165,42 @@ it('names the process that made the job folder, and removes the folder on close'
   const { directory } = prepared;
   await prepared.close();
   await expect(stat(directory)).rejects.toThrow();
+});
+
+it('reads the wallet values from the env block of a settings file, and only those', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wallet-settings-'));
+  try {
+    const file = join(dir, 'settings.json');
+    await writeFile(
+      file,
+      JSON.stringify({
+        env: { TENJIN_WALLET_PASSPHRASE: 'fixture-pass-1', OTHER: 'fixture-other' },
+      }),
+    );
+    const broken = join(dir, 'settings.local.json');
+    await writeFile(broken, '{ not json');
+    expect(await settingsFileWalletValues([file, broken, join(dir, 'missing.json')])).toEqual([
+      'fixture-pass-1',
+    ]);
+    expect(
+      workerWalletValues({ TENJIN_WALLET_KEY: 'abc', TENJIN_WALLET_PASSPHRASE: ' fixture-2 ' }),
+    ).toEqual(['fixture-2']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('removes a secret as JSON text writes it, and a GitHub token by its shape', () => {
+  const secret = 'pa"ss\\word';
+  const body = JSON.stringify({ text: `a ${secret} b ${TOKEN}` });
+  expect(redactWorkerSecrets(body, [secret])).not.toContain('pa\\"ss');
+  expect(redactGithubTokenShapes(`x ${TOKEN} ${NAMED} y`)).toBe(
+    'x [redacted job secret] [redacted job secret] y',
+  );
+  expect(redactGithubTokenShapes('ghost story, ghp_short')).toBe('ghost story, ghp_short');
+});
+
+it("names the job's GitHub folder by its real path", async () => {
+  prepared = await prepareWorkerGithub({}, { run: async () => '' });
+  expect(prepared.directory).toBe(await realpath(prepared.directory));
 });

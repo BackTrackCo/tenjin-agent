@@ -108,12 +108,15 @@ import {
 } from './claude-workspace';
 import {
   prepareWorkerGithub,
+  redactGithubTokenShapes,
   redactWorkerMessage,
   redactWorkerSecrets,
   sessionTokenClears,
+  settingsFileWalletValues,
   WORKER_ALLOWED_DOMAINS,
   workerGithubPatterns,
   workerTokenValues,
+  workerWalletValues,
   type WorkerGithub,
 } from './worker-github';
 import {
@@ -411,6 +414,7 @@ async function runQualifiedWorker(
       !sameClaudeWorkspace(workspace, current)
     )
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
+    await refreshWalletSecrets(resolved.effective.env);
     return { resolved, disclosure };
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
@@ -432,6 +436,27 @@ async function runQualifiedWorker(
   const githubEnv = binary.windows ? {} : (github?.env ?? sessionTokenClears(process.env));
   // Literal GitHub token values; the bridge removes them before anything leaves.
   let secrets: readonly string[] = github?.secrets ?? workerTokenValues(process.env);
+  // The wallet's key and passphrase, by value, from every place a worker could read them:
+  // this process's environment (a command can read it), the merged settings `env`, and the
+  // `env` block of each settings file its file tools open. Its own environment drops them;
+  // this removes them from everything the bridge forwards. Refreshed on every send.
+  let walletSecrets: readonly string[] = workerWalletValues(process.env);
+  let settingsFiles: readonly string[] = [];
+  const refreshWalletSecrets = async (settingsEnv: Record<string, string | undefined> = {}) => {
+    walletSecrets = [
+      ...new Set([
+        ...workerWalletValues(process.env),
+        ...workerWalletValues(settingsEnv),
+        ...(await settingsFileWalletValues(settingsFiles)),
+      ]),
+    ];
+  };
+  // A job whose GitHub setup failed knows no token by value; an earlier job's, resent from
+  // a continued transcript, goes by its shape.
+  const removeSecrets = (text: string) => {
+    const removed = redactWorkerSecrets(text, [token, ...secrets, ...walletSecrets]);
+    return github ? removed : redactGithubTokenShapes(removed);
+  };
   const token = randomBytes(32).toString('hex');
   // The job's own temp folder, as a native session has its scratchpad. Without one the
   // worker uses the shared temp root, as before.
@@ -503,7 +528,7 @@ async function runQualifiedWorker(
   };
   // The job's own bridge token and GitHub token, wherever they appear in text that leaves
   // this process or is written to disk.
-  const redactAll = (text: string) => redactWorkerSecrets(text, [token, ...secrets]);
+  const redactAll = (text: string) => removeSecrets(text);
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
@@ -524,7 +549,7 @@ async function runQualifiedWorker(
   // The worker's settings carry the bridge token and the job's GitHub env: in a private
   // file, never on its command line.
   const nativeProcess = claudeWorkerProcess({
-    secrets: () => [token, ...secrets],
+    secrets: () => [token, ...secrets, ...walletSecrets],
     windows: binary.windows,
     onStartupMark: (name, at) => diagnostics.childMark(name, at),
   });
@@ -661,7 +686,7 @@ async function runQualifiedWorker(
         const outgoing = async () => {
           await assertCurrentSend();
           const text = withholdDroppedDirectories(
-            redactWorkerSecrets(body, [token, ...secrets]),
+            removeSecrets(body),
             workspace.droppedDirectories,
           );
           try {
@@ -840,7 +865,7 @@ async function runQualifiedWorker(
   let result: string | undefined;
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
-  // Auto and bypass workers never wait on a person; the sandbox and the secrets boundary still apply.
+  // Auto and bypass workers never wait on a person; the sandbox still applies.
   const nobodyAsked = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
   const repeats = new WorkerRepeatReminder();
   // What the job's own offer says, so a job keeps one cap from its first call to its last.
@@ -884,6 +909,8 @@ async function runQualifiedWorker(
       },
     );
     diagnostics.mark('workspaceRead');
+    settingsFiles = privatePaths.readable;
+    await refreshWalletSecrets(resolved.effective.env);
     // A GitHub token in the person's settings env reaches the worker's commands too.
     secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;

@@ -8,6 +8,7 @@ import { completedMessageSse } from './model-messages';
 import { modelSettings } from './model-settings';
 import { ModelCallFailed, workerStop } from './model-worker-control';
 import { prepareWorkerGithub } from './worker-github';
+import { osCredentialStorePaths } from './model-worker-privacy';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { spawn } from 'node:child_process';
@@ -3661,4 +3662,120 @@ it('keeps the messages a failed worker never read for whoever reports its end', 
   // The inbox takes nothing more, and what it held is still there to report.
   expect(inbox.push('too late')).toBe('closed');
   expect(inbox.close()).toEqual(['Use the new head.']);
+});
+
+/** A worker whose child sends one request holding `content` as a tool result, and ends with `result`. */
+function bridgeToolResult(content: () => Promise<string> | string, result: string) {
+  vi.mocked(query).mockImplementation((call) => {
+    let complete!: () => void;
+    const forwarded = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    handle(
+      {
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(
+            JSON.stringify({
+              model: 'deepseek-flash',
+              max_tokens: 32000,
+              messages: [
+                {
+                  role: 'user',
+                  content: [{ type: 'tool_result', tool_use_id: 't1', content: await content() }],
+                },
+              ],
+            }),
+          );
+        },
+      },
+      {
+        headersSent: false,
+        destroyed: false,
+        writeHead() {
+          return this;
+        },
+        end(_body: string, done?: () => void) {
+          done?.();
+          complete();
+          return this;
+        },
+      },
+    );
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+        await forwarded;
+        yield { type: 'result', subtype: 'success', result };
+      },
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+}
+
+// Failure caught: the worker's environment dropped the wallet variables, but a settings
+// file its file tools may read (here the user's own, the one install's hint names) held
+// them, and a read of it went to Tenjin and DeepSeek as written. Real settings file, real
+// bridge: only the model client is the fixture.
+it('removes the wallet key and passphrase by value from a request, from a settings file, the environment and a command, and closes the OS credential stores', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'worker-wallet-home-'));
+  const FILE_PASSPHRASE = 'fixture "pass" phrase\\one';
+  const ENV_KEY = `0x${'ab12'.repeat(16)}`;
+  await mkdir(join(home, '.claude'), { recursive: true });
+  await writeFile(
+    join(home, '.claude', 'settings.json'),
+    JSON.stringify({ env: { TENJIN_WALLET_PASSPHRASE: FILE_PASSPHRASE } }),
+  );
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('TENJIN_WALLET_KEY', ENV_KEY);
+  try {
+    const messages = vi.fn(async () => ({ fixture: true }));
+    // What a Read of the settings file and a command printing the parent's environment return.
+    bridgeToolResult(
+      async () =>
+        `${await readFile(join(home, '.claude', 'settings.json'), 'utf8')}\nTENJIN_WALLET_KEY=${ENV_KEY}`,
+      `held ${ENV_KEY}`,
+    );
+    const result = await runModelWorker(job, {
+      ...options(),
+      transport: { messages } as unknown as ModelTransport,
+    });
+    const sent = JSON.stringify(messages.mock.calls);
+    for (const value of [FILE_PASSPHRASE, JSON.stringify(FILE_PASSPHRASE).slice(1, -1), ENV_KEY])
+      expect(sent).not.toContain(value);
+    expect(sent).toContain('[redacted job secret]');
+    expect(result).toBe('held [redacted job secret]');
+    // The credential stores of the OS are denied to commands and to the file tools.
+    const written = given(vi.mocked(query).mock.calls[0]![0].options);
+    for (const store of osCredentialStorePaths(home)) {
+      expect(written.sandbox?.filesystem?.denyRead).toContain(store);
+      expect((written.settings as { permissions: { deny: string[] } }).permissions.deny).toContain(
+        `Read(//${store.replace(/^\/+/, '')})`,
+      );
+    }
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// Failure caught: a continuation whose GitHub setup failed knew no token by value, so the
+// earlier job's token, which Claude Code's own transcript carries, was resent as written.
+it("removes an earlier job's GitHub token by its shape when this job's GitHub setup failed", async () => {
+  const EARLIER = `gho_${'Zk9x'.repeat(9)}`;
+  vi.mocked(prepareWorkerGithub).mockRejectedValueOnce(new Error('no temp folder'));
+  const messages = vi.fn(async () => ({ fixture: true }));
+  bridgeToolResult(() => `earlier push used ${EARLIER}`, 'done');
+  await runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport });
+  const sent = JSON.stringify(messages.mock.calls);
+  expect(sent).not.toContain(EARLIER);
+  expect(sent).toContain('earlier push used [redacted job secret]');
 });

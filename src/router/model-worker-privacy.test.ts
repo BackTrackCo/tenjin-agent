@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { join, resolve } from 'node:path';
-import { isSecretPath, secretHomePaths } from './model-worker-privacy';
+import { isSecretPath, osCredentialStorePaths, secretHomePaths } from './model-worker-privacy';
 
 it.each([
   '.env.local',
@@ -82,3 +82,18 @@ it.each(['settings.json', 'settings.local.json', '.mcp.json', 'mcp.json'])(
     );
   },
 );
+
+it('closes the keychain on macOS and the keyring and its sockets on Linux, and nothing else elsewhere', () => {
+  const home = resolve('fixture', 'home');
+  expect(osCredentialStorePaths(home, 'darwin')).toEqual([join(home, 'Library', 'Keychains')]);
+  const linux = osCredentialStorePaths(home, 'linux', '/run/user/1000');
+  expect(linux).toEqual(
+    expect.arrayContaining([
+      join(home, '.local', 'share', 'keyrings'),
+      '/run/user/1000/bus',
+      '/run/user/1000/keyring',
+    ]),
+  );
+  expect(osCredentialStorePaths(home, 'win32')).toEqual([]);
+  expect(secretHomePaths(home)).toEqual(expect.arrayContaining(osCredentialStorePaths(home)));
+});

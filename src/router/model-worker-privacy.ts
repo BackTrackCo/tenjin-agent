@@ -29,9 +29,31 @@ export const SECRET_HOME_PATHS = [
   '.claude.json',
 ] as const;
 
+/**
+ * The OS credential stores a working directory that covers the home folder would reach:
+ * the macOS keychain files (the `security` command opens them itself, so a sandbox that
+ * cannot read them finds no item) and the desktop-Linux keyring files and its D-Bus
+ * sockets. Closing the folder closes the Tenjin and GitHub items with every other.
+ */
+export function osCredentialStorePaths(
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+  runtimeDir: string | undefined = process.env.XDG_RUNTIME_DIR,
+): string[] {
+  if (platform === 'darwin') return [join(home, 'Library', 'Keychains')];
+  if (platform === 'linux')
+    return [
+      join(home, '.local', 'share', 'keyrings'),
+      join(home, '.gnome2', 'keyrings'),
+      ...(runtimeDir ? [join(runtimeDir, 'bus'), join(runtimeDir, 'keyring')] : []),
+    ];
+  return [];
+}
+
 export function secretHomePaths(home: string): string[] {
   return [
     ...SECRET_HOME_PATHS.map((name) => join(home, name)),
+    ...osCredentialStorePaths(home),
     ...claudePrivatePaths(join(home, '.claude')),
   ];
 }

@@ -162,7 +162,9 @@ export async function prepareWorkerGithub(
   options: { run?: Exec } = {},
 ): Promise<WorkerGithub> {
   const run = options.run ?? exec;
-  const directory = await mkdtemp(join(tmpdir(), GITHUB_PREFIX));
+  // By its real path: the sandbox's `allowRead` names it, and a link's spelling of the
+  // temp folder (macOS `/var` for `/private/var`) does not re-allow it over the deny.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), GITHUB_PREFIX)));
   markJobFolder(directory);
   try {
     const others = await workerGithubPatterns();
@@ -204,17 +206,75 @@ export async function prepareWorkerGithub(
 
 export const REDACTED_JOB_SECRET = '[redacted job secret]';
 
-/** Removes each literal secret; a GitHub token never needs JSON escaping. */
+/** Removes each literal secret, as written and as JSON text escapes it. */
 export function redactWorkerSecrets(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_JOB_SECRET);
+  for (const secret of secrets) {
+    if (!secret) continue;
+    out = out.split(secret).join(REDACTED_JOB_SECRET);
+    // A request body is JSON: a value with a quote, backslash or newline is written escaped.
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    if (escaped !== secret) out = out.split(escaped).join(REDACTED_JOB_SECRET);
+  }
   return out;
 }
 
+/** The wallet's two secrets: a worker never gets them, from its environment or any file it reads. */
+const WALLET_VARIABLES = ['TENJIN_WALLET_KEY', 'TENJIN_WALLET_PASSPHRASE'] as const;
+
+/** Shorter values are not secrets worth the damage a removal by value does to ordinary text. */
+const MIN_WALLET_VALUE = 6;
+
+/** The wallet values an environment holds, for removal. */
+export function workerWalletValues(source: Record<string, string | undefined>): string[] {
+  return WALLET_VARIABLES.map((key) => source[key])
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter((value) => value.length >= MIN_WALLET_VALUE);
+}
+
 /**
- * A literal removal over every key and string of a parsed SDK message: the job's
- * token values. It feeds the activity copy behind the viewer, the plugin's progress
- * file and a stopped worker's partial handback, where `mask()` knows only token shapes.
+ * The wallet values in the `env` block of each settings file a worker may read, which is
+ * where install tells a person to put them. A file that is missing or not JSON holds none.
+ */
+export async function settingsFileWalletValues(paths: readonly string[]): Promise<string[]> {
+  const found = await Promise.all(
+    paths
+      .filter((path) => /settings(?:\.local)?\.json$/.test(path))
+      .map(async (path) => {
+        try {
+          const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+          const env =
+            parsed && typeof parsed === 'object' ? (parsed as { env?: unknown }).env : undefined;
+          return env && typeof env === 'object'
+            ? workerWalletValues(env as Record<string, string | undefined>)
+            : [];
+        } catch {
+          return [];
+        }
+      }),
+  );
+  return [...new Set(found.flat())];
+}
+
+/** Shapes of a GitHub token: classic, OAuth, user, server, refresh, and fine-grained. */
+const GITHUB_TOKEN_SHAPE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{20,255})/g;
+
+/**
+ * For a job whose GitHub setup failed: an earlier job's token can still sit in the session
+ * transcript a continuation resends, and nothing is known by value to remove. Only GitHub's
+ * own token shapes go; other secrets stay as written.
+ */
+export function redactGithubTokenShapes(text: string): string {
+  return text.replace(GITHUB_TOKEN_SHAPE, REDACTED_JOB_SECRET);
+}
+
+/**
+ * A literal removal over every key and string of a parsed SDK message, by the
+ * values the caller names: the job's tokens and the wallet's secrets. It feeds the
+ * activity copy behind the viewer, the plugin's progress file and a stopped worker's
+ * partial handback. Other secrets a worker read are not removed there, as they are not
+ * in what it sends.
  */
 export function redactWorkerMessage(message: unknown, redact: (text: string) => string): unknown {
   const walk = (value: unknown): unknown => {
