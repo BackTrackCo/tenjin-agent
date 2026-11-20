@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Agent, EnvHttpProxyAgent } from 'undici';
 import { expect, it } from 'vitest';
 import { paidCallDispatcher, paidCallTimeouts } from './paid-call-dispatcher';
 
@@ -52,3 +53,38 @@ it('clamps a router-stated call wait and idle limit to what a timer holds', asyn
   expect(streamIdleMs({ callIdleLimitMs: 300_000 })).toBe(330_000);
   expect(paidCallTimeoutMs({ maxCallDurationMs: 540_000 })).toBe(600_000);
 });
+
+// Failure caught (Greptile): a dispatcher handed to fetch replaces the global one the CLI set
+// from HTTPS_PROXY, so a paid call skipped the proxy that routing and the quote went through,
+// and the call, its routing fee already paid, was left uncertain. The proxy is chosen by the
+// variables `useEnvProxy` reads.
+it.each(['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'])(
+  'goes through the proxy the environment names (%s), as the CLI does for its other calls',
+  (name) => {
+    const saved = { ...process.env };
+    try {
+      for (const key of [
+        'HTTPS_PROXY',
+        'https_proxy',
+        'HTTP_PROXY',
+        'http_proxy',
+        'NODE_USE_ENV_PROXY',
+      ])
+        delete process.env[key];
+      expect(paidCallDispatcher(111_000, 45_000)).toBeInstanceOf(Agent);
+      expect(paidCallDispatcher(111_000, 45_000)).not.toBeInstanceOf(EnvHttpProxyAgent);
+      process.env[name] = 'http://127.0.0.1:9';
+      expect(paidCallDispatcher(111_000, 45_000)).toBeInstanceOf(EnvHttpProxyAgent);
+    } finally {
+      for (const key of [
+        'HTTPS_PROXY',
+        'https_proxy',
+        'HTTP_PROXY',
+        'http_proxy',
+        'NODE_USE_ENV_PROXY',
+      ])
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+    }
+  },
+);

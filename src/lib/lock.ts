@@ -37,7 +37,7 @@ export interface FileLockOptions {
 const HOLDER_REUSE_GAP_MS = 10 * 60_000;
 
 /** The start of a process from `ps`, which reads its start in UTC with the C locale. */
-function psStartedAt(pid: number): number | undefined {
+export function psStartedAt(pid: number): number | undefined {
   if (process.platform === 'win32') return undefined;
   try {
     const out = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {

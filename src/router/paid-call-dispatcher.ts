@@ -1,4 +1,5 @@
 import { Agent, EnvHttpProxyAgent, type Dispatcher } from 'undici';
+import { proxyVariable } from '../lib/env-proxy';
 
 /**
  * The HTTP timeouts of a paid model call. Node's own fetch cuts a request whose headers or
@@ -12,8 +13,9 @@ const kept = new Map<string, Dispatcher>();
 
 /**
  * A dispatcher whose headers and body waits are at least the call's deadline and its
- * stream idle limit, plus a minute. One per size, kept for the process. A proxy set for
- * Node (`NODE_USE_ENV_PROXY`) still applies, as it does to Node's own fetch.
+ * stream idle limit, plus a minute. One per size, kept for the process. A dispatcher given
+ * to `fetch` replaces the global one, so the proxy the CLI turns on (`useEnvProxy`, from
+ * HTTPS_PROXY or HTTP_PROXY, with NO_PROXY) is chosen here by the same variables.
  */
 export function paidCallTimeouts(deadlineMs: number, idleMs: number) {
   return {
@@ -24,7 +26,9 @@ export function paidCallTimeouts(deadlineMs: number, idleMs: number) {
 
 export function paidCallDispatcher(deadlineMs: number, idleMs: number): Dispatcher {
   const { headersTimeout, bodyTimeout } = paidCallTimeouts(deadlineMs, idleMs);
-  const proxied = ['1', 'true'].includes(String(process.env.NODE_USE_ENV_PROXY).toLowerCase());
+  const proxied =
+    proxyVariable(process.env) !== undefined ||
+    ['1', 'true'].includes(String(process.env.NODE_USE_ENV_PROXY).toLowerCase());
   const key = `${proxied}:${headersTimeout}:${bodyTimeout}`;
   let dispatcher = kept.get(key);
   if (!dispatcher) {

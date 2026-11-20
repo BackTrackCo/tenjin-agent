@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { pidAlive, withFileLock } from '../lib/lock';
-import { systemProcessFacts } from './job-folders';
+import { pidAlive, psStartedAt, withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
@@ -391,7 +390,8 @@ export class ModelJobStore {
       // job (a pid reused, or a process this user cannot signal): one that started well after
       // the accept is not its runner, and the record would stay running for good.
       if (runner && !gone) {
-        const startedAt = o.startedAt ?? (o.isAlive ? undefined : systemProcessFacts.startedAt);
+        const startedAt =
+          o.startedAt ?? (o.isAlive ? undefined : async (pid: number) => psStartedAt(pid));
         const started = await startedAt?.(runner.pid).catch(() => undefined);
         gone = started !== undefined && started > runner.acceptedAt + RUNNER_REUSE_GAP_MS;
       }
