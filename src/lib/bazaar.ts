@@ -20,6 +20,8 @@ export interface RegistryResource {
   url: string;
   registry: string;
   description?: string;
+  serviceName?: string;
+  extensions?: Record<string, unknown>;
   accepts: PaymentRequirements[];
   lastUpdated?: string;
 }
@@ -31,7 +33,7 @@ export interface RegistryError {
 
 export interface RegistrySweep {
   resources: RegistryResource[];
-  /** Registries that did not answer; a sweep with errors is PARTIAL, never silently complete. */
+  /** Failed or incomplete registries; a sweep with errors is PARTIAL. */
   errors: RegistryError[];
   /** Listings skipped because they are not plain HTTP resources (e.g. MCP servers). */
   skippedNonHttp: number;
@@ -59,6 +61,10 @@ const ultravioletResource = z.object({
   type: z.string(),
   x402Version: z.number().int(),
   description: z.string().optional(),
+  // Display metadata for `tenjin discover` only. A malformed value is dropped,
+  // so the pay-time lookup accepts the same records with or without it.
+  serviceName: z.string().optional().catch(undefined),
+  extensions: z.record(z.string(), z.unknown()).optional().catch(undefined),
   accepts: z.array(paymentTerms).max(100),
   lastUpdated: z.number().int().nonnegative().max(8_640_000_000_000),
 });
@@ -136,6 +142,8 @@ async function ultravioletListings(
         accepts: item.accepts as PaymentRequirements[],
         lastUpdated: new Date(item.lastUpdated * 1000).toISOString(),
         ...(item.description !== undefined ? { description: item.description } : {}),
+        ...(item.serviceName !== undefined ? { serviceName: item.serviceName } : {}),
+        ...(item.extensions !== undefined ? { extensions: item.extensions } : {}),
       });
     }
     const next = pagination.offset + response.items.length;
@@ -176,6 +184,8 @@ function toResource(item: DiscoveryResource, registry: string): RegistryResource
     url: item.resource,
     registry,
     ...(item.description !== undefined ? { description: item.description } : {}),
+    ...(item.serviceName !== undefined ? { serviceName: item.serviceName } : {}),
+    ...(item.extensions !== undefined ? { extensions: item.extensions } : {}),
     accepts: item.accepts,
     ...(item.lastUpdated !== undefined ? { lastUpdated: item.lastUpdated } : {}),
   };
@@ -203,23 +213,28 @@ export async function sweepRegistries(
           )
         : undefined;
       if (ultraviolet?.incomplete) errors.push({ registry, message: ultraviolet.incomplete });
+      const search =
+        ultraviolet === undefined && opts.query !== undefined
+          ? await withTimeout(
+              bazaar.search({ query: opts.query, limit: SEARCH_LIMIT }),
+              remaining,
+              `search on ${registry}`,
+            )
+          : undefined;
+      if (search?.partialResults || search?.pagination?.cursor)
+        errors.push({ registry, message: 'Registry search returned partial results' });
       const items =
-        ultraviolet?.items ??
-        (opts.query !== undefined
-          ? (
-              await withTimeout(
-                bazaar.search({ query: opts.query, limit: SEARCH_LIMIT }),
-                remaining,
-                `search on ${registry}`,
-              )
-            ).resources
-          : (
-              await withTimeout(
-                bazaar.listResources({ type: 'http', limit: PAGE_LIMIT }),
-                remaining,
-                `listing ${registry}`,
-              )
-            ).items);
+        ultraviolet !== undefined
+          ? ultraviolet.items
+          : search !== undefined
+            ? search.resources
+            : (
+                await withTimeout(
+                  bazaar.listResources({ type: 'http', limit: PAGE_LIMIT }),
+                  remaining,
+                  `listing ${registry}`,
+                )
+              ).items;
       for (const item of items) {
         if (item.type !== 'http') {
           // An MCP-type listing is a seller this CLI cannot speak x402-over-HTTP
