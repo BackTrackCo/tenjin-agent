@@ -439,9 +439,7 @@ it('words the routing fee as the tool router rule, with no amount and no cap of 
   const { SUBAGENT_TERMS } = await import('../router/subagents-shown');
   const { readFile } = await import('node:fs/promises');
   const terms = SUBAGENT_TERMS.join(' ');
-  expect(terms).toContain(
-    'Routing costs 15% of the expected cost of a job, the same rule as tool routing',
-  );
+  expect(terms).toContain('Routing costs one fee for each offer, also when Claude declines it');
   for (const text of [terms, await readFile('docs/subagents.md', 'utf8')])
     expect(text).not.toMatch(/capped at \$0\.003|up to \$0\.003/);
 });
