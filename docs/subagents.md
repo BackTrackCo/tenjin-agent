@@ -2,7 +2,7 @@
 
 - **What it is.** Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job. Claude keeps its own model and accepts or declines each offer. DeepSeek subagents are off by default.
 - **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. Web searches go to Exa.
-- **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs 15% of the expected cost of a job, the same rule as tool routing, an offer at a time, also when Claude declines it.
+- **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked (production quotes $0.003), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job's ceiling.
 - **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
 - **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.
 
@@ -277,7 +277,7 @@ These run natively:
 
 - `Done (…)`, like a native subagent's, when it completed.
 - When it did not complete, the line says who or what ended it: `Stopped by you (…)`, `Cancelled by the parent (…)`, `Interrupted (…)` when Claude Code ended the call that ran it, `Session ended (…)`, `Budget reached (…)`, `Model call failed (…)`, `Model call timed out (…)` or `Payment refused (…)` when a model call through Tenjin returned no result, `DeepSeek unavailable (…)` when DeepSeek could not take the request, `DeepSeek refused (…)` when DeepSeek refused to answer it, `Stopped (…)` for anything else, and `Not started (…)` when it never started.
-- If no read can say how the job ended, the line reads `Outcome not shown here (…)` with the counts seen so far and no time: the result still returns to the parent.
+- While no read can say how the job ended, its row keeps following it and shows no end line: a job has no time limit, so an unanswered row is never read as an end. The result still returns to the parent.
 - The worker's result to the parent carries the same cause as a fixed code (`endedBy`) with a sentence in plain words, and `status: "stopped"`, or `"unknown"` only when nothing said why. A failed model call also carries the router's HTTP status, the router's own error code (such as `invalid_model_request`) or the payer's code (such as `payment_failed`) when one is known, and the worker's last text.
 - `subagent` reports completion, elapsed time, tool uses, tokens, accounted spend and unresolved reservations.
 
@@ -286,13 +286,13 @@ These run natively:
 - **The worker's transcript** is a local record in Claude Code's own session files, as a native subagent's transcript is, with the job's GitHub token already replaced. Of a call's output it holds only short lines, never a file's content.
 - **Each handback**, so a later accept in the same session can return it: a completed worker's result, and a stopped worker's last text and up to 24 recent steps, with the same replacements already made, in files only your user can read. Tenjin's data folder keeps no live worker activity after a job.
 - **A diagnostic record** beside each job: the worker's tools and MCP servers, its root and commit, its request settings, retries, times and token counts, and how it ended. These are names, times, counts and codes only. For a job that did not complete it also holds the error: the job's end code, and the class name, code and first 300 characters of the message of the error and its causes, with secret-shaped values masked: this is Tenjin's own diagnostic file, not what the worker forwards. It is readable by your user alone and is sent nowhere.
-- Tenjin removes its own local job, conversation, budget, handback and diagnostic records 7 days after their last write.
+- Tenjin removes its own local job, conversation, budget, handback and diagnostic records 7 days after their last write, except the files of a job that is still running.
 
 ## Charges and limits
 
 ### The routing fee
 
-- A valid offered job incurs one routing fee: 15% of the expected cost of a job, the same rule as tool routing and with no cap of its own beyond the tool router's ceiling, even if declined. The offer shows its own fee, which Tenjin pays only up to what the router stated for that call, within your spend limits and the job cap.
+- A valid offered job incurs one routing fee, also when the offer is declined. The router states it on its 402 (production: a flat $0.003) and Tenjin pays it before any offer exists, only when it is at most $0.25 and fits inside your per-call limit and what the job cap leaves after one minimum model call; otherwise nothing is paid and the call stays native. The offer shows the fee that was paid.
 - Several calls in a turn mean several offers and several routing fees, one each. Your daily budget and spend limits apply to every fee, and each job keeps its own ceiling.
 - A fee your limits refuse buys no offer, and that call runs natively. A call the router judges should stay native pays no fee.
 - Sending an offered call again unchanged to keep it native adds no second fee. A follow-up to a finished worker is not a new offer and pays no routing fee.
@@ -304,7 +304,7 @@ These run natively:
 - **Output cap.** A worker's turn asks for the output cap its router's offer names, up to 256,000 tokens, the DeepSeek harness's cap. On a router whose offer names none it asks for up to 65,536. Thinking counts as output, so it adds output tokens to a job's cost.
 - **What a call reserves.** A quote reserves the output a call asks for. At the current peak tariff plus 5%, a 256,000-token call reserves about $0.324 plus $0.32 per decimal MB of request body through about 1.04 MB, then caps near $0.653 at the model's input-context limit; a 65,536-token call reserves about $0.084 plus the same, capped near $0.413. For a 130 KiB request that is $0.365784 against $0.125799. These are reservation estimates, not actual charges or a guaranteed run.
 - **Near the ceiling.** When what is left of a job's ceiling cannot reserve the offered cap, the call asks for the largest cap that still fits, never under 65,536, so a higher cap does not end a job sooner. Under that, the rule below applies.
-- **The floor.** A 65,536-token call reserves at least $0.083866 before system, tools and history input. Configuration refuses a job ceiling not above that, since the routing fee comes on top and is paid only from the room the cap leaves; this necessary floor does not guarantee a larger prompt fits.
+- **The floor.** A 65,536-token call reserves at least $0.083866 before system, tools and history input. Configuration refuses a job ceiling not above that, since the routing fee is paid inside the cap, from the room the cap leaves; this necessary floor does not guarantee a larger prompt fits.
 - A continuing job must retain enough unspent ceiling, after actual spend and unresolved reservations, for each next call's full quote. Inference is refused if its quote exceeds the remaining ceiling; a routing fee may already be paid.
 - A job's cap is your per-call spend limit or a lower ceiling you named, so no inference deposit passes the per-call limit. The daily budget and creator allowlist still apply, and a per-call limit of zero stops jobs as it stops every automatic payment.
 - Other connected services retain their own permissions and billing. A worker cannot call Tenjin's paid-tool router or purchase tool itself; its web searches are the only tool calls Tenjin pays for on its behalf.
@@ -335,7 +335,8 @@ These run natively:
 
 ### Time limits
 
-- Jobs have no time limit and no turn limit, as a native subagent and the DeepSeek harness have none: a job ends when it completes, reaches its dollar cap or your daily budget, you or the parent cancel it, its session ends or you run `/clear`, or its worker fails; native compaction remains enabled, given the window where the DeepSeek harness triggers it at its defaults: `min(0.8 * 1,048,576, 1,048,576 - reply cap - 65,536)`, which is 838,860 at the 65,536 reply cap of production and 727,040 at 256,000. Claude Code treats that value as a window and takes 33,000 tokens off it (a reserve of up to 20,000 for the summary plus 13,000 of headroom), so compaction fires about 33,000 tokens earlier: near 805,860 and 694,040.
+- Jobs have no time limit and no turn limit, as a native subagent and the DeepSeek harness have none: a job ends when it completes, reaches its dollar cap or your daily budget, you or the parent cancel it, its session ends or you run `/clear`, or its worker fails.
+- Native compaction remains enabled, given the window where the DeepSeek harness triggers it at its defaults: `min(0.8 * 1,048,576, 1,048,576 - reply cap - 65,536)`, which is 838,860 at the 65,536 reply cap of production and 727,040 at 256,000. Claude Code treats that value as a window and takes 33,000 tokens off it (a reserve of up to 20,000 for the summary plus 13,000 of headroom), so compaction fires about 33,000 tokens earlier: near 805,860 and 694,040.
 - One model call waits for the router's answer a minute longer than the router lets a call run, so Tenjin never gives up on a call the router is still serving: the call duration the router's offer names plus a minute, or 10 minutes where the offer names none. The HTTP client's own waits for headers and body are at least that long.
 - A worker has no separate start-up window, as a native subagent has none: its Claude Code takes the time the machine needs to start, with no limit. Cancel or interrupt a start that takes too long.
 - A job whose first question to the router got no answer in three tries reports `not_started` (`endedBy: "router_unreachable"`). No inference was bought, the routing fee for the offer was already paid, and sending the original call again unchanged runs it natively with no second fee.

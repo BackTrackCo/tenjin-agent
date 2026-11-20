@@ -135,7 +135,7 @@ it('redacts the job token and any inherited GitHub token everywhere they appear'
   // A token in the person's settings env reaches the worker's commands as well.
   const secrets = [...prepared.secrets, ...workerTokenValues({ GH_TOKEN: configured })];
   expect(redactWorkerSecrets(`${TOKEN} and ${TOKEN}; ${inherited}; ${configured}`, secrets)).toBe(
-    '[redacted GitHub token] and [redacted GitHub token]; [redacted GitHub token]; [redacted GitHub token]',
+    '[redacted job secret] and [redacted job secret]; [redacted job secret]; [redacted job secret]',
   );
 });
 

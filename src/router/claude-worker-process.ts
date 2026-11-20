@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Settings, SpawnOptions } from '@anthropic-ai/claude-agent-sdk/core';
-import { markJobFolder, removeJobFolder } from './job-folders';
+import { forgetJobFolder, markJobFolder, removeJobFolder } from './job-folders';
 
 export type WindowsWorkerProcess = {
   launcherPath: string;
@@ -130,6 +130,7 @@ export function claudeWorkerProcess(
         return file;
       } catch (error) {
         folders.splice(folders.indexOf(folder), 1);
+        forgetJobFolder(folder);
         try {
           rmSync(folder, { recursive: true, force: true });
         } catch {
@@ -194,6 +195,7 @@ export function claudeWorkerProcess(
               });
       } catch (error) {
         if (cancelFolder) {
+          forgetJobFolder(cancelFolder);
           try {
             rmSync(cancelFolder, { recursive: true, force: true });
           } catch {

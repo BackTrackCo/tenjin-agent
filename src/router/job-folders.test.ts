@@ -1,16 +1,15 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   JOB_FOLDER_MARKER,
+  forgetJobFolder,
   JOB_FOLDER_STALE_MS,
   markJobFolder,
-  parsePsStart,
   removeJobFolder,
   sweepJobFolders,
-  systemProcessFacts,
   type ProcessFacts,
 } from './job-folders';
 
@@ -43,7 +42,6 @@ async function folder(
 }
 const facts = (o: Partial<ProcessFacts> & { alive?: (pid: number) => boolean } = {}) => ({
   alive: () => false,
-  startedAt: async () => undefined,
   commandLines: async () => '',
   ...o,
 });
@@ -57,6 +55,8 @@ it('marks a folder with the process that made it, readable by this user alone', 
   const file = join(path, JOB_FOLDER_MARKER);
   expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ pid: process.pid });
   expect(statSync(file).mode & 0o777).toBe(0o600);
+  // This process keeps one heartbeat for every folder it owns: let go, as a removal does.
+  forgetJobFolder(path);
 });
 
 it('removes the folder of a job whose process is gone, in each of the three kinds', async () => {
@@ -85,27 +85,16 @@ it('never removes the folder of a live owner in another process, whatever its st
   // worker another Claude Code session runs: `ps` printed local time, one hour early for a
   // process started in the second 01:30 of a fall-back night, and the owner read as a reused pid.
   const live = { pid: 4_000_002, startedAt: now - 20 * HOUR };
-  // Quiet for hours, as after a sleeping laptop; each start below is before the last beat.
-  const beat = now - 5 * HOUR;
+  // Quiet for hours, as after a sleeping laptop.
   const paths = [
     await folder('tenjin-worker-settings-Live01', { ageMs: 5 * HOUR, owner: live }),
     await folder('tenjin-worker-Live02', { ageMs: 5 * HOUR, owner: live }),
     await folder('tenjin-job-Live03', { ageMs: 5 * HOUR, owner: live }),
   ];
-  for (const started of [
-    live.startedAt,
-    live.startedAt - HOUR,
-    live.startedAt + HOUR,
-    live.startedAt + 3 * HOUR,
-    beat + 5 * 60_000,
-    undefined,
-  ]) {
-    const removed = await sweep(
-      facts({ alive: (pid) => pid === live.pid, startedAt: async () => started }),
-    );
-    expect(removed, String(started)).toEqual([]);
-    for (const path of paths) expect(existsSync(path), path).toBe(true);
-  }
+  // A live pid is a live owner, whatever start time a clock step would make `ps` print.
+  const removed = await sweep(facts({ alive: (pid) => pid === live.pid }));
+  expect(removed).toEqual([]);
+  for (const path of paths) expect(existsSync(path), path).toBe(true);
 });
 
 it('keeps a live owner whose system clock moved between the mark and the sweep', async () => {
@@ -117,7 +106,7 @@ it('keeps a live owner whose system clock moved between the mark and the sweep',
     await sweepJobFolders({
       directories: [scratch],
       now: now + 10 * 24 * HOUR,
-      facts: facts({ alive: () => true, startedAt: async () => live.startedAt }),
+      facts: facts({ alive: () => true }),
       changedAt: (stat) => stat.mtimeMs,
     }),
   ).toEqual([]);
@@ -142,43 +131,32 @@ it('never takes a folder of its own process, however its owner reads', async () 
   expect(existsSync(own)).toBe(true);
 });
 
-it('takes a folder whose pid a different process holds, once that process started long after the owner was last seen', async () => {
-  const reused = await folder('tenjin-worker-settings-Reuse1', {
+it('keeps a folder whose pid is held, even by a process that looks newer than the owner', async () => {
+  const held = await folder('tenjin-worker-settings-Reuse1', {
     ageMs: 5 * HOUR,
     owner: { pid: 4_000_003, startedAt: now - 10 * HOUR },
   });
-  const removed = await sweep(facts({ alive: () => true, startedAt: async () => now - 2 * HOUR }));
-  expect(removed).toEqual([reused]);
-});
-
-it('reads a ps start time in UTC, whatever the time zone and the hour', () => {
-  const saved = process.env.TZ;
-  try {
-    // 01:30 happens twice in New York on 2026-11-01; 02:30 does not exist on 2026-03-08.
-    process.env.TZ = 'America/New_York';
-    expect(parsePsStart('Sun Nov  1 01:30:00 2026\n')).toBe(Date.UTC(2026, 10, 1, 1, 30));
-    expect(parsePsStart('Sun Mar  8 02:30:00 2026\n')).toBe(Date.UTC(2026, 2, 8, 2, 30));
-    for (const bad of ['', 'garbage', 'Sun Nov  1 25:61:00 2026 extra', '1 Nov 2026'])
-      expect(parsePsStart(bad), bad).toBeUndefined();
-  } finally {
-    if (saved === undefined) delete process.env.TZ;
-    else process.env.TZ = saved;
-  }
+  expect(await sweep(facts({ alive: () => true }))).toEqual([]);
+  expect(existsSync(held)).toBe(true);
 });
 
 it.skipIf(process.platform === 'win32')(
-  'reads the real start of a process the same in a fall-back time zone',
+  'never follows a marker that is a link, and reads no marker over 1 KB',
   async () => {
-    const saved = process.env.TZ;
-    try {
-      process.env.TZ = 'America/New_York';
-      const own = Math.round(Date.now() - process.uptime() * 1000);
-      const read = await systemProcessFacts.startedAt(process.pid);
-      expect(Math.abs(read! - own)).toBeLessThan(5_000);
-    } finally {
-      if (saved === undefined) delete process.env.TZ;
-      else process.env.TZ = saved;
-    }
+    const target = join(scratch, 'target.txt');
+    await writeFile(target, 'x');
+    const old = new Date(now - 5 * HOUR);
+    await utimes(target, old, old);
+    const linked = await folder('tenjin-worker-settings-Link01', { ageMs: 5 * HOUR });
+    await symlink(target, join(linked, JOB_FOLDER_MARKER));
+    const big = await folder('tenjin-worker-settings-Big001', { ageMs: 5 * HOUR });
+    await writeFile(
+      join(big, JOB_FOLDER_MARKER),
+      JSON.stringify({ pid: 4_000_009, startedAt: 1, pad: 'x'.repeat(2000) }),
+    );
+    // Neither reads as a marker: both fall to the no-marker rule (old, named by no process).
+    await sweep(facts({ alive: () => true }));
+    expect(statSync(target).mtimeMs).toBeLessThan(now - HOUR);
   },
 );
 

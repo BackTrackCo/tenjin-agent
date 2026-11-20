@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { lstat, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, rm } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import { utimesSync, writeFileSync } from 'node:fs';
+import { constants, lutimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pidAlive } from '../lib/lock';
@@ -38,12 +38,6 @@ const OWNER_GONE_FLOOR_MS = 2 * 60 * 60_000;
  * no process names it.
  */
 export const JOB_FOLDER_STALE_MS = OWNER_GONE_FLOOR_MS;
-/**
- * A process that holds the owner's pid counts as another one only if it started this long
- * after the owner's last sign of life: no clock change, time zone or rounding makes that
- * gap, and any doubt reads as the owner being alive.
- */
-const REUSE_GAP_MS = 10 * 60_000;
 const HEARTBEAT_MS = 30_000;
 
 type Marker = { pid: number; startedAt: number };
@@ -59,7 +53,7 @@ function beat() {
   const at = new Date();
   for (const folder of owned) {
     try {
-      utimesSync(join(folder, JOB_FOLDER_MARKER), at, at);
+      lutimesSync(join(folder, JOB_FOLDER_MARKER), at, at);
     } catch {
       // The folder is gone or unwritable; the sweep reads a stale beat as an owner to check.
     }
@@ -80,9 +74,10 @@ export function markJobFolder(folder: string): void {
       flag: 'wx',
     });
     owned.add(folder);
-    clearInterval(heartbeat);
-    heartbeat = setInterval(beat, HEARTBEAT_MS);
-    heartbeat.unref();
+    if (!heartbeat) {
+      heartbeat = setInterval(beat, HEARTBEAT_MS);
+      heartbeat.unref();
+    }
   } catch {
     // The sweep treats a folder with no marker by its age.
   }
@@ -96,9 +91,17 @@ const RETRY_WAITS = [50, 150, 400];
  * writing into it, a busy file) is tried again and then left to the next sweep, and never
  * changes the job's result. Returns whether the folder is gone.
  */
-export async function removeJobFolder(folder: string): Promise<boolean> {
+/** Stops keeping a folder's marker fresh: it is removed, or its removal is left to the sweep. */
+export function forgetJobFolder(folder: string): void {
   owned.delete(folder);
-  if (owned.size === 0) clearInterval(heartbeat);
+  if (owned.size === 0 && heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = undefined;
+  }
+}
+
+export async function removeJobFolder(folder: string): Promise<boolean> {
+  forgetJobFolder(folder);
   for (let attempt = 0; ; attempt += 1) {
     try {
       await rm(folder, { recursive: true, force: true });
@@ -114,24 +117,9 @@ export async function removeJobFolder(folder: string): Promise<boolean> {
 export type ProcessFacts = {
   /** Whether the process exists. */
   alive: (pid: number) => boolean;
-  /** When the process started, or undefined where that cannot be read. */
-  startedAt: (pid: number) => Promise<number | undefined>;
   /** The command lines (and, where the system shows them, environments) of this user's processes. */
   commandLines: () => Promise<string | undefined>;
 };
-
-/**
- * Reads a `ps -o lstart=` line that was printed with `TZ=UTC` (macOS and Linux, where
- * `lstart` is local time with no offset and so ambiguous in a fall-back hour and missing in a
- * spring-forward gap; in UTC it is neither). Windows has no `ps`: no start time is read there.
- * Anything that does not read as one date is undefined, which the sweep takes as alive.
- */
-export function parsePsStart(text: string): number | undefined {
-  const line = text.trim();
-  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d\d:\d\d:\d\d \d{4}$/.test(line)) return undefined;
-  const at = Date.parse(`${line} UTC`);
-  return Number.isFinite(at) ? at : undefined;
-}
 
 const run = (file: string, args: string[]) =>
   new Promise<string>((resolve, reject) =>
@@ -149,14 +137,6 @@ const run = (file: string, args: string[]) =>
 
 export const systemProcessFacts: ProcessFacts = {
   alive: pidAlive,
-  startedAt: async (pid) => {
-    if (process.platform === 'win32') return undefined;
-    try {
-      return parsePsStart(await run('ps', ['-o', 'lstart=', '-p', String(pid)]));
-    } catch {
-      return undefined;
-    }
-  },
   commandLines: async () => {
     if (process.platform === 'win32') return undefined;
     try {
@@ -186,12 +166,26 @@ export type SweepOptions = {
 
 const newest = (stat: Stats) => Math.max(stat.birthtimeMs, stat.mtimeMs, stat.ctimeMs);
 
+/** The marker sits in a folder the worker can write: read only a small regular file, and never follow a link or wait on a pipe. */
+const MARKER_MAX_BYTES = 1024;
+
 async function readMarker(folder: string): Promise<Marker | undefined> {
+  const path = join(folder, JOB_FOLDER_MARKER);
   try {
-    const raw = JSON.parse(await readFile(join(folder, JOB_FOLDER_MARKER), 'utf8')) as Marker;
-    return Number.isInteger(raw.pid) && raw.pid > 0 && Number.isFinite(raw.startedAt)
-      ? { pid: raw.pid, startedAt: raw.startedAt }
-      : undefined;
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.size > MARKER_MAX_BYTES) return undefined;
+    const handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const raw = JSON.parse(await handle.readFile({ encoding: 'utf8' })) as Marker;
+      return Number.isInteger(raw.pid) && raw.pid > 0 && Number.isFinite(raw.startedAt)
+        ? { pid: raw.pid, startedAt: raw.startedAt }
+        : undefined;
+    } finally {
+      await handle.close();
+    }
   } catch {
     return undefined;
   }
@@ -239,18 +233,14 @@ export async function sweepJobFolders(o: SweepOptions = {}): Promise<string[]> {
             if (marker.pid === process.pid) continue;
             // The owner's last sign of life: its marker's own time, which it touches while
             // it runs (a marker an older build wrote is its creation).
-            const beat = (await lstat(join(folder, JOB_FOLDER_MARKER)).catch(() => undefined))
-              ?.mtimeMs;
+            const beatStat = await lstat(join(folder, JOB_FOLDER_MARKER)).catch(() => undefined);
+            const beat = beatStat?.isFile() ? beatStat.mtimeMs : undefined;
             if (beat === undefined) continue;
             const quiet = now - beat;
             if (quiet <= OWNER_GONE_FLOOR_MS) continue;
-            if (!facts.alive(marker.pid)) stale = true;
-            else {
-              // The pid is held: stale only if its holder started well after the owner's
-              // last sign of life. Anything else, an unreadable start included, is alive.
-              const started = await facts.startedAt(marker.pid);
-              stale = started !== undefined && started > beat + REUSE_GAP_MS;
-            }
+            // A live pid is a live owner, full stop: no start time is compared, because a
+            // clock step moves what `ps` prints for it.
+            stale = !facts.alive(marker.pid);
           } else {
             if (age <= staleMs) continue;
             if (commandLines === null) commandLines = await facts.commandLines();

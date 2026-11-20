@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import {
+  endedDisplay,
   ModelWorkerActivity,
   activityAnswer,
   partialHandback,
@@ -613,4 +614,24 @@ it('follows a streamed turn block by block with a count that only rises', () => 
   expect(seen).toEqual([15_001, 15_060, 15_060, 15_140]);
   // Each block's row is there as its block arrives, not at the turn's end.
   expect(rows).toEqual([1, 2, 3, 4]);
+});
+
+it('keeps the omitted-block count in what an ended job shows, as the viewer reads it', () => {
+  const kept = JSON.stringify({
+    status: 'completed',
+    elapsedMs: 61_000,
+    toolUses: 3,
+    tokens: 900,
+    omitted: { blocks: 2, note: 'The worker did not see 2 image or document blocks.' },
+  });
+  expect(endedDisplay('completed', kept)).toEqual({
+    status: 'completed',
+    elapsedMs: 61_000,
+    toolUses: 3,
+    tokens: 900,
+    omitted: { blocks: 2 },
+  });
+  expect(endedDisplay('completed', JSON.stringify({ status: 'completed' }))).toEqual({
+    status: 'completed',
+  });
 });

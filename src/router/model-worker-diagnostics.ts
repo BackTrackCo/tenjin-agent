@@ -508,8 +508,9 @@ export class WorkerDiagnosticsRecord {
 
   /** A start phase reached, once: milliseconds since the accept. */
   mark(name: string, at = Date.now()): void {
-    if (name in this.value.phases || Object.keys(this.value.phases).length >= MAX_PHASES) return;
-    this.value.phases[name.slice(0, 40)] = Math.round(at - this.acceptedAt);
+    const key = name.slice(0, 40);
+    if (key in this.value.phases || Object.keys(this.value.phases).length >= MAX_PHASES) return;
+    this.value.phases[key] = Math.round(at - this.acceptedAt);
   }
 
   /** A start-up checkpoint of the child, once: milliseconds since the accept. */

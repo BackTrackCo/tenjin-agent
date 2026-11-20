@@ -274,7 +274,11 @@ export async function finishNewInstall(
               },
             ),
           ]
-        : ['', ...SUBAGENTS_KEPT_OFF_LINES]),
+        : // The line after it already names the command: not twice.
+          [
+            '',
+            ...(stands.length ? SUBAGENTS_KEPT_OFF_LINES.slice(0, 1) : SUBAGENTS_KEPT_OFF_LINES),
+          ]),
       ...stands,
     ],
   };

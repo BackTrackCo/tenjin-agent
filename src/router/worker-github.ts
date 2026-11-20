@@ -149,6 +149,13 @@ export function workerTokenValues(source: Record<string, string | undefined>): s
     .filter((value): value is string => typeof value === 'string' && value.length >= 20);
 }
 
+/** Every job's GitHub folder (and settings folder) in the system temp folder, by each spelling of it. */
+export async function workerGithubPatterns(): Promise<string[]> {
+  return [...new Set([tmpdir(), await realpath(tmpdir()).catch(() => tmpdir())])].map((base) =>
+    join(base, `${GITHUB_PREFIX}*`),
+  );
+}
+
 /** Per-job GitHub and git setup for one DeepSeek worker, made by the MCP server process. */
 export async function prepareWorkerGithub(
   parent: NodeJS.ProcessEnv = process.env,
@@ -158,9 +165,7 @@ export async function prepareWorkerGithub(
   const directory = await mkdtemp(join(tmpdir(), GITHUB_PREFIX));
   markJobFolder(directory);
   try {
-    const others = [...new Set([tmpdir(), await realpath(tmpdir())])].map((base) =>
-      join(base, `${GITHUB_PREFIX}*`),
-    );
+    const others = await workerGithubPatterns();
     const [token, identity] = await Promise.all([
       workerGithubToken(parent, run),
       gitIdentity(parent, run),
@@ -197,12 +202,12 @@ export async function prepareWorkerGithub(
   }
 }
 
-export const REDACTED_GITHUB_TOKEN = '[redacted GitHub token]';
+export const REDACTED_JOB_SECRET = '[redacted job secret]';
 
 /** Removes each literal secret; a GitHub token never needs JSON escaping. */
 export function redactWorkerSecrets(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_GITHUB_TOKEN);
+  for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_JOB_SECRET);
   return out;
 }
 

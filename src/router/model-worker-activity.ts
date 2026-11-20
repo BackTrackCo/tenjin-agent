@@ -156,6 +156,7 @@ export function endedDisplay(state: string, kept: string | null | undefined) {
     handback.tokens,
   ].map(count);
   const spend = spendSchema.safeParse(handback.spend);
+  const omittedBlocks = count(object(handback.omitted)?.blocks);
   const endedBy = Object.keys(WORKER_ENDS).find((code) => code === handback.endedBy);
   return {
     // The handback's own word for a stop the job's state calls `unknown`.
@@ -167,6 +168,8 @@ export function endedDisplay(state: string, kept: string | null | undefined) {
     ...(elapsedMs !== undefined ? { elapsedMs } : {}),
     ...(toolUses !== undefined ? { toolUses } : {}),
     ...(tokens !== undefined ? { tokens } : {}),
+    // The image and document blocks the worker did not see, as the viewer's row reads them.
+    ...(omittedBlocks ? { omitted: { blocks: omittedBlocks } } : {}),
     ...(spend.success ? { spend: spend.data } : {}),
   };
 }

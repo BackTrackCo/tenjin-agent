@@ -76,6 +76,13 @@ const JOB_TEMP_PREFIX = 'tenjin-job-';
  * commands' output and the files it wrote, as written. The sandbox denies them and
  * re-allows this one (`allowRead` wins over `denyRead`).
  */
+/** Every job's temp folder, by each spelling of `/tmp`: the patterns the sandbox denies, which need no setup of this job to be known. */
+export async function jobTempPatterns(): Promise<string[]> {
+  return [...new Set(['/tmp', await realpath('/tmp').catch(() => '/tmp')])].map((base) =>
+    join(base, `${JOB_TEMP_PREFIX}*`),
+  );
+}
+
 export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.env) {
   const uid = process.getuid?.();
   if (uid === undefined || process.platform === 'win32') return undefined;
@@ -101,9 +108,7 @@ export async function prepareClaudeWorkerTemp(env: NodeJS.ProcessEnv = process.e
       ),
     ]),
   );
-  const others = [...new Set(['/tmp', await realpath('/tmp').catch(() => '/tmp')])].map((base) =>
-    join(base, `${JOB_TEMP_PREFIX}*`),
-  );
+  const others = await jobTempPatterns();
   return {
     directory,
     scratchpad,

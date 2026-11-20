@@ -274,10 +274,10 @@ it('marks a change of the cap on the cost row, as the scope row marks a change o
       '',
     );
   expect(await cost({ maxJob: '0.50' })).toBe('  Cost     Up to $0.50 a job (your --max-job)');
-  expect(await cost({})).toBe('  Cost     Up to $1.00 a job (your per-call limit) (was $0.50)');
+  expect(await cost({})).toBe('  Cost     Up to $1.00 a job (your per-call limit; was $0.50)');
   expect(await cost({})).toBe('  Cost     Up to $1.00 a job (your per-call limit)');
   expect(await cost({ maxJob: '0.25' })).toBe(
-    '  Cost     Up to $0.25 a job (your --max-job) (was $1.00)',
+    '  Cost     Up to $0.25 a job (your --max-job; was $1.00)',
   );
   // What the command saves is unchanged: a bare on names no ceiling.
   await cost({});
@@ -314,7 +314,7 @@ it('prints one short terms text that names every recipient of the consent record
   // A named ceiling under the limit is the cap, and the row says whose it is.
   const named = await runConfigSubagents('on', { maxJob: '0.50' }, testCtx(dir));
   expect(named.humanLines?.[3]).toBe(
-    '  Cost     Up to $0.50 a job (your --max-job) (was $0.70) · your daily budget applies',
+    '  Cost     Up to $0.50 a job (your --max-job; was $0.70) · your daily budget applies',
   );
   // The status reads the cap again from the settings as they stand, with no terms.
   await writeFile(
@@ -439,9 +439,7 @@ it('words the routing fee as the tool router rule, with no amount and no cap of 
   const { SUBAGENT_TERMS } = await import('../router/subagents-shown');
   const { readFile } = await import('node:fs/promises');
   const terms = SUBAGENT_TERMS.join(' ');
-  expect(terms).toContain(
-    'Routing costs 15% of the expected cost of a job, the same rule as tool routing',
-  );
+  expect(terms).toContain('Routing costs one fee for each offer, also when Claude declines it');
   for (const text of [terms, await readFile('docs/subagents.md', 'utf8')])
     expect(text).not.toMatch(/capped at \$0\.003|up to \$0\.003/);
 });

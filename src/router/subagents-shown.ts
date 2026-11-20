@@ -23,7 +23,7 @@ export const SUBAGENT_DETAILS_URL =
  * The full terms are the guide and the `disclosure` field of `on --json`.
  */
 export const SUBAGENT_TERMS: readonly string[] = [
-  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs 15% of the expected cost of a job, the same rule as tool routing, an offer at a time, also when Claude declines it.',
+  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked (production quotes $0.003), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job ceiling.',
   'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results. Web searches, and the address of a public page the worker could not fetch, go to Exa.',
   'In ~/.claude, Claude Code loads your CLAUDE.md, skills and plugins as the worker’s instructions. The worker’s file tools can read the session transcripts, prompt history and settings there, and what they read can reach DeepSeek.',
   `Details: ${SUBAGENT_DETAILS_URL}`,
@@ -65,14 +65,14 @@ export type SubagentsShown = {
 /** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
 function costWords({ perCall, named, wasCap, daily }: SubagentsShown): string {
   const now = named !== undefined && named < perCall ? named : perCall;
-  const change = wasCap !== undefined && wasCap !== now ? ` (was ${usd(wasCap)})` : '';
+  const was = wasCap !== undefined && wasCap !== now ? `; was ${usd(wasCap)}` : '';
   const cap =
     named === undefined
-      ? `Up to ${usd(perCall)} a job (your per-call limit)`
+      ? `Up to ${usd(perCall)} a job (your per-call limit${was})`
       : named < perCall
-        ? `Up to ${usd(named)} a job (your --max-job)`
-        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it)`;
-  return daily ? `${cap}${change} · your daily budget applies` : cap + change;
+        ? `Up to ${usd(named)} a job (your --max-job${was})`
+        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it${was})`;
+  return daily ? `${cap} · your daily budget applies` : cap;
 }
 
 const ROW_LABEL = 9;

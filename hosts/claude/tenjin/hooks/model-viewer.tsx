@@ -1047,7 +1047,7 @@ async function settle($: Dollar, offerId: string, title: string): Promise<void> 
       });
       // A background worker this module took up again after a reload: its result is
       // still the parent's to get, once.
-      if (ended.ended !== 'unseen') void deliverBackground($, offerId, title);
+      void deliverBackground($, offerId, title);
     } finally {
       liveWorkers.delete(offerId);
       $.ui.invalidate('ui.render');
@@ -1121,25 +1121,15 @@ function endingText({ word, parts }: WorkerEnding): string {
 function workerEnding(live: TenjinModelWorker): WorkerEnding {
   const time = live.elapsedMs !== undefined ? [duration(live.elapsedMs)] : [];
   if (live.ended === 'not_started') return { word: 'Not started', parts: time };
-  // NOT LEARNED HERE: said so, never as a failure of the work, and with no time past its end.
-  const unseen = live.ended === 'unseen';
-  const word =
-    live.ended === 'completed'
-      ? 'Done'
-      : unseen
-        ? 'Outcome not shown here'
-        : stopWord(live.ended, live.endedBy);
+  const word = live.ended === 'completed' ? 'Done' : stopWord(live.ended, live.endedBy);
   const parts = [
     ...(live.toolUses !== undefined || time.length ? [toolUses(live.toolUses ?? 0)] : []),
     ...(live.tokens !== undefined ? [tokens(live.tokens)] : []),
-    ...(unseen ? [] : time),
+    ...time,
     ...(live.spentAtomic !== undefined
-      ? [
-          dollars(live.spentAtomic) +
-            (unseen ? ' so far' : live.unresolved ? ' · settlement unresolved' : ''),
-        ]
+      ? [dollars(live.spentAtomic) + (live.unresolved ? ' · settlement unresolved' : '')]
       : []),
-    ...(live.omittedBlocks && !unseen ? [omittedWords(live.omittedBlocks)] : []),
+    ...(live.omittedBlocks ? [omittedWords(live.omittedBlocks)] : []),
   ];
   return { word, parts };
 }
@@ -2518,9 +2508,7 @@ export function registerModelViewer(on: On): void {
       if (workers.every((worker) => worker === undefined)) return next(e);
       const statuses = workers.map((worker) => worker?.ended);
       const finished = statuses.filter((status) => status === 'completed').length;
-      const unconfirmed = statuses.filter(
-        (status) => !status || status === 'unseen' || status === 'unknown',
-      ).length;
+      const unconfirmed = statuses.filter((status) => !status || status === 'unknown').length;
       const other = moved.length - finished - unconfirmed;
       const summary = [
         finished ? finished + ' finished' : undefined,
@@ -2541,10 +2529,7 @@ export function registerModelViewer(on: On): void {
     if (moved?.[0] !== undefined) {
       const live = (await $.state.get({ ...WORKERS, id: moved[0] })).value;
       if (!live) return next(e);
-      const how =
-        live.ended === 'unseen'
-          ? undefined
-          : (live.ended ?? (task?.status === 'completed' ? 'completed' : undefined));
+      const how = live.ended ?? (task?.status === 'completed' ? 'completed' : undefined);
       const text =
         'DeepSeek "' +
         live.title +
@@ -2734,7 +2719,7 @@ async function describeWorker(
   if (live?.ended)
     return {
       ...head,
-      state: live.ended === 'completed' ? 'done' : live.ended === 'unseen' ? 'held' : 'error',
+      state: live.ended === 'completed' ? 'done' : 'error',
       ending: workerEnding(live),
     };
   if (isInterrupted)
