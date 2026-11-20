@@ -439,30 +439,19 @@ it('keeps the original job files and conversation of a running continuation, wha
   expect(await Promise.all(files.map(exists))).toEqual([false, false, false]);
 });
 
-// Failure caught (vraspar's repro with pid 1): a pid that is alive but started long after the
-// accept (a reused pid, or one this user cannot signal) kept a dead job `running` for good.
-it('ends a job whose recorded pid is alive but started long after the accept', async () => {
+// A live pid is a live runner, however long after the accept its process started: a clock
+// step after a host sleep must not strand another session's paid job.
+it('keeps a job running while its recorded pid is alive, whenever that process started', async () => {
   const { store, job } = await heldAgentCall();
   const accepted = await store.accept(job.id, 'root', 'turn');
   const path = join(dir, 'model-jobs', `${job.id}.json`);
-  const acceptedAt = Date.now() - 3 * 3600_000;
   await writeFile(
     path,
-    JSON.stringify({ ...accepted, runner: { pid: process.pid + 1, acceptedAt } }),
-  );
-  // The runner started before it accepted: it still holds the run.
-  expect(
-    await store.strand(job.id, { isAlive: () => true, startedAt: async () => acceptedAt - 5000 }),
-  ).toBeNull();
-  // An unreadable start is alive.
-  expect(
-    await store.strand(job.id, { isAlive: () => true, startedAt: async () => undefined }),
-  ).toBeNull();
-  // A holder that started an hour after the accept is another process.
-  expect(
-    await store.strand(job.id, {
-      isAlive: () => true,
-      startedAt: async () => acceptedAt + 3600_000,
+    JSON.stringify({
+      ...accepted,
+      runner: { pid: process.pid + 1, acceptedAt: Date.now() - 3 * 3600_000 },
     }),
-  ).toMatchObject({ state: 'unknown' });
+  );
+  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
+  expect(await store.strand(job.id, { isAlive: () => false })).toMatchObject({ state: 'unknown' });
 });
