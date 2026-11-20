@@ -1247,6 +1247,59 @@ it('hands back the messages a failed worker never read', async () => {
   }
 });
 
+// Failure caught (a refusal that fails closed): the owner's root was the spelling of the
+// accept and was compared with the real path of the session's directory, so a symlinked
+// working directory could never write to its own running worker.
+it('delivers a message to a running worker from a symlinked working directory', async () => {
+  const f = await ownedClaudeFixture();
+  const heard: string[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => (started = resolve));
+  worker.run.mockImplementation(async (_job, options) => {
+    started();
+    await blocked;
+    const text = await options.inbox.next();
+    if (text !== null) heard.push(text);
+    options.inbox.closeIfEmpty();
+    return 'completed fixture';
+  });
+  try {
+    const alias = join(dir, 'repo-alias-send');
+    await symlink(f.repo, alias, 'dir');
+    f.session.cwd = alias;
+    worker.qualified.mockImplementation(async () => ({
+      path: 'worker',
+      claudeWorkspace: {
+        version: 1,
+        root: f.repo,
+        workingDirectories: [f.repo],
+        workingDirectorySpellings: [f.repo],
+        readExceptions: [],
+        writeExceptions: [],
+      },
+    }));
+    const accepted = f.call({ offer_id: f.job.id });
+    await ready;
+    const sent = await f.call({
+      capture: {
+        session_id: f.session.sessionId,
+        tool_use_id: 'alias-send',
+        tool: 'SendMessage',
+        input: { to: `tenjin-worker-${f.job.id}`, message: 'Through the alias.' },
+      },
+    });
+    expect(sent.action).toBe('delivered');
+    release();
+    expect((await accepted).status).toBe('completed');
+    expect(heard).toEqual(['Through the alias.']);
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
 it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
   const f = await ownedClaudeFixture();
   let release!: () => void;

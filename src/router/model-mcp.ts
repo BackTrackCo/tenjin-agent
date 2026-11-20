@@ -786,11 +786,17 @@ export function registerModelTool(
                 // accepted it may write to it, and only while its consent still stands.
                 const current = await modelSettings(options.dataDir, session.cwd);
                 const transport = await options.transport();
+                // The owner's root is the spelling the accept saw; each is compared by its real path.
+                const [ownerRoot, here] = await Promise.all([
+                  realpath(live.owner.root).catch(() => null),
+                  realpath(session.cwd).catch(() => null),
+                ]);
                 if (
                   live.owner.parentSessionId !== session.sessionId ||
-                  live.owner.root !== (await realpath(session.cwd).catch(() => null)) ||
+                  !ownerRoot ||
+                  ownerRoot !== here ||
                   !current ||
-                  current.root !== live.owner.root ||
+                  current.root !== ownerRoot ||
                   current.routerOrigin !== transport.origin
                 )
                   return unavailable(
