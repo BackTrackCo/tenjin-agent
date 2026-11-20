@@ -256,7 +256,7 @@ export async function runConfigSubagents(
   if (named !== undefined && named <= MODEL_MINIMUM_CALL_ATOMIC)
     throw new CliError(
       'USAGE',
-      `The job ceiling must be above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the current minimum Messages reservation, with the routing fee paid inside it. Actual input can require more.`,
+      `The job ceiling must be above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the least a job's cap can be, with the routing fee paid inside it. Actual input can require more.`,
     );
   if (perCall <= MODEL_MINIMUM_CALL_ATOMIC)
     throw new CliError(
