@@ -8,12 +8,18 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { buildPaymentRequired, testSigner, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
-import { completedMessageSse } from './model-messages';
+import {
+  completedMessageSse,
+  searchRefusedMessage,
+  SEARCH_MAX_TOKENS,
+  WEB_SEARCH_MAX_USES,
+  WEB_SEARCH_TOOL,
+  workerSearchMessages,
+} from './model-messages';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import type { ModelJob } from './model-job';
 import { ModelTransport } from './model-transport';
 import {
-  answerWorkerWebSearch,
   workerFetchFallback,
   workerWebSearch,
   type WorkerRequest,
@@ -23,17 +29,17 @@ import type { Identities } from './identities';
 import { runRequestTool } from './tool';
 
 /**
- * A worker's WebSearch, answered by the bridge with Exa search through the person's own
- * request executor (the real one here, over a scripted network), and counted in the job's
- * budget by the real transport. No test signs a real payment or opens a socket.
+ * A worker's WebSearch becomes one Messages call with DeepSeek's own search tool, and a
+ * page its WebFetch could not fetch is read through Exa page read as a paid Tenjin tool
+ * call counted in the job's budget by the real transport. No test signs a real payment or
+ * opens a socket.
  */
 
 const ROUTER = 'https://router.test';
-const EXA_SEARCH = 'https://api.exa.ai/search';
 const EXA_CONTENTS = 'https://api.exa.ai/contents';
 const ROUTING_FEE = 3000n;
-/** The catalog's Exa search spec, as the router serves it. */
-const SEARCH_SPEC = (() => {
+/** The catalog's Exa tool spec, as the router serves it: the page read's shape. */
+const EXA_SPEC = (() => {
   const wired = JSON.parse(
     readFileSync(new URL('./fixtures/wire-hook-execute-headers.json', import.meta.url), 'utf8'),
   ) as { decision: { specs: Record<string, unknown>[] } };
@@ -42,7 +48,7 @@ const SEARCH_SPEC = (() => {
   return spec;
 })();
 const CONTENTS_SPEC = {
-  ...SEARCH_SPEC,
+  ...EXA_SPEC,
   capabilityId: 'exa-contents',
   label: 'Exa page read',
   holds: { WebFetch: 'urls' },
@@ -138,9 +144,9 @@ interface Seen {
 }
 
 /**
- * The network: the router serves a spec for a `{tool}` read (or `routerAnswer`) and takes
- * outcome reports; each Exa service answers its unpaid probe with a 402 at `price` and
- * its paid call with `paid`.
+ * The network: the router serves the page read's spec for a `{tool}` read (or
+ * `routerAnswer`), and Exa answers its unpaid probe with a 402 at `price` and its paid
+ * call with `paid`.
  */
 function network(
   options: {
@@ -172,12 +178,12 @@ function network(
         decision: {
           action: 'spec',
           id,
-          spec: body.tool === 'exa-contents' ? CONTENTS_SPEC : SEARCH_SPEC,
+          spec: CONTENTS_SPEC,
           hint: `Call request({id: "${id}", input: {...}}).`,
         },
       });
     }
-    if (url === EXA_SEARCH || url === EXA_CONTENTS) {
+    if (url === EXA_CONTENTS) {
       if (!paid)
         return Response.json(
           {},
@@ -185,35 +191,17 @@ function network(
             status: 402,
             headers: {
               'PAYMENT-REQUIRED': buildPaymentRequired({
-                amount: options.price ?? (url === EXA_SEARCH ? '4000' : '1000'),
-                payTo: String(SEARCH_SPEC.payTo),
+                amount: options.price ?? '1000',
+                payTo: String(EXA_SPEC.payTo),
               }).header,
             },
           },
         );
       const answer = options.paid ?? {
         status: 200,
-        body:
-          url === EXA_SEARCH
-            ? {
-                results: [
-                  {
-                    title: 'x402 specification',
-                    url: 'https://x402.org/spec',
-                    publishedDate: '2026-10-01',
-                    highlights: ['A payment is an HTTP 402 answered with a signature.'],
-                  },
-                  {
-                    title: 'Blocked page',
-                    url: 'https://www.blocked.example/page',
-                    highlights: ['NOT FOR THE WORKER'],
-                  },
-                  { title: 'Router', url: 'https://tenjin.sh/router', highlights: [] },
-                ],
-              }
-            : {
-                results: [{ title: 'Read page', url: 'https://x402.org', text: 'The whole page.' }],
-              },
+        body: {
+          results: [{ title: 'Read page', url: 'https://x402.org', text: 'The whole page.' }],
+        },
       };
       return Response.json(answer.body, { status: answer.status });
     }
@@ -300,312 +288,111 @@ function setup(fetchImpl: typeof fetch, auth = spyAuthorizer()) {
   };
 }
 
-/** What Claude Code's WebSearch takes from an answer: each search's links, and the text. */
-function asWebSearchReads(message: Record<string, unknown>) {
-  const links: { title: unknown; url: unknown }[][] = [];
-  const errors: unknown[] = [];
-  let text = '';
-  for (const block of message.content as Record<string, unknown>[]) {
-    if (block.type === 'web_search_tool_result') {
-      if (Array.isArray(block.content))
-        links.push(
-          (block.content as Record<string, unknown>[]).map(({ title, url }) => ({ title, url })),
-        );
-      else errors.push((block.content as Record<string, unknown>).error_code);
-    }
-    if (block.type === 'text') text += String(block.text);
-  }
-  return { links, errors, text };
-}
+const FAILED_FETCH = {
+  input: { url: 'https://x402.org', prompt: 'Summarize' },
+  error: 'getaddrinfo ENOTFOUND x402.org',
+};
 
-const SEARCH = { query: 'x402 payments', allowedDomains: [], blockedDomains: ['blocked.example'] };
-
-it("answers a worker's WebSearch with Exa lite search in the shape WebSearch reads, and counts it in the job's spend", async () => {
-  // The failure: a worker's WebSearch reached the bridge as a server tool it refused, and
-  // that refusal ended the whole job.
-  await configure();
-  const { fetchImpl, seen } = network();
-  const { job, transport, deps, auth } = setup(fetchImpl);
-  const answer = await answerWorkerWebSearch(SEARCH, deps);
-  const reads = asWebSearchReads(answer);
-  expect(reads.links).toEqual([
-    [
-      { title: 'x402 specification', url: 'https://x402.org/spec' },
-      { title: 'Router', url: 'https://tenjin.sh/router' },
-    ],
-  ]);
-  expect(reads.errors).toEqual([]);
-  expect(reads.text).toContain('A payment is an HTTP 402 answered with a signature.');
-  expect(reads.text).not.toContain('NOT FOR THE WORKER');
-  // The streamed form carries the same blocks.
-  expect(completedMessageSse(answer)).toContain('"type":"web_search_tool_result"');
-  // Lite tier, ten pages, the catalog's pinned highlights; paid once, to Exa.
-  const paid = seen.filter((call) => call.url === EXA_SEARCH && call.paid);
-  expect(paid).toHaveLength(1);
-  expect(paid[0]!.body).toMatchObject({ query: 'x402 payments', type: 'lite', numResults: 10 });
-  expect(paid[0]!.body).toHaveProperty('contents');
-  expect(auth.commit).toHaveBeenCalledWith('rsv', 4000n, expect.anything());
-  // The job's spend: its routing fee and the search's $0.004, nothing left uncertain.
-  expect(await transport.summary(job)).toEqual({
-    reservedAtomic: (ROUTING_FEE + 4000n).toString(),
-    actualAtomic: (ROUTING_FEE + 4000n).toString(),
-    uncertain: [],
-  });
-});
-
-it('passes allowed domains to Exa and keeps only pages under them', async () => {
-  await configure();
-  const { fetchImpl, seen } = network();
-  const { deps } = setup(fetchImpl);
-  const answer = await answerWorkerWebSearch(
-    { query: 'x402', allowedDomains: ['x402.org'], blockedDomains: [] },
-    deps,
-  );
-  expect(seen.find((call) => call.url === EXA_SEARCH && call.paid)?.body).toMatchObject({
-    includeDomains: ['x402.org'],
-  });
-  expect(asWebSearchReads(answer).links).toEqual([
-    [{ title: 'x402 specification', url: 'https://x402.org/spec' }],
-  ]);
-});
-
-it("refuses a search the job's budget cannot cover at the spec's ceiling, before anything reaches Exa", async () => {
-  // The failure: a search paid past the job's cap, which the person approved as the job's
-  // whole spend. $0.007 is the spec's ceiling; $0.009 less the $0.003 routing fee leaves $0.006.
-  await configure({ cap: '9000' });
-  const { fetchImpl, seen } = network();
-  const { job, transport, deps, auth } = setup(fetchImpl);
-  const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
-  expect(reads.errors).toEqual(['unavailable']);
-  expect(reads.text).toContain(
-    "Web search is not available to this worker right now: this job's budget has no room for another search.",
-  );
-  expect(seen.some((call) => call.url === EXA_SEARCH)).toBe(false);
-  expect(auth.authorize).not.toHaveBeenCalled();
-  expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
-});
-
-it.each([
-  // The job's cap is the per-call limit, so a limit this low leaves the job no room.
-  ['per-call limit', { maxAutoSpend: '3000' }, "this job's budget has no room for another search"],
-  ['daily budget', { sessionBudget: '3000' }, "it would pass the person's spending limits"],
-] as const)(
-  "refuses a search over the person's %s with the native error, and releases its reservation",
-  async (_limit, limits, why) => {
-    // The failure: a worker search kept as a quote or paid past the person's own limit.
-    await configure(limits);
-    const { fetchImpl, seen } = network();
-    const { job, transport, deps, auth } = setup(fetchImpl);
-    const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
-    expect(reads.errors).toEqual(['unavailable']);
-    expect(reads.text).toContain(why);
-    expect(seen.some((call) => call.url === EXA_SEARCH && call.paid)).toBe(false);
-    expect(auth.commit).not.toHaveBeenCalled();
-    expect(await transport.summary(job)).toEqual({
-      reservedAtomic: ROUTING_FEE.toString(),
-      actualAtomic: ROUTING_FEE.toString(),
-      uncertain: [],
-    });
-  },
-);
-
-it('answers the native error when the router declines the search, and pays nothing', async () => {
-  await configure();
-  const { fetchImpl, seen } = network({ routerAnswer: { status: 503, body: {} } });
-  const { job, transport, deps } = setup(fetchImpl);
-  const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
-  expect(reads.errors).toEqual(['unavailable']);
-  expect(reads.text).toMatch(
-    /^Web search is not available to this worker right now: Tenjin's router did not offer it/,
-  );
-  expect(seen.some((call) => call.url === EXA_SEARCH)).toBe(false);
-  expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
-});
-
-it('answers the native error when Exa fails after the payment was signed, and keeps that payment counted', async () => {
-  // The failure: a signed payment that came back with an error dropped out of the job's spend.
-  await configure();
-  const { fetchImpl } = network({ paid: { status: 500, body: { error: 'down' } } });
-  const { job, transport, deps } = setup(fetchImpl);
-  const reads = asWebSearchReads(await answerWorkerWebSearch(SEARCH, deps));
-  expect(reads.errors).toEqual(['unavailable']);
-  expect(reads.text).toMatch(/it did not run/);
-  expect((await transport.summary(job)).actualAtomic).toBe((ROUTING_FEE + 4000n).toString());
-});
-
-const EXA = { kind: 'provider', id: 'exa' } as const;
-it.each([
-  ['blocks Exa', { block: [EXA] }],
-  ["turns off Tenjin's own tools", { block: [{ kind: 'source', id: 'tenjin' }] }],
-  ['blocks the lookups category', { block: [{ kind: 'category', id: 'lookups' }] }],
-  [
-    'lets Tenjin offer only images on its own',
+/** The nested request Claude Code 2.1.326's WebSearch sends its model (probed). */
+const NESTED = {
+  model: 'deepseek-flash',
+  stream: true,
+  tool_choice: { type: 'auto' },
+  tools: [
     {
-      only: [
-        {
-          scope: { kind: 'global' },
-          dimension: 'capability',
-          targets: [{ kind: 'category', id: 'images' }],
-        },
-      ],
+      type: 'web_search_20250305',
+      name: 'web_search',
+      allowed_domains: ['https://Docs.Example.org/guide', '*.x402.org'],
+      max_uses: 8,
     },
   ],
-  [
-    'names another provider as the only one for web research',
+  messages: [
     {
-      only: [
-        {
-          scope: { kind: 'task', id: 'web research' },
-          dimension: 'provider',
-          targets: [{ kind: 'provider', id: 'coinmarketcap' }],
-        },
-      ],
+      role: 'user',
+      content: [{ type: 'text', text: 'Perform a web search for the query: x402 receipts' }],
     },
   ],
-])(
-  "refuses a worker's search, unpaid, when the person's rules leave Exa out: %s",
-  async (_rule, policy) => {
-    // The failure: a worker's searches went to Exa and were paid while the person had told
-    // Tenjin not to use Exa, or anything for web research, on its own.
-    await configure({ policy });
-    const { fetchImpl, seen } = network();
-    const { job, transport, deps, auth } = setup(fetchImpl);
-    const reads = asWebSearchReads(
-      await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => IDENTITIES }),
-    );
-    expect(reads.errors).toEqual(['unavailable']);
-    expect(reads.text).toMatch(
-      /^Web search is not available to this worker right now: the person's Tenjin settings keep Tenjin from using Exa search on its own/,
-    );
-    // Nothing asked of the router, nothing sent to Exa, nothing authorized or counted.
-    expect(seen).toEqual([]);
-    expect(auth.authorize).not.toHaveBeenCalled();
-    expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
-  },
-);
+};
 
-it("reads no page through Exa, and pays nothing, when the person's rules block Exa", async () => {
-  // The failure: a worker's failed WebFetch was read through Exa, and paid, against a block.
-  await configure({ policy: { block: [EXA] } });
-  const { fetchImpl, seen } = network();
-  const { deps, auth } = setup(fetchImpl);
-  const read = await workerFetchFallback(
-    {
-      input: { url: 'https://x402.org', prompt: 'Summarize' },
-      error: 'getaddrinfo ENOTFOUND x402.org',
-    },
-    { ...deps, identities: async () => IDENTITIES, redact: (text) => text },
-  );
-  expect(read).toContain('keep Tenjin from using Exa contents on its own');
-  expect(read).not.toContain('The whole page.');
-  expect(seen).toEqual([]);
-  expect(auth.authorize).not.toHaveBeenCalled();
-});
-
-it.each([
-  ['blocks another provider', { block: [{ kind: 'provider', id: 'coinmarketcap' }] }],
-  [
-    'lets Tenjin offer only lookups on its own',
-    {
-      only: [
-        {
-          scope: { kind: 'global' },
-          dimension: 'capability',
-          targets: [{ kind: 'category', id: 'lookups' }],
-        },
-      ],
-    },
-  ],
-  [
-    'names Exa as the only provider for web research',
-    {
-      only: [
-        { scope: { kind: 'task', id: 'web research' }, dimension: 'provider', targets: [EXA] },
-      ],
-    },
-  ],
-  [
-    'prefers another provider for web research',
-    {
-      prefer: [
-        {
-          scope: { kind: 'task', id: 'web research' },
-          targets: [{ kind: 'provider', id: 'coinmarketcap' }],
-        },
-      ],
-    },
-  ],
-])("still searches with Exa when the person's rules leave it in: %s", async (_rule, policy) => {
-  // The failure: a rule about something else, or a preference, which never forbids a
-  // service, cost the worker its searches.
-  await configure({ policy });
-  const { fetchImpl, seen } = network();
-  const { deps } = setup(fetchImpl);
-  const reads = asWebSearchReads(
-    await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => IDENTITIES }),
-  );
-  expect(reads.errors).toEqual([]);
-  expect(seen.filter((call) => call.url === EXA_SEARCH && call.paid)).toHaveLength(1);
-});
-
-it('refuses a search, unpaid, when a block rule cannot be checked because no identities read is known', async () => {
-  // The failure: with the router unreachable and no kept copy, a provider block was taken
-  // to leave Exa in.
-  await configure({ policy: { block: [{ kind: 'provider', id: 'coinmarketcap' }] } });
-  const { fetchImpl, seen } = network();
-  const { deps } = setup(fetchImpl);
-  const reads = asWebSearchReads(
-    await answerWorkerWebSearch(SEARCH, { ...deps, identities: async () => undefined }),
-  );
-  expect(reads.errors).toEqual(['unavailable']);
-  expect(seen).toEqual([]);
-});
-
-it('answers that search is not available when no request executor runs for the worker', async () => {
-  await configure();
-  const { job, transport } = setup(network().fetchImpl);
-  const reads = asWebSearchReads(
-    await answerWorkerWebSearch(SEARCH, { job, transport, dataDir: dir }),
-  );
-  expect(reads.errors).toEqual(['unavailable']);
-});
-
-it("recognises only WebSearch's own nested request, with its query and domain filters", () => {
-  // The shape Claude Code 2.1.326 sends (probed): one server tool and one user message.
-  const nested = {
-    model: 'deepseek-flash',
-    stream: true,
-    tool_choice: { type: 'auto' },
-    tools: [
-      {
-        type: 'web_search_20250305',
-        name: 'web_search',
-        allowed_domains: ['https://Docs.Example.org/guide', '*.x402.org'],
-        max_uses: 8,
-      },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'Perform a web search for the query: x402 receipts' }],
-      },
-    ],
-  };
-  expect(workerWebSearch(nested)).toEqual({
+it("recognises only WebSearch's own nested request, keeps its query, and clamps its bound", () => {
+  expect(workerWebSearch(NESTED)).toEqual({
     query: 'x402 receipts',
-    allowedDomains: ['docs.example.org', 'x402.org'],
-    blockedDomains: [],
+    maxUses: WEB_SEARCH_MAX_USES,
+    refused: 'allowed_domains',
   });
+  const plain = {
+    ...NESTED,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+  };
+  expect(workerWebSearch(plain)).toEqual({
+    query: 'x402 receipts',
+    maxUses: WEB_SEARCH_MAX_USES,
+    refused: null,
+  });
+  for (const max_uses of [1, 3, 5, 8, 0, 1.5, '3', null])
+    expect(workerWebSearch({ ...plain, tools: [{ ...plain.tools[0], max_uses }] })?.maxUses).toBe(
+      typeof max_uses === 'number' && Number.isInteger(max_uses)
+        ? Math.min(Math.max(max_uses, 1), WEB_SEARCH_MAX_USES)
+        : WEB_SEARCH_MAX_USES,
+    );
+  // Any other server tool field is one the router's strict schema refuses.
+  for (const field of [
+    { blocked_domains: ['x.example'] },
+    { user_location: { type: 'approximate' } },
+    { allowed_domains: ['x.example'], blocked_domains: ['y.example'] },
+  ])
+    expect(workerWebSearch({ ...plain, tools: [{ ...plain.tools[0], ...field }] })?.refused).toBe(
+      Object.keys(field)[0],
+    );
   // A request that also holds another tool is not WebSearch's: the bridge refuses it.
   expect(
     workerWebSearch({
-      ...nested,
-      tools: [...nested.tools, { name: 'Read', input_schema: { type: 'object' } }],
+      ...NESTED,
+      tools: [...NESTED.tools, { name: 'Read', input_schema: { type: 'object' } }],
     }),
   ).toBeNull();
   expect(
-    workerWebSearch({ ...nested, tools: [{ name: 'Read', input_schema: { type: 'object' } }] }),
+    workerWebSearch({ ...NESTED, tools: [{ name: 'Read', input_schema: { type: 'object' } }] }),
   ).toBeNull();
+});
+
+it('sends one search as one Messages call with the one server tool, and a small output cap', () => {
+  const body = workerSearchMessages({ query: 'x402 receipts', maxUses: 5, refused: null });
+  expect(body).toEqual({
+    model: 'deepseek-flash',
+    max_tokens: SEARCH_MAX_TOKENS,
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'user', content: 'x402 receipts' }],
+    tools: [{ type: WEB_SEARCH_TOOL, name: 'web_search', max_uses: 5 }],
+  });
+  // The cap is small: the search's results come back as input tokens, not output.
+  expect(SEARCH_MAX_TOKENS).toBeLessThan(65_536);
+});
+
+it('answers a refused search in the shape WebSearch reads, streamed or whole', () => {
+  const message = searchRefusedMessage(
+    { query: 'x402 receipts', maxUses: 5, refused: 'allowed_domains' },
+    "the request's allowed_domains filter is not supported",
+  );
+  expect(message).toMatchObject({
+    type: 'message',
+    role: 'assistant',
+    content: [
+      { type: 'server_tool_use', name: 'web_search', input: { query: 'x402 receipts' } },
+      { type: 'web_search_tool_result', content: { error_code: 'unavailable' } },
+      {
+        type: 'text',
+        text: "Web search is not available to this worker right now: the request's allowed_domains filter is not supported. Continue without it.",
+      },
+    ],
+  });
+  // The streamed form carries the same blocks, as the completed whole answer does.
+  const sse = completedMessageSse(message);
+  expect(sse).toContain('event: message_start');
+  expect(sse).toContain('"type":"server_tool_use"');
+  expect(sse).toContain('"type":"web_search_tool_result"');
+  expect(sse).toContain('"error_code":"unavailable"');
+  expect(sse).toContain('event: message_stop');
 });
 
 it('reads a page through Exa when the local WebFetch failed on the network, and counts it', async () => {
@@ -614,13 +401,11 @@ it('reads a page through Exa when the local WebFetch failed on the network, and 
   const { fetchImpl, seen } = network();
   const { job, transport, deps } = setup(fetchImpl);
   const read: number[] = [];
-  const context = await workerFetchFallback(
-    {
-      input: { url: 'https://x402.org', prompt: 'Summarize' },
-      error: 'getaddrinfo ENOTFOUND x402.org',
-    },
-    { ...deps, redact: (text) => text, onRead: (bytes) => read.push(bytes) },
-  );
+  const context = await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    redact: (text) => text,
+    onRead: (bytes) => read.push(bytes),
+  });
   expect(context).toContain('The whole page.');
   // The worker's viewer is told the page Exa read stood in, and its size.
   expect(read).toEqual([Buffer.byteLength('The whole page.')]);
@@ -698,9 +483,123 @@ it.each([
   expect(seen).toEqual([]);
 });
 
-// Review finding: a worker stopped while its search waited for the free spec read still
-// reserved the job's budget and paid for the search.
-it('buys nothing for a worker stopped while its search waited, and releases what it reserved', async () => {
+const EXA = { kind: 'provider', id: 'exa' } as const;
+it("reads no page through Exa, and pays nothing, when the person's rules block Exa", async () => {
+  // The failure: a worker's failed WebFetch was read through Exa, and paid, against a block.
+  await configure({ policy: { block: [EXA] } });
+  const { fetchImpl, seen } = network();
+  const { deps, auth } = setup(fetchImpl);
+  const read = await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    identities: async () => IDENTITIES,
+    redact: (text) => text,
+  });
+  expect(read).toContain('keep Tenjin from using Exa contents on its own');
+  expect(read).not.toContain('The whole page.');
+  expect(seen).toEqual([]);
+  expect(auth.authorize).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['provider block', { block: [{ kind: 'provider', id: 'coinmarketcap' }] }],
+  [
+    'only rule for another task',
+    {
+      only: [
+        {
+          scope: { kind: 'task', id: 'web research' },
+          dimension: 'provider',
+          targets: [{ kind: 'provider', id: 'exa' }],
+        },
+      ],
+    },
+  ],
+])(
+  "still reads the page through Exa when the person's rules leave it in: %s",
+  async (_r, policy) => {
+    await configure({ policy });
+    const { fetchImpl, seen } = network();
+    const { deps } = setup(fetchImpl);
+    const read = await workerFetchFallback(FAILED_FETCH, {
+      ...deps,
+      identities: async () => IDENTITIES,
+      redact: (text) => text,
+    });
+    expect(read).toContain('The whole page.');
+    expect(seen.filter((call) => call.url === EXA_CONTENTS && call.paid)).toHaveLength(1);
+  },
+);
+
+it('refuses a page read, unpaid, when a block rule cannot be checked because no identities read is known', async () => {
+  // The failure: with the router unreachable and no kept copy, a provider block was taken
+  // to leave Exa in.
+  await configure({ policy: { block: [{ kind: 'provider', id: 'coinmarketcap' }] } });
+  const { fetchImpl, seen } = network();
+  const { deps } = setup(fetchImpl);
+  const read = await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    identities: async () => undefined,
+    redact: (text) => text,
+  });
+  expect(read).toContain('keep Tenjin from using exa-contents on its own');
+  expect(seen).toEqual([]);
+});
+
+it("refuses a page read the job's budget cannot cover at the spec's ceiling, before anything reaches Exa", async () => {
+  // The failure: a page read paid past the job's cap, which the person approved as the
+  // job's whole spend. The spec's ceiling is $0.001.
+  await configure({ cap: '3900' });
+  const { fetchImpl, seen } = network();
+  const { job, transport, deps, auth } = setup(fetchImpl);
+  const read = await workerFetchFallback(FAILED_FETCH, { ...deps, redact: (text) => text });
+  expect(read).toContain("this job's budget has no room for another page read");
+  expect(seen.some((call) => call.url === EXA_CONTENTS)).toBe(false);
+  expect(auth.authorize).not.toHaveBeenCalled();
+  expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
+});
+
+it.each([
+  ['daily budget', { sessionBudget: '500' }, "it would pass the person's spending limits"],
+] as const)(
+  "refuses a page read over the person's %s with its plain refusal, and releases its reservation",
+  async (_limit, limits, why) => {
+    // The failure: a worker page read kept as a quote or paid past the person's own limit.
+    await configure(limits);
+    const { fetchImpl, seen } = network();
+    const { job, transport, deps, auth } = setup(fetchImpl);
+    const read = await workerFetchFallback(FAILED_FETCH, { ...deps, redact: (text) => text });
+    expect(read).toContain(why);
+    expect(seen.some((call) => call.url === EXA_CONTENTS && call.paid)).toBe(false);
+    expect(auth.commit).not.toHaveBeenCalled();
+    expect(await transport.summary(job)).toEqual({
+      reservedAtomic: ROUTING_FEE.toString(),
+      actualAtomic: ROUTING_FEE.toString(),
+      uncertain: [],
+    });
+  },
+);
+
+it('says so when the router declines the page read, and pays nothing', async () => {
+  await configure();
+  const { fetchImpl, seen } = network({ routerAnswer: { status: 503, body: {} } });
+  const { job, transport, deps } = setup(fetchImpl);
+  const read = await workerFetchFallback(FAILED_FETCH, { ...deps, redact: (text) => text });
+  expect(read).toMatch(/Tenjin's router did not offer it/);
+  expect(seen.some((call) => call.url === EXA_CONTENTS)).toBe(false);
+  expect((await transport.summary(job)).actualAtomic).toBe(ROUTING_FEE.toString());
+});
+
+it('keeps a page read Exa failed after the payment was signed counted', async () => {
+  // The failure: a signed payment that came back with an error dropped out of the job's spend.
+  await configure();
+  const { fetchImpl } = network({ paid: { status: 500, body: { error: 'down' } } });
+  const { job, transport, deps } = setup(fetchImpl);
+  const read = await workerFetchFallback(FAILED_FETCH, { ...deps, redact: (text) => text });
+  expect(read).toMatch(/it did not run/);
+  expect((await transport.summary(job)).actualAtomic).toBe((ROUTING_FEE + 1000n).toString());
+});
+
+it('buys nothing for a worker stopped while its page read waited, and releases what it reserved', async () => {
   await configure();
   const { fetchImpl, seen } = network();
   const { job, transport, deps } = setup(fetchImpl);
@@ -711,8 +610,12 @@ it('buys nothing for a worker stopped while its search waited, and releases what
     if ('tool' in args) stop.abort();
     return answer;
   };
-  const answer = await answerWorkerWebSearch(SEARCH, { ...deps, request, signal: stop.signal });
-  expect(asWebSearchReads(answer).errors).toEqual(['unavailable']);
+  await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    request,
+    signal: stop.signal,
+    redact: (text) => text,
+  });
   expect(seen.filter((call) => call.paid)).toEqual([]);
   expect(await transport.summary(job)).toMatchObject({
     reservedAtomic: ROUTING_FEE.toString(),
@@ -720,53 +623,43 @@ it('buys nothing for a worker stopped while its search waited, and releases what
   });
   // A worker already stopped makes no request at all, not even the free one.
   const before = seen.length;
-  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal });
+  await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    signal: stop.signal,
+    redact: (text) => text,
+  });
   expect(seen.length).toBe(before);
 });
 
-it.each([
-  {
-    service: 'search',
-    url: EXA_SEARCH,
-    run: (deps: WorkerWebDeps) => answerWorkerWebSearch(SEARCH, deps),
-  },
-  {
-    service: 'page read',
-    url: EXA_CONTENTS,
-    run: (deps: WorkerWebDeps) =>
-      workerFetchFallback(
-        { input: { url: 'https://x402.org' }, error: 'getaddrinfo ENOTFOUND x402.org' },
-        { ...deps, redact: (text) => text },
-      ),
-  },
-])(
-  'refuses to authorize a $service stopped during its unsigned Exa probe',
-  async ({ url, run }) => {
-    await configure();
-    const stop = new AbortController();
-    const { fetchImpl, seen } = network();
-    let probeSignal: AbortSignal | null | undefined;
-    const stoppedProbe: typeof fetch = (input, init) => {
-      if (String(input) === url && !new Headers(init?.headers).has('payment-signature')) {
-        probeSignal = init?.signal;
-        stop.abort();
-      }
-      // The provider still answers 402 even if the request was cancelled.
-      return fetchImpl(input, init);
-    };
-    const { job, transport, deps, auth } = setup(stoppedProbe);
-    await run({ ...deps, signal: stop.signal });
-    expect(probeSignal?.aborted).toBe(true);
-    expect(seen.filter((call) => call.url === url)).toMatchObject([{ paid: false }]);
-    expect(auth.authorize).not.toHaveBeenCalled();
-    expect(auth.commit).not.toHaveBeenCalled();
-    expect(await transport.summary(job)).toEqual({
-      reservedAtomic: ROUTING_FEE.toString(),
-      actualAtomic: ROUTING_FEE.toString(),
-      uncertain: [],
-    });
-  },
-);
+it('refuses to authorize a page read stopped during its unsigned Exa probe', async () => {
+  await configure();
+  const stop = new AbortController();
+  const { fetchImpl, seen } = network();
+  let probeSignal: AbortSignal | null | undefined;
+  const stoppedProbe: typeof fetch = (input, init) => {
+    if (String(input) === EXA_CONTENTS && !new Headers(init?.headers).has('payment-signature')) {
+      probeSignal = init?.signal;
+      stop.abort();
+    }
+    // The provider still answers 402 even if the request was cancelled.
+    return fetchImpl(input, init);
+  };
+  const { job, transport, deps, auth } = setup(stoppedProbe);
+  await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    signal: stop.signal,
+    redact: (text) => text,
+  });
+  expect(probeSignal?.aborted).toBe(true);
+  expect(seen.filter((call) => call.url === EXA_CONTENTS)).toMatchObject([{ paid: false }]);
+  expect(auth.authorize).not.toHaveBeenCalled();
+  expect(auth.commit).not.toHaveBeenCalled();
+  expect(await transport.summary(job)).toEqual({
+    reservedAtomic: ROUTING_FEE.toString(),
+    actualAtomic: ROUTING_FEE.toString(),
+    uncertain: [],
+  });
+});
 
 it('releases the reservation and skips signing when a worker stops during spend authorization', async () => {
   await configure();
@@ -788,10 +681,15 @@ it('releases the reservation and skips signing when a worker stops during spend 
     stoppedAuthorizer,
     testWalletProvider({ ...signer, signTypedData }),
   );
-  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal, request });
+  await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    signal: stop.signal,
+    request,
+    redact: (text) => text,
+  });
   expect(auth.authorize).toHaveBeenCalledOnce();
   expect(signTypedData).not.toHaveBeenCalled();
-  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([{ paid: false }]);
+  expect(seen.filter((call) => call.url === EXA_CONTENTS)).toMatchObject([{ paid: false }]);
   expect(auth.release).toHaveBeenCalledWith('rsv');
   expect(auth.commit).not.toHaveBeenCalled();
   expect(await transport.summary(job)).toMatchObject({
@@ -812,10 +710,15 @@ it('releases an Exa payment that was signed locally when the worker stopped befo
     return signature;
   });
   const request = executor(fetchImpl, auth, testWalletProvider({ ...signer, signTypedData }));
-  const result = await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal, request });
-  expect(asWebSearchReads(result).errors).toEqual(['unavailable']);
+  const read = await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    signal: stop.signal,
+    request,
+    redact: (text) => text,
+  });
+  expect(read).toContain('The request was stopped before payment was sent');
   expect(signTypedData).toHaveBeenCalledOnce();
-  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([{ paid: false }]);
+  expect(seen.filter((call) => call.url === EXA_CONTENTS)).toMatchObject([{ paid: false }]);
   expect(auth.release).toHaveBeenCalledWith('rsv');
   expect(auth.commit).not.toHaveBeenCalled();
   expect(await transport.summary(job)).toEqual({
@@ -828,27 +731,28 @@ it('releases an Exa payment that was signed locally when the worker stopped befo
 it('settles an already transmitted Exa payment when the worker stops while it waits', async () => {
   await configure();
   const stop = new AbortController();
-  const { fetchImpl, seen } = network();
+  const { fetchImpl } = network();
   let paidSignal: AbortSignal | null | undefined;
   const stoppedResponse: typeof fetch = (input, init) => {
-    if (String(input) === EXA_SEARCH && new Headers(init?.headers).has('payment-signature')) {
+    if (String(input) === EXA_CONTENTS && new Headers(init?.headers).has('payment-signature')) {
       paidSignal = init?.signal;
       stop.abort();
     }
     return fetchImpl(input, init);
   };
   const { job, transport, deps, auth } = setup(stoppedResponse);
-  await answerWorkerWebSearch(SEARCH, { ...deps, signal: stop.signal });
-  expect(seen.filter((call) => call.url === EXA_SEARCH)).toMatchObject([
-    { paid: false },
-    { paid: true },
-  ]);
+  const read = await workerFetchFallback(FAILED_FETCH, {
+    ...deps,
+    signal: stop.signal,
+    redact: (text) => text,
+  });
+  expect(read).toContain('The whole page.');
   expect(paidSignal?.aborted).toBe(false);
-  expect(auth.commit).toHaveBeenCalledWith('rsv', 4000n, expect.anything());
+  expect(auth.commit).toHaveBeenCalledWith('rsv', 1000n, expect.anything());
   expect(auth.release).not.toHaveBeenCalled();
   expect(await transport.summary(job)).toEqual({
-    reservedAtomic: (ROUTING_FEE + 4000n).toString(),
-    actualAtomic: (ROUTING_FEE + 4000n).toString(),
+    reservedAtomic: (ROUTING_FEE + 1000n).toString(),
+    actualAtomic: (ROUTING_FEE + 1000n).toString(),
     uncertain: [],
   });
 });
@@ -862,12 +766,12 @@ async function savedHash(): Promise<string> {
 }
 
 // Review finding: a block of Exa saved after the rules were checked but before the spec
-// was read passed, since a named read skips blocks, and the search was bought.
+// was read passed, since a named read skips blocks, and the page was bought.
 it('buys nothing when a block of Exa is saved between the rules check and the spec read', async () => {
   // An unrelated block is saved, so the rules are checked against the router's identities.
   await configure({ policy: { block: [{ kind: 'provider', id: 'coinmarketcap' }] } });
   const { fetchImpl, seen } = network();
-  const { job, transport, deps } = setup(fetchImpl);
+  const { deps, transport, job } = setup(fetchImpl);
   const { storeSpecs } = await import('./specs');
   const request: WorkerRequest = async (args, call) => {
     if (args.tool === undefined) return deps.request!(args, call);
@@ -875,23 +779,21 @@ it('buys nothing when a block of Exa is saved between the rules check and the sp
     // spec is kept under the new rules, so the paid request would find them unchanged.
     await configure({ policy: { block: [EXA] } });
     const id = randomUUID();
-    await storeSpecs(dir, [{ ...SEARCH_SPEC, id } as never], await savedHash());
+    await storeSpecs(dir, [{ ...CONTENTS_SPEC, id } as never], await savedHash());
     return { isError: false, summary: '', envelope: { status: 'spec', id } };
   };
-  const answer = await answerWorkerWebSearch(SEARCH, {
+  const read = await workerFetchFallback(FAILED_FETCH, {
     ...deps,
     request,
     identities: async () => IDENTITIES,
+    redact: (text) => text,
   });
-  expect(asWebSearchReads(answer).text).toContain('settings changed during the call');
+  expect(read).toContain('settings changed during the call');
   expect(seen.filter((call) => call.paid)).toEqual([]);
-  expect(await transport.summary(job)).toMatchObject({
-    reservedAtomic: ROUTING_FEE.toString(),
-    uncertain: [],
-  });
+  expect((await transport.summary(job)).reservedAtomic).toBe(ROUTING_FEE.toString());
 });
 
-it('keeps the whole ceiling reserved for a search whose payment the spend gate never settled, and reconcile leaves it', async () => {
+it('keeps the whole ceiling reserved for a page read whose payment the spend gate never settled, and reconcile leaves it', async () => {
   // The failure: a payment that may have left was released from the job's budget, or its
   // local id was sent to the model proxy as if it named a model call.
   await configure();
@@ -901,17 +803,25 @@ it('keeps the whole ceiling reserved for a search whose payment the spend gate n
     if (args.tool !== undefined) {
       const id = randomUUID();
       // Kept under the rules saved now, as the request tool keeps a spec it read.
-      await storeSpecs(dir, [{ ...SEARCH_SPEC, id } as never], await savedHash());
+      await storeSpecs(dir, [{ ...CONTENTS_SPEC, id } as never], await savedHash());
       return { isError: false, summary: '', envelope: { status: 'spec', id } };
     }
     // Reserved at the gate, then neither committed nor released: it may have been signed.
-    await watch(auth).authorize({ amountAtomic: 4000n, creator: 'api.exa.ai' });
+    await watch(auth).authorize({ amountAtomic: 1000n, creator: 'api.exa.ai' });
     return { isError: true, summary: '', envelope: { status: 'failed', reason: 'cut off' } };
   };
-  await answerWorkerWebSearch(SEARCH, { job, transport, dataDir: dir, request });
+  const read = await workerFetchFallback(FAILED_FETCH, {
+    job,
+    transport,
+    dataDir: dir,
+    request,
+    resolve: async () => [{ address: '93.184.216.34' }],
+    redact: (text) => text,
+  });
+  expect(read).toContain('cut off');
   const before = await transport.summary(job);
   expect(before).toMatchObject({
-    reservedAtomic: (ROUTING_FEE + 7000n).toString(),
+    reservedAtomic: (ROUTING_FEE + 1000n).toString(),
     actualAtomic: ROUTING_FEE.toString(),
   });
   expect(before.uncertain).toHaveLength(1);

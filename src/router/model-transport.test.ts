@@ -15,6 +15,7 @@ import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from '.
 import { ModelTransport } from './model-transport';
 import { MODEL_PAID_CALL_TIMEOUT_MS, modelPeakQuoteAtomic } from './model-limits';
 import { ModelPace } from './model-pace';
+import { workerSearchMessages } from './model-messages';
 import { ModelCallFailed, ModelWorkerStopped, retryableModelCall } from './model-worker-control';
 import type { ModelJob } from './model-job';
 
@@ -476,6 +477,23 @@ it("holds a job's reserved total against a cap lowered while a call waited for i
   }
   expect(f.router.paidRequests()).toBe(1);
   expect(JSON.parse(await readFile(budget, 'utf8')).charged).toBe(spent.toString());
+});
+
+it('sends a web search as one Messages call with the server tool, inside the same quote and settlement', async () => {
+  const f = await fixture();
+  const body = workerSearchMessages({ query: 'x402 receipts', maxUses: 5, refused: null });
+  await expect(f.make().messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+    f.message,
+  );
+  // One unpaid quote, one signed request, and the answer the router's message carries.
+  expect(f.last()).toMatchObject({ messages: body });
+  expect(f.router.paidRequests()).toBe(1);
+  // The call is reserved at its quote and settled at what it charged, beside the fee.
+  expect(await f.make().summary(f.job)).toEqual({
+    reservedAtomic: '4000',
+    actualAtomic: '4000',
+    uncertain: [],
+  });
 });
 
 it('funds a Messages quote within the per-call limit, with no deposit above that limit', async () => {
