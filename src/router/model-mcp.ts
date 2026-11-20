@@ -1287,6 +1287,8 @@ export function registerModelTool(
                   job.id,
                   workerFailure(endedBy, abort.signal.aborted ? undefined : error),
                 );
+                // Messages the parent was told were delivered that the worker never read.
+                const unread = inbox.close().map((text) => text.slice(0, 2000));
                 const stopped = {
                   // `stopped` with its cause in `endedBy`; `unknown` only when nothing said why.
                   status: abort.signal.aborted
@@ -1307,6 +1309,15 @@ export function registerModelTool(
                   ...(await refundOutcome()),
                   ...omittedBlocks(omitted),
                   ...(partial ? { partial } : {}),
+                  ...(unread.length
+                    ? {
+                        messagesNotRead: {
+                          note: 'The worker ended before it read these messages you sent it; send them again with a fresh assignment if they still matter.',
+                          messages: unread.slice(0, 10),
+                          count: unread.length,
+                        },
+                      }
+                    : {}),
                   // An initial offer's held call has a free repeat. A continuation has none,
                   // though it runs with the original job's fields.
                   nextStep:
