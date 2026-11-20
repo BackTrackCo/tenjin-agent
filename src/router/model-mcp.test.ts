@@ -1441,9 +1441,10 @@ it.each(['general-purpose', 'Explore'] as const)(
       expect(first).toMatchObject({
         status: 'completed',
         worker_handle: expect.stringMatching(/^tenjin-worker-/),
-        // True for both cases: one call where this process accepted the worker, a held offer elsewhere.
+        // Each case: one call where this process accepted the worker (refused, nothing held,
+        // when the ceiling has no room), a held offer after a resume or a reload.
         continuation: expect.stringMatching(
-          /one call starts the worker again at once[\s\S]*holds the follow-up as an offer/,
+          /one call starts the worker again at once[\s\S]*the call is refused and nothing is held[\s\S]*After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer/,
         ),
       });
       // The address the offer named before the accept is the one the conversation took.
