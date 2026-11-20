@@ -2,7 +2,7 @@ import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { readFile, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { withAppServer, type CodexAppRequest } from '../lib/codex-app-server';
@@ -28,6 +28,12 @@ import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { codexModelPolicy } from './codex-model-context';
 import { MODEL_WORKER_CREDENTIAL_KEYS as CLEARED_CREDENTIAL_KEYS } from './model-worker-privacy';
+import {
+  redactWorkerSecrets,
+  settingsFileWalletValues,
+  workerTokenValues,
+  workerWalletValues,
+} from './worker-github';
 
 const PROVIDER = 'tenjin_deepseek_worker_v1';
 const VERSION = '0.167.0-alpha.4.1';
@@ -749,7 +755,16 @@ export async function runNativeCodexWorker(
           if (size > 8 * 1024 * 1024) throw new Error('Native request exceeds bound');
           chunks.push(Buffer.from(chunk));
         }
-        const raw: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        // The job's own bridge token, any GitHub token the session holds and the wallet's
+        // secrets are removed by value, as the Claude bridge removes them; nothing else is
+        // masked. The wallet values come from the environment and the user's Claude settings.
+        const removed = redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), [
+          token,
+          ...workerTokenValues(process.env),
+          ...workerWalletValues(process.env),
+          ...(await settingsFileWalletValues([join(homedir(), '.claude', 'settings.json')])),
+        ]);
+        const raw: unknown = JSON.parse(removed);
         const guardian =
           isRecord(raw) &&
           isRecord(raw.client_metadata) &&

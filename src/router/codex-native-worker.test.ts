@@ -897,6 +897,31 @@ it('uses the paid Responses bridge for worker calls and defaults only the bounde
   );
 });
 
+// Failure caught: removing `scrub` left a Codex worker's bridge removing nothing by value.
+it("removes the job's tokens and the wallet's secrets by value from a request before it is bought", async () => {
+  const accepted = await job();
+  const github = `gho_${'Qm4z'.repeat(9)}`;
+  const wallet = `fixture-wallet-pass-${'k9'.repeat(4)}`;
+  vi.stubEnv('GH_TOKEN', github);
+  vi.stubEnv('TENJIN_WALLET_PASSPHRASE', wallet);
+  try {
+    onTurn = async () => {
+      await provider({ input: `a ${github} b ${wallet} c ${env.TENJIN_MODEL_TOKEN}` });
+      await final();
+    };
+    await runNativeCodexWorker(accepted, options());
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  expect(responses).toHaveBeenCalledWith(
+    accepted,
+    expect.objectContaining({
+      input: 'a [redacted job secret] b [redacted job secret] c [redacted job secret]',
+    }),
+    expect.any(AbortSignal),
+  );
+});
+
 it.each([0, 1])(
   'rechecks disclosure after %i successful requests before another inference purchase',
   async (completed) => {
