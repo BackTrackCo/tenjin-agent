@@ -25,6 +25,9 @@ export const STREAM_IDLE_DEFAULT_MS = 300_000;
 /** The most event bytes one reply may carry: the router's own bound. */
 export const STREAM_EVENT_BYTES = 64 * 1024 * 1024;
 
+/** The longest wait a timer holds: Node runs a longer one after 1 ms. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** Whether this offer advertises the stream this client speaks. Anything else is closed. */
 export function messagesStreamOffered(decision: Record<string, unknown>): boolean {
   return decision.messagesStream === MESSAGES_STREAM_VERSION;
@@ -37,7 +40,8 @@ export function streamIdleMs(decision: Record<string, unknown>): number {
     typeof offered === 'number' && Number.isSafeInteger(offered) && offered > 0
       ? offered
       : STREAM_IDLE_DEFAULT_MS;
-  return limit + STREAM_IDLE_MARGIN_MS;
+  // A timer longer than 2^31 - 1 ms fires at once: a router's limit is clamped to the top.
+  return Math.min(limit + STREAM_IDLE_MARGIN_MS, MAX_TIMER_MS);
 }
 
 export type StreamEvent = { type: string } & Record<string, unknown>;

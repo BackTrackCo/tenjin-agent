@@ -64,7 +64,8 @@ const MODEL_PAID_CALL_MARGIN_MS = 60_000;
 export function paidCallTimeoutMs(decision: Record<string, unknown>): number {
   const offered = decision.maxCallDurationMs;
   return typeof offered === 'number' && Number.isSafeInteger(offered) && offered >= 0
-    ? offered + MODEL_PAID_CALL_MARGIN_MS
+    ? // Clamped to the longest wait a timer holds: a longer one would fire after 1 ms.
+      Math.min(offered + MODEL_PAID_CALL_MARGIN_MS, 2 ** 31 - 1)
     : MODEL_PAID_CALL_TIMEOUT_MS;
 }
 /**

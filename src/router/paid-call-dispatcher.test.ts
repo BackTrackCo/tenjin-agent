@@ -39,3 +39,16 @@ it('is accepted by the global fetch', async () => {
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// Failure caught (vraspar's repro): a router stating a limit near 2^31 ms made the idle timer
+// fire after 1 ms, so every streamed call was cut right after it was paid and left reserved.
+it('clamps a router-stated call wait and idle limit to what a timer holds', async () => {
+  const { streamIdleMs } = await import('./model-stream');
+  const { paidCallTimeoutMs } = await import('./model-limits');
+  for (const stated of [2 ** 31 - 10, Number.MAX_SAFE_INTEGER]) {
+    expect(streamIdleMs({ callIdleLimitMs: stated })).toBe(2 ** 31 - 1);
+    expect(paidCallTimeoutMs({ maxCallDurationMs: stated })).toBe(2 ** 31 - 1);
+  }
+  expect(streamIdleMs({ callIdleLimitMs: 300_000 })).toBe(330_000);
+  expect(paidCallTimeoutMs({ maxCallDurationMs: 540_000 })).toBe(600_000);
+});
