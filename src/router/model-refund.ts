@@ -20,7 +20,7 @@ import {
   type TypedDataDefinition,
 } from 'viem';
 import { z } from 'zod';
-import { withFileLock } from '../lib/lock';
+import { LockTimeoutError, withFileLock } from '../lib/lock';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { creditRefundedExposure } from '../lib/wallet/spend';
 import { modelInferenceRunDir, modelInferenceRunScope, modelRunDepositKeys } from './model-channel';
@@ -451,6 +451,9 @@ export class ModelRefundJournal {
 
   /** Only the side note is written, so a session that never held the lock cannot touch the record. */
   private async noteFailure(path: string, error: unknown) {
+    // A lock another session holds is a live run, not a failure: its timeout error advises removing
+    // the lock directory, which is wrong advice for a refund that is being closed.
+    if (error instanceof LockTimeoutError) return;
     const why = `failed: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 150)}`;
     const saved = await readRecord(path);
     if (saved && saved.state === 'pending') await writeNote(path, why);

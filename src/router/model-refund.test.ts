@@ -285,7 +285,7 @@ it('keeps the reason a pending refund could not close with its record', async ()
 
 // A session that timed out on the lock only writes the side note: the record stays byte for
 // byte what the lock holder saved, even when that session read it before the holder's write.
-it('leaves the record byte-identical when a recovery could not take the lock', async () => {
+it('leaves the record byte-identical and writes no note when a recovery could not take the lock', async () => {
   const { dataDir, runId, record, journal } = await fixture();
   await record();
   const dir = join(dataDir, 'model-refunds');
@@ -295,7 +295,9 @@ it('leaves the record byte-identical when a recovery could not take the lock', a
     await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
   });
   expect(await readFile(join(dir, file!), 'utf8')).toBe(before);
-  await expect(readModelRefundNote(dataDir, origin, runId)).resolves.toMatch(/^failed: /);
+  // A lock timeout is a live run: no note, and so no advice to remove the lock directory.
+  await expect(readModelRefundNote(dataDir, origin, runId)).resolves.toBeUndefined();
+  expect(await readdir(dir)).toEqual([file]);
 });
 
 // After a base URL change `tenjin balance` showed nothing of these. A refund request carries
