@@ -236,11 +236,43 @@ describe('withFileLock with takeOverDead', () => {
 
   it('never takes a lock whose holder is running', async () => {
     const lock = join(dir, 'live.lock');
-    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: 0 }));
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() }));
     await expect(
       withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
     ).rejects.toBeInstanceOf(LockTimeoutError);
     expect(existsSync(join(lock, 'meta'))).toBe(true);
+  });
+
+  // Failure caught (vraspar): a lane wait has no limit, so a dead holder whose pid another
+  // process now holds blocked every later call for good.
+  it('takes a lock whose pid is held by a process that started long after the holder took it', async () => {
+    const lock = join(dir, 'reused.lock');
+    const acquiredAt = Date.now() - 3600_000;
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt }));
+    // The holder started before it took the lock: still the holder.
+    await expect(
+      withFileLock(lock, async () => 'unreached', {
+        ...quick,
+        takeOverDead: true,
+        startedAt: () => acquiredAt - 1000,
+      }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+    // An unreadable start is alive.
+    await expect(
+      withFileLock(lock, async () => 'unreached', {
+        ...quick,
+        takeOverDead: true,
+        startedAt: () => undefined,
+      }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+    // A holder of that pid that began an hour after is another process.
+    expect(
+      await withFileLock(lock, async () => 'ran', {
+        ...quick,
+        takeOverDead: true,
+        startedAt: () => acquiredAt + 3600_000,
+      }),
+    ).toBe('ran');
   });
 
   it('takes a lock with no readable holder only once it is older than 10 s', async () => {
