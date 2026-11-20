@@ -24,7 +24,7 @@ export type InstallSubagentChoice = 'on' | 'off';
 /** The whole fresh-setup question, in a terminal and through an agent: its wording changes here alone. */
 export const SUBAGENT_QUESTION = [
   'Use a cheap model for eligible subagent jobs?',
-  'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results.',
+  'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results unmasked.',
   `Each job costs up to your per-call spend limit. Details: ${SUBAGENT_DETAILS_URL}`,
 ].join('\n');
 const SUBAGENT_OPTIONS = [

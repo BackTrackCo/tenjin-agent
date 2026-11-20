@@ -196,7 +196,7 @@ it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][]
         // The consent question, whole: an agent relays it word for word.
         question: [
           'Use a cheap model for eligible subagent jobs?',
-          'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results.',
+          'Claude accepts or declines each offer. DeepSeek sees accepted work and tool results unmasked.',
           'Each job costs up to your per-call spend limit. Details: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
         ].join('\n'),
         options: [

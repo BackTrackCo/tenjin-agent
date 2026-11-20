@@ -3,6 +3,7 @@ import {
   compactWindowTokens,
   fittingOutputTokens,
   offeredOutputTokens,
+  MODEL_FLOOR_CALL_ATOMIC,
   MODEL_MINIMUM_CALL_ATOMIC,
   MODEL_OUTPUT_FLOOR_TOKENS,
   MODEL_OUTPUT_TOKENS,
@@ -17,6 +18,8 @@ it('derives the call floor from the output cap with the router quote formula', (
   expect(MODEL_OUTPUT_TOKENS).toBe(65_536);
   expect(MODEL_MINIMUM_CALL_ATOMIC).toBe(83_866n);
   expect(usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)).toBe('$0.083866');
+  // The least a call reserves once it has stepped down to its 8,192-token floor.
+  expect(MODEL_FLOOR_CALL_ATOMIC).toBe(11_613n);
   // The router's own figures: a zero-byte 32,000-token quote was 41,611; other caps follow.
   expect(modelPeakQuoteAtomic(0, 32_000)).toBe(41_611n);
   expect(modelPeakQuoteAtomic(0, 128_000)).toBe(162_571n);

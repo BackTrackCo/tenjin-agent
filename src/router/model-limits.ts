@@ -2,8 +2,8 @@ export const MODEL_ROUTE_BODY_BYTES = 16_384;
 export const MODEL_ROUTE_ENVELOPE_BYTES = 64;
 export const MODEL_CODEX_TASK_BYTES = 16_000;
 export const MODEL_NATIVE_TEXT_BYTES = 256_000;
-/** The least output a worker's own call asks for: the floor a call near the job's ceiling
- *  steps down to, and the cap a side request keeps. */
+/** The output cap a side request keeps (the auto-mode classifier's own, a search): the
+ *  least a worker's own turn asks for by default. */
 export const MODEL_OUTPUT_TOKENS = 65_536;
 /**
  * The least output a call is stepped down to when the job's ceiling cannot hold more. The
@@ -98,8 +98,13 @@ export function fittingOutputTokens(bytes: number, asked: number, remaining: big
   }
   return fits;
 }
-/** The least quote a worker's request can have: no body, the output cap every router takes. */
+/**
+ * The least job ceiling Tenjin offers a job under, and the floor configuration refuses below:
+ * one call at 65,536 output tokens with no body, so a job can pay a normal call and its fee.
+ */
 export const MODEL_MINIMUM_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_TOKENS);
+/** The least a call can reserve: no body, the 8,192 output tokens it steps down to. */
+export const MODEL_FLOOR_CALL_ATOMIC = modelPeakQuoteAtomic(0, MODEL_OUTPUT_FLOOR_TOKENS);
 /** A floor in dollars as the CLI prints it: `$0.083866`. */
 export const usdOfAtomic = (atomic: bigint): string => '$' + (Number(atomic) / 1e6).toFixed(6);
 /** Full hosted POST receipt or owner-GET JSON envelope, including escaped wire and metadata. */
