@@ -236,6 +236,7 @@ These run natively:
 ### Write to a running worker
 
 - An offer names the worker's address, `tenjin-worker-…`, before it is accepted, and an accepted background job says it again. While the worker runs, `SendMessage` to that address reaches it at its next turn, as a message to a native subagent does, and it answers as a native send does. Several messages arrive in order.
+- A message sent this way goes to DeepSeek at once, with no held offer to cancel, so the parent applies your restrictions (model, privacy, disclosure, paid inference) to its text before it sends it.
 - It is the same job: no new offer, no routing fee and no new question, and the job's ceiling and your limits hold at each payment as before. Only the session that accepted the worker can write to it.
 - A message sent after the worker has reported is not delivered and the parent is told so; it sends it again once the result has arrived.
 
@@ -244,7 +245,7 @@ These run natively:
 - Completed Claude workers return a `tenjin-worker-…` handle. The same parent can continue with native `SendMessage`, or compatible `Agent.resume`. A worker handle is never sent to native tools.
 - In the session that accepted the worker, a follow-up is one call: the worker continues at once in the background, as a native subagent resumed by a message does, and its result arrives by itself. The same consent, directory scope and permission mode checks run as for an accept.
 - Where Tenjin did not accept the worker itself (a resumed session, a reloaded plugin), each full follow-up is held until the parent runs it with one `subagent({offer_id})` call or stops it with `subagent({cancel: offer_id})`. The parent does not judge again whether the worker suits it, as a native follow-up resumes its subagent with no confirmation. A job whose ceiling is used up refuses the follow-up.
-- Because the text goes to DeepSeek, what binds an assignment still binds a follow-up: your own instructions that restrict the worker's model, privacy, disclosure or paid inference, and planning, which stays native. The parent cancels a follow-up that would break one.
+- Because the text goes to DeepSeek, what binds an assignment still binds a follow-up: your own instructions that restrict the worker's model, privacy, disclosure or paid inference, and planning, which stays native. The parent applies them before it sends a follow-up (a one-call follow-up or a message to a running worker goes at once, with no held offer to cancel) and cancels a held one that would break one.
 - A follow-up pays no routing fee, and its inference is charged to what is left of the original job's ceiling.
 - It reopens the same history, for up to 7 days after the worker's last run, including after the same session is resumed. Current instructions and permissions refresh. Continuations retain the full worker history.
 - Missing history or accounting, uncertain state, changed directory scope or revoked disclosure refuses continuation. Native retention may remove history; no idle worker service is maintained.

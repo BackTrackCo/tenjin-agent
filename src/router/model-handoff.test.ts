@@ -270,6 +270,8 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   const address = `tenjin-worker-${'offer_id' in first ? String(first.offer_id) : ''}`;
   expect(first).toMatchObject({ worker_handle: address });
   expect(instruction).toContain(`SendMessage({to:"${address}"`);
+  // A message to a running worker has no held offer: the parent applies the policy first.
+  expect(instruction).toContain("apply this offer's parentPolicy to its text before you send it");
   expect(instruction).toContain(
     'To keep it native, send the original Agent call again unchanged; that repeat costs no second routing fee.',
   );

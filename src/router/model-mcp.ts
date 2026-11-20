@@ -1228,7 +1228,7 @@ export function registerModelTool(
                   ...(activeConversation
                     ? {
                         worker_handle: activeConversation.handle,
-                        continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background, and its result arrives by itself. After a resumed session or a reloaded plugin, or when this job's ceiling is used up, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget.`,
+                        continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background, and its result arrives by itself. After a resumed session or a reloaded plugin, or when this job's ceiling is used up, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to DeepSeek at once, so apply the offer's parentPolicy to its text before you send it.`,
                       }
                     : {}),
                 };
