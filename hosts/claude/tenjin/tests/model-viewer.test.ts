@@ -3440,6 +3440,61 @@ test('a batch the host ended for its idle limit hands over the worker that ended
   expect(submitted).toHaveLength(2);
 });
 
+// Failure caught (vraspar): a worker of a batch that ended `not_started` before the host gave
+// up on the call was never handed over, because the row's end was matched against a list that
+// left out `not_started`.
+test('a batch the host ended for its idle limit hands over a worker that never started', async ($, on) => {
+  const f = setup($, on);
+  const submitted: string[] = [];
+  on('prompt.submit', (_$, e) => {
+    submitted.push(e.text);
+    return { text: e.text };
+  });
+  on('ui.render', { component: 'UserMessage' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: [e.props.text] }),
+  );
+  await remember($);
+  f.state.offer = SECOND_OFFER;
+  await remember($, { ...INPUT, description: 'Read another file' });
+  const aborted =
+    'MCP server "plugin:tenjin:router" tool "subagent" sent no response or progress for 1802s; aborting.';
+  let abort: () => void = () => undefined;
+  const hosting = new Promise<void>((resolve) => {
+    abort = resolve;
+  });
+  f.state.work = async () => {
+    await hosting;
+    return { result: aborted, text: aborted };
+  };
+  const running = $.tool.call({
+    tool: ACCEPT,
+    tool_use_id: 'idle_not_started',
+    offer_ids: [OFFER, SECOND_OFFER],
+  });
+  await f.clock.settle();
+  const handback = JSON.stringify({
+    status: 'not_started',
+    stopReason: { kind: 'not_started', reason: 'startup_timeout' },
+    elapsedMs: 61_000,
+    spend: { reservedAtomic: '0', actualAtomic: '0', uncertain: [] },
+    nextStep: 'No worker started',
+    worker_handle: WORKER,
+  });
+  f.state.per[OFFER] = { phase: 'unknown' };
+  f.state.started = false;
+  f.state.ended = JSON.parse(handback);
+  f.state.handback = handback;
+  await f.clock.advance(61_000);
+  await f.clock.settle();
+  abort();
+  await running;
+  await f.clock.advance(2000);
+  await f.clock.settle();
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain(`(offer ${OFFER}) ended. This is the result`);
+  expect(submitted[0]).toContain('"status":"not_started"');
+});
+
 // Operator ruling 2026-11-18: "background calls should get an offer". An Agent call with
 // `run_in_background` was never offered; now its worker runs in the background, the accept
 // answers at once, and the result reaches the parent when the worker ends.

@@ -2101,8 +2101,7 @@ export function registerModelViewer(on: On): void {
         // watch, and its delivery was skipped while its offer was a foreground one: it is
         // handed over now, once. A worker still running is followed to its end.
         const row = (await $.state.get({ ...WORKERS, id }).catch(() => undefined))?.value;
-        if (row?.ended && ENDED.includes(row.ended))
-          void deliverBackground($, id, row.title ?? 'subagent');
+        if (row?.ended) void deliverBackground($, id, row.title ?? 'subagent');
         else watcher.follow();
       }
     } else {
