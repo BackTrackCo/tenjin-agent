@@ -440,6 +440,7 @@ async function runQualifiedWorker(
   ];
   // Before the native init timer starts: `gh auth token` may wait on the keychain. A setup
   // failure leaves the worker without GitHub access, never without its job.
+  // A Windows job has no GitHub setup, so it always strips GitHub token shapes (`removeSecrets`).
   const github: WorkerGithub | undefined = binary.windows
     ? undefined
     : await prepareWorkerGithub(process.env).catch(() => undefined);

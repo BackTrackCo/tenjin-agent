@@ -307,8 +307,9 @@ async function paidWorkerTool(
 }
 
 /**
- * THE PERSON'S ROUTING RULES (`tenjin config block|only`) bind a worker's search and page
- * read as they bind what Tenjin picks on its own: the worker never named Exa, Tenjin did.
+ * THE PERSON'S ROUTING RULES (`tenjin config block|only`) bind a worker's page read (the
+ * search runs inside the model call) as they bind what Tenjin picks on its own: the worker
+ * never named Exa, Tenjin did.
  * The router applies the rules to its picks, and this call is never routed, so they are
  * read here, from the global file now, against the router's identities read. Why they
  * leave `service` out, or null. A preference never forbids a service, so it changes

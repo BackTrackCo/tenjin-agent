@@ -237,7 +237,7 @@ export function redactWorkerJson(text: string, redact: (text: string) => string)
   }
 }
 
-/** The wallet's two secrets: a worker never gets them, from its environment or any file it reads. */
+/** The wallet's two secrets: a worker's environment drops them, and the bridge removes their values from everything it forwards. */
 const WALLET_VARIABLES = ['TENJIN_WALLET_KEY', 'TENJIN_WALLET_PASSPHRASE'] as const;
 
 /** Shorter values are not secrets worth the damage a removal by value does to ordinary text. */

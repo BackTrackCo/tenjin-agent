@@ -196,10 +196,8 @@ async function readMarker(folder: string): Promise<Marker | undefined> {
  *
  * A folder with a marker is stale only when ALL hold: its owner's marker has not been touched
  * for hours (a running owner touches it every 30 s, so a live one is known by no clock
- * comparison between processes), and either its owner's pid is gone, or a process that holds
- * the pid started more than ten minutes after that last touch. Every doubt reads as alive: a
- * start time that cannot be read, is off by an hour, or lies in an ambiguous hour never
- * leads to a delete (`ps` is read in UTC besides). A folder with no marker (an older build
+ * comparison between processes) and its owner's pid is gone. A live pid is a live owner: no
+ * start time is compared, so a clock step never leads to a delete. A folder with no marker (an older build
  * made it) is stale when it has not changed for {@link JOB_FOLDER_STALE_MS} and no process names it on its
  * command line or in its environment; where the process list cannot be read, it stays.
  * A folder of this process is never removed, so a job of another `tenjin mcp` stays untouched.

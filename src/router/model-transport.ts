@@ -1075,7 +1075,7 @@ export class ModelTransport {
   }
 
   /**
-   * A ROUTER TOOL A WORKER'S NATIVE TOOL PAID FOR (its web search through Exa), counted in
+   * A ROUTER TOOL A WORKER'S NATIVE TOOL PAID FOR (its failed WebFetch's page read through Exa), counted in
    * the job's budget beside its model calls, so the job's spend, its end line and every
    * later model quote see it. Reserved at the tool's price ceiling before anything is
    * signed: a call that would pass the job's cap is refused here, unpaid. `run` pays from
