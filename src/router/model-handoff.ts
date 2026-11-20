@@ -827,7 +827,7 @@ export class ModelHandoff {
         session.harness === 'claude' ? '' : ' No assignment has been sent to a worker.'
       }${
         session.harness === 'claude'
-          ? ` Once accepted, the worker's address is ${workerHandleFor(job.id)}: to tell it something while it runs, call SendMessage({to:"${workerHandleFor(job.id)}",message:"<complete message>"}); it reaches the worker at its next turn, as a native subagent's message does.`
+          ? ` Once accepted, the worker's address is ${workerHandleFor(job.id)}: to tell it something while it runs, call SendMessage({to:"${workerHandleFor(job.id)}",message:"<complete message>"}); it reaches the worker at its next turn, as a native subagent's message does. Such a message goes to DeepSeek at once, with no held offer to cancel, so apply this offer's parentPolicy to its text before you send it.`
           : ''
       }`,
       ...(session.harness === 'claude' ? { worker_handle: workerHandleFor(job.id) } : {}),

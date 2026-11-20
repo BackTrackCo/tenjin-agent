@@ -428,6 +428,40 @@ it('never sends a second signed request after events have left, whatever the las
   expect(await f.make().summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
 });
 
+// Failure caught (vraspar's repro): the strict proof held at the call, but the next
+// `reconcile` (every continuation, every stopped job's handback) released the same call on
+// the looser rule, at zero or at a wrong charge.
+it('keeps a relayed call on the strict proof at reconcile too', async () => {
+  // `reconcile` reads only for the router the job's offer named.
+  const owned = (job: ModelJob): ModelJob => ({
+    ...job,
+    decision: { ...job.decision, routerOrigin: BASE },
+  });
+  const failedAfterEvents: Drive = ({ events, push, finish }) => {
+    push(frame('message_start', events()[0]));
+    finish(502, { error: { code: 'incomplete_model_response', message: 'empty' } });
+  };
+  for (const record of [
+    { state: 'unknown', voucherState: 'pending', actualAtomic: '0' },
+    { state: 'unknown', voucherState: 'cancelled', actualAtomic: '1000' },
+  ]) {
+    const f = await fixture({ drive: failedAfterEvents });
+    f.setRecord(record);
+    await call(f);
+    const transport = f.make();
+    await transport.reconcile(owned(f.job), new AbortController().signal);
+    expect(await transport.summary(f.job)).toMatchObject({ uncertain: [expect.any(String)] });
+  }
+  // The strict proof, read later, does release it.
+  const f = await fixture({ drive: failedAfterEvents });
+  f.setRecord({ state: 'unknown', voucherState: 'pending', actualAtomic: '0' });
+  await call(f);
+  f.setRecord({ state: 'unknown', voucherState: 'cancelled', actualAtomic: '0' });
+  const transport = f.make();
+  await transport.reconcile(owned(f.job), new AbortController().signal);
+  expect(await transport.summary(f.job)).toMatchObject({ uncertain: [] });
+});
+
 it('keeps a stream that ends with no last event uncertain and never signs again', async () => {
   const f = await fixture({
     drive: ({ events, push, cut }) => {
