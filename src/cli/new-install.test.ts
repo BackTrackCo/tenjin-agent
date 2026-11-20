@@ -7,7 +7,6 @@ import { captureIo, testCtx } from '../context-test-utils';
 import { persist } from '../commands/config';
 import { loadRawConfig } from '../lib/config';
 import type { RuntimeSetup } from '../lib/runtime';
-import { runCodexInstall } from '../router/codex-install';
 import { runRouterInstall } from '../router/install';
 import { SUBAGENT_TERMS } from '../router/subagents-shown';
 import { CODEX_PLUGIN } from '../router/codex-host';
@@ -166,7 +165,7 @@ function expectEnabled(config: Awaited<ReturnType<typeof loadRawConfig>>) {
   expect(config.install?.freshSetup).toBeUndefined();
 }
 
-it.each([['claude'], ['codex'], ['claude', 'codex']] as ('claude' | 'codex')[][])(
+it.each([['claude'], ['claude', 'codex']] as ('claude' | 'codex')[][])(
   'offers one explicit subagent choice after spending on %j',
   async (...hosts) => {
     seams.hosts = hosts;
@@ -248,33 +247,25 @@ it.each([
 
 // The terms paragraph was in every receipt's disclosure, so it came back after Keep off
 // and a second time after the question that held it.
-it.each(['claude', 'codex'] as const)(
-  'says the DeepSeek terms once after on, and not at all after off, on %s',
-  async (host) => {
-    const run = host === 'claude' ? runRouterInstall : runCodexInstall;
-    const count = (text: string) => text.split(SUBAGENT_TERMS[0]!).length - 1;
-    const said = async (subagents: 'on' | 'off') => {
-      await rm(seams.data, { recursive: true, force: true });
-      const out = await run({ yes: true, subagents }, testCtx(seams.data, { json: false }));
-      const human = [...(out.humanLines ?? []), ...(out.humanTail ?? [])].join('\n');
-      return count(human) + count(JSON.stringify(out.data));
-    };
-    // Once for a person and once in the data an agent reads.
-    expect(await said('on')).toBe(2);
-    expect(await said('off')).toBe(0);
-  },
-);
+it('says the DeepSeek terms once after on, and not at all after off', async () => {
+  const run = runRouterInstall;
+  const count = (text: string) => text.split(SUBAGENT_TERMS[0]!).length - 1;
+  const said = async (subagents: 'on' | 'off') => {
+    await rm(seams.data, { recursive: true, force: true });
+    const out = await run({ yes: true, subagents }, testCtx(seams.data, { json: false }));
+    const human = [...(out.humanLines ?? []), ...(out.humanTail ?? [])].join('\n');
+    return count(human) + count(JSON.stringify(out.data));
+  };
+  // Once for a person and once in the data an agent reads.
+  expect(await said('on')).toBe(2);
+  expect(await said('off')).toBe(0);
+});
 
-it.each(['claude', 'codex'] as const)(
-  'supports the standalone %s installer entrypoint',
-  async (host) => {
-    const out = await (host === 'claude'
-      ? runRouterInstall({ yes: true, subagents: 'on' }, testCtx(seams.data))
-      : runCodexInstall({ yes: true, subagents: 'on' }, testCtx(seams.data)));
-    expectEnabled(await loadRawConfig(seams.data));
-    expect(out.data).toMatchObject({ subagents: { enabled: true, jobCapAtomic: '1000000' } });
-  },
-);
+it('supports the standalone Claude installer entrypoint', async () => {
+  const out = await runRouterInstall({ yes: true, subagents: 'on' }, testCtx(seams.data));
+  expectEnabled(await loadRawConfig(seams.data));
+  expect(out.data).toMatchObject({ subagents: { enabled: true, jobCapAtomic: '1000000' } });
+});
 
 it.each([
   {},
@@ -330,7 +321,7 @@ it('does not enable after runtime failure or a failed second host', async () => 
 });
 
 it('preserves an explicit off written during native registration', async () => {
-  seams.hosts = ['codex'];
+  seams.hosts = ['claude', 'codex'];
   seams.turnOff = true;
   const out = await install(['--yes', '--subagents', 'on']);
   expect(out.code).toBe(0);
@@ -355,6 +346,20 @@ it.each([
   expect(out.config.router?.subagentConsent).toBeUndefined();
   expect(out.config.install?.freshSetup).toBeUndefined();
 });
+
+// DeepSeek workers run on Claude Code only: a machine set up for Codex alone is not asked.
+it.each([[[] as string[]], [['--yes']], [['--yes', '--subagents', 'on']]])(
+  'asks nothing and saves no subagent setting when Codex is the only host: %j',
+  async (args) => {
+    seams.hosts = ['codex'];
+    const out = await install(args);
+    expect(out.code).toBe(0);
+    expect(out.output).not.toContain('Use a cheap model for eligible subagent jobs?');
+    expect(JSON.stringify(JSON.parse(out.output).data)).not.toContain('"subagents"');
+    expect(out.config.router?.subagents).toBeUndefined();
+    expect(out.config.router?.subagentConsent).toBeUndefined();
+  },
+);
 
 it('does not consume a pending claim on refresh', async () => {
   await install();
