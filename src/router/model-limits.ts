@@ -84,6 +84,14 @@ export function modelPeakQuoteAtomic(bytes: number, outputTokens: number): bigin
   return usage + (usage * 5n + 99n) / 100n;
 }
 /**
+ * How many output tokens `atomic` pays for at the quote's output rate (1,200 per thousand
+ * plus the 5% proxy fee), rounded up: what a call lowers its limit by to take back `atomic`
+ * of a quote that is too high.
+ */
+export function outputTokensPaidBy(atomic: bigint): number {
+  return Number((atomic * 100_000n + 125_999n) / 126_000n);
+}
+/**
  * THE LARGEST OUTPUT CAP, FROM `asked` DOWN, WHOSE PEAK QUOTE FITS `remaining` of a job's
  * ceiling for a request of `bytes`. A quote reserves the input (each 3 bytes of body counted as a
  * token, at the full input rate, up to the context) and the output a call asks for, so near

@@ -56,6 +56,8 @@ async function fixture(
     protocol?: 'messages' | 'responses';
     wire?: string;
     quote?: string;
+    /** The quote the fake router names for a request, in place of the fixed one. */
+    quoteFor?: (request: Record<string, unknown>) => bigint;
     charge?: string;
     minDeposit?: string;
     maxAutoSpendAtomic?: bigint;
@@ -153,13 +155,14 @@ async function fixture(
       await options.onPaidSend?.();
     }
     last = (await request.clone().json()) as Record<string, unknown>;
+    if (options.quoteFor) router.requirement.amount = options.quoteFor(last).toString();
     result = {
       ...(options.protocol === 'responses'
         ? { wire: options.wire ?? 'event: response.completed\ndata: {"owned":"native wire"}\n\n' }
         : { message }),
       receipt: {
         invocationId: last.invocationId,
-        quoteAtomic: options.quote ?? '500000',
+        quoteAtomic: options.quoteFor ? router.requirement.amount : (options.quote ?? '500000'),
         actualAtomic: options.charge ?? '1000',
       },
     };
@@ -1198,6 +1201,65 @@ it('asks for the largest output cap the rest of the job ceiling can reserve, nev
   expect(small.asked).toBeLessThan(65_536);
   expect(small.asked).toBeGreaterThanOrEqual(8_192);
   expect(modelPeakQuoteAtomic(small.bytes, small.asked)).toBeLessThanOrEqual(77_000n);
+});
+
+// The client's estimate of a quote is a first guess: the router's quote is the truth. A job near
+// its cap whose router counts a body byte as a whole input token, while the client guesses one
+// token for 3 bytes, used to be stopped for budget in place of asking for less output.
+const byteQuote = (bytes: number, out: number, bytesPerToken: number) => {
+  const tokens = Math.min(1_048_576, Math.ceil(bytes / bytesPerToken) + 4096);
+  const usage = (BigInt(tokens) * 300n + BigInt(out) * 1200n + 999n) / 1000n;
+  return usage + (usage * 5n + 99n) / 100n;
+};
+const bigRequest = {
+  model: 'deepseek-flash',
+  max_tokens: 256_000,
+  messages: [{ role: 'user', content: 'x'.repeat(130 * 1024) }],
+};
+const ruledFixture = (bytesPerToken: number) =>
+  fixture({
+    cap: '200000',
+    quoteFor: (sent) =>
+      byteQuote(
+        Buffer.byteLength(JSON.stringify(sent)),
+        (sent.messages as { max_tokens: number }).max_tokens,
+        bytesPerToken,
+      ),
+  });
+
+it("asks again with less output when the router's quote is above what the job has left, and reserves once", async () => {
+  const f = await ruledFixture(1);
+  const seen: { outputCap?: number }[] = [];
+  await f
+    .make()
+    .messages(f.job, bigRequest, new AbortController().signal, undefined, (t) => seen.push(t));
+  const sent = (f.last()?.messages as { max_tokens: number }).max_tokens;
+  expect(sent).toBeLessThan(256_000);
+  expect(sent).toBeGreaterThanOrEqual(8_192);
+  expect(seen).toMatchObject([{ outputCap: sent }]);
+  // More than one unpaid quote, one signed request, and a single reservation at the last quote.
+  expect(f.router.log.filter((line) => line.endsWith('unpaid')).length).toBeGreaterThan(1);
+  expect(f.router.log.filter((line) => line.endsWith(' paid')).length).toBe(1);
+  // The routing fee and the one call at its real charge: the earlier quotes reserved nothing.
+  expect((await f.make().summary(f.job)).reservedAtomic).toBe('4000');
+});
+
+it("sends the client's own guess at once when the router counts fewer bytes than the client does", async () => {
+  const f = await ruledFixture(3);
+  await f.make().messages(f.job, bigRequest, new AbortController().signal);
+  expect(f.router.log.filter((line) => line.endsWith('unpaid')).length).toBe(1);
+  expect(f.router.log.filter((line) => line.endsWith(' paid')).length).toBe(1);
+});
+
+it("ends a job for budget only when the router's quote at the output floor does not fit", async () => {
+  const f = await fixture({ cap: '200000', quote: '500000' });
+  await expect(
+    f.make().messages(f.job, bigRequest, new AbortController().signal),
+  ).rejects.toMatchObject({ detail: { cause: 'budget' } });
+  expect((f.last()?.messages as { max_tokens: number }).max_tokens).toBe(8_192);
+  expect(f.router.log.filter((line) => line.endsWith(' paid')).length).toBe(0);
+  // Only the routing fee is held: the refused call reserved nothing.
+  expect((await f.make().summary(f.job)).reservedAtomic).toBe('3000');
 });
 
 it('rejects a Messages result above the size the call states even when the receipt envelope fits', async () => {
