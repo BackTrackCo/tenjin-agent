@@ -94,8 +94,12 @@ async function fixture(
       jobId: randomUUID(),
       routingFeeAtomic: '3000',
       routingAuthorizedAtomic: '3000',
-      messagesStream: 1,
+      maxResultBytes: 4_000_000,
+      maxOutputTokens: 256_000,
+      maxCallDurationMs: 540_000,
       callIdleLimitMs: 300_000,
+      callLimit: { max: 120, windowSeconds: 60 },
+      messagesStream: 1,
       ...options.decision,
     },
     capAtomic: '1000000',
@@ -237,13 +241,14 @@ it('states no stream, and gives no event, when the offer carries no field, or on
     const { got, value } = await call(f);
     expect(value).toEqual(reply);
     expect(got).toEqual([]);
-    // The request is today's, byte for byte: no `stream`, and the keys it always had.
+    // The request is whole: no `stream`, and the result size its offer names.
     expect(f.bodies.every((body) => !('stream' in body))).toBe(true);
     expect(Object.keys(f.bodies[0]!)).toEqual([
       'schemaVersion',
       'consent',
       'jobId',
       'invocationId',
+      'maxResultBytes',
       'messages',
     ]);
   }
@@ -504,6 +509,8 @@ it('leaves a call the client cancelled mid-stream uncertain, to be reconciled, w
 
 it('refuses a reply larger than the result it may carry, as it arrives', async () => {
   const f = await fixture({
+    // The smallest size an offer may name: the reply below is larger, as it arrives.
+    decision: { maxResultBytes: 2_000_000 },
     drive: ({ events, push }) => {
       push(frame('message_start', events()[0]));
       push(
