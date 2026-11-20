@@ -6,23 +6,14 @@ import { dirname, join } from 'node:path';
 import type { RoutingPayerDeps } from './routing-payer';
 import { LocalSendBlocked, RoutingPayer as Payer } from './routing-payer';
 import { paidCallDispatcher } from './paid-call-dispatcher';
-import {
-  messagesStreamOffered,
-  readMessagesStream,
-  streamIdleMs,
-  type StreamEvent,
-} from './model-stream';
+import { readMessagesStream, streamIdleMs, type StreamEvent } from './model-stream';
 import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import { modelLock, routingAuthorizedAtomic, type ModelJob } from './model-job';
-import {
-  modelChannelScope,
-  modelInferenceRunScope,
-  type ModelInferenceSlot,
-} from './model-channel';
-import { withFileLock, withFirstFileLock } from '../lib/lock';
+import { modelChannelScope, modelInferenceRunScope } from './model-channel';
+import { withFileLock } from '../lib/lock';
 import { RouteSkipped } from './decision';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import {
@@ -38,22 +29,12 @@ import {
   MODEL_CUT_REPLY_CODES,
   MODEL_REFUSED_CODE,
   ModelCallFailed,
-  ModelWorkerStopped,
   retryAfterMs,
-  sleepFor,
   timedOut,
 } from './model-worker-control';
-import { ModelRefundJournal, modelRefundRunLock, RefundProbeUnanswered } from './model-refund';
+import { ModelRefundJournal, modelRefundRunLock } from './model-refund';
 import type { ModelCallTiming } from './model-worker-diagnostics';
 import { advertisedCallLimit, ModelPace, type PaceClock } from './model-pace';
-
-/**
- * How long each try of a run's refund-support question may take. A first accept once got
- * no answer inside 3 s on a loaded machine, and the job ended with no cause: the question
- * is asked again before the run gives up.
- */
-const SUPPORT_PROBE_MS = [3_000, 10_000, 10_000];
-const SUPPORT_PROBE_WAIT_MS = 500;
 
 /**
  * The router's codes for a paid model call the provider failed (its `model_inference_failed`,
@@ -85,9 +66,6 @@ function statedResultBytes(job: ModelJob): number {
     throw new Error('The offer names no result size');
   return Math.min(honoured, MODEL_MESSAGES_RESULT_BYTES_MAX);
 }
-
-/** Jobs whose router refused `stream` after offering it (its flag was turned off again). */
-const streamRefused = new Set<string>();
 
 /**
  * The jobs whose budget file this process has read or written. A job in this set has a run
@@ -203,16 +181,6 @@ function boundedResponse(response: Response, limit = MODEL_RESPONSE_ENVELOPE_BYT
   );
 }
 
-/** A promise's outcome, or the signal's reason when the signal aborts first. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const stop = () => reject(signal.reason);
-    signal.addEventListener('abort', stop, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', stop));
-  });
-}
-
 /**
  * WHAT A JOB'S ROUTING CALL COULD HAVE CHARGED, which its budget starts from: the amount this
  * client authorized for that call, recorded when it was made. An offer's own fee cannot
@@ -240,7 +208,6 @@ export class ModelTransport {
       dataDir: string;
       baseUrl: string;
       payerDeps: RoutingPayerDeps;
-      inferenceSlot?: ModelInferenceSlot;
       inferenceRun?: string;
       /** The pace's clock and wait: the real ones unless a test drives them. */
       paceClock?: PaceClock;
@@ -259,28 +226,8 @@ export class ModelTransport {
   get origin() {
     return new URL(this.options.baseUrl).origin;
   }
-  forInferenceSlot(inferenceSlot: ModelInferenceSlot): ModelTransport {
-    return (this.options.inferenceSlot ?? 0) === inferenceSlot
-      ? this
-      : new ModelTransport({ ...this.options, inferenceSlot });
-  }
   private refundJournal() {
     return new ModelRefundJournal(this.options.dataDir, this.origin, this.options.payerDeps);
-  }
-
-  /**
-   * THE REFUND-SUPPORT QUESTION OF A RUN ABOUT TO START, asked while the accept's own
-   * checks run and handed to `withInferenceRun`, which waits for its answer where it used
-   * to ask. The question signs nothing, buys nothing and names no job, so an accept that
-   * a later check refuses has sent one unsigned read. It came after those checks, one
-   * round trip in the way of a worker that was ready.
-   */
-  askRefundSupport(signal: AbortSignal): Promise<boolean> {
-    const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
-    const asked = this.refundSupport(this.refundJournal(), endpoint, signal);
-    // Its failure is the run's, reported where the run waits for it.
-    asked.catch(() => undefined);
-    return asked;
   }
 
   /** The run lock outlives its individual requests so recovery cannot drain a live worker. */
@@ -288,21 +235,13 @@ export class ModelTransport {
     runId: string,
     signal: AbortSignal,
     run: (transport: ModelTransport) => Promise<T>,
-    /** Diagnostics only: when the refund-support answer came, and when the run's channel closed. */
-    mark?: (name: 'refundProbed' | 'workerReturned' | 'refundClosed') => void,
-    /** The answer asked ahead (`askRefundSupport`); absent, it is asked here. */
-    asked?: Promise<boolean>,
+    /** Diagnostics only: when the run returned, and when the run's channel closed. */
+    mark?: (name: 'workerReturned' | 'refundClosed') => void,
   ): Promise<T> {
     const journal = this.refundJournal();
-    const endpoint = new URL('/api/model-proxy/messages', this.origin).toString();
     // A refund an earlier run left pending is tried again at every accept, in the background:
     // a run's lock keeps it off a live run's channel, and it never delays this one.
     void journal.recoverPending(AbortSignal.timeout(15_000)).catch(() => undefined);
-    const supported = await (asked
-      ? untilAborted(asked, signal)
-      : this.refundSupport(journal, endpoint, signal));
-    mark?.('refundProbed');
-    if (!supported) return run(this).finally(() => mark?.('workerReturned'));
     const lock = modelRefundRunLock(this.options.dataDir, this.origin, runId);
     await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
     const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
@@ -322,32 +261,6 @@ export class ModelTransport {
       if (entered) await journal.close(runId, AbortSignal.timeout(8_000)).catch(() => undefined);
       mark?.('refundClosed');
     }
-  }
-
-  /**
-   * Asked before the worker is released, so nothing was bought when it fails. No answer in
-   * every try ends the run as not started, with the router as the cause; any other
-   * failure is the journal's own refusal.
-   */
-  private async refundSupport(journal: ModelRefundJournal, endpoint: string, signal: AbortSignal) {
-    let unanswered: RefundProbeUnanswered | undefined;
-    for (const [attempt, timeoutMs] of SUPPORT_PROBE_MS.entries()) {
-      if (attempt > 0) await sleepFor(SUPPORT_PROBE_WAIT_MS * attempt, signal);
-      try {
-        return await journal.requireSupport(endpoint, signal, timeoutMs);
-      } catch (error) {
-        if (signal.aborted || !(error instanceof RefundProbeUnanswered)) throw error;
-        unanswered = error;
-      }
-    }
-    throw new ModelWorkerStopped(
-      {
-        kind: 'not_started',
-        reason: 'router_unreachable',
-        ...(unanswered?.status !== undefined ? { status: unanswered.status } : {}),
-      },
-      { cause: unanswered },
-    );
   }
 
   async recoverInferenceRefunds(signal: AbortSignal) {
@@ -419,9 +332,9 @@ export class ModelTransport {
     beforeSend?: () => Promise<void>,
     /** Diagnostics only: where this call's time went, told once when the call ends. */
     observe?: (timing: ModelCallTiming) => void,
-    /** Provider events as they arrive, for a job whose router offers a streamed reply. The
-     *  call still ends with the whole answer; this only carries its events early. A caller
-     *  that joins a call already in flight gets none. */
+    /** Provider events as they arrive, for a streamed worker turn. The call still ends with
+     *  the whole answer; this only carries its events early. A caller that joins a call
+     *  already in flight gets none. */
     stream?: (event: StreamEvent) => void,
   ) {
     return this.invoke(job, messages, signal, 'messages', beforeSend, observe, stream);
@@ -450,7 +363,7 @@ export class ModelTransport {
     let invocation = this.invocations.get(key);
     if (!invocation) {
       const abort = new AbortController();
-      const timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 };
+      const timing: ModelCallTiming = {};
       const result = this.invokeStreamed(
         structuredClone(job),
         structuredClone(messages),
@@ -513,11 +426,8 @@ export class ModelTransport {
     });
   }
   /**
-   * THE CALL WITH ITS STREAM, when the job's offer opens one and the caller wants events. A
-   * router whose flag was turned off after the offer refuses the `stream` field before
-   * payment (`invalid_model_request`, nothing reserved or signed): the call is then made
-   * whole, once, as it would have been without an offer for a stream. A call that failed
-   * after events had left says so (`relayed`), so it is never tried again.
+   * THE CALL WITH ITS STREAM, when the caller wants events. A call that failed after
+   * events had left says so (`relayed`), so it is never tried again.
    */
   private async invokeStreamed(
     job: ModelJob,
@@ -528,19 +438,18 @@ export class ModelTransport {
     timing: ModelCallTiming,
     stream: ((event: StreamEvent) => void) | undefined,
   ) {
-    const open =
-      stream !== undefined && messagesStreamOffered(job.decision) && !streamRefused.has(job.id);
     // Each attempt starts from the request as the worker made it: the output cap is stepped
     // down in the request an attempt is given, and the call's identity is its hash, so a retry
     // that inherited the lowered cap would reserve under another hash than a plain resend.
     const original = structuredClone(messages);
     const seen = { relayed: false };
-    const relay = open
-      ? (event: StreamEvent) => {
-          seen.relayed = true;
-          stream(event);
-        }
-      : undefined;
+    const relay =
+      stream === undefined
+        ? undefined
+        : (event: StreamEvent) => {
+            seen.relayed = true;
+            stream(event);
+          };
     try {
       return await this.invokeOnce(
         job,
@@ -552,31 +461,6 @@ export class ModelTransport {
         relay,
       );
     } catch (error) {
-      if (
-        relay &&
-        !seen.relayed &&
-        error instanceof ModelCallFailed &&
-        error.detail.uncharged === true &&
-        error.detail.status === 400 &&
-        error.detail.code === 'invalid_model_request'
-      ) {
-        streamRefused.add(job.id);
-        try {
-          return await this.invokeOnce(
-            job,
-            structuredClone(original),
-            signal,
-            protocol,
-            beforeSend,
-            timing,
-          );
-        } catch (again) {
-          // The same refusal without a stream was never about the stream.
-          if (again instanceof ModelCallFailed && again.detail.code === 'invalid_model_request')
-            streamRefused.delete(job.id);
-          throw again;
-        }
-      }
       if (seen.relayed && error instanceof ModelCallFailed) error.detail.relayed = true;
       throw error;
     }
@@ -587,24 +471,20 @@ export class ModelTransport {
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
     beforeSend?: () => Promise<void>,
-    timing: ModelCallTiming = { slot: this.options.inferenceSlot ?? 0 },
+    timing: ModelCallTiming = {},
     relay?: (event: StreamEvent) => void,
   ) {
     signal.throwIfAborted();
+    // Codex's Responses calls keep the temporary shared channel until Codex workers are
+    // removed from this feature; every Messages call runs inside its run's own channel.
+    if (protocol === 'messages' && this.options.inferenceRun === undefined)
+      throw new Error('A Messages call runs only inside an inference run');
     // Diagnostics only: each step's milliseconds, read from a monotonic clock.
     let stepFrom = performance.now();
     const step = (
       name: Exclude<
         keyof ModelCallTiming,
-        | 'slot'
-        | 'fetches'
-        | 'requestBytes'
-        | 'outputCap'
-        | 'laneMoved'
-        | 'waitedOn'
-        | 'paceWaitMs'
-        | 'requoteMs'
-        | 'ttfbMs'
+        'fetches' | 'requestBytes' | 'outputCap' | 'paceWaitMs' | 'requoteMs' | 'ttfbMs'
       >,
     ) => {
       const now = performance.now();
@@ -837,12 +717,10 @@ export class ModelTransport {
         }
       });
     /**
-     * ONE TRY AT PAYING, on the first of `slots` whose channel is free. What it leaves says
-     * how far it went: whether signing started, whether a signed request reached fetch, and
-     * the router's answer to it.
+     * ONE TRY AT PAYING. What it leaves says how far it went: whether signing started,
+     * whether a signed request reached fetch, and the router's answer to it.
      */
     type Paid = {
-      slot: ModelInferenceSlot;
       result?: Awaited<ReturnType<ReturnType<Payer['routeFor']>['send']>>;
       failure?: unknown;
       signingStarted: boolean;
@@ -853,8 +731,8 @@ export class ModelTransport {
       /** The fresh quote a long wait called for could not be had, or named another amount. */
       requote?: ModelCallFailed;
     };
-    const payOn = async (slots: readonly ModelInferenceSlot[]): Promise<Paid> => {
-      const paid: Paid = { slot: slots[0]!, signingStarted: false, paymentSent: false };
+    const payOn = async (): Promise<Paid> => {
+      const paid: Paid = { signingStarted: false, paymentSent: false };
       let answer = quoted();
       let first = true;
       const cachedFetch: typeof fetch = async (input, init) => {
@@ -949,7 +827,7 @@ export class ModelTransport {
           paid.paidError = { status: response.status, ...(await errorCode(response.clone())) };
         return response;
       };
-      const payerOn = (slot: ModelInferenceSlot) =>
+      const payerOn = () =>
         new Payer({
           ...payerDeps,
           // A job's cap is the per-call limit or a lower named ceiling, so no deposit
@@ -986,7 +864,6 @@ export class ModelTransport {
             path: endpoint,
             ceilingAtomic: quote,
             origin: this.origin,
-            inferenceSlot: slot,
             ...(inferenceRun ? { inferenceRun } : {}),
           },
           fetchImpl: cachedFetch,
@@ -994,11 +871,9 @@ export class ModelTransport {
       let paymentTurn = false;
       stepFrom = performance.now();
       try {
-        paid.result = await withFirstFileLock(
-          slots.map(channelLock),
-          async (index) => {
-            paid.slot = slots[index]!;
-            step('laneWaitMs');
+        paid.result = await withFileLock(
+          channelLock,
+          async () => {
             await beforeSend?.();
             // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS CHANNEL still binds the job's
             // total: the payer's own check below reads this one quote alone. The quote was
@@ -1011,9 +886,9 @@ export class ModelTransport {
             // A QUOTE THE ROUTER NO LONGER HOLDS A PLACE FOR. A router that counts a call
             // at its quote serves the paid request that follows within 120 s whatever the
             // rate is by then; a later one it counts again, after the signature. This call
-            // waited for its channel past that, so it asks for the quote again, with the
-            // same invocation, before it signs. A fresh quote that cannot be had, or that
-            // names another amount than the one reserved, ends this try unsigned and
+            // waited for the run's channel past that, so it asks for the quote again, with
+            // the same invocation, before it signs. A fresh quote that cannot be had, or
+            // that names another amount than the one reserved, ends this try unsigned and
             // uncharged, for the retry rule to take up with a new reservation.
             if (now() - quotedAt > QUOTE_FRESH_MS) {
               const from = performance.now();
@@ -1029,7 +904,7 @@ export class ModelTransport {
                 ));
               }
               await answer.body?.cancel().catch(() => undefined);
-              quoted = await kept(fresh.challenge);
+              quoted = () => fresh.challenge;
               answer = quoted();
               quotedAt = now();
               timing.requoteMs = (timing.requoteMs ?? 0) + performance.now() - from;
@@ -1038,9 +913,9 @@ export class ModelTransport {
             signal.throwIfAborted();
             paymentTurn = true;
             step('gateMs');
-            // The payer of the channel this call holds: it reads that channel's total,
-            // signs from it and takes the router's answer into it, all under this lock.
-            const payer = payerOn(paid.slot);
+            // The payer of the run's channel: it reads that channel's total, signs from
+            // it and takes the router's answer into it, all under this lock.
+            const payer = payerOn();
             try {
               const sent = await payer.routeFor(baseUrl).send(url, {
                 method: 'POST',
@@ -1061,18 +936,10 @@ export class ModelTransport {
           {
             signal,
             takeOverDead: true,
-            // No job wall: the wait for a lane ends with the job's own signal, and the holder
-            // of a lane is bounded by its own per-call deadline or is dead (taken over).
+            // No job wall: the wait for the run's channel ends with the job's own signal, and
+            // its holder is bounded by its own per-call deadline or is dead (taken over).
             timeoutMs: Number.POSITIVE_INFINITY,
             retryMs: 100,
-            onHeld: (pid) => {
-              timing.waitedOn ??=
-                pid === undefined
-                  ? 'unknown'
-                  : pid === process.pid
-                    ? 'this_process'
-                    : 'other_process';
-            },
           },
         );
       } catch (cause) {
@@ -1083,65 +950,25 @@ export class ModelTransport {
       }
       return paid;
     };
-    // THE PAYMENT LOCK IS ONE CHANNEL'S, HELD FOR THE WHOLE PAID CALL. A voucher signs the
-    // channel's charged total plus this quote. That total moves only when the router's
-    // answer to the paid request is taken in, by what the router charged, which may be
-    // less than the quote; and the router refuses a second payment on a channel whose
-    // first is still in flight (`channel_busy`). So the next voucher of a channel cannot
-    // be signed before the previous call's answer, and the lock covers the read of the
-    // total, the signature, the paid request and its answer, across every process.
-    // What it must not cover is another channel. A run with its own channel (a router
-    // that refunds) locks that channel alone, so no other job waits for it. On the two
-    // shared channels, a call takes its worker's own lane when that is free, the other
-    // lane when another call holds its own, and waits for whichever comes free first when
-    // both are held: two sessions no longer queue on one lane while the other is idle.
-    const own = this.options.inferenceSlot ?? 0;
-    const other: ModelInferenceSlot = own === 0 ? 1 : 0;
-    const channelLock = (slot: ModelInferenceSlot) =>
-      join(
-        dataDir,
-        'model-jobs',
-        `${
-          inferenceRun
-            ? modelInferenceRunScope(this.origin, inferenceRun).id
-            : modelChannelScope(this.origin, 'model-inference', slot).id
-        }.payment.lock`,
-      );
-    // The quote is answered to the payer once per try. A call that may try twice keeps the
-    // quote's bytes and answers each try from them (a clone would hold the first try's
-    // cancel until the second was cancelled too).
-    const kept = async (challenged: Response): Promise<() => Response> => {
-      if (inferenceRun) return () => challenged;
-      const bytes = await boundedResponse(challenged, 65_536)
-        .arrayBuffer()
-        .catch(() => undefined);
-      if (bytes === undefined) {
-        await release();
-        throw new Error('Unsupported model payment quote');
-      }
-      return () =>
-        new Response(bytes.byteLength > 0 ? bytes : null, {
-          status: challenged.status,
-          headers: challenged.headers,
-        });
-    };
-    let quoted = await kept(challenge);
-    let paid = await payOn(inferenceRun ? [own] : [own, other]);
-    // THE OTHER LANE REFUSED BEFORE ANYTHING WAS SIGNED (its channel needs a deposit that
-    // the person's limits do not allow, say): the call waits for its own lane, as it did
-    // before lanes were shared out, so a call that its own lane can pay is never lost to
-    // the other lane's funding. Nothing was signed or sent, so this is no second payment.
-    if (
-      !inferenceRun &&
-      paid.slot !== own &&
-      paid.failure instanceof RouteSkipped &&
-      !paid.signingStarted &&
-      !paid.paymentSent &&
-      !paid.localBlock
-    )
-      paid = await payOn([own]);
-    timing.slot = paid.slot;
-    if (paid.slot !== own) timing.laneMoved = true;
+    // THE PAYMENT LOCK IS THE RUN'S CHANNEL'S, HELD FOR THE WHOLE PAID CALL. A voucher
+    // signs the channel's charged total plus this quote. That total moves only when the
+    // router's answer to the paid request is taken in, by what the router charged, which
+    // may be less than the quote; and the router refuses a second payment on a channel
+    // whose first is still in flight (`channel_busy`). So the next voucher of a channel
+    // cannot be signed before the previous call's answer, and the lock covers the read of
+    // the total, the signature, the paid request and its answer, across every process.
+    // The run's own channel is locked alone, so no other job waits for it.
+    const channelLock = join(
+      dataDir,
+      'model-jobs',
+      `${
+        inferenceRun
+          ? modelInferenceRunScope(this.origin, inferenceRun).id
+          : modelChannelScope(this.origin, 'model-inference').id
+      }.payment.lock`,
+    );
+    let quoted = () => challenge;
+    const paid = await payOn();
     const { result, failure, paymentSent, signingStarted, localBlock, paidError, overCap } = paid;
     if (failure !== undefined) {
       // A refusal before signing or a proven local guard failure can release

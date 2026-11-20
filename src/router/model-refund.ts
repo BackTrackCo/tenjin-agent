@@ -28,7 +28,6 @@ import { RPC_TIMEOUT_MS, type RoutingPayerDeps } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 
 const REFUND_TIMEOUT_MS = 20_000;
-const PROBE_TIMEOUT_MS = 3_000;
 const REFUND_RETRY_MS = 300_000;
 const CORRECTION_RETRY_MS = 2_000;
 const PRE_BROADCAST_ERRORS = new Set([
@@ -316,23 +315,6 @@ function boundedSignal(ms: number, signal?: AbortSignal) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-/** The router gave no answer on refund support: the request failed or timed out, or it
- *  answered a rate limit or a server error (`status`). Nothing was signed or sent for it. */
-export class RefundProbeUnanswered extends Error {
-  constructor(
-    readonly status?: number,
-    options?: ErrorOptions,
-  ) {
-    super(
-      status === undefined
-        ? 'The router did not answer the inference refund probe'
-        : `The router answered the inference refund probe with ${status}`,
-      options,
-    );
-    this.name = 'RefundProbeUnanswered';
-  }
-}
-
 export class ModelRefundJournal {
   private readonly origin: string;
   private readonly fetchImpl: typeof fetch;
@@ -344,39 +326,6 @@ export class ModelRefundJournal {
   ) {
     this.origin = new URL(origin).origin;
     this.fetchImpl = deps.fetchImpl ?? fetch;
-  }
-
-  /**
-   * Whether the router refunds a run's own channel. A request that failed or timed out, a
-   * rate limit and a server error are no answer (`RefundProbeUnanswered`): the caller asks
-   * again. Any other answer that is not a zero-quote challenge means no refunds: nothing
-   * is signed for the probe, so the run keeps the shared channels.
-   */
-  async requireSupport(url: string, signal?: AbortSignal, timeoutMs = PROBE_TIMEOUT_MS) {
-    const endpoint = exactEndpoint(this.origin, url);
-    let response: Response;
-    try {
-      response = await this.fetchImpl(endpoint, {
-        method: 'GET',
-        redirect: 'error',
-        signal: boundedSignal(timeoutMs, signal),
-      });
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new RefundProbeUnanswered(undefined, { cause: error });
-    }
-    try {
-      if (response.status === 429 || response.status >= 500)
-        throw new RefundProbeUnanswered(response.status);
-      try {
-        verifyChallenge(response);
-      } catch {
-        return false;
-      }
-      return response.headers.get('tenjin-inference-refunds') === 'worker-v1';
-    } finally {
-      void response.body?.cancel().catch(() => undefined);
-    }
   }
 
   /** Must run under the worker's lifetime lock before forwarding the payment. */

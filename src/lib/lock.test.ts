@@ -30,7 +30,7 @@ vi.mock('node:fs', async (importOriginal) => {
     },
   };
 });
-import { LockTimeoutError, withFileLock, withFirstFileLock, withRuntimeLock } from './lock';
+import { LockTimeoutError, withFileLock, withRuntimeLock } from './lock';
 import { processStartToken } from './process-identity';
 
 let dir: string;
@@ -97,120 +97,6 @@ describe('withFileLock', () => {
     expect((err as LockTimeoutError).lockPath).toBe(lock);
     expect((err as Error).message).toContain(lock);
     expect((err as Error).message).toMatch(/remove that directory/);
-  });
-});
-
-describe('withFirstFileLock', () => {
-  const gate = () => {
-    let open!: () => void;
-    const opened = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    return { open, opened };
-  };
-
-  it('takes the next lock while the first is held, and the first again once it is free', async () => {
-    // Two sessions queued on one inference lane while the other lane stood idle.
-    const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
-    const release = gate();
-    const entered = gate();
-    const first = withFirstFileLock(locks, async (index) => {
-      entered.open();
-      await release.opened;
-      return index;
-    });
-    await entered.opened;
-    // Held by the first caller: the second runs on the other lock at once.
-    await expect(withFirstFileLock(locks, async (index) => index)).resolves.toBe(1);
-    release.open();
-    await expect(first).resolves.toBe(0);
-    await expect(withFirstFileLock(locks, async (index) => index)).resolves.toBe(0);
-    expect(readdirSync(dir)).toEqual([]);
-  });
-
-  it('waits when every lock is held, says who held the first, and takes whichever is released first', async () => {
-    const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
-    const releases = [gate(), gate()];
-    const entered = [gate(), gate()];
-    const holders = [0, 1].map((n) =>
-      withFirstFileLock(locks, async (index) => {
-        entered[index]!.open();
-        await releases[index]!.opened;
-        return [n, index];
-      }),
-    );
-    await Promise.all(entered.map((e) => e.opened));
-    const held = gate();
-    let holder: number | undefined;
-    let running = 0;
-    const third = withFirstFileLock(
-      locks,
-      async (index) => {
-        running++;
-        return index;
-      },
-      {
-        retryMs: 2,
-        onHeld: (pid) => {
-          holder = pid;
-          held.open();
-        },
-      },
-    );
-    await held.opened;
-    expect(holder).toBe(process.pid);
-    expect(running).toBe(0);
-    // The second lock comes free first: the waiter takes it, not the first in its order.
-    releases[1]!.open();
-    await expect(third).resolves.toBe(1);
-    releases[0]!.open();
-    await expect(Promise.all(holders)).resolves.toEqual([
-      [0, 0],
-      [1, 1],
-    ]);
-  });
-
-  it('never runs two holders of one lock at a time, however many callers share the locks', async () => {
-    const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
-    const inside = [0, 0];
-    let most = 0;
-    const call = () =>
-      withFirstFileLock(
-        locks,
-        async (index) => {
-          inside[index]!++;
-          most = Math.max(most, inside[index]!);
-          await new Promise<void>((resolve) => setImmediate(resolve));
-          inside[index]!--;
-        },
-        { retryMs: 1 },
-      );
-    await Promise.all(Array.from({ length: 12 }, call));
-    expect(most).toBe(1);
-    expect(readdirSync(dir)).toEqual([]);
-  });
-
-  // Whether two callers overlap in time depends on the runner, so no timing is guessed: each
-  // holder stays until the other one is inside too. Locks that let only one caller in at a
-  // time would leave both waiting for each other, and the test would time out.
-  it('lets two callers hold the two locks at once, each its own', async () => {
-    const locks = [join(dir, 'lane-0.lock'), join(dir, 'lane-1.lock')];
-    const held: number[] = [];
-    let bothIn!: () => void;
-    const both = new Promise<void>((resolve) => (bothIn = resolve));
-    const call = () =>
-      withFirstFileLock(
-        locks,
-        async (index) => {
-          held.push(index);
-          if (held.length === 2) bothIn();
-          await both;
-        },
-        { retryMs: 1 },
-      );
-    await Promise.all([call(), call()]);
-    expect([...held].sort()).toEqual([0, 1]);
-    expect(readdirSync(dir)).toEqual([]);
   });
 });
 

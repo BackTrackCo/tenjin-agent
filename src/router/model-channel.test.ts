@@ -17,23 +17,19 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-it('keeps the original channel salts and scopes the second inference channel by origin', () => {
+it('keeps the original channel salts and scopes each channel by origin', () => {
   const origin = 'https://router.test';
   const primary = modelChannelScope(origin, 'model-inference');
-  const secondary = modelChannelScope(origin, 'model-inference', 1);
   const routing = modelChannelScope(origin, 'model-routing');
   // Existing funded channels are identified by these salts onchain.
   expect(primary.salt).toBe('0x428f2d5b25cde2721c60f0be6187c4aff939727a2c38e051c5c0e5a4a3a6f560');
   expect(routing.salt).toBe('0x698b515e6066903a36d0a55ef272ac2e8a97b4e7f906eb7f268d3d567d811a27');
-  expect(modelChannelScope(origin, 'model-inference', 0)).toEqual(primary);
-  expect(modelChannelScope(origin, 'model-routing', 1)).toEqual(routing);
-  expect(modelChannelScope(origin + '/api/model-proxy/messages', 'model-inference', 1)).toEqual(
-    secondary,
+  expect(modelChannelScope(origin, 'model-inference')).toEqual(primary);
+  expect(modelChannelScope(origin, 'model-routing')).toEqual(routing);
+  expect(modelChannelScope(origin + '/api/model-proxy/messages', 'model-inference')).toEqual(
+    primary,
   );
-  expect(secondary.salt).not.toBe(primary.salt);
-  expect(modelChannelScope('http://localhost:3939', 'model-inference', 1).salt).not.toBe(
-    secondary.salt,
-  );
+  expect(modelChannelScope('http://localhost:3939', 'model-inference').salt).not.toBe(primary.salt);
 });
 
 it('funds independent SDK channels for tools, model routing and inference at each server origin, and reuses each model channel', async () => {

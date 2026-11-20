@@ -1,4 +1,3 @@
-import { messagesStreamOffered } from './model-stream';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -890,6 +889,7 @@ it('consumes the server canonical offer contract without enabling an alias or pr
     maxCallDurationMs: 540_000,
     callIdleLimitMs: 300_000,
     callLimit: { max: 120, windowSeconds: 60 },
+    messagesStream: 1,
   });
   expect(modelOfferSchema.safeParse(offer).success).toBe(true);
   expect(modelOfferSchema.safeParse({ ...offer, model: 'other-model' }).success).toBe(false);
@@ -904,6 +904,7 @@ it('consumes the server canonical offer contract without enabling an alias or pr
     'maxCallDurationMs',
     'callIdleLimitMs',
     'callLimit',
+    'messagesStream',
   ]) {
     const rest: Record<string, unknown> = { ...offer };
     delete rest[key];
@@ -919,6 +920,10 @@ it('consumes the server canonical offer contract without enabling an alias or pr
     { maxCallDurationMs: -1 },
     { callIdleLimitMs: null },
     { callLimit: {} },
+    { messagesStream: 2 },
+    { messagesStream: '1' },
+    { messagesStream: true },
+    { messagesStream: null },
   ])
     expect(modelOfferSchema.safeParse({ ...offer, ...patch }).success).toBe(false);
 });
@@ -1035,7 +1040,7 @@ it.each([
 // The optional offer fields a job's calls rely on must reach the stored job record, which is
 // what a worker, a held follow-up and a reload read: the parse once stripped what it did not
 // declare, so a real job always waited the constant.
-it('keeps the optional offer fields in the stored job, and the call wait reads them from there', async () => {
+it('keeps the offer fields in the stored job, and the call wait reads them from there', async () => {
   const f = await routedFixture();
   const extras = {
     maxCallDurationMs: 900_000,
@@ -1057,30 +1062,8 @@ it('keeps the optional offer fields in the stored job, and the call wait reads t
   expect(paidCallTimeoutMs(job!.decision)).toBe(960_000);
   expect(offeredOutputTokens(job!.decision)).toBe(256_000);
   expect(advertisedCallLimit(job!.decision)).toEqual({ max: 120, windowMs: 60_000 });
-  // The stream gate reads the stored record, as a worker and a reload do.
-  expect(messagesStreamOffered(job!.decision)).toBe(true);
-  // Only the version this client speaks opens it; any other value is no offer of one.
-  for (const bad of [2, '1', true, null]) {
-    f.route.mockImplementation(async (input: { jobId: string }) => ({
-      ...offer,
-      jobId: input.jobId,
-      messagesStream: bad,
-    }));
-    const odd = await f.model.capture(f.session, `stream-${String(bad)}`, {
-      prompt: `Read the fixture once more, ${String(bad)}.`,
-    });
-    const stored = await f.model.store.owned(offerId(odd), 'root');
-    expect(stored?.decision).not.toHaveProperty('messagesStream');
-    expect(messagesStreamOffered(stored!.decision)).toBe(false);
-  }
-  // An offer that names none gets the constant.
-  f.route.mockImplementation(async (input: { jobId: string }) => ({
-    ...offer,
-    jobId: input.jobId,
-  }));
-  const plain = await f.model.capture(f.session, 'plain', { prompt: 'Read the fixture again.' });
-  const bare = await f.model.store.owned(offerId(plain), 'root');
-  expect(paidCallTimeoutMs(bare!.decision)).toBe(600_000);
+  // The stream field reads back from the stored record, as a worker and a reload do.
+  expect(job!.decision.messagesStream).toBe(1);
 });
 
 it('takes the authorization from the call, never from a field the offer carries', async () => {

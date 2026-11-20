@@ -214,22 +214,6 @@ async function fixture() {
   };
 }
 
-it('opens a run-scoped channel only when the zero-quote route opts in', async () => {
-  const { journal, state, fetchImpl } = await fixture();
-  await expect(journal.requireSupport(url)).resolves.toBe(true);
-  state.probe = () => challenge({ ...requirements, amount: '0' }, false);
-  await expect(journal.requireSupport(url)).resolves.toBe(false);
-  state.probe = () => new Response(null, { status: 405 });
-  await expect(journal.requireSupport(url)).resolves.toBe(false);
-  // Nothing is signed for the probe, so an answer that is no zero-quote challenge means no refunds.
-  state.probe = () => challenge(requirements);
-  await expect(journal.requireSupport(url)).resolves.toBe(false);
-  await expect(
-    journal.requireSupport('https://other.test/api/model-proxy/messages'),
-  ).rejects.toThrow('Invalid inference refund URL');
-  expect(fetchImpl).toHaveBeenCalledTimes(4);
-});
-
 it('journals only channel metadata and refunds the unspent amount with the pinned SDK', async () => {
   const { dataDir, runId, signer, channelId, signature, record, journal, fetchImpl } =
     await fixture();

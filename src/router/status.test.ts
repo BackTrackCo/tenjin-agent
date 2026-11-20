@@ -65,7 +65,7 @@ describe('status, the balance line', () => {
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
-  it('shows model-routing and inference credit separately from funds for tool routing', async () => {
+  it('shows model-routing and inference credit in JSON, and the model fee line', async () => {
     const result = await runRouterStatus(ctx(), {
       cwd: dir,
       routingCredit: async () => 21000n,
@@ -78,8 +78,8 @@ describe('status, the balance line', () => {
       modelCredit: { remaining: { atomic: '977000' } },
       modelRoutingCredit: { remaining: { atomic: '47000' } },
     });
-    // Off, with credit an earlier job left: the row says both.
-    expect(lines(result)).toContain('Subagents Off · $0.977 set aside');
+    // The inference credit is JSON only; the model fee keeps its own row.
+    expect(lines(result)).toContain('Subagents Off');
     expect(lines(result)).toContain('Model fee $0.047 set aside for model routing');
   });
 

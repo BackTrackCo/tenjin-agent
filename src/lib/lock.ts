@@ -43,14 +43,13 @@ export class LockTimeoutError extends Error {
 }
 
 /**
- * Make one of the lock directories `lockPaths`, the first that is free in the order
- * given, and say which. mkdir is atomic, so a second holder gets EEXIST: `onBusy` is
- * asked first, and that lock is tried again at once when it moved the lock aside. With
- * every lock held, `onHeld` is told once, then this waits `retryMs` and tries them all
- * again until `deadline` on `now`, then throws LockTimeoutError for the first.
+ * Make the lock directory `lockPath`. mkdir is atomic, so a second holder gets EEXIST:
+ * `onBusy` is asked first, and the lock is tried again at once when it moved the lock aside.
+ * While it is held this waits `retryMs` and tries again until `deadline` on `now`, then
+ * throws LockTimeoutError.
  */
 async function acquire(
-  lockPaths: readonly string[],
+  lockPath: string,
   o: {
     deadline: number;
     timeoutMs: number;
@@ -59,32 +58,24 @@ async function acquire(
     /** Makes the lock whole in one step; false when it is held. Default: `mkdir`. */
     make?: (lockPath: string) => boolean;
     onBusy?: (lockPath: string) => boolean;
-    onHeld?: () => void;
     signal?: AbortSignal;
   },
-): Promise<number> {
-  let told = false;
+): Promise<void> {
   for (;;) {
     o.signal?.throwIfAborted();
-    for (let index = 0; index < lockPaths.length;) {
-      try {
-        if (o.make) {
-          if (o.make(lockPaths[index]!)) return index;
-        } else {
-          mkdirSync(lockPaths[index]!);
-          return index;
-        }
-        if (o.onBusy?.(lockPaths[index]!) !== true) index++;
-      } catch (err) {
-        if (!hasCode(err, 'EEXIST')) throw err;
-        if (o.onBusy?.(lockPaths[index]!) !== true) index++;
+    try {
+      if (o.make) {
+        if (o.make(lockPath)) return;
+      } else {
+        mkdirSync(lockPath);
+        return;
       }
+      if (o.onBusy?.(lockPath) === true) continue;
+    } catch (err) {
+      if (!hasCode(err, 'EEXIST')) throw err;
+      if (o.onBusy?.(lockPath) === true) continue;
     }
-    if (!told) {
-      told = true;
-      o.onHeld?.();
-    }
-    if (o.now() >= o.deadline) throw new LockTimeoutError(lockPaths[0]!, o.timeoutMs);
+    if (o.now() >= o.deadline) throw new LockTimeoutError(lockPath, o.timeoutMs);
     await delay(o.retryMs, undefined, { signal: o.signal }).catch((error) => {
       o.signal?.throwIfAborted();
       throw error;
@@ -106,23 +97,7 @@ export async function withFileLock<T>(
   fn: () => Promise<T>,
   opts: FileLockOptions = {},
 ): Promise<T> {
-  return withFirstFileLock([lockPath], fn, opts);
-}
-
-/**
- * `withFileLock` over several locks that guard interchangeable things: `fn` runs holding
- * the first that is free, in the order given, and is told which. With every lock held it
- * waits for whichever comes free first, trying them in that order each round. `onHeld`
- * is told once, when the first round found them all held, with the pid holding the first
- * lock (undefined when its holder cannot be read).
- */
-export async function withFirstFileLock<T>(
-  lockPaths: readonly string[],
-  fn: (index: number) => Promise<T>,
-  opts: FileLockOptions & { onHeld?: (holderPid: number | undefined) => void } = {},
-): Promise<T> {
   const { timeoutMs, retryMs } = { ...DEFAULTS, ...opts };
-  const { onHeld } = opts;
   // One wait reads a holder's start token once per holder it meets, and never on Linux by a fork.
   const read = new Map<string, string | undefined>();
   // WHO HOLDS IT, written before the lock exists: the pid, the process's start token (a reused
@@ -136,7 +111,7 @@ export async function withFirstFileLock<T>(
     owner,
     ...(token === undefined ? {} : { token }),
   });
-  const index = await acquire(lockPaths, {
+  await acquire(lockPath, {
     deadline: performance.now() + timeoutMs,
     timeoutMs,
     retryMs,
@@ -144,9 +119,7 @@ export async function withFirstFileLock<T>(
     signal: opts.signal,
     make: (path) => makeWhole(path, record),
     ...(opts.takeOverDead ? { onBusy: (path: string) => takeOverDeadHolder(path, read) } : {}),
-    ...(onHeld ? { onHeld: () => onHeld(holderPid(lockPaths[0]!)) } : {}),
   });
-  const lockPath = lockPaths[index]!;
   let ino: number | undefined;
   try {
     ino = statSync(lockPath).ino;
@@ -155,7 +128,7 @@ export async function withFirstFileLock<T>(
   }
   try {
     opts.signal?.throwIfAborted();
-    return await fn(index);
+    return await fn();
   } finally {
     // Only a lock that is still this holder's is removed: one a waiter took after judging
     // this holder gone belongs to the taker.
@@ -202,16 +175,6 @@ function stillOurs(lockPath: string, owner: string, ino: number | undefined): bo
     return ino !== undefined && statSync(lockPath).ino === ino;
   } catch {
     return false;
-  }
-}
-
-/** The pid a `withFileLock` directory names as its holder, when it can be read. */
-function holderPid(lockPath: string): number | undefined {
-  try {
-    const pid = (JSON.parse(readFileSync(join(lockPath, 'meta'), 'utf8')) as { pid?: unknown }).pid;
-    return typeof pid === 'number' ? pid : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -438,7 +401,7 @@ export async function withRuntimeLock<T>(
   const lock = join(root, '.lock');
   const deadline = opts.now() + opts.lockWaitMs;
   mkdirSync(root, { recursive: true });
-  await acquire([lock], {
+  await acquire(lock, {
     deadline,
     timeoutMs: opts.lockWaitMs,
     retryMs: LOCK_POLL_MS,

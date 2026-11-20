@@ -716,9 +716,9 @@ async function runQualifiedWorker(
           else
             res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(message));
         };
-        // The provider's events go to the child as they arrive, when it asked for a stream and
-        // the job's router offers one. A child that has gone away is no longer written to; the
-        // call runs on to its receipt.
+        // The provider's events go to the child as they arrive, when it asked for a stream.
+        // A child that has gone away is no longer written to; the call runs on to its
+        // receipt.
         const relayEvent =
           raw.stream === true
             ? (event: StreamEvent) => {

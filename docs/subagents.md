@@ -116,7 +116,7 @@ On native Windows a worker has no shell sandbox:
 - **No Tenjin tools.** Unlike a native subagent, it has none of Tenjin's own tools (`request`, `approve`, `subagent`). What a worker pays for is its model calls, searches and page reads, which count in its job's budget, and a Tenjin lookup of its own would not.
 - **Thinking.** The worker thinks on every turn, at high effort, as the DeepSeek harness does. Neither your own Claude Code settings nor a managed policy turns that off for a worker: `MAX_THINKING_TOKENS=0`, `CLAUDE_CODE_DISABLE_THINKING` and `alwaysThinkingEnabled: false` are set aside for it, also when a managed policy sets them, and a turn that still arrives without thinking is sent with thinking on. The auto-mode classifier's own short requests carry no thinking, as Claude Code sends them.
 - **Images and PDFs.** Unlike a native subagent, the worker cannot see an image or a PDF: Tenjin's router takes text only. An image or document block, in the assignment or in what a tool returns, goes to the model as one line of text that says it was omitted, and the worker works on. The result to the parent counts them (`omitted.blocks`, each block once) and says to run the job natively if it needed that content, and the worker's row says how many; with none omitted, neither appears.
-- **Live replies.** When the router offers a streamed reply, the worker's text, thinking and tool calls appear as the model produces them, as a native subagent's do; otherwise each reply appears once it is complete.
+- **Live replies.** Every worker turn is streamed, so the worker's text, thinking and tool calls appear as the model produces them, as a native subagent's do.
 - **Stopping early.** A worker that stops early returns its last text and recent activity to the parent.
 
 ### Your `~/.claude` folder
@@ -179,7 +179,7 @@ On Linux and macOS:
 
 - Accept one offer with `subagent({offer_id})`. To start several workers together, accept the chosen offers with one `subagent({offer_ids: [id1, id2]})` call. Each offer keeps its own permissions, budget and cancellation, and the call returns one result per offer in the order requested.
 - An offer is accepted by its id in any turn of the session that received it, until it expires 15 minutes after it was made. Another session gets nothing for that id.
-- On a router with shared inference channels, two model calls of your wallet run at the same time, across every session on the machine, and a third waits for a free channel. On a router that supports refunds, each run pays on its own channel and waits for no other worker.
+- Each worker run pays on its own inference channel, so its model calls wait for no other worker.
 - Accepting the same offer again never starts a second worker and adds no charge. While its worker runs, the repeat is refused. After the worker ended, a repeat in any later turn of the same session returns the stored result: the completed result, or for a stopped worker how it ended, its last text and recent steps, the next step, and the spend as it then stands. That read is local and free.
 
 ### Keep an offer native
@@ -322,10 +322,9 @@ These run natively:
 
 - Tenjin refills inference credit as needed, normally depositing up to $0.25 at a time. If one quote requires more than $0.25 in additional credit, Tenjin deposits only the amount that quote needs within the job and daily limits. Smaller deposits leave more USDC available for other workers.
 - Each fresh deposit counts against the existing automatic spend limits as it is sent.
-- On a router that supports refunds, each Claude worker run opens its own inference channel when it first needs to pay. When the worker finishes, stops or fails, Tenjin closes that channel and returns its unused USDC to the funding wallet. If the refund is still pending, Tenjin retries it during the session and when a Claude session starts.
+- Each Claude worker run opens its own inference channel when it first needs to pay. When the worker finishes, stops or fails, Tenjin closes that channel and returns its unused USDC to the funding wallet. If the refund is still pending, Tenjin retries it during the session and when a Claude session starts.
 - `tenjin balance` shows pending and confirmed refunds recorded on this installation. A refund still pending at a router you configured earlier is listed with that router's address, and is retried only while that router is the configured one.
 - When the router's receipt and the chain confirm a refund, its amount comes off the daily budget's count again, so the budget counts what the run cost and not its deposit. A pending refund stays counted. A refund gives back no more than that run's own deposits still count, and nothing once the budget's 24-hour window has rolled. A job's own ceiling counts its calls, not its deposits, so a refund changes nothing there.
-- Other routers use shared inference channels, and `tenjin balance` lists their remaining credit.
 
 ### Uncertain calls, retries and the call rate
 
@@ -339,7 +338,6 @@ These run natively:
 - Native compaction remains enabled, given the window where the DeepSeek harness triggers it at its defaults: `min(0.8 * 1,048,576, 1,048,576 - reply cap - 65,536)`, which is 838,860 at a 65,536 reply cap and 727,040 at 256,000. Claude Code treats that value as a window and takes 33,000 tokens off it (a reserve of up to 20,000 for the summary plus 13,000 of headroom), so compaction fires about 33,000 tokens earlier: near 805,860 and 694,040.
 - One model call waits for the router's answer a minute longer than the router lets a call run, so Tenjin never gives up on a call the router is still serving: the call duration the router's offer names plus a minute. The HTTP client's own waits for headers and body are at least that long.
 - A worker has no separate start-up window, as a native subagent has none: its Claude Code takes the time the machine needs to start, with no limit. Cancel or interrupt a start that takes too long.
-- A job whose first question to the router got no answer in three tries reports `not_started` (`endedBy: "router_unreachable"`). No inference was bought, the routing fee for the offer was already paid, and sending the original call again unchanged runs it natively with no second fee.
 
 ## Hosts
 

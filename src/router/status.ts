@@ -488,12 +488,9 @@ export async function runRouterStatus(
         ...balance,
         today,
         {
-          // Whether DeepSeek subagents are on and where, then the money set aside for them.
+          // Whether DeepSeek subagents are on and where.
           label: 'Subagents',
-          value: [
-            subagentsStatusValue(config),
-            ...(modelCreditAtomic > 0n ? [`${dollars(modelCreditAtomic)} set aside`] : []),
-          ].join(' · '),
+          value: subagentsStatusValue(config),
         },
         ...(modelRoutingCreditAtomic > 0n
           ? [

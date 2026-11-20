@@ -175,7 +175,6 @@ it.each(
     const transport = {
       origin: 'http://localhost:3939',
       route: answering(route),
-      askRefundSupport: async () => true,
       withInferenceRun,
       summary: async () => ({ actualAtomic: '0' }),
     } as unknown as ModelTransport;
@@ -536,19 +535,14 @@ async function ownedClaudeFixture(
     uncertain: [],
   }));
   const reconcile = vi.fn(async (_job: ModelJob) => {});
-  const askRefundSupport = vi.fn(async (_signal: AbortSignal) => true);
-  const inference = {
+  const transport = {
     origin: 'http://localhost:3939',
     route: answering(route),
     requireResumeBudget,
     reconcile,
     summary,
-    askRefundSupport,
     withInferenceRun,
-  };
-  const secondaryTransport = inference as unknown as ModelTransport;
-  const forInferenceSlot = vi.fn((_slot: 0 | 1) => secondaryTransport);
-  const transport = { ...inference, forInferenceSlot } as unknown as ModelTransport;
+  } as unknown as ModelTransport;
   const getTransport = vi.fn(async () => transport);
   // One `tenjin mcp` process: its own server, tool registration and host connection.
   const start = async () => {
@@ -668,10 +662,7 @@ async function ownedClaudeFixture(
     reconcile,
     summary,
     getTransport,
-    forInferenceSlot,
-    secondaryTransport,
     transport,
-    askRefundSupport,
   };
 }
 
@@ -692,31 +683,6 @@ it('runs the unchanged Agent repeat of an offer natively through capture, once, 
     expect(f.route).not.toHaveBeenCalled();
     expect(worker.run).not.toHaveBeenCalled();
   } finally {
-    await f.close();
-  }
-});
-
-it("asks the run's refund-support question while the accept's checks run, and hands its answer to the run", async () => {
-  // Operator item of 2026-11-18: a worker that was ready waited for the accept's checks
-  // and then for this round trip, one after the other.
-  const f = await ownedClaudeFixture();
-  const qualified = worker.qualified.getMockImplementation()!;
-  let askedBeforeChecksEnded: boolean | undefined;
-  worker.qualified.mockImplementation(async (...args: Parameters<typeof qualified>) => {
-    await new Promise((done) => setTimeout(done, 20));
-    askedBeforeChecksEnded = f.askRefundSupport.mock.calls.length > 0;
-    return qualified(...args);
-  });
-  const answer = Promise.resolve(false);
-  f.askRefundSupport.mockReturnValue(answer);
-  const run = vi.spyOn(f.transport, 'withInferenceRun');
-  try {
-    expect(await f.call({ offer_id: f.job.id })).toMatchObject({ status: 'completed' });
-    expect(askedBeforeChecksEnded).toBe(true);
-    expect(f.askRefundSupport).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]![4]).toBe(answer);
-  } finally {
-    worker.qualified.mockImplementation(qualified);
     await f.close();
   }
 });
@@ -1909,47 +1875,6 @@ it('hands back a worker that never started as not started, with the free native 
   }
 });
 
-// Live case (job 77f41059): a job ended `unknown` after 3.0 s with nothing to say what failed.
-it('ends a job whose router did not answer at its start as not started, and keeps the error in its record', async () => {
-  const f = await ownedClaudeFixture('general-purpose', true);
-  const transport = await f.getTransport();
-  const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
-  transport.withInferenceRun = async () => {
-    throw new ModelWorkerStopped(
-      { kind: 'not_started', reason: 'router_unreachable' },
-      {
-        cause: new Error('The router did not answer the inference refund probe', {
-          cause: timeout,
-        }),
-      },
-    );
-  };
-  try {
-    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
-      status: 'not_started',
-      endedBy: 'router_unreachable',
-      ended: WORKER_ENDS.router_unreachable,
-      stopReason: { kind: 'not_started', reason: 'router_unreachable' },
-      nextStep:
-        'No worker started: the Tenjin router did not answer when the job started. Keep it native: send the original Agent call again unchanged; that repeat costs no second routing fee.',
-    });
-    expect(worker.run).not.toHaveBeenCalled();
-    const record = JSON.parse(
-      await readFile(join(dir, 'model-jobs', `${f.job.id}.diagnostics.json`), 'utf8'),
-    );
-    expect(record.failure).toEqual({
-      endedBy: 'router_unreachable',
-      errors: [
-        { name: 'ModelWorkerStopped', code: 'router_unreachable', message: expect.any(String) },
-        { name: 'Error', message: 'The router did not answer the inference refund probe' },
-        { name: 'TimeoutError', message: 'The operation was aborted due to timeout' },
-      ],
-    });
-  } finally {
-    await f.close();
-  }
-});
-
 it('keeps the error of a worker that failed with no known cause, with secret-shaped text masked', async () => {
   const f = await ownedClaudeFixture();
   worker.run.mockRejectedValue(
@@ -2487,8 +2412,7 @@ it('accepts a foreground and a background offer in one batch: the background one
   try {
     const batch = f.call({ offer_ids: [f.job.id, background.id] });
     await vi.waitFor(() => expect(finish.size).toBe(2));
-    // Each on a channel of its own, as two foreground workers of one batch are.
-    expect(f.forInferenceSlot).toHaveBeenCalledWith(1);
+    // Each worker runs on its own run's channel.
     finish.get(f.job.id)!('foreground report');
     const { results } = await batch;
     expect(results[0]).toMatchObject({
@@ -2557,9 +2481,8 @@ it('runs two batched offers concurrently and returns separate results after canc
     await started;
     expect(worker.run.mock.calls.map(([, options]) => options.transport)).toEqual([
       await f.getTransport(),
-      f.secondaryTransport,
+      await f.getTransport(),
     ]);
-    expect(f.forInferenceSlot.mock.calls).toEqual([[1]]);
     // A repeated accept of a running offer starts no third worker.
     expect((await f.call({ offer_id: second.id })).reason).toContain('still running');
     expect(await f.call({ cancel: second.id })).toEqual({ status: 'cancelled' });
@@ -2601,7 +2524,6 @@ it('runs two batched offers concurrently and returns separate results after canc
       ],
     });
     expect(worker.run.mock.calls[2]?.[1].transport).toBe(await f.getTransport());
-    expect(f.forInferenceSlot.mock.calls).toEqual([[1]]);
   } finally {
     await f.close();
   }

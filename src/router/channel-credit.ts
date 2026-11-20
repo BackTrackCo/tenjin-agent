@@ -34,9 +34,9 @@ async function bestCredit(dir: string): Promise<bigint> {
 }
 
 /**
- * What the wallet has set aside in the active routing channel, or in both
- * reusable inference channels. Each directory may contain earlier channel
- * records, so take its largest available balance before totaling the slots.
+ * What the wallet has set aside in the active routing channel, or in the
+ * reusable inference channel. Each directory may contain earlier channel
+ * records, so take its largest available balance.
  */
 export async function channelCredit(
   dataDir: string,
@@ -46,12 +46,9 @@ export async function channelCredit(
 ): Promise<bigint> {
   if (lane === 'tool') return bestCredit(payerDir(dataDir, address));
   if (!origin) throw new Error('Model credit requires its server origin');
-  if (lane === 'model-routing') return bestCredit(modelChannelDir(dataDir, address, lane, origin));
-  const [primary, parallel] = await Promise.all([
-    bestCredit(modelChannelDir(dataDir, address, 'model-inference', origin)).catch(() => 0n),
-    bestCredit(modelChannelDir(dataDir, address, 'model-inference', origin, 1)).catch(() => 0n),
-  ]);
-  return primary + parallel;
+  return bestCredit(
+    modelChannelDir(dataDir, address, lane === 'model' ? 'model-inference' : lane, origin),
+  );
 }
 
 /**

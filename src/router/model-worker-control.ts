@@ -4,7 +4,6 @@ export type WorkerStop = {
   kind: 'harness_limit' | 'provider_limit' | 'execution_failure' | 'not_started';
   reason:
     | 'startup_timeout'
-    | 'router_unreachable'
     | 'turn_guard'
     | 'budget_guard'
     | 'structured_output_guard'
@@ -200,8 +199,6 @@ export const WORKER_ENDS = {
   output_limit: "It reached the model's output limit.",
   context_limit: "It reached the model's context limit.",
   not_started: 'Its Claude Code did not start.',
-  router_unreachable:
-    'The Tenjin router did not answer when the job started, so no worker ran and no inference was bought.',
   model_call_failed:
     'Its model call through Tenjin returned no result; that call stays reserved until its receipt is read.',
   model_call_timeout:
@@ -225,7 +222,6 @@ export function workerEnd(stop: WorkerStop | undefined): WorkerEnd {
     case 'model_call_failed':
     case 'model_call_timeout':
     case 'payment_refused':
-    case 'router_unreachable':
       return stop.reason;
     case 'provider_failed':
       // A refusal is its own end: the parent and the person read why, not a bare

@@ -1,22 +1,20 @@
 /**
  * THE STREAMED MESSAGES REPLY, the client's side of the router's contract.
  *
- * A router whose offer carries `messagesStream: 1` takes `stream: true` beside `messages`
- * in the Messages body. Its answer to the paid request is then, from the first provider
- * event, `text/event-stream` with `tenjin-model-stream: 1`: the provider's Messages events
- * in order, a `: keep` comment after 15 s of quiet, and one last event that is the whole
- * answer's response (`tenjin_result` for a 200, `tenjin_error` otherwise) with data
- * `{status, headers, body}`. A request that ends before the first event answers as without
- * `stream` (the 402 quote, a refusal, an error). A stream that ends with no last event is a
- * lost stream.
+ * Every worker offer carries `messagesStream: 1`, and a worker turn takes `stream: true`
+ * beside `messages` in the Messages body. Its answer to the paid request is then, from the
+ * first provider event, `text/event-stream` with `tenjin-model-stream: 1`: the provider's
+ * Messages events in order, a `: keep` comment after 15 s of quiet, and one last event that
+ * is the whole answer's response (`tenjin_result` for a 200, `tenjin_error` otherwise) with
+ * data `{status, headers, body}`. A request that ends before the first event answers as
+ * without `stream` (the 402 quote, a refusal, an error). A stream that ends with no last
+ * event is a lost stream.
  *
  * This reads such a stream, hands each provider event on as it arrives, and returns the last
  * event as the Response the whole answer would have been, so the payer, the receipt and the
  * settlement see exactly what they see for a whole answer. Nothing here moves money.
  */
 
-/** The version of the stream a router offers (`messagesStream`) and this client speaks. */
-export const MESSAGES_STREAM_VERSION = 1;
 /** Beyond the router's own idle limit, so the router's cut arrives before the client's. The
  *  router sends a `: keep` comment every 15 s, so a live stream never nears it. */
 export const STREAM_IDLE_MARGIN_MS = 30_000;
@@ -25,11 +23,6 @@ export const STREAM_EVENT_BYTES = 64 * 1024 * 1024;
 
 /** The longest wait a timer holds: Node runs a longer one after 1 ms. */
 export const MAX_TIMER_MS = 2 ** 31 - 1;
-
-/** Whether this offer advertises the stream this client speaks. Anything else is closed. */
-export function messagesStreamOffered(decision: Record<string, unknown>): boolean {
-  return decision.messagesStream === MESSAGES_STREAM_VERSION;
-}
 
 /** How long the client waits for the next received bytes of a stream: the idle limit the
  *  offer names plus the margin. The offer always names it; one that does not is invalid. */

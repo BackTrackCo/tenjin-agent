@@ -107,13 +107,9 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
       },
       tries: 1,
       timing: {
-        slot: 1,
         quoteMs: 180.4,
-        laneWaitMs: 12_000,
         signMs: 40,
         answerMs: 2_900,
-        laneMoved: true,
-        waitedOn: 'other_process',
         paceWaitMs: 41_250,
       },
     },
@@ -127,7 +123,7 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
     {
       usage: { output_tokens: 5 },
       // Fixed codes only: any other value is left out.
-      timing: { slot: 1, laneWaitMs: 3, waitedOn: 'PRIVATE_' as never, laneMoved: 1 as never },
+      timing: { gateMs: 3, quoteMs: 'PRIVATE_' as never },
     },
     20_000,
   );
@@ -142,17 +138,13 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
       cachedTokens: 640,
       outputTokens: 200,
       thinkingTokens: 16,
-      slot: 1,
       quoteMs: 180,
-      laneWaitMs: 12_000,
       signMs: 40,
       answerMs: 2_900,
-      laneMoved: true,
-      waitedOn: 'other_process',
       paceWaitMs: 41_250,
     },
     { at: 600, live: 1, ms: 15_500, tries: 2, failed: true },
-    { at: 18_100, live: 0, gapMs: 2_000, ms: 900, outputTokens: 5, slot: 1, laneWaitMs: 3 },
+    { at: 18_100, live: 0, gapMs: 2_000, ms: 900, outputTokens: 5, gateMs: 3 },
   ]);
   expect(callTotals).toEqual({
     count: 3,
@@ -161,7 +153,7 @@ it('keeps each model call: its wait for the lane, its round trips, its tokens an
     prepMs: 20,
     outputTokens: 205,
     quoteMs: 180,
-    laneWaitMs: 12_003,
+    gateMs: 3,
     signMs: 40,
     answerMs: 2_900,
     paceWaitMs: 41_250,
@@ -256,10 +248,7 @@ it('keeps the time to the first event beside the time to the last, for a streame
   const record = new WorkerDiagnosticsRecord('job', 100_000, 65_536);
   record
     .call(1_000)
-    .done(
-      { usage: { output_tokens: 9 }, timing: { slot: 0, ttfbMs: 350.4, answerMs: 41_000.2 } },
-      42_500,
-    );
+    .done({ usage: { output_tokens: 9 }, timing: { ttfbMs: 350.4, answerMs: 41_000.2 } }, 42_500);
   const { calls, callTotals } = record.snapshot();
   expect(calls[0]).toMatchObject({ ttfbMs: 350, answerMs: 41_000 });
   expect(callTotals).toMatchObject({ ttfbMs: 350, answerMs: 41_000 });
