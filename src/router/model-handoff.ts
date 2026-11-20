@@ -78,9 +78,9 @@ export const modelOfferSchema = z.object({
   maxCallDurationMs: z.number().int().nonnegative(),
   /** The router's idle limit for one call, in ms. */
   callIdleLimitMs: z.number().int().nonnegative(),
-  /** The version of the streamed Messages reply this router speaks. It is sent only behind
-   *  the router's own flag; an offer without it, or with another value, gets none. */
-  messagesStream: z.literal(1).optional().catch(undefined),
+  /** The version of the streamed Messages reply this router speaks. The router always sends
+   *  it, so an offer without it, or with another value, is invalid and the call stays native. */
+  messagesStream: z.literal(1),
 });
 export interface ModelSession {
   sessionId: string;

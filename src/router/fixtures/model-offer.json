@@ -22,5 +22,6 @@
   "callLimit": {
     "max": 120,
     "windowSeconds": 60
-  }
+  },
+  "messagesStream": 1
 }

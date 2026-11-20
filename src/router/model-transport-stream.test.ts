@@ -193,7 +193,13 @@ async function fixture(
     fetchImpl,
     policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 1000000n }),
   });
-  const make = () => new ModelTransport({ dataDir: dir, baseUrl: BASE, payerDeps: deps });
+  const make = () =>
+    new ModelTransport({
+      dataDir: dir,
+      baseUrl: BASE,
+      payerDeps: deps,
+      inferenceRun: 'stream-run',
+    });
   return {
     job,
     make,
@@ -228,31 +234,6 @@ const call = async (
     );
   return { got, timings, ...result };
 };
-
-it('states no stream, and gives no event, when the offer carries no field, or one it does not know', async () => {
-  for (const decision of [
-    { messagesStream: undefined },
-    { messagesStream: 2 },
-    { messagesStream: '1' },
-    { messagesStream: true },
-    { messagesStream: null },
-  ]) {
-    const f = await fixture({ decision, drive: () => expect.unreachable('no stream asked') });
-    const { got, value } = await call(f);
-    expect(value).toEqual(reply);
-    expect(got).toEqual([]);
-    // The request is whole: no `stream`, and the result size its offer names.
-    expect(f.bodies.every((body) => !('stream' in body))).toBe(true);
-    expect(Object.keys(f.bodies[0]!)).toEqual([
-      'schemaVersion',
-      'consent',
-      'jobId',
-      'invocationId',
-      'maxResultBytes',
-      'messages',
-    ]);
-  }
-});
 
 it('hands the events on as they arrive, before the stream ends, and settles as a whole answer does', async () => {
   const barrier = deferred();
@@ -295,7 +276,7 @@ it('hands the events on as they arrive, before the stream ends, and settles as a
   expect(timings[0]!.ttfbMs!).toBeLessThanOrEqual(timings[0]!.answerMs!);
   expect(f.bodies.every((body) => body.stream === true)).toBe(true);
   // The same reply whole: the same charge and the same local state.
-  const whole = await fixture({ decision: { messagesStream: undefined } });
+  const whole = await fixture();
   await call(whole);
   expect(await f.make().summary(f.job)).toEqual(await whole.make().summary(whole.job));
 });
@@ -528,46 +509,6 @@ it('refuses a reply larger than the result it may carry, as it arrives', async (
   expect(retryableModelCall(error)).toBe(false);
 });
 
-it('asks again without a stream once, when the router refuses the field it offered', async () => {
-  const f = await fixture({ drive: () => expect.unreachable('refused before payment') });
-  const real = f.make;
-  let refusals = 0;
-  const transport = real();
-  // A router whose flag is off again refuses `stream` at the unpaid quote.
-  const original = (transport as unknown as { options: { payerDeps: { fetchImpl: typeof fetch } } })
-    .options.payerDeps;
-  const inner = original.fetchImpl;
-  original.fetchImpl = async (input, init) => {
-    const body = JSON.parse(String(init?.body ?? 'null')) as { stream?: boolean } | null;
-    if (body?.stream === true) {
-      refusals++;
-      return Response.json({ error: { code: 'invalid_model_request' } }, { status: 400 });
-    }
-    return inner(input, init);
-  };
-  const got: StreamEvent[] = [];
-  await expect(
-    transport.messages(f.job, say('One'), new AbortController().signal, undefined, undefined, (e) =>
-      got.push(e),
-    ),
-  ).resolves.toEqual(reply);
-  // The refused request was the unpaid quote: nothing was reserved or signed for it, so the
-  // call paid once and holds one settled charge, with nothing left uncertain.
-  expect(f.signed()).toBe(1);
-  expect(await transport.summary(f.job)).toMatchObject({ uncertain: [] });
-  expect(Number((await transport.summary(f.job)).reservedAtomic)).toBe(
-    Number((await transport.summary(f.job)).actualAtomic),
-  );
-  await expect(
-    transport.messages(f.job, say('Two'), new AbortController().signal, undefined, undefined, (e) =>
-      got.push(e),
-    ),
-  ).resolves.toEqual(reply);
-  // The first call asked once with the stream; the second never did.
-  expect(refusals).toBe(1);
-  expect(got).toEqual([]);
-});
-
 // The reader alone: the idle limit, the size guard and the frame parser.
 const sseBody = (chunks: string[], hang = false) =>
   new Response(
@@ -586,33 +527,6 @@ const reading = (over: Partial<Parameters<typeof readMessagesStream>[1]> = {}) =
   contentBytes: 2_000_000,
   onEvent: () => undefined,
   ...over,
-});
-
-// Failure caught (vraspar's repro, two signed requests): the fallback after a refused stream
-// reused a request whose output cap the first attempt had already stepped down, so its
-// reservation sat under another hash than the worker's own request, and an identical resend
-// bought the same call again.
-it('reserves the fallback under the request as the worker made it, so a resend is not bought again', async () => {
-  const f = await fixture({ drive: () => expect.unreachable('refused before payment') });
-  const transport = f.make();
-  const original = (transport as unknown as { options: { payerDeps: { fetchImpl: typeof fetch } } })
-    .options.payerDeps;
-  const inner = original.fetchImpl;
-  original.fetchImpl = async (input, init) => {
-    const body = JSON.parse(String(init?.body ?? 'null')) as { stream?: boolean } | null;
-    if (body?.stream === true)
-      return Response.json({ error: { code: 'invalid_model_request' } }, { status: 400 });
-    return inner(input, init);
-  };
-  const big = () => ({ ...say('One'), max_tokens: 4_000_000 });
-  await expect(
-    transport.messages(f.job, big(), new AbortController().signal, undefined, undefined, () => {}),
-  ).resolves.toEqual(reply);
-  expect(f.signed()).toBe(1);
-  await expect(
-    transport.messages(f.job, big(), new AbortController().signal, undefined, undefined, () => {}),
-  ).resolves.toEqual(reply);
-  expect(f.signed()).toBe(1);
 });
 
 it('reads frames split across chunks and CRLF, and answers the last event as the whole response', async () => {

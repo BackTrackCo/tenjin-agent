@@ -179,8 +179,7 @@ it.each(['completed', 'stopped'] as const)(
         origin: settings.routerOrigin,
         summary: async () => spend,
         reconcile: async () => undefined,
-        askRefundSupport: async () => false,
-        // A router with no refund support: the worker runs on the transport as it is.
+        // The test worker runs on the transport as it is.
         withInferenceRun: <T>(
           _runId: string,
           _signal: AbortSignal,
