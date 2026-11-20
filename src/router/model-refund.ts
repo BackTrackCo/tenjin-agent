@@ -10,7 +10,7 @@ import {
   readChannelBalanceAndTotalClaimed,
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
-import { lstat, opendir } from 'node:fs/promises';
+import { lstat, opendir, readFile, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
   encodeAbiParameters,
@@ -97,8 +97,6 @@ const record = z.object({
   sealed: z.boolean(),
   submitted: receipt.extend({ balance: uint }).optional(),
   state: z.enum(['pending', 'no_balance', 'closed', 'refunded']),
-  /** Why the last try left it pending, for whoever looks at a refund that waits. No secrets. */
-  note: z.string().max(200).optional(),
 });
 const settlement = z.object({
   success: z.literal(true),
@@ -146,6 +144,32 @@ function refundDir(dataDir: string) {
 
 function recordPath(dataDir: string, origin: string, runId: string) {
   return join(refundDir(dataDir), modelInferenceRunScope(origin, runId).id + '.json');
+}
+
+/**
+ * WHY A PENDING REFUND WAITS lives beside its record, never in it: a diagnostic written
+ * from any session, locked or not, must not be able to change a payment record. Whole
+ * file, private, replaced by rename; removed when the refund finishes.
+ */
+function notePath(path: string) {
+  return path.replace(/\.json$/, '.note');
+}
+
+async function writeNote(path: string, why: string) {
+  if ((await readNote(path)) === why) return;
+  await writePrivate(notePath(path), why.slice(0, 200));
+}
+
+async function readNote(path: string) {
+  const raw = await readFile(notePath(path), 'utf8').catch(() => undefined);
+  return raw === undefined || raw.length > 200 ? undefined : raw;
+}
+
+/** The reason a pending refund waits, or undefined when it has none or is no longer pending. */
+export async function readModelRefundNote(dataDir: string, origin: string, runId: string) {
+  const path = recordPath(dataDir, origin, runId);
+  const saved = await readRecord(path).catch(() => null);
+  return saved?.state === 'pending' ? readNote(path) : undefined;
 }
 
 export function modelRefundRunLock(dataDir: string, origin: string, runId: string) {
@@ -420,22 +444,16 @@ export class ModelRefundJournal {
   }
 
   /** Records why a pending refund was left pending, once per reason. */
-  private async wait(path: string, saved: RunRecord, why: string): Promise<ModelRefundResult> {
-    if (saved.note !== why) {
-      saved.note = why;
-      await writeRecord(path, saved).catch(() => undefined);
-    }
+  private async wait(path: string, why: string): Promise<ModelRefundResult> {
+    await writeNote(path, why).catch(() => undefined);
     return { state: 'pending' };
   }
 
+  /** Only the side note is written, so a session that never held the lock cannot touch the record. */
   private async noteFailure(path: string, error: unknown) {
     const why = `failed: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 150)}`;
-    // Unlocked: the note is a diagnostic, and only a still-pending record is touched.
     const saved = await readRecord(path);
-    if (saved && saved.state === 'pending' && saved.note !== why) {
-      saved.note = why;
-      await writeRecord(path, saved);
-    }
+    if (saved && saved.state === 'pending') await writeNote(path, why);
   }
 
   private async refund(
@@ -444,12 +462,12 @@ export class ModelRefundJournal {
     signal: AbortSignal,
   ): Promise<ModelRefundResult> {
     const readContract = this.deps.readContract;
-    if (!readContract || !this.deps.readChainId) return this.wait(path, saved, 'no chain reads');
+    if (!readContract || !this.deps.readChainId) return this.wait(path, 'no chain reads');
     const signer = await this.deps.getSigner();
     if (saved.channel.payer !== signer.address.toLowerCase())
-      return this.wait(path, saved, 'another wallet');
+      return this.wait(path, 'another wallet');
     if (saved.network !== `eip155:${await this.deps.readChainId(RPC_TIMEOUT_MS)}`) {
-      return this.wait(path, saved, 'another chain');
+      return this.wait(path, 'another chain');
     }
     const clientSigner = toClientEvmSigner(
       {
@@ -467,14 +485,14 @@ export class ModelRefundJournal {
       },
     );
     if (!(await this.fundingSettled(saved, readContract, signal)))
-      return this.wait(path, saved, 'deposit not settled');
+      return this.wait(path, 'deposit not settled');
     const [balance, totalClaimed] = await readChannelBalanceAndTotalClaimed(
       clientSigner,
       saved.channelId,
     );
     if (balance === totalClaimed) return this.finish(path, saved, balance);
     if (balance < totalClaimed || saved.submitted || saved.retryAfter > this.now()) {
-      return this.wait(path, saved, 'waiting to retry');
+      return this.wait(path, 'waiting to retry');
     }
 
     const storage = new FileClientChannelStorage({
@@ -565,7 +583,7 @@ export class ModelRefundJournal {
         }
       },
     });
-    if (!saved.submitted) return this.wait(path, saved, 'no refund receipt');
+    if (!saved.submitted) return this.wait(path, 'no refund receipt');
     const [after, claimed] = await readChannelBalanceAndTotalClaimed(clientSigner, saved.channelId);
     return after === claimed ? this.finish(path, saved, after) : { state: 'pending' };
   }
@@ -620,6 +638,7 @@ export class ModelRefundJournal {
       saved.state = saved.retryAfter > 0 ? 'closed' : 'no_balance';
     }
     await writeRecord(path, saved);
+    await rm(notePath(path), { force: true }).catch(() => undefined);
     return refundResult(saved);
   }
 

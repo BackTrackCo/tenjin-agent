@@ -14,7 +14,7 @@ import {
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TypedDataDefinition } from 'viem';
@@ -31,6 +31,7 @@ import {
   modelRefundRunLock,
   readModelRefundResult,
   readModelRefundSummary,
+  readModelRefundNote,
 } from './model-refund';
 
 const origin = 'https://router.test';
@@ -271,9 +272,30 @@ it('keeps the reason a pending refund could not close with its record', async ()
   state.probe = () => challenge({ ...requirements, amount: '0', payTo: requirements.asset });
   await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
   const dir = join(dataDir, 'model-refunds');
+  const files = (await readdir(dir)).sort();
+  expect(files).toHaveLength(2);
+  const note = await readFile(join(dir, files[1]!), 'utf8');
+  expect(files[1]).toMatch(/\.note$/);
+  expect(note).toMatch(/^(failed: |waiting|deposit|no chain|another)/);
+  expect((await stat(join(dir, files[1]!))).mode & 0o777).toBe(0o600);
+  // The record itself carries no note.
+  expect(JSON.parse(await readFile(join(dir, files[0]!), 'utf8'))).not.toHaveProperty('note');
+  await expect(readModelRefundNote(dataDir, origin, runId)).resolves.toBe(note);
+});
+
+// A session that timed out on the lock only writes the side note: the record stays byte for
+// byte what the lock holder saved, even when that session read it before the holder's write.
+it('leaves the record byte-identical when a recovery could not take the lock', async () => {
+  const { dataDir, runId, record, journal } = await fixture();
+  await record();
+  const dir = join(dataDir, 'model-refunds');
   const [file] = await readdir(dir);
-  const saved = JSON.parse(await readFile(join(dir, file!), 'utf8')) as { note?: string };
-  expect(saved.note).toMatch(/^(failed: |waiting|deposit)/);
+  const before = await readFile(join(dir, file!), 'utf8');
+  await withFileLock(modelRefundRunLock(dataDir, origin, runId), async () => {
+    await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
+  });
+  expect(await readFile(join(dir, file!), 'utf8')).toBe(before);
+  await expect(readModelRefundNote(dataDir, origin, runId)).resolves.toMatch(/^failed: /);
 });
 
 // After a base URL change `tenjin balance` showed nothing of these. A refund request carries
