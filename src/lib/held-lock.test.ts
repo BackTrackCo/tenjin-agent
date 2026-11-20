@@ -2,7 +2,6 @@ import {
   closeSync,
   constants,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -22,6 +21,7 @@ import {
   HeldLockTimeoutError,
   holdLock,
   holdLockWith,
+  lockSupport,
   LockUnavailableError,
   openAttempt,
   resetSelfTest,
@@ -30,20 +30,7 @@ import {
   withHeldLock,
   type OpenDeps,
 } from './held-lock';
-import {
-  entryGone,
-  entryName,
-  linuxAttempt,
-  parseEntry,
-  parseStat,
-  readIdentity,
-  reapLockDir,
-  reapPrepared,
-  systemFs,
-  type Identity,
-  type LinuxDeps,
-  type Proc,
-} from './held-lock-linux';
+import { forgetSqlite, loadSqlite, sqliteAttempt } from './held-lock-sqlite';
 import { child, holder as startHolder, killChildren, probe } from './held-lock-test/child';
 import { LockTimeoutError } from './lock';
 
@@ -83,6 +70,27 @@ it('is the only code that names a lock file: nothing else opens, reads or delete
 });
 
 describe('held lock, every platform', () => {
+  it('discards an idle lock file and leaves a held one', async () => {
+    const lock = join(tmp, 'discard');
+    (await holdLock(lock))();
+    expect(await discardHeldLock(lock)).toBe(true);
+    expect(existsSync(heldPath(lock))).toBe(false);
+    const held = await startHolder(lock);
+    expect(await discardHeldLock(lock)).toBe(false);
+    expect(existsSync(heldPath(lock))).toBe(true);
+    await held.release();
+  });
+
+  it('sweeps only the names it is told are eligible', async () => {
+    const keep = join(tmp, 'keep.held');
+    const drop = join(tmp, 'drop.held');
+    writeFileSync(keep, '');
+    writeFileSync(drop, '');
+    await sweepHeldLocks(tmp, async (name) => name === 'drop.held');
+    expect(existsSync(keep)).toBe(true);
+    expect(existsSync(drop)).toBe(false);
+  });
+
   it('rejects a zero-wait probe while this process holds it', async () => {
     const lock = join(tmp, 'a');
     const release = await holdLock(lock);
@@ -109,11 +117,8 @@ describe('held lock, every platform', () => {
   it.skipIf(!posix)('keeps the lock of a stopped holder', async () => {
     const lock = join(tmp, 'd');
     const held = await startHolder(lock);
-    const before = existsSync(heldPath(lock)) ? readdirOrFile(heldPath(lock)) : [];
     held.proc.kill('SIGSTOP');
     await expect(holdLock(lock, { timeoutMs: 0 })).rejects.toBeInstanceOf(LockTimeoutError);
-    // Nothing was evicted: on Linux the entry is unchanged.
-    expect(readdirOrFile(heldPath(lock))).toEqual(before);
     held.proc.kill('SIGCONT');
     await held.release();
     (await holdLock(lock, { timeoutMs: 1000 }))();
@@ -136,7 +141,6 @@ describe('held lock, every platform', () => {
     const waiting = holdLock(lock, { timeoutMs: 10_000, retryMs: 5, signal: abort.signal });
     setTimeout(() => abort.abort(), 30);
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    expect(readdirSync(tmp).filter((name) => name.includes('.held.new-'))).toEqual([]);
     await expect(holdLock(lock, { timeoutMs: 0 })).rejects.toBeInstanceOf(LockTimeoutError);
     release();
   });
@@ -146,7 +150,7 @@ describe('held lock, every platform', () => {
     const release = await holdLock(lock);
     const error = await holdLock(lock, { timeoutMs: 20, retryMs: 5 }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(HeldLockTimeoutError);
-    expect(error).toMatchObject({ name: 'LockTimeoutError', lockPath: lock });
+    expect(error).toMatchObject({ name: 'LockTimeoutError', lockPath: heldPath(lock) });
     expect((error as Error).message).toContain('Another Tenjin process holds');
     release();
   });
@@ -169,10 +173,6 @@ describe('held lock, every platform', () => {
     release();
   });
 });
-
-function readdirOrFile(path: string): string[] {
-  return statSync(path).isDirectory() ? readdirSync(path) : [];
-}
 
 describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows)', () => {
   beforeEach(() => resetSelfTest());
@@ -232,325 +232,67 @@ describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows
       release();
     },
   );
-
-  it('discards an idle lock file and leaves a held one', async () => {
-    const lock = join(tmp, 'discard');
-    (await holdLock(lock))();
-    expect(await discardHeldLock(lock)).toBe(true);
-    expect(existsSync(heldPath(lock))).toBe(false);
-    const held = await startHolder(lock);
-    expect(await discardHeldLock(lock)).toBe(false);
-    expect(existsSync(heldPath(lock))).toBe(true);
-    await held.release();
-  });
-
-  it('sweeps only the names it is told are eligible', async () => {
-    const keep = join(tmp, 'keep.held');
-    const drop = join(tmp, 'drop.held');
-    writeFileSync(keep, '');
-    writeFileSync(drop, '');
-    await sweepHeldLocks(tmp, async (name) => name === 'drop.held');
-    expect(existsSync(keep)).toBe(true);
-    expect(existsSync(drop)).toBe(false);
-  });
 });
 
-// ---------------------------------------------------------------------------
-// The Linux scheme, forced through injected /proc readers and forged entry names. The
-// rename-onto-an-empty-directory rule these rely on holds on Linux and macOS.
-// ---------------------------------------------------------------------------
+// The Linux primitive, on any platform that has node:sqlite.
+describe.skipIf(loadSqlite() === null)('exclusive SQLite transaction (Linux primitive)', () => {
+  const attemptOn = (lock: string) => sqliteAttempt(heldPath(lock), loadSqlite()!);
 
-const NS = '4026532381';
-const BOOT = 'b'.repeat(32);
-const MACHINE = 'a'.repeat(32);
-
-function world() {
-  const live = new Map<number, { state: string; ticks: string }>();
-  const proc: Proc = {
-    read(path) {
-      const m = /^\/proc\/(\d+)\/stat$/.exec(path);
-      const entry = m ? live.get(Number(m[1])) : undefined;
-      return entry
-        ? `${m![1]} (cmd (x)) ${[entry.state, ...Array<string>(18).fill('0'), entry.ticks].join(' ')}\n`
-        : undefined;
-    },
-    readlink: () => undefined,
-    kill0: (pid) => (live.has(pid) ? 'exists' : 'gone'),
-  };
-  return { live, proc };
-}
-
-const identity = (pid: number, over: Partial<Identity> = {}): Identity => ({
-  pid,
-  ticks: '1000',
-  pidns: NS,
-  offset: '0_0',
-  boot: BOOT,
-  machine: MACHINE,
-  ...over,
-});
-
-function deps(
-  w: ReturnType<typeof world>,
-  self: Identity,
-  extra: Partial<LinuxDeps> = {},
-): LinuxDeps {
-  return { fs: systemFs, proc: w.proc, self: () => self, ...extra };
-}
-
-describe.skipIf(!posix)('named-entry lock (Linux scheme)', () => {
-  const lockDir = () => join(tmp, 'l.held');
-  const names = () => readdirSync(lockDir());
-  /** A holder with pid `pid` that is alive in the fake world. */
-  function holderOf(w: ReturnType<typeof world>, pid: number, over: Partial<Identity> = {}) {
-    const id = identity(pid, over);
-    w.live.set(pid, { state: 'S', ticks: id.ticks });
-    const release = linuxAttempt(lockDir(), deps(w, id)).tryOnce();
+  it('starts over on the new file when the lock file is deleted after its connection opened', async () => {
+    const lock = join(tmp, 'sq-ino');
+    const holding = await holdLockWith((path) => sqliteAttempt(path, loadSqlite()!), lock);
+    const waiter = attemptOn(lock);
+    // Busy: this connection is open on the first file.
+    expect(waiter.tryOnce()).toBeNull();
+    unlinkSync(heldPath(lock));
+    holding();
+    // The old file is free, but it is no longer the lock file: the waiter ends on the new one.
+    const release = waiter.tryOnce();
     expect(release).not.toBeNull();
-    return { id, release: release! };
-  }
-  const judge = (w: ReturnType<typeof world>, selfOver: Partial<Identity> = {}) =>
-    linuxAttempt(lockDir(), deps(w, identity(222, selfOver)));
-
-  beforeEach(() => {
-    mkdirSync(tmp, { recursive: true });
-  });
-
-  it('parses the name it makes, and nothing else', () => {
-    const id = identity(5, { offset: 'n12_34' });
-    const name = entryName('0123456789abcdef', id);
-    expect(parseEntry(name)).toEqual(id);
-    for (const junk of ['meta', 'h-zz', `${name}x`, '']) expect(parseEntry(junk)).toBeUndefined();
-  });
-
-  it('reads the identity from /proc, with x for what it cannot read', () => {
-    const files: Record<string, string> = {
-      '/proc/self/stat': `7 (a b) S ${Array<string>(18).fill('0').join(' ')} 4321 0\n`,
-      '/proc/self/timens_offsets': 'monotonic 0 0\nboottime -5 9\n',
-      '/proc/sys/kernel/random/boot_id': `${'b'.repeat(8)}-${'b'.repeat(24)}\n`,
-    };
-    const links: Record<string, string> = { '/proc/self': '7', '/proc/self/ns/pid': 'pid:[42]' };
-    const proc: Proc = {
-      read: (path) => files[path],
-      readlink: (path) => links[path],
-      kill0: () => 'exists',
-    };
-    expect(readIdentity(proc, 7)).toEqual({
-      pid: 7,
-      ticks: '4321',
-      pidns: '42',
-      offset: 'n5_9',
-      boot: BOOT,
-      machine: 'x',
-    });
-    expect(parseStat('1 (x) S 0')).toBeUndefined();
-  });
-
-  it('leaves its own entry and a live holder alone, and a second holder waits', () => {
-    const w = world();
-    const first = holderOf(w, 111);
-    const before = names();
-    expect(judge(w).tryOnce()).toBeNull();
-    expect(names()).toEqual(before);
-    first.release();
-    expect(existsSync(lockDir())).toBe(false);
-  });
-
-  it('evicts a holder whose process is gone and takes the lock', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.delete(111);
-    const release = judge(w).tryOnce();
-    expect(release).not.toBeNull();
-    expect(names()).toHaveLength(1);
-    expect(parseEntry(names()[0]!)?.pid).toBe(222);
+    expect(await probe(lock)).toBe('held');
     release!();
   });
 
-  it('evicts an entry whose pid was reused (other start ticks)', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.set(111, { state: 'S', ticks: '1001' });
-    expect(judge(w).tryOnce()).not.toBeNull();
+  it('abandoning a wait closes its connection and leaves the holder alone', async () => {
+    const lock = join(tmp, 'sq-abandon');
+    const holding = await holdLock(lock);
+    const waiter = attemptOn(lock);
+    expect(waiter.tryOnce()).toBeNull();
+    waiter.abandon();
+    expect(await probe(lock)).toBe('held');
+    holding();
+    expect(await probe(lock)).toBe('free');
   });
 
-  it('never evicts an entry from another pid namespace, or one with none', () => {
-    for (const pidns of ['4026532999', 'x']) {
-      const w = world();
-      holderOf(w, 111, { pidns });
-      w.live.delete(111);
-      const before = names();
-      expect(judge(w).tryOnce()).toBeNull();
-      expect(names()).toEqual(before);
-      rmSync(lockDir(), { recursive: true });
-    }
-  });
-
-  it('never evicts an entry from another time offset', () => {
-    const w = world();
-    holderOf(w, 111, { offset: '100000_0' });
-    w.live.delete(111);
-    expect(judge(w).tryOnce()).toBeNull();
-    expect(names()).toHaveLength(1);
-  });
-
-  it('judges a reboot only on the same machine id', () => {
-    const other = 'c'.repeat(32);
-    const cases: Array<[Partial<Identity>, boolean]> = [
-      [{ boot: other }, true],
-      [{ boot: other, machine: other }, false],
-      [{ boot: other, machine: 'x' }, false],
-      [{ boot: 'x' }, false],
-    ];
-    for (const [over, evicted] of cases) {
-      const w = world();
-      holderOf(w, 111, over);
-      expect(judge(w).tryOnce() !== null).toBe(evicted);
-      rmSync(lockDir(), { recursive: true });
-    }
-  });
-
-  it('evicts a zombie', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.set(111, { state: 'Z', ticks: '1000' });
-    expect(judge(w).tryOnce()).not.toBeNull();
-  });
-
-  it('never removes what it does not understand', () => {
-    const w = world();
-    mkdirSync(lockDir());
-    writeFileSync(join(lockDir(), 'meta'), '{}');
-    expect(judge(w).tryOnce()).toBeNull();
-    writeFileSync(join(lockDir(), 'junk'), '');
-    expect(judge(w).tryOnce()).toBeNull();
-    expect(names().sort()).toEqual(['junk', 'meta']);
-    rmSync(lockDir(), { recursive: true });
-    // Two forged entries, both gone: still never judged.
-    mkdirSync(lockDir(), { recursive: true });
-    for (const pid of [301, 302])
-      writeFileSync(join(lockDir(), entryName(String(pid).padStart(16, '0'), identity(pid))), '');
-    expect(judge(w).tryOnce()).toBeNull();
-    expect(names()).toHaveLength(2);
-  });
-
-  it('a process that cannot read its own /proc judges nobody', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.delete(111);
-    for (const self of [identity(222, { pidns: 'x' }), identity(222, { ticks: 'x' })])
-      expect(linuxAttempt(lockDir(), deps(w, self)).tryOnce()).toBeNull();
-    expect(names()).toHaveLength(1);
-  });
-
-  it('leaves the waiter intact when a release is paused between its two steps', () => {
-    const w = world();
-    let waiter: (() => void) | null = null;
-    const id = identity(111);
-    w.live.set(111, { state: 'S', ticks: id.ticks });
-    const releaser = linuxAttempt(
-      lockDir(),
-      deps(w, id, {
-        hook: (point) => {
-          // The entry is gone and the directory is empty: a waiter renames onto it.
-          if (point === 'unlinked') waiter = judge(w).tryOnce();
-        },
-      }),
-    );
-    const release = releaser.tryOnce()!;
-    release();
-    expect(waiter).not.toBeNull();
-    expect(names()).toHaveLength(1);
-    expect(parseEntry(names()[0]!)?.pid).toBe(222);
-    waiter!();
-    expect(existsSync(lockDir())).toBe(false);
-  });
-
-  it('a stale evictor resumes onto a successor and changes nothing', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.delete(111);
-    let successor: (() => void) | null = null;
-    w.live.set(333, { state: 'S', ticks: '1000' });
-    const stale = linuxAttempt(
-      lockDir(),
-      deps(w, identity(222), {
-        hook: (point) => {
-          // Paused after judging: another waiter evicts the same entry and takes the lock.
-          if (point === 'judged')
-            successor = linuxAttempt(lockDir(), deps(w, identity(333))).tryOnce();
-        },
-      }),
-    );
-    expect(stale.tryOnce()).toBeNull();
-    expect(successor).not.toBeNull();
-    expect(names()).toHaveLength(1);
-    expect(parseEntry(names()[0]!)?.pid).toBe(333);
-  });
-
-  it('an evictor paused between unlink and rmdir cannot remove a successor', () => {
-    const w = world();
-    holderOf(w, 111);
-    w.live.delete(111);
-    w.live.set(333, { state: 'S', ticks: '1000' });
-    let successor: (() => void) | null = null;
-    const evictor = linuxAttempt(
-      lockDir(),
-      deps(w, identity(222), {
-        hook: (point) => {
-          if (point === 'released')
-            successor = linuxAttempt(lockDir(), deps(w, identity(333))).tryOnce();
-        },
-      }),
-    );
-    expect(evictor.tryOnce()).toBeNull();
-    expect(successor).not.toBeNull();
-    expect(parseEntry(names()[0]!)?.pid).toBe(333);
-  });
-
-  it('removes its prepared directory when the wait is abandoned', () => {
-    const w = world();
-    holderOf(w, 111);
-    const waiting = judge(w);
-    expect(waiting.tryOnce()).toBeNull();
-    expect(readdirSync(tmp).some((name) => name.includes('.held.new-'))).toBe(true);
-    waiting.abandon();
-    expect(readdirSync(tmp).filter((name) => name.includes('.held.new-'))).toEqual([]);
-  });
-
-  it('sweeps a prepared directory only when its entry is gone, and a lock directory by its two steps', () => {
-    const w = world();
-    const self = identity(222);
-    const prepared = (pid: number) => {
-      const path = join(tmp, `p${pid}.held.new-${'0'.repeat(15)}${pid % 10}`);
-      mkdirSync(path);
-      writeFileSync(join(path, entryName('0'.repeat(16), identity(pid))), '');
-      return path;
-    };
-    w.live.set(401, { state: 'S', ticks: '1000' });
-    const alive = prepared(401);
-    const gone = prepared(402);
-    expect(reapPrepared(alive, deps(w, self))).toBe(false);
-    expect(reapPrepared(gone, deps(w, self))).toBe(true);
-    expect(existsSync(alive)).toBe(true);
-    expect(existsSync(gone)).toBe(false);
-
-    holderOf(w, 111);
-    w.live.delete(111);
-    expect(reapLockDir(lockDir(), deps(w, self))).toBe(true);
-    expect(existsSync(lockDir())).toBe(false);
-    holderOf(w, 112);
-    expect(reapLockDir(lockDir(), deps(w, self))).toBe(false);
-    expect(existsSync(lockDir())).toBe(true);
-    expect(entryGone('meta', self, w.proc)).toBe(false);
-  });
-
-  it('clears the lock of a killed child at its next waiter (real /proc, Linux only)', async () => {
-    if (process.platform !== 'linux') return;
-    const lock = join(tmp, 'real');
+  // A container restart gives the next process another pid namespace: a lock that depended on
+  // a pid would stay stuck. The kernel drops the dead holder's lock whatever namespace asks.
+  it('is free the moment its holder is killed, for a process that shares nothing with it', async () => {
+    const lock = join(tmp, 'sq-restart');
     const held = await startHolder(lock);
+    expect(await probe(lock)).toBe('held');
     await held.kill();
-    (await holdLock(lock, { timeoutMs: 1000 }))();
+    expect(await probe(lock)).toBe('free');
+  });
+});
+
+describe.skipIf(process.platform !== 'linux')('Linux without node:sqlite', () => {
+  afterEach(() => forgetSqlite());
+
+  it('says why the lock cannot be taken, once, and holds nothing', async () => {
+    const original = process.getBuiltinModule;
+    process.getBuiltinModule = (() => undefined) as typeof process.getBuiltinModule;
+    forgetSqlite();
+    try {
+      expect(lockSupport()).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining('Node 22.13 or later'),
+      });
+      await expect(holdLock(join(tmp, 'none'), { timeoutMs: 0 })).rejects.toBeInstanceOf(
+        LockUnavailableError,
+      );
+    } finally {
+      process.getBuiltinModule = original;
+    }
   });
 });
 

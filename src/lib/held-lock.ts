@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasCode } from './errno';
-import { linuxAttempt, reapLockDir, reapPrepared } from './held-lock-linux';
+import { loadSqlite, sqliteAttempt } from './held-lock-sqlite';
 import { LockTimeoutError } from './lock';
 
 /**
@@ -21,8 +21,8 @@ import { LockTimeoutError } from './lock';
  *
  * - macOS and Windows: an exclusive open of the never-written `<path>.held` file. The system
  *   drops the lock when the holder's process ends, at whatever line it dies.
- * - Linux: a named-entry directory `<path>.held` (see `held-lock-linux.ts`), where a waiter
- *   clears the entry of a process that is certainly gone, and of no other.
+ * - Linux: an exclusive SQLite transaction on the same never-written file (`node:sqlite`, see
+ *   `held-lock-sqlite.ts`), which the kernel drops when the holder's process ends.
  *
  * Callers pass the lock path WITHOUT the suffix and never branch on the platform. A held lock
  * file is never opened, read or deleted by anything else in a process that may hold it: on
@@ -42,10 +42,10 @@ export class LockUnavailableError extends Error {
 export class HeldLockTimeoutError extends LockTimeoutError {
   constructor(lockPath: string, timeoutMs: number) {
     super(lockPath, timeoutMs);
-    this.message =
-      process.platform === 'linux'
-        ? `Timed out waiting for lock ${lockPath} after ${timeoutMs}ms. Another Tenjin process holds it. If no Tenjin process runs on this machine or in a container that shares this folder, remove ${lockPath} and retry.`
-        : `Timed out waiting for lock ${lockPath} after ${timeoutMs}ms. Another Tenjin process holds it, and the lock ends when that process ends.`;
+    const held = `${lockPath}.held`;
+    // The lock file itself is what is held: it is never removed by hand.
+    (this as { lockPath: string }).lockPath = held;
+    this.message = `Timed out waiting for lock ${held} after ${timeoutMs}ms. Another Tenjin process holds it, and the lock ends when that process ends; do not delete the file.`;
   }
 }
 
@@ -65,8 +65,8 @@ export interface Attempt {
 }
 export type AttemptFactory = (heldPath: string) => Attempt;
 
-/** Whether a file name in a store is a lock file or a leftover of one being made. */
-export const isHeldLockName = (name: string) => /\.held(\.new-[0-9a-f]+)?$/.test(name);
+/** Whether a file name in a store is a lock file. */
+export const isHeldLockName = (name: string) => name.endsWith('.held');
 
 /** The exclusive-open flags, numeric because Node exports neither `O_EXLOCK` nor libuv's. */
 const O_EXLOCK_DARWIN = 0x20;
@@ -183,12 +183,31 @@ function defaultFactory(): AttemptFactory {
   const { platform } = process;
   if (platform === 'darwin' || platform === 'win32')
     return (held) => openAttempt(held, systemOpenDeps(platform));
-  if (platform === 'linux') return (held) => linuxAttempt(held);
+  if (platform === 'linux')
+    return (held) => {
+      const sqlite = loadSqlite();
+      if (!sqlite) throw new LockUnavailableError(SQLITE_MISSING);
+      return sqliteAttempt(held, sqlite);
+    };
   return () => {
     throw new LockUnavailableError(`Tenjin cannot lock files on ${platform}`);
   };
 }
 const factory = defaultFactory();
+
+const SQLITE_MISSING = `Subagent workers on Linux need Node 22.13 or later; this is Node ${process.versions.node}.`;
+
+/**
+ * Whether this platform and Node can take a held lock, and if not, one sentence why. Linux needs
+ * the built-in node:sqlite (Node 22.13 or later); macOS and Windows need nothing.
+ */
+export function lockSupport(): { ok: true } | { ok: false; reason: string } {
+  const { platform } = process;
+  if (platform === 'darwin' || platform === 'win32') return { ok: true };
+  if (platform === 'linux')
+    return loadSqlite() ? { ok: true } : { ok: false, reason: SQLITE_MISSING };
+  return { ok: false, reason: `Tenjin cannot lock files on ${platform}.` };
+}
 
 /**
  * The wait loop shared by every platform. Takes the lock, or throws {@link HeldLockTimeoutError}
@@ -234,14 +253,13 @@ export async function withHeldLock<T>(
 }
 
 /**
- * Removes a lock file no one holds, for the job sweep: macOS probes, unlinks while holding and
- * then closes; Windows probes, closes and then unlinks, ignoring a lost race; Linux clears an
- * empty directory or one whose only entry is gone. A lock that is held is left alone. True when
- * the lock is gone afterwards.
+ * Removes a lock file no one holds, for the job sweep: macOS and Linux probe, unlink while
+ * holding and then close (an opener that resolved the old file notices its inode changed and
+ * starts over); Windows probes, closes and then unlinks, ignoring a lost race. A lock that is
+ * held is left alone. True when the lock is gone afterwards.
  */
 export async function discardHeldLock(lockPath: string): Promise<boolean> {
   const held = `${lockPath}.held`;
-  if (process.platform === 'linux') return reapLockDir(held);
   let release: () => void;
   try {
     release = await holdLockWith(factory, lockPath, { timeoutMs: 0 });
@@ -249,7 +267,7 @@ export async function discardHeldLock(lockPath: string): Promise<boolean> {
     if (error instanceof LockTimeoutError) return false;
     throw error;
   }
-  if (process.platform === 'darwin') {
+  if (process.platform !== 'win32') {
     try {
       unlinkSync(held);
       return true;
@@ -270,8 +288,7 @@ export async function discardHeldLock(lockPath: string): Promise<boolean> {
 }
 
 /**
- * Housekeeping for the lock files in `dir`. A prepared directory of a killed Linux acquirer is
- * removed when its only entry is gone. Every other `*.held` name is discarded through
+ * Housekeeping for the lock files in `dir`: a `*.held` name is discarded through
  * {@link discardHeldLock} when `eligible` says so (the sweep passes only what belongs to a job
  * that is final and idle). Never throws.
  */
@@ -285,10 +302,6 @@ export async function sweepHeldLocks(
     for await (const entry of await opendir(dir)) {
       if (++seen > limit) return;
       const path = join(dir, entry.name);
-      if (/\.held\.new-[0-9a-f]+$/.test(entry.name)) {
-        if (process.platform === 'linux' && entry.isDirectory()) reapPrepared(path);
-        continue;
-      }
       if (!entry.name.endsWith('.held')) continue;
       if (await eligible(entry.name).catch(() => false))
         await discardHeldLock(path.slice(0, -'.held'.length)).catch(() => false);
