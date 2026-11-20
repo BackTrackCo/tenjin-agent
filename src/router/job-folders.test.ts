@@ -85,8 +85,7 @@ it('never removes the folder of a live owner in another process, whatever its st
   // worker another Claude Code session runs: `ps` printed local time, one hour early for a
   // process started in the second 01:30 of a fall-back night, and the owner read as a reused pid.
   const live = { pid: 4_000_002, startedAt: now - 20 * HOUR };
-  // Quiet for hours, as after a sleeping laptop; each start below is before the last beat.
-  const beat = now - 5 * HOUR;
+  // Quiet for hours, as after a sleeping laptop.
   const paths = [
     await folder('tenjin-worker-settings-Live01', { ageMs: 5 * HOUR, owner: live }),
     await folder('tenjin-worker-Live02', { ageMs: 5 * HOUR, owner: live }),
