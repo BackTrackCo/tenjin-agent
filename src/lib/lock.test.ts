@@ -339,20 +339,51 @@ describe('withFileLock with takeOverDead', () => {
     expect(existsSync(join(lock, 'meta'))).toBe(true);
   });
 
-  it('takes a lock with no readable holder only once it stood unchanged for the window', async () => {
-    const lock = join(dir, 'ownerless.lock');
-    leave(lock, '{"pid":');
-    await expect(
-      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
-    ).rejects.toBeInstanceOf(LockTimeoutError);
+  // Failure caught (Greptile): a holder that died between mkdir and its meta write left an
+  // ownerless lock that a fresh process had to watch for 10 s, longer than the 5 s wait.
+  it('makes a lock whole in one step, so no lock is ever seen without its owner', async () => {
+    const lock = join(dir, 'whole.lock');
+    const seen: string[] = [];
+    const waiter = (async () => {
+      for (let n = 0; n < 200; n++) {
+        try {
+          seen.push(readFileSync(join(lock, 'meta'), 'utf8'));
+        } catch {
+          // Absent, or no lock yet; but a lock directory with no meta is the failure.
+          if (existsSync(lock) && !existsSync(join(lock, 'meta'))) seen.push('OWNERLESS');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    })();
+    for (let n = 0; n < 20; n++) await withFileLock(lock, async () => undefined);
+    await waiter;
+    expect(seen).not.toContain('OWNERLESS');
+  });
+
+  it('takes a lock whose owner record is missing or unreadable at once, within the default wait', async () => {
+    for (const meta of [undefined, '{"pid":']) {
+      const lock = join(dir, `corrupt-${meta === undefined ? 'none' : 'half'}.lock`);
+      leave(lock, meta);
+      const began = performance.now();
+      expect(await withFileLock(lock, async () => 'ran', { takeOverDead: true })).toBe('ran');
+      expect(performance.now() - began).toBeLessThan(1000);
+    }
+  });
+
+  it('clears the takeover gate of a waiter that died, and goes on to take the dead lock', async () => {
+    const lock = join(dir, 'gated.lock');
+    leave(lock, JSON.stringify({ pid: deadPid(), acquiredAt: 0 }));
+    mkdirSync(`${lock}.takeover`);
+    writeFileSync(join(`${lock}.takeover`, 'meta'), JSON.stringify({ pid: deadPid() }));
+    const began = performance.now();
     expect(
       await withFileLock(lock, async () => 'ran', {
-        timeoutMs: 2000,
+        timeoutMs: 3000,
         retryMs: 10,
         takeOverDead: true,
-        ownerlessMs: 150,
       }),
     ).toBe('ran');
+    expect(performance.now() - began).toBeLessThan(1500);
   });
 
   it('lets waiters on one dead lock run one at a time, each landing its update', async () => {

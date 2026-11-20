@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { expect, it } from 'vitest';
 import { holderGone, processStartToken } from './process-identity';
 
@@ -8,16 +7,10 @@ it.skipIf(process.platform === 'win32')(
     const mine = processStartToken(process.pid);
     expect(mine).toBeDefined();
     expect(processStartToken(process.pid)).toBe(mine);
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], {
-      stdio: 'ignore',
-    });
-    try {
-      const other = processStartToken(child.pid!);
-      expect(other).toBeDefined();
-      expect(other).not.toBe(mine);
-    } finally {
-      child.kill();
-    }
+    // A process that started earlier (the parent), as a macOS start has a second's resolution.
+    const other = processStartToken(process.ppid);
+    expect(other).toBeDefined();
+    expect(other).not.toBe(mine);
   },
 );
 
@@ -37,9 +30,15 @@ it('is gone for a dead pid or another token, and alive for the same token, none 
   expect(holderGone(2 ** 30, 'a', alive)).toBe(false);
 });
 
-it('reads a holder once per wait', () => {
-  const read = new Map<number, string | undefined>();
-  holderGone(process.pid, 'x', () => true, read);
-  read.set(process.pid, 'cached');
-  expect(holderGone(process.pid, 'cached', () => true, read)).toBe(false);
+it('reads a holder once per wait, keyed by its pid and the token the lock recorded', () => {
+  const real = processStartToken(process.pid)!;
+  const memo = new Map<string, string | undefined>();
+  // A memo of the same holder is honoured: one read per wait.
+  memo.set(`${process.pid}:${real}`, 'cached-other');
+  expect(holderGone(process.pid, real, () => true, memo)).toBe(true);
+  // A lock another process took (another recorded token) is read afresh, whatever the memo holds
+  // for the previous holder of the pid.
+  const afresh = new Map<string, string | undefined>([[`${process.pid}:old-owner`, 'old-live']]);
+  expect(holderGone(process.pid, real, () => true, afresh)).toBe(false);
+  expect(afresh.get(`${process.pid}:${real}`)).toBe(real);
 });

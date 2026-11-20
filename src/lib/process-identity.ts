@@ -52,17 +52,19 @@ export function ownStartToken(): string | undefined {
  * Whether a process that recorded `token` for `pid` is gone: its pid is not running, or the pid
  * is held by a process with a different token (a reused pid). A token that was never recorded
  * or cannot be read now is alive: the pid alone decides, and a doubt reads as alive.
- * `read` memoizes one wait's reads, so a holder's token is read once per wait.
+ * `read` memoizes one wait's reads by pid and recorded token, so a holder is read once per wait.
  */
 export function holderGone(
   pid: number,
   token: string | undefined,
   alive: (pid: number) => boolean,
-  read: Map<number, string | undefined> = new Map(),
+  read: Map<string, string | undefined> = new Map(),
 ): boolean {
   if (!alive(pid)) return true;
   if (token === undefined) return false;
-  if (!read.has(pid)) read.set(pid, processStartToken(pid));
-  const now = read.get(pid);
+  // Keyed by the recorded token too: a pid reused by another holder of the same lock is another key.
+  const key = `${pid}:${token}`;
+  if (!read.has(key)) read.set(key, processStartToken(pid));
+  const now = read.get(key);
   return now !== undefined && now !== token;
 }
