@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { pidAlive, withFileLock } from '../lib/lock';
-import { holderGone, ownStartToken } from '../lib/process-identity';
+import { holdLock, isHeldLockName, sweepHeldLocks, withHeldLock } from '../lib/held-lock';
+import { LockTimeoutError } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
 import { readJsonFile, sweep, writePrivate } from './store-files';
@@ -35,20 +35,23 @@ const jobSchema = z.object({
   ]),
   expiresAt: z.number(),
   result: z.string().optional(),
-  /** The process that accepted the job and runs its worker, and when. */
-  runner: z
-    .object({ pid: z.number().int(), acceptedAt: z.number(), token: z.string().optional() })
-    .optional(),
+  /**
+   * The process that accepted the job and runs its worker, and when. For diagnosis only: whether
+   * a runner is alive is the runner lock (see {@link ModelJobStore.holdRunner}), never this pid.
+   */
+  runner: z.object({ pid: z.number().int(), acceptedAt: z.number() }).optional(),
 });
 export type ModelJob = z.infer<typeof jobSchema>;
 export const modelJobSchema = jobSchema;
 
 /**
- * A model store's lock. Its holder can be killed with the session mid-update,
- * and a lock nothing takes over would then time out every later operation.
+ * A model store's lock: `<path>.held`, which ends with the process that holds it, so a holder
+ * killed mid-update never blocks a later operation and nothing is taken over from a live one.
+ * It protects one read-modify-write of the store's records for a few milliseconds, and waits
+ * up to 5 s before the caller fails (before any money moves).
  */
 export const modelLock = <T>(path: string, fn: () => Promise<T>): Promise<T> =>
-  withFileLock(path, fn, { takeOverDead: true });
+  withHeldLock(path, fn);
 
 /** Local job, conversation and budget records are removed this long after their last write. */
 export const MODEL_RECORD_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -83,13 +86,26 @@ export async function sweepModelRecords(dataDir: string, now = Date.now()): Prom
       if (id) live.add(id.toLowerCase());
     }
   }
-  const old = async (name: string, path: string) => {
-    const id = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(name)?.[1];
+  const jobId = (name: string) =>
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(name)?.[1];
+  const idle = async (name: string, path: string) => {
+    const id = jobId(name);
     if (id && live.has(id.toLowerCase())) return false;
     return now - (await lstat(path)).mtimeMs > MODEL_RECORD_TTL_MS;
   };
-  for (const store of ['model-jobs', 'model-conversations'])
-    await sweep(join(dataDir, store), old, { limit: 50_000 });
+  // A lock file is never aged out by its mtime: an unwritten file's never changes, so a lock
+  // that guards live state would be deleted. The store-wide locks and the pace locks (no job id
+  // in the name) stay; a job's own lock files go with the job, only through `discardHeldLock`.
+  const old = async (name: string, path: string) =>
+    isHeldLockName(name) ? false : idle(name, path);
+  for (const store of ['model-jobs', 'model-conversations']) {
+    const dir = join(dataDir, store);
+    await sweep(dir, old, { limit: 50_000 });
+    await sweepHeldLocks(
+      dir,
+      async (name) => jobId(name) !== undefined && idle(name, join(dir, name)),
+    );
+  }
 }
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 /** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
@@ -302,6 +318,23 @@ export class ModelJobStore {
     }
     return found;
   }
+  /** The runner lock of a job: `<id>.runner.held` in the store. */
+  private runnerPath(id: string) {
+    if (!z.uuid().safeParse(id).success) throw new Error('Invalid model job');
+    return join(this.dir, `${id}.runner`);
+  }
+  /**
+   * Takes the job's runner lock, which the process that accepts the job holds from BEFORE
+   * {@link accept} until after the job's last `finish`: a runner is alive exactly while its
+   * lock is held, in any process, pid namespace or platform, and no pid is consulted. Waits up
+   * to 5 s (a second accept of the same offer), then throws LockTimeoutError. Release it when
+   * accept returns null.
+   */
+  async holdRunner(id: string): Promise<() => void> {
+    const path = this.runnerPath(id);
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    return holdLock(path);
+  }
   /** Once, on disk. The offer is accepted from any turn of its session. */
   async accept(id: string, session: string): Promise<ModelJob | null> {
     return this.locked(async () => {
@@ -314,42 +347,45 @@ export class ModelJobStore {
       )
         return null;
       job.state = 'running';
-      // The token names this process by its start, so a later process that takes the pid is told apart.
-      const token = ownStartToken();
-      job.runner = { pid: process.pid, acceptedAt: Date.now(), ...(token ? { token } : {}) };
+      job.runner = { pid: process.pid, acceptedAt: Date.now() };
       await writePrivate(this.path(id), JSON.stringify(job));
       return job;
     });
   }
   /**
-   * Ends a record its process left `running`: that process is gone, it is this
-   * process (which the caller knows runs no such worker). The record becomes `unknown` and is returned. Null
-   * while another live process may still be running the worker.
+   * Ends a record whose runner is gone: no process holds its runner lock, so the process that
+   * accepted it has ended (or never held it). The record becomes `unknown` and is returned. Null
+   * while a runner holds the lock, in this process or another. The probe is one attempt and
+   * holds the lock while the record is rewritten, so no runner can start under it. The lock
+   * order is runner, then job, as in `accept`.
    */
-  async strand(
-    id: string,
-    o: { isAlive?: (pid: number) => boolean } = {},
-  ): Promise<ModelJob | null> {
-    return this.locked(async () => {
-      const job = await this.read(id);
-      if (!job || !['running', 'cancelling'].includes(job.state)) return job;
-      const { runner } = job;
-      // Gone: this process (the caller knows it runs no such worker), a pid that is not running,
-      // or a pid held by a process with another start token than the one recorded. A runner with
-      // no recorded token, or whose token cannot be read, is alive: the pid alone decides.
-      const gone =
-        runner &&
-        (runner.pid === process.pid || holderGone(runner.pid, runner.token, o.isAlive ?? pidAlive));
-      if (!gone) return null;
-      const ended: ModelJob = {
-        ...job,
-        state: 'unknown',
-        expiresAt: Math.max(job.expiresAt, Date.now() + OFFER_MS),
-        result: JSON.stringify(STRANDED_HANDBACK),
-      };
-      await writePrivate(this.path(id), JSON.stringify(ended));
-      return ended;
-    });
+  async strand(id: string): Promise<ModelJob | null> {
+    const first = await this.read(id);
+    if (!first || !['running', 'cancelling'].includes(first.state)) return first;
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    let release: () => void;
+    try {
+      release = await holdLock(this.runnerPath(id), { timeoutMs: 0 });
+    } catch (error) {
+      if (error instanceof LockTimeoutError) return null;
+      throw error;
+    }
+    try {
+      return await this.locked(async () => {
+        const job = await this.read(id);
+        if (!job || !['running', 'cancelling'].includes(job.state)) return job;
+        const ended: ModelJob = {
+          ...job,
+          state: 'unknown',
+          expiresAt: Math.max(job.expiresAt, Date.now() + OFFER_MS),
+          result: JSON.stringify(STRANDED_HANDBACK),
+        };
+        await writePrivate(this.path(id), JSON.stringify(ended));
+        return ended;
+      });
+    } finally {
+      release();
+    }
   }
   /**
    * Claude: the parent keeps an offered call native by sending it again

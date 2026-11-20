@@ -12,14 +12,14 @@ import {
   signVoucher,
 } from '@x402/evm/batch-settlement/client';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
-import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TypedDataDefinition } from 'viem';
 import { afterEach, expect, it, vi } from 'vitest';
-import { withFileLock } from '../lib/lock';
+import { withHeldLock } from '../lib/held-lock';
+import { holder, killChildren } from '../lib/held-lock-test/child';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { SIWX_HEADER } from '../lib/siwx';
@@ -54,6 +54,7 @@ const requirements: PaymentRequirements = {
 };
 const dirs: string[] = [];
 afterEach(async () => {
+  killChildren();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -78,6 +79,7 @@ async function fixture(shared?: 0 | 1) {
   const dataDir = await mkdtemp(join(tmpdir(), 'model-refund-'));
   dirs.push(dataDir);
   const runId = randomUUID();
+  await mkdir(join(dataDir, 'model-jobs'), { recursive: true });
   const signer = testSigner();
   const sdk = toClientEvmSigner({
     address: signer.address,
@@ -212,7 +214,7 @@ async function fixture(shared?: 0 | 1) {
     fetchImpl,
     nonces,
     record: () =>
-      withFileLock(modelRefundRunLock(dataDir, origin, runId), () =>
+      withHeldLock(modelRefundRunLock(dataDir, origin, runId), () =>
         journal.record(runId, url, signature),
       ),
   };
@@ -259,7 +261,7 @@ it('journals only channel metadata and refunds the unspent amount with the pinne
 it('skips a live run, and later refuses a changed router identity', async () => {
   const { dataDir, runId, record, state, journal, fetchImpl } = await fixture();
   await record();
-  await withFileLock(modelRefundRunLock(dataDir, origin, runId), async () => {
+  await withHeldLock(modelRefundRunLock(dataDir, origin, runId), async () => {
     await journal.recoverPending();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -294,7 +296,7 @@ it('leaves the record byte-identical and writes no note when a recovery could no
   const dir = join(dataDir, 'model-refunds');
   const [file] = await readdir(dir);
   const before = await readFile(join(dir, file!), 'utf8');
-  await withFileLock(modelRefundRunLock(dataDir, origin, runId), async () => {
+  await withHeldLock(modelRefundRunLock(dataDir, origin, runId), async () => {
     await expect(journal.close(runId)).resolves.toEqual({ state: 'pending' });
   });
   expect(await readFile(join(dir, file!), 'utf8')).toBe(before);
@@ -321,15 +323,18 @@ it('counts a pending refund recorded for an earlier router origin, and sends tha
   expect(fetchImpl).not.toHaveBeenCalled();
 });
 
-it('refunds a recorded channel after the worker process exits with its run lock', async () => {
+// The run lock is held by the process that runs the worker and ends with it, at whatever line it
+// dies: recovery leaves a live run alone and settles one whose process is gone.
+it('leaves a run alone while another process holds its run lock, and refunds it once that process is killed', async () => {
   const { dataDir, runId, record, newJournal, fetchImpl } = await fixture();
   await record();
-  const { pid } = spawnSync(process.execPath, ['-e', '']);
-  expect(pid).toBeGreaterThan(0);
-  const lock = modelRefundRunLock(dataDir, origin, runId);
-  await mkdir(lock);
-  await writeFile(join(lock, 'meta'), JSON.stringify({ pid, acquiredAt: Date.now() }));
-
+  const run = await holder(modelRefundRunLock(dataDir, origin, runId));
+  await newJournal().recoverPending();
+  expect(fetchImpl).not.toHaveBeenCalled();
+  await expect(readModelRefundResult(dataDir, origin, runId)).resolves.toEqual({
+    state: 'pending',
+  });
+  await run.kill();
   await newJournal().recoverPending();
   await expect(readModelRefundResult(dataDir, origin, runId)).resolves.toEqual({
     state: 'refunded',

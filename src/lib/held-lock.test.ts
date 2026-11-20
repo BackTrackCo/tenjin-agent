@@ -1,4 +1,3 @@
-import { spawn, type ChildProcess } from 'node:child_process';
 import {
   closeSync,
   constants,
@@ -15,8 +14,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   discardHeldLock,
@@ -45,75 +44,41 @@ import {
   type LinuxDeps,
   type Proc,
 } from './held-lock-linux';
+import { child, holder as startHolder, killChildren, probe } from './held-lock-test/child';
 import { LockTimeoutError } from './lock';
 
-const dir = fileURLToPath(new URL('./held-lock-test', import.meta.url));
 const posix = process.platform !== 'win32';
 
 let tmp: string;
-const children = new Set<ChildProcess>();
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'held-lock-'));
 });
 afterEach(() => {
-  for (const child of children) child.kill('SIGKILL');
-  children.clear();
+  killChildren();
   rmSync(tmp, { recursive: true, force: true });
 });
 
-/** A child that runs a helper from `held-lock-test`, with the lines it prints. */
-function child(file: string, ...args: string[]) {
-  const proc = spawn(
-    process.execPath,
-    [
-      '--experimental-strip-types',
-      '--no-warnings',
-      '--import',
-      join(dir, 'register.mjs'),
-      join(dir, file),
-      ...args,
-    ],
-    { stdio: ['pipe', 'pipe', 'inherit'] },
-  );
-  children.add(proc);
-  let text = '';
-  const waiters: Array<() => void> = [];
-  proc.stdout.on('data', (chunk: Buffer) => {
-    text += chunk.toString();
-    for (const wake of waiters.splice(0)) wake();
-  });
-  const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
-  return {
-    proc,
-    exited,
-    /** Resolves once the child printed a line that starts with `prefix`. */
-    async line(prefix: string) {
-      for (;;) {
-        const found = text.split('\n').find((line) => line.startsWith(prefix));
-        if (found !== undefined) return found;
-        await new Promise<void>((resolve) => {
-          waiters.push(resolve);
-          void exited.then(resolve);
-        });
-        if (proc.exitCode !== null && !text.includes(prefix))
-          throw new Error(`child ended: ${text}`);
-      }
-    },
-  };
-}
-
-/** Starts a child that holds `lock` and waits until it does. */
-async function holder(lock: string) {
-  const held = child('holder.ts', lock, 'hold');
-  await held.line('held');
-  return held;
-}
-async function probe(lock: string) {
-  const probing = child('holder.ts', lock, 'probe');
-  await probing.exited;
-  return probing.line('').catch(() => '');
-}
 const heldPath = (lock: string) => `${lock}.held`;
+
+it('is the only code that names a lock file: nothing else opens, reads or deletes a `.held` path', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const offenders: string[] = [];
+  const walk = (path: string) => {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const full = join(path, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.ts$/.test(entry.name) && !/\.test\.ts$/.test(entry.name)) {
+        if (/held-lock/.test(full)) continue;
+        const code = readFileSync(full, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:])\/\/.*$/gm, '$1');
+        if (/['"`][^'"`\n]*\.held\b/.test(code)) offenders.push(full);
+      }
+    }
+  };
+  walk(root);
+  expect(offenders).toEqual([]);
+});
 
 describe('held lock, every platform', () => {
   it('rejects a zero-wait probe while this process holds it', async () => {
@@ -126,32 +91,29 @@ describe('held lock, every platform', () => {
 
   it('excludes another process, and frees on release', async () => {
     const lock = join(tmp, 'b');
-    const held = await holder(lock);
+    const held = await startHolder(lock);
     await expect(holdLock(lock, { timeoutMs: 0 })).rejects.toBeInstanceOf(LockTimeoutError);
-    held.proc.stdin.write('go\n');
-    await held.exited;
+    await held.release();
     (await holdLock(lock, { timeoutMs: 1000 }))();
   });
 
   it('frees at once when its holder is killed inside the critical section', async () => {
     const lock = join(tmp, 'c');
-    const held = await holder(lock);
-    held.proc.kill('SIGKILL');
-    await held.exited;
+    const held = await startHolder(lock);
+    await held.kill();
     (await holdLock(lock, { timeoutMs: 1000 }))();
   });
 
   it.skipIf(!posix)('keeps the lock of a stopped holder', async () => {
     const lock = join(tmp, 'd');
-    const held = await holder(lock);
+    const held = await startHolder(lock);
     const before = existsSync(heldPath(lock)) ? readdirOrFile(heldPath(lock)) : [];
     held.proc.kill('SIGSTOP');
     await expect(holdLock(lock, { timeoutMs: 0 })).rejects.toBeInstanceOf(LockTimeoutError);
     // Nothing was evicted: on Linux the entry is unchanged.
     expect(readdirOrFile(heldPath(lock))).toEqual(before);
     held.proc.kill('SIGCONT');
-    held.proc.stdin.write('go\n');
-    await held.exited;
+    await held.release();
     (await holdLock(lock, { timeoutMs: 1000 }))();
   });
 
@@ -274,11 +236,10 @@ describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows
     (await holdLock(lock))();
     expect(await discardHeldLock(lock)).toBe(true);
     expect(existsSync(heldPath(lock))).toBe(false);
-    const held = await holder(lock);
+    const held = await startHolder(lock);
     expect(await discardHeldLock(lock)).toBe(false);
     expect(existsSync(heldPath(lock))).toBe(true);
-    held.proc.stdin.write('go\n');
-    await held.exited;
+    await held.release();
   });
 
   it('sweeps only the names it is told are eligible', async () => {
@@ -585,9 +546,8 @@ describe.skipIf(!posix)('named-entry lock (Linux scheme)', () => {
   it('clears the lock of a killed child at its next waiter (real /proc, Linux only)', async () => {
     if (process.platform !== 'linux') return;
     const lock = join(tmp, 'real');
-    const held = await holder(lock);
-    held.proc.kill('SIGKILL');
-    await held.exited;
+    const held = await startHolder(lock);
+    await held.kill();
     (await holdLock(lock, { timeoutMs: 1000 }))();
   });
 });

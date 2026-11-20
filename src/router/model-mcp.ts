@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
+import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings } from './model-settings';
 import {
@@ -757,6 +758,11 @@ export function registerModelTool(
           // offer request has no window a fence could close.
           let window = JSON.stringify([session.sessionId]);
           const offered = args.offer_id;
+          // THE RUNNER LOCK of the job this call accepts: taken before `accept` and held until the
+          // job's last `finish`, background path included (the run hands it to its own end).
+          // While it is held a runner is alive, in any process; `strand` ends a running record
+          // only when it can take it.
+          let runnerLock: (() => void) | undefined;
           const refuseOffer = async (reason: string) => {
             if (offered) await warming.get(offered)?.stop();
             return unavailable(reason);
@@ -947,7 +953,14 @@ export function registerModelTool(
                     : 'Host permissions changed; retry original native call',
                 );
               signal.throwIfAborted();
-              const job = await model.store.accept(args.offer_id, session.sessionId);
+              let job: ModelJob | null = null;
+              try {
+                runnerLock = await model.store.holdRunner(args.offer_id);
+                job = await model.store.accept(args.offer_id, session.sessionId);
+              } catch (error) {
+                // A runner already holds this offer: another accept of it won.
+                if (!(error instanceof LockTimeoutError)) throw error;
+              }
               const warm = job && warming.get(job.id);
               if (job) warming.delete(job.id);
               if (
@@ -1318,6 +1331,10 @@ export function registerModelTool(
                   signal.removeEventListener('abort', stop);
                 }
               })();
+              // The run now owns the runner lock: it is released after the last `finish`.
+              const runner = runnerLock;
+              runnerLock = undefined;
+              if (runner) void done.then(runner, runner);
               controllers.set(job.id, {
                 abort,
                 done,
@@ -1353,6 +1370,8 @@ export function registerModelTool(
               return unavailable('Delegation interrupted; no new worker may start from this offer');
             })
             .finally(() => {
+              // An early return, or a throw before the run began, leaves the lock to this call.
+              runnerLock?.();
               if (!offered) return;
               const left = (accepting.get(offered) ?? 1) - 1;
               if (left > 0) accepting.set(offered, left);

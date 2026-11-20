@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MODEL_RECORD_TTL_MS, ModelJobStore, sweepModelRecords } from './model-job';
 import { canonicalHash } from '../lib/request-schema';
-import { processStartToken } from '../lib/process-identity';
+import { holder, killChildren, probe } from '../lib/held-lock-test/child';
+import { holdLock } from '../lib/held-lock';
 let dir: string;
 afterEach(async () => {
   vi.restoreAllMocks();
+  killChildren();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
@@ -230,37 +232,63 @@ it('finds an offer by its own id in a later turn and from another process, for i
   expect(await store.accept(job.id, 'root')).toBeNull();
 });
 
+const runnerLock = (id: string) => join(dir, 'model-jobs', `${id}.runner`);
+
 it('ends a running record only once the process that accepted it is gone', async () => {
   const { store, job } = await heldAgentCall();
   const accepted = (await store.accept(job.id, 'root'))!;
   const path = join(dir, 'model-jobs', `${job.id}.json`);
-  const runningIn = (pid: number) =>
-    writeFile(path, JSON.stringify({ ...accepted, runner: { pid, acceptedAt: Date.now() } }));
-  const other = process.pid + 1;
-  // Another live process may still be running the worker: nothing changes.
-  await runningIn(other);
-  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
+  // The runner is another live process: it holds the runner lock, whatever the record's pid says.
+  const runner = await holder(runnerLock(job.id));
+  await writeFile(
+    path,
+    JSON.stringify({ ...accepted, runner: { pid: process.pid, acceptedAt: Date.now() } }),
+  );
+  expect(await store.strand(job.id)).toBeNull();
   expect((await store.owned(job.id, 'root'))?.state).toBe('running');
-  // No wall: a live process still holds the run however long it has gone on (a 3-hour-old
+  // No wall: a live runner still holds the run however long it has gone on (a 3-hour-old
   // accept is not over), so nothing changes.
   await writeFile(
     path,
-    JSON.stringify({ ...accepted, runner: { pid: other, acceptedAt: Date.now() - 3 * 3600_000 } }),
+    JSON.stringify({ ...accepted, runner: { pid: 1, acceptedAt: Date.now() - 3 * 3600_000 } }),
   );
-  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
+  expect(await store.strand(job.id)).toBeNull();
   expect((await store.owned(job.id, 'root'))?.state).toBe('running');
-  // A process that is gone left it: it ends as interrupted, and stays ended.
-  await runningIn(other);
-  const ended = await store.strand(job.id, { isAlive: () => false });
+  // The runner is killed inside its run: the job ends as interrupted, and stays ended.
+  await runner.kill();
+  const ended = await store.strand(job.id);
   expect(ended?.state).toBe('unknown');
   expect(JSON.parse(ended!.result!)).toMatchObject({
     status: 'unknown',
     stopReason: { kind: 'interrupted' },
   });
-  expect(await store.strand(job.id, { isAlive: () => true })).toMatchObject({ state: 'unknown' });
+  expect(await store.strand(job.id)).toMatchObject({ state: 'unknown' });
   expect(await store.unfinished()).toEqual([]);
   // An ended record cannot be accepted again, so no second worker can start from it.
   expect(await store.accept(job.id, 'root')).toBeNull();
+});
+
+it('keeps a record whose runner is this process, and ends one this process runs no worker for', async () => {
+  const { store, job } = await heldAgentCall();
+  const release = await store.holdRunner(job.id);
+  expect(await store.accept(job.id, 'root')).toMatchObject({ state: 'running' });
+  // Same process: the runner lock is held, so a runner is alive.
+  expect(await store.strand(job.id)).toBeNull();
+  expect((await store.owned(job.id, 'root'))?.state).toBe('running');
+  release();
+  expect(await store.strand(job.id)).toMatchObject({ state: 'unknown' });
+});
+
+// The finding behind the runner lock: a pid names a process only for as long as it lives, and
+// another pid namespace, a reused pid or a machine without tokens read as alive or dead wrongly.
+it('does not consult the recorded pid: a live pid with no runner lock is a gone runner', async () => {
+  const { store, job } = await heldAgentCall();
+  const accepted = (await store.accept(job.id, 'root'))!;
+  await writeFile(
+    join(dir, 'model-jobs', `${job.id}.json`),
+    JSON.stringify({ ...accepted, runner: { pid: process.pid, acceptedAt: Date.now() } }),
+  );
+  expect(await store.strand(job.id)).toMatchObject({ state: 'unknown' });
 });
 
 it('lists what was left running across sessions, and nothing else', async () => {
@@ -303,7 +331,7 @@ it('keeps every file of a job that is still running, however old, and removes th
     ).toBe(true);
   expect((await store.owned(job.id, 'root'))?.state).toBe('running');
   // Ended by its gone process: the age rule applies again.
-  await store.strand(job.id, { isAlive: () => false });
+  await store.strand(job.id);
   for (const path of [...files, join(dir, 'model-jobs', `${job.id}.json`)])
     await utimes(path, old, old);
   await sweepModelRecords(dir);
@@ -385,61 +413,71 @@ it('keeps the original job files and conversation of a running continuation, wha
   expect(await Promise.all(files.map(exists))).toEqual([false, false, false]);
 });
 
-// Failure caught (Greptile): after a crash or a reboot another process holds the recorded pid and a
-// pid-only check left an abandoned job `running` for good. The runner is named by its pid and its
-// start token, compared for equality only: no wall clock, no timer, no beat.
-async function runningAs(runner: { pid: number; token?: string }) {
+it('records the runner pid, in files only the user can read', async () => {
   const { store, job } = await heldAgentCall();
-  const accepted = await store.accept(job.id, 'root');
-  const path = join(dir, 'model-jobs', `${job.id}.json`);
-  await writeFile(
-    path,
-    JSON.stringify({ ...accepted, runner: { ...runner, acceptedAt: Date.now() - 3 * 3600_000 } }),
-  );
-  return { store, job };
-}
-
-it('records the runner with its start token, in a file only the user can read', async () => {
-  const { store, job } = await heldAgentCall();
+  const release = await store.holdRunner(job.id);
   const accepted = await store.accept(job.id, 'root');
   expect(accepted?.runner?.pid).toBe(process.pid);
-  expect(accepted?.runner?.token).toBe(processStartToken(process.pid));
+  expect(accepted?.runner).not.toHaveProperty('token');
+  release();
   const files = await readdir(join(dir, 'model-jobs'));
-  for (const name of files)
-    expect((await stat(join(dir, 'model-jobs', name))).mode & 0o777).toBe(0o600);
-});
-
-it('ends a running job whose live pid has another start token, and keeps one with the same', async () => {
-  const reused = await runningAs({ pid: process.ppid, token: 'not:this' });
-  expect(await reused.store.strand(reused.job.id, { isAlive: () => true })).toMatchObject({
-    state: 'unknown',
-  });
-  const live = await runningAs({ pid: process.ppid, token: processStartToken(process.ppid)! });
-  // The same pid and token as another process holds: alive for ever, however long it ran.
-  expect(await live.store.strand(live.job.id, { isAlive: () => true })).toBeNull();
-});
-
-it('treats a runner with no token, or a pid that is gone, by the simplest rule: alive, or dead at once', async () => {
-  const bare = await runningAs({ pid: process.pid + 1 });
-  expect(await bare.store.strand(bare.job.id, { isAlive: () => true })).toBeNull();
-  expect(await bare.store.strand(bare.job.id, { isAlive: () => false })).toMatchObject({
-    state: 'unknown',
-  });
+  for (const name of files) {
+    const mode = (await stat(join(dir, 'model-jobs', name))).mode & 0o777;
+    // A lock file is 0600, or a 0700 directory where the platform lock is one.
+    if (name.endsWith('.held')) expect(mode & 0o077).toBe(0);
+    else expect(mode).toBe(0o600);
+  }
 });
 
 it('is not moved by a step of the wall clock, forward or back', async () => {
   vi.useFakeTimers({ toFake: ['Date'], now: Date.now(), shouldAdvanceTime: true });
   try {
-    const live = await runningAs({ pid: process.ppid, token: processStartToken(process.ppid)! });
+    const { store, job } = await heldAgentCall();
+    const release = await store.holdRunner(job.id);
+    await store.accept(job.id, 'root');
     for (const step of [2 * 86_400_000, -4 * 86_400_000]) {
       vi.setSystemTime(Date.now() + step);
-      expect(await live.store.strand(live.job.id, { isAlive: () => true })).toBeNull();
+      expect(await store.strand(job.id)).toBeNull();
     }
-    const reused = await runningAs({ pid: process.ppid, token: 'not:this' });
-    expect(await reused.store.strand(reused.job.id, { isAlive: () => true })).toMatchObject({
-      state: 'unknown',
-    });
+    release();
+    expect(await store.strand(job.id)).toMatchObject({ state: 'unknown' });
   } finally {
     vi.useRealTimers();
   }
+});
+
+// A lock file's mtime never changes (nothing is written to it), so an age rule would delete
+// the locks of the stores that guard live records.
+it('never sweeps a held lock file, and sweeps a job lock file only once the job is over and idle', async () => {
+  const { store, job } = await heldAgentCall();
+  const old = new Date(Date.now() - MODEL_RECORD_TTL_MS - 1000);
+  const global = join(dir, 'model-jobs', 'lock');
+  const perJob = join(dir, 'model-jobs', `${job.id}.budget.json.lock`);
+  const exists = (path: string) =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  // A job that is over (it ran and finished).
+  await store.accept(job.id, 'root');
+  await store.finish(job.id, 'completed');
+  // The store-wide lock, held by this process, 8 days old by its mtime.
+  const releaseGlobal = await holdLock(global);
+  await utimes(`${global}.held`, old, old);
+  // A job's own lock, held by another process while the job is over and idle.
+  const child = await holder(perJob);
+  await utimes(`${perJob}.held`, old, old);
+  await utimes(join(dir, 'model-jobs', `${job.id}.json`), old, old);
+  await sweepModelRecords(dir);
+  expect(await exists(`${global}.held`)).toBe(true);
+  expect(await probe(global)).toBe('held');
+  expect(await exists(`${perJob}.held`)).toBe(true);
+  expect(await probe(perJob)).toBe('held');
+  expect(await exists(join(dir, 'model-jobs', `${job.id}.json`))).toBe(false);
+  // Its process ended: the lock file goes with the job, and the store-wide lock stays.
+  await child.kill();
+  await sweepModelRecords(dir);
+  expect(await exists(`${perJob}.held`)).toBe(false);
+  expect(await exists(`${global}.held`)).toBe(true);
+  releaseGlobal();
 });

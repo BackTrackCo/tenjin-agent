@@ -10,8 +10,8 @@ import {
   readChannelBalanceAndTotalClaimed,
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
-import { lstat, opendir, readdir, readFile, rm } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { lstat, mkdir, opendir, readdir, readFile, rm } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import {
   encodeAbiParameters,
   keccak256,
@@ -20,7 +20,8 @@ import {
   type TypedDataDefinition,
 } from 'viem';
 import { z } from 'zod';
-import { LockTimeoutError, withFileLock } from '../lib/lock';
+import { withHeldLock } from '../lib/held-lock';
+import { LockTimeoutError } from '../lib/lock';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { creditRefundedExposure } from '../lib/wallet/spend';
 import {
@@ -180,8 +181,16 @@ export async function readModelRefundNote(dataDir: string, origin: string, runId
   return saved?.state === 'pending' ? readNote(path) : undefined;
 }
 
+const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The run lock, without its `.held` suffix: `model-jobs/<runId>.refund`, beside the job's other
+ * files so the job sweep keeps it while the job is live and removes it with the job. A run id
+ * that is not a job id (a hand-written record) is named by its scope hash, never by its text.
+ */
 export function modelRefundRunLock(dataDir: string, origin: string, runId: string) {
-  return join(dataDir, 'model-refund-' + modelInferenceRunScope(origin, runId).id + '.lock');
+  const name = JOB_ID.test(runId) ? runId.toLowerCase() : modelInferenceRunScope(origin, runId).id;
+  return join(dataDir, 'model-jobs', `${name}.refund`);
 }
 
 async function readRecord(path: string) {
@@ -518,8 +527,15 @@ export class ModelRefundJournal {
   private async closeLocked(runId: string, signal: AbortSignal): Promise<ModelRefundResult> {
     const path = recordPath(this.dataDir, this.origin, runId);
     try {
-      return await withFileLock(
-        modelRefundRunLock(this.dataDir, this.origin, runId),
+      const lock = modelRefundRunLock(this.dataDir, this.origin, runId);
+      await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
+      // THE RUN LOCK: no refund while the run can still sign. It is held for the whole run by the
+      // run's process, so it ends with that process, and recovery acts exactly when the run is
+      // gone. This close holds it for the record's seal and refund (up to the refund timeout)
+      // and waits 150 ms for it: a run that is still going is not recovered, and the next pass
+      // tries again.
+      return await withHeldLock(
+        lock,
         async () => {
           const saved = await readRecord(path);
           if (!saved || saved.state !== 'pending') return refundResult(saved);
@@ -529,7 +545,7 @@ export class ModelRefundJournal {
           }
           return this.refund(path, saved, signal);
         },
-        { timeoutMs: 150, retryMs: 25, takeOverDead: true, signal },
+        { timeoutMs: 150, retryMs: 25, signal },
       );
     } catch (error) {
       // Why it waits, kept with the record: a refund that cannot close says so.
@@ -546,8 +562,7 @@ export class ModelRefundJournal {
 
   /** Only the side note is written, so a session that never held the lock cannot touch the record. */
   private async noteFailure(path: string, error: unknown) {
-    // A lock another session holds is a live run, not a failure: its timeout error advises removing
-    // the lock directory, which is wrong advice for a refund that is being closed.
+    // A lock another session holds is a live run, not a failure.
     if (error instanceof LockTimeoutError) return;
     const why = `failed: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 150)}`;
     const saved = await readRecord(path);

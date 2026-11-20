@@ -11,6 +11,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { holdLock } from '../lib/held-lock';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1898,8 +1899,17 @@ it('refuses a repeated accept while the worker runs, and starts exactly one work
     const repeat = await f.call({ offer_id: f.job.id });
     expect(repeat.reason).toContain('still running');
     expect((await f.store.owned(f.job.id, 'root'))?.state).toBe('running');
+    // The accepting process holds the job's runner lock for as long as the worker runs, so a
+    // strand probe finds a runner alive.
+    const runnerLock = join(dir, 'model-jobs', `${f.job.id}.runner`);
+    await expect(holdLock(runnerLock, { timeoutMs: 0 })).rejects.toMatchObject({
+      name: 'LockTimeoutError',
+    });
+    expect(await f.store.strand(f.job.id)).toBeNull();
     finish();
     const answers = await Promise.all(raced);
+    // After the job's last finish the lock is free again.
+    await vi.waitFor(async () => (await holdLock(runnerLock, { timeoutMs: 0 }))());
     expect(answers.filter((answer) => answer.status === 'completed')).toHaveLength(1);
     expect(answers.filter((answer) => answer.status === undefined)).toHaveLength(1);
     expect(worker.run).toHaveBeenCalledTimes(1);

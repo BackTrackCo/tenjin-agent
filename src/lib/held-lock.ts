@@ -65,6 +65,9 @@ export interface Attempt {
 }
 export type AttemptFactory = (heldPath: string) => Attempt;
 
+/** Whether a file name in a store is a lock file or a leftover of one being made. */
+export const isHeldLockName = (name: string) => /\.held(\.new-[0-9a-f]+)?$/.test(name);
+
 /** The exclusive-open flags, numeric because Node exports neither `O_EXLOCK` nor libuv's. */
 const O_EXLOCK_DARWIN = 0x20;
 const UV_FS_O_EXLOCK_WIN32 = 0x10000000;

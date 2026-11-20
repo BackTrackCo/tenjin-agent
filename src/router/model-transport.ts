@@ -11,9 +11,10 @@ import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
+import { withChannelTurn } from './model-channel-turn';
 import { modelLock, routingAuthorizedAtomic, type ModelJob } from './model-job';
 import { modelInferenceRunScope } from './model-channel';
-import { withFileLock } from '../lib/lock';
+import { withHeldLock } from '../lib/held-lock';
 import { RouteSkipped } from './decision';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import {
@@ -230,7 +231,11 @@ export class ModelTransport {
     return new ModelRefundJournal(this.options.dataDir, this.origin, this.options.payerDeps);
   }
 
-  /** The run lock outlives its individual requests so recovery cannot drain a live worker. */
+  /**
+   * The run lock outlives its individual requests so recovery cannot drain a live worker. It
+   * protects "no refund while the run can still sign": the run's process holds it for the whole
+   * run (no wall time) and it ends with that process. It waits up to 5 s to be taken.
+   */
   async withInferenceRun<T>(
     runId: string,
     signal: AbortSignal,
@@ -247,13 +252,13 @@ export class ModelTransport {
     const transport = new ModelTransport({ ...this.options, inferenceRun: runId });
     let entered = false;
     try {
-      return await withFileLock(
+      return await withHeldLock(
         lock,
         async () => {
           entered = true;
           return run(transport).finally(() => mark?.('workerReturned'));
         },
-        { signal, takeOverDead: true },
+        { signal },
       );
     } finally {
       // The worker may have been cancelled. Refund settlement gets its own bounded signal.
@@ -872,77 +877,66 @@ export class ModelTransport {
       let paymentTurn = false;
       stepFrom = performance.now();
       try {
-        paid.result = await withFileLock(
-          channelLock,
-          async () => {
-            await beforeSend?.();
-            // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS CHANNEL still binds the job's
-            // total: the payer's own check below reads this one quote alone. The quote was
-            // reserved under the cap as it then stood, so what the job has reserved, this
-            // call included, is held against the cap as it stands now. Over it, nothing is
-            // signed and the reservation is released.
-            const current = await consent();
-            const cap = jobCap(current, job);
-            if (BigInt((await load()).charged) > cap) throw (paid.overCap = new QuoteOverCap());
-            // A QUOTE THE ROUTER NO LONGER HOLDS A PLACE FOR. A router that counts a call
-            // at its quote serves the paid request that follows within 120 s whatever the
-            // rate is by then; a later one it counts again, after the signature. This call
-            // waited for the run's channel past that, so it asks for the quote again, with
-            // the same invocation, before it signs. A fresh quote that cannot be had, or
-            // that names another amount than the one reserved, ends this try unsigned and
-            // uncharged, for the retry rule to take up with a new reservation.
-            if (now() - quotedAt > QUOTE_FRESH_MS) {
-              const from = performance.now();
-              const fresh = await askQuote().catch((error: unknown) => {
-                if (error instanceof ModelCallFailed) paid.requote = error;
-                throw error;
-              });
-              if (fresh.amount !== quote) {
-                await fresh.challenge.body?.cancel().catch(() => undefined);
-                throw (paid.requote = new ModelCallFailed(
-                  'Model quote changed while the call waited for its channel',
-                  { cause: 'failed', uncharged: true },
-                ));
-              }
-              await answer.body?.cancel().catch(() => undefined);
-              quoted = () => fresh.challenge;
-              answer = quoted();
-              quotedAt = now();
-              timing.requoteMs = (timing.requoteMs ?? 0) + performance.now() - from;
-              stepFrom = performance.now();
+        paid.result = await withChannelTurn(channelKey, signal, async () => {
+          await beforeSend?.();
+          // A CAP LOWERED WHILE THIS CALL WAITED FOR ITS CHANNEL still binds the job's
+          // total: the payer's own check below reads this one quote alone. The quote was
+          // reserved under the cap as it then stood, so what the job has reserved, this
+          // call included, is held against the cap as it stands now. Over it, nothing is
+          // signed and the reservation is released.
+          const current = await consent();
+          const cap = jobCap(current, job);
+          if (BigInt((await load()).charged) > cap) throw (paid.overCap = new QuoteOverCap());
+          // A QUOTE THE ROUTER NO LONGER HOLDS A PLACE FOR. A router that counts a call
+          // at its quote serves the paid request that follows within 120 s whatever the
+          // rate is by then; a later one it counts again, after the signature. This call
+          // waited for the run's channel past that, so it asks for the quote again, with
+          // the same invocation, before it signs. A fresh quote that cannot be had, or
+          // that names another amount than the one reserved, ends this try unsigned and
+          // uncharged, for the retry rule to take up with a new reservation.
+          if (now() - quotedAt > QUOTE_FRESH_MS) {
+            const from = performance.now();
+            const fresh = await askQuote().catch((error: unknown) => {
+              if (error instanceof ModelCallFailed) paid.requote = error;
+              throw error;
+            });
+            if (fresh.amount !== quote) {
+              await fresh.challenge.body?.cancel().catch(() => undefined);
+              throw (paid.requote = new ModelCallFailed(
+                'Model quote changed while the call waited for its channel',
+                { cause: 'failed', uncharged: true },
+              ));
             }
-            signal.throwIfAborted();
-            paymentTurn = true;
-            step('gateMs');
-            // The payer of the run's channel: it reads that channel's total, signs from
-            // it and takes the router's answer into it, all under this lock.
-            const payer = payerOn();
-            try {
-              const sent = await payer.routeFor(baseUrl).send(url, {
-                method: 'POST',
-                jsonBody: body,
-                timeoutMs: paidCallTimeoutMs(job.decision),
-                blockRedirects: true,
-              });
-              if (timing.answerMs !== undefined) step('bodyMs');
-              return sent;
-            } finally {
-              // Hold the channel until SDK accounting drains, including detached work.
-              const from = performance.now();
-              await payer.idle();
-              timing.drainMs = (timing.drainMs ?? 0) + performance.now() - from;
-              stepFrom = performance.now();
-            }
-          },
-          {
-            signal,
-            takeOverDead: true,
-            // No job wall: the wait for the run's channel ends with the job's own signal, and
-            // its holder is bounded by its own per-call deadline or is dead (taken over).
-            timeoutMs: Number.POSITIVE_INFINITY,
-            retryMs: 100,
-          },
-        );
+            await answer.body?.cancel().catch(() => undefined);
+            quoted = () => fresh.challenge;
+            answer = quoted();
+            quotedAt = now();
+            timing.requoteMs = (timing.requoteMs ?? 0) + performance.now() - from;
+            stepFrom = performance.now();
+          }
+          signal.throwIfAborted();
+          paymentTurn = true;
+          step('gateMs');
+          // The payer of the run's channel: it reads that channel's total, signs from
+          // it and takes the router's answer into it, all under this lock.
+          const payer = payerOn();
+          try {
+            const sent = await payer.routeFor(baseUrl).send(url, {
+              method: 'POST',
+              jsonBody: body,
+              timeoutMs: paidCallTimeoutMs(job.decision),
+              blockRedirects: true,
+            });
+            if (timing.answerMs !== undefined) step('bodyMs');
+            return sent;
+          } finally {
+            // Hold the channel until SDK accounting drains, including detached work.
+            const from = performance.now();
+            await payer.idle();
+            timing.drainMs = (timing.drainMs ?? 0) + performance.now() - from;
+            stepFrom = performance.now();
+          }
+        });
       } catch (cause) {
         paid.failure = cause;
         if (!paymentTurn) paid.localBlock = new LocalSendBlocked(cause);
@@ -951,19 +945,18 @@ export class ModelTransport {
       }
       return paid;
     };
-    // THE PAYMENT LOCK IS THE RUN'S CHANNEL'S, HELD FOR THE WHOLE PAID CALL. A voucher
+    // THE PAYMENT TURN IS THE RUN'S CHANNEL'S, HELD FOR THE WHOLE PAID CALL. A voucher
     // signs the channel's charged total plus this quote. That total moves only when the
     // router's answer to the paid request is taken in, by what the router charged, which
     // may be less than the quote; and the router refuses a second payment on a channel
     // whose first is still in flight (`channel_busy`). So the next voucher of a channel
-    // cannot be signed before the previous call's answer, and the lock covers the read of
-    // the total, the signature, the paid request and its answer, across every process.
-    // The run's own channel is locked alone, so no other job waits for it.
-    const channelLock = join(
-      dataDir,
-      'model-jobs',
-      `${modelInferenceRunScope(this.origin, inferenceRun).id}.payment.lock`,
-    );
+    // cannot be signed before the previous call's answer, and the turn covers the read of
+    // the total, the signature, the paid request and its answer. Only the process that runs
+    // the worker signs on its own channel (recovery is kept off it by the run lock), so the
+    // turn is a queue in this process, with no file and nothing to take over. The wait for
+    // it has no wall time: it ends with the job's own signal, and its holder is bounded by
+    // its own per-call deadline.
+    const channelKey = modelInferenceRunScope(this.origin, inferenceRun).id;
     let quoted = () => challenge;
     const paid = await payOn();
     const { result, failure, paymentSent, signingStarted, localBlock, paidError, overCap } = paid;

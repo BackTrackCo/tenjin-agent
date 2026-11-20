@@ -1,9 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { performance } from 'node:perf_hooks';
-import { holderGone, ownStartToken } from './process-identity';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { hasCode } from './errno';
 
 export interface FileLockOptions {
@@ -11,20 +9,11 @@ export interface FileLockOptions {
   timeoutMs?: number;
   /** Poll interval between acquisition attempts (ms). */
   retryMs?: number;
-  /** Stops waiting to acquire. Once running, the callback owns cancellation. */
-  signal?: AbortSignal;
   /**
    * Called when the lock could not be removed on release. The work succeeded,
    * but the leftover blocks later runs, and only the caller can say so.
    */
   onReleaseError?: (lockPath: string, err: unknown) => void;
-  /**
-   * Move aside a lock whose holder is gone (its pid not running, or held by another
-   * process), or whose owner record is unreadable. For a store whose
-   * holders can be killed mid-update and whose every later operation would
-   * otherwise time out. Off by default: see {@link withFileLock}.
-   */
-  takeOverDead?: boolean;
 }
 
 const DEFAULTS = { timeoutMs: 5000, retryMs: 25 };
@@ -43,10 +32,10 @@ export class LockTimeoutError extends Error {
 }
 
 /**
- * Make the lock directory `lockPath`. mkdir is atomic, so a second holder gets EEXIST:
- * `onBusy` is asked first, and the lock is tried again at once when it moved the lock aside.
- * While it is held this waits `retryMs` and tries again until `deadline` on `now`, then
- * throws LockTimeoutError.
+ * Make the lock directory `lockPath`. mkdir is atomic, so a second holder gets
+ * EEXIST: `onBusy` is asked first, and retries at once when it moved the lock
+ * aside; otherwise this waits `retryMs` and tries again until `deadline` on
+ * `now`, then throws LockTimeoutError.
  */
 async function acquire(
   lockPath: string,
@@ -55,42 +44,28 @@ async function acquire(
     timeoutMs: number;
     retryMs: number;
     now: () => number;
-    /** Makes the lock whole in one step; false when it is held. Default: `mkdir`. */
-    make?: (lockPath: string) => boolean;
-    onBusy?: (lockPath: string) => boolean;
-    signal?: AbortSignal;
+    onBusy?: () => boolean;
   },
 ): Promise<void> {
   for (;;) {
-    o.signal?.throwIfAborted();
     try {
-      if (o.make) {
-        if (o.make(lockPath)) return;
-      } else {
-        mkdirSync(lockPath);
-        return;
-      }
-      if (o.onBusy?.(lockPath) === true) continue;
+      mkdirSync(lockPath);
+      return;
     } catch (err) {
       if (!hasCode(err, 'EEXIST')) throw err;
-      if (o.onBusy?.(lockPath) === true) continue;
+      if (o.onBusy?.() === true) continue;
+      if (o.now() >= o.deadline) throw new LockTimeoutError(lockPath, o.timeoutMs);
+      await delay(o.retryMs);
     }
-    if (o.now() >= o.deadline) throw new LockTimeoutError(lockPath, o.timeoutMs);
-    await delay(o.retryMs, undefined, { signal: o.signal }).catch((error) => {
-      o.signal?.throwIfAborted();
-      throw error;
-    });
   }
 }
 
 /**
  * Minimal cross-process mutex: the lock is a directory, and mkdir is atomic, so
- * a second holder gets EEXIST and retries until `timeoutMs`. By default a stale
- * lock is never stolen: waiters that each judged it stale could remove a fresh
- * holder's directory and lose its update. A crashed holder's lock is removed by
- * hand (the timeout error names the path); the pid+acquiredAt meta only helps
- * diagnose it. With `takeOverDead`, a waiter moves a dead holder's lock aside,
- * one waiter at a time and only the exact lock it judged.
+ * a second holder gets EEXIST and retries until `timeoutMs`. A stale lock is
+ * never stolen: waiters that each judged it stale could remove a fresh holder's
+ * directory and lose its update. A crashed holder's lock is removed by hand (the
+ * timeout error names the path); the pid+acquiredAt meta only helps diagnose it.
  */
 export async function withFileLock<T>(
   lockPath: string,
@@ -98,42 +73,22 @@ export async function withFileLock<T>(
   opts: FileLockOptions = {},
 ): Promise<T> {
   const { timeoutMs, retryMs } = { ...DEFAULTS, ...opts };
-  // One wait reads a holder's start token once per holder it meets, and never on Linux by a fork.
-  const read = new Map<string, string | undefined>();
-  // WHO HOLDS IT, written before the lock exists: the pid, the process's start token (a reused
-  // pid has another) and a random id, so the release can tell this lock from one a waiter put
-  // there. The lock appears whole in one atomic step, so there is no moment with no owner.
-  const owner = randomBytes(8).toString('hex');
-  const token = ownStartToken();
-  const record = JSON.stringify({
-    pid: process.pid,
-    acquiredAt: Date.now(),
-    owner,
-    ...(token === undefined ? {} : { token }),
-  });
+  const metaPath = join(lockPath, 'meta');
   await acquire(lockPath, {
-    deadline: performance.now() + timeoutMs,
+    deadline: Date.now() + timeoutMs,
     timeoutMs,
     retryMs,
-    now: () => performance.now(),
-    signal: opts.signal,
-    make: (path) => makeWhole(path, record),
-    ...(opts.takeOverDead ? { onBusy: (path: string) => takeOverDeadHolder(path, read) } : {}),
+    now: () => Date.now(),
   });
-  let ino: number | undefined;
+  await writeFile(metaPath, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() })).catch(
+    () => undefined,
+  );
   try {
-    ino = statSync(lockPath).ino;
-  } catch {
-    // Taken away already: the release finds nothing of ours.
-  }
-  try {
-    opts.signal?.throwIfAborted();
     return await fn();
   } finally {
-    // Only a lock that is still this holder's is removed: one a waiter took after judging
-    // this holder gone belongs to the taker.
+    // Nothing steals this lock, so it is still ours and the plain rm is safe.
     try {
-      if (stillOurs(lockPath, owner, ino)) rmSync(lockPath, { recursive: true, force: true });
+      rmSync(lockPath, { recursive: true, force: true });
     } catch (err) {
       // A leftover blocks every later run; tell the caller now, not as a timeout.
       opts.onReleaseError?.(lockPath, err);
@@ -141,126 +96,8 @@ export async function withFileLock<T>(
   }
 }
 
-/**
- * Makes the lock directory at `path` with its `meta` already in it, by one rename of a
- * prepared directory: the rename fails when `path` holds a directory with anything in it, so
- * the lock is never seen without its owner. False when it is held.
- */
-function makeWhole(path: string, record: string): boolean {
-  const prepared = `${path}.new-${randomBytes(6).toString('hex')}`;
-  mkdirSync(prepared, { mode: 0o700 });
-  try {
-    writeFileSync(join(prepared, 'meta'), record, { mode: 0o600 });
-    renameSync(prepared, path);
-    return true;
-  } catch (err) {
-    rmSync(prepared, { recursive: true, force: true });
-    // A held lock is a directory with a `meta` in it; Windows says EPERM where POSIX says
-    // EEXIST or ENOTEMPTY.
-    if (hasCode(err, 'EEXIST') || hasCode(err, 'ENOTEMPTY') || hasCode(err, 'EPERM')) return false;
-    throw err;
-  }
-}
-
-/** Whether the lock on disk is the one this holder made: its owner id, or its inode when its meta is unreadable. */
-function stillOurs(lockPath: string, owner: string, ino: number | undefined): boolean {
-  let meta: { owner?: unknown } | undefined;
-  try {
-    meta = JSON.parse(readFileSync(join(lockPath, 'meta'), 'utf8')) as { owner?: unknown };
-  } catch {
-    // No readable meta: ours only by its inode.
-  }
-  if (meta !== undefined) return meta.owner === owner;
-  try {
-    return ino !== undefined && statSync(lockPath).ino === ino;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The identity of a `withFileLock` directory whose holder is gone, or null while it may still
- * be held: its inode plus its `meta` bytes, so a takeover moves only the exact lock it judged.
- * A holder is gone when its pid is not running, or is held by a process with another start
- * token than the one recorded (a reused pid): an equality of tokens, never a comparison of
- * times. A holder with no recorded token, or whose token cannot be read, is alive: the pid
- * alone decides and a doubt reads as alive. A lock whose `meta` cannot be read or parsed is a
- * corrupt one (a lock is only ever made whole): it is gone at once.
- * `read` memoizes tokens by pid AND the recorded token, so a lock another process took after
- * the pid was reused is read fresh; pass a new map to read every holder afresh.
- */
-function deadHolder(lockPath: string, read: Map<string, string | undefined>): string | null {
-  let info;
-  try {
-    info = statSync(lockPath);
-  } catch {
-    return null;
-  }
-  let text = '';
-  let pid: unknown;
-  let token: unknown;
-  try {
-    text = readFileSync(join(lockPath, 'meta'), 'utf8');
-    ({ pid, token } = JSON.parse(text) as { pid?: unknown; token?: unknown });
-  } catch {
-    return `${info.ino}:${text}`;
-  }
-  if (typeof pid !== 'number') return `${info.ino}:${text}`;
-  return holderGone(pid, typeof token === 'string' ? token : undefined, pidAlive, read)
-    ? `${info.ino}:${text}`
-    : null;
-}
-
-/**
- * Move a dead holder's lock aside, serialised by `<lock>.takeover` (a gate made whole like a
- * lock, so a gate of a killed waiter is told by its holder's identity) so two waiters that
- * judged the same lock cannot both take it. Every judgment to move is confirmed with fresh
- * reads of the holder just before the move. True when this call moved it.
- */
-function takeOverDeadHolder(lockPath: string, read: Map<string, string | undefined>): boolean {
-  if (deadHolder(lockPath, read) === null) return false;
-  const gate = `${lockPath}.takeover`;
-  const token = ownStartToken();
-  let made: boolean;
-  try {
-    made = makeWhole(
-      gate,
-      JSON.stringify({
-        pid: process.pid,
-        owner: randomBytes(8).toString('hex'),
-        ...(token ? { token } : {}),
-      }),
-    );
-  } catch {
-    return false;
-  }
-  if (!made) {
-    // A gate is held for one rename: one whose holder is gone was left by a killed waiter.
-    const left = deadHolder(gate, new Map());
-    if (left !== null) {
-      try {
-        const aside = `${gate}.dead-${randomBytes(6).toString('hex')}`;
-        renameSync(gate, aside);
-        rmSync(aside, { recursive: true, force: true });
-      } catch {
-        // Taken or released meanwhile.
-      }
-    }
-    return false;
-  }
-  try {
-    // The confirmation reads the holder afresh, never from this wait's memo.
-    const judged = deadHolder(lockPath, new Map());
-    if (judged === null) return false;
-    const aside = `${lockPath}.dead-${randomBytes(6).toString('hex')}`;
-    renameSync(lockPath, aside);
-    rmSync(aside, { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    rmSync(gate, { recursive: true, force: true });
-  }
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ---------------------------------------------------------------------------

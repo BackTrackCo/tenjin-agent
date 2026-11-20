@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { withFileLock } from '../lib/lock';
+import { withHeldLock } from '../lib/held-lock';
 import { sleepFor } from './model-worker-control';
 import { readJsonFile, writePrivate } from './store-files';
 
@@ -93,7 +93,10 @@ export class ModelPace {
     act: (sent: number[], now: number) => T,
   ): Promise<T> {
     await mkdir(join(this.dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
-    return withFileLock(
+    // THE PACE LOCK protects one read-check-append of the wallet's call log (milliseconds), so
+    // the check and the count are one step across processes. It waits up to 5 s; after that
+    // `take` lets the call go unpaced.
+    return withHeldLock(
       `${this.path}.lock`,
       async () => {
         const kept = logSchema.safeParse(await readJsonFile(this.path, 2_000_000));
@@ -105,7 +108,7 @@ export class ModelPace {
           await writePrivate(this.path, JSON.stringify({ v: 1, sent: sent.slice(-20_000) }));
         return result;
       },
-      { takeOverDead: true, ...(signal ? { signal } : {}) },
+      signal ? { signal } : {},
     );
   }
 

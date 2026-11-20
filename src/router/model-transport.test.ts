@@ -1,16 +1,16 @@
-import { spawnSync } from 'node:child_process';
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
-import * as locks from '../lib/lock';
+import { holdLock } from '../lib/held-lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
 import { modelInferenceRunScope } from './model-channel';
+import * as turns from './model-channel-turn';
 import { ModelRefundJournal, modelRefundRunLock, readModelRefundResult } from './model-refund';
 import { ModelTransport } from './model-transport';
 import { modelPeakQuoteAtomic } from './model-limits';
@@ -41,10 +41,10 @@ function signedRequest(input: Parameters<typeof fetch>[0], init?: RequestInit): 
 
 function watchPaymentLock() {
   const waiting = deferred();
-  const withFileLock = locks.withFileLock;
-  const spy = vi.spyOn(locks, 'withFileLock').mockImplementation((path, run, opts) => {
-    if (path.endsWith('.payment.lock')) waiting.resolve();
-    return withFileLock(path, run, opts);
+  const withChannelTurn = turns.withChannelTurn;
+  const spy = vi.spyOn(turns, 'withChannelTurn').mockImplementation((key, signal, run) => {
+    waiting.resolve();
+    return withChannelTurn(key, signal, run);
   });
   return { waiting: waiting.promise, restore: () => spy.mockRestore() };
 }
@@ -237,14 +237,16 @@ it('journals each accepted run before signing requests reach the router and clos
     maxAutoSpendAtomic: 500000n,
     onPaidSend: async () => {
       expect(await readModelRefundResult(f.dir, BASE, activeRun)).toEqual({ state: 'pending' });
-      expect((await lstat(modelRefundRunLock(f.dir, BASE, activeRun))).isDirectory()).toBe(true);
+      // The run lock is held while the worker signs: no recovery can take it.
+      await expect(
+        holdLock(modelRefundRunLock(f.dir, BASE, activeRun), { timeoutMs: 0 }),
+      ).rejects.toMatchObject({ name: 'LockTimeoutError' });
       pendingAtSend.push(activeRun);
     },
   });
   const close = vi.spyOn(ModelRefundJournal.prototype, 'close').mockImplementation(async (id) => {
-    await expect(lstat(modelRefundRunLock(f.dir, BASE, id))).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
+    // The lock is released before the close: this process can take it again.
+    (await holdLock(modelRefundRunLock(f.dir, BASE, id), { timeoutMs: 0 }))();
     closed.push(id);
     return { state: 'pending' };
   });
@@ -331,13 +333,11 @@ it("holds a job's reserved total against a cap lowered while a call waited for i
     );
   };
   // Lowered when the call, its quote already reserved, takes its turn at the channel.
-  const withFileLock = locks.withFileLock;
-  const lane = vi.spyOn(locks, 'withFileLock').mockImplementation(async (path, run, opts) => {
-    if (path.endsWith('.payment.lock')) {
-      expect(BigInt(JSON.parse(await readFile(budget, 'utf8')).charged)).toBe(spent + 300000n);
-      await lower();
-    }
-    return withFileLock(path, run, opts);
+  const withChannelTurn = turns.withChannelTurn;
+  const lane = vi.spyOn(turns, 'withChannelTurn').mockImplementation(async (key, signal, run) => {
+    expect(BigInt(JSON.parse(await readFile(budget, 'utf8')).charged)).toBe(spent + 300000n);
+    await lower();
+    return withChannelTurn(key, signal, run);
   });
   try {
     await expect(
@@ -541,9 +541,13 @@ it("runs two runs' calls at once on a router that refunds, each under its own ch
   held.resolve();
   await expect(Promise.all(runs)).resolves.toEqual([f.message, f.message]);
   expect(f.vouchers.map((voucher) => voucher.status)).toEqual([200, 200]);
+  // No file lock sits around a signature: a run's channel is queued in this process.
+  expect(
+    (await readdir(join(f.dir, 'model-jobs'))).filter((name) => name.includes('.payment.lock')),
+  ).toEqual([]);
 });
 
-it('recovers after a process that died between signing and sending: its lock is taken over, its call stays reserved and unsigned again, and the next voucher claims the same total once', async () => {
+it('recovers after a process that died between signing and sending: its call stays reserved and unsigned again, and the next voucher claims the same total once', async () => {
   const f = await fixture({ quote: '120000' });
   const signal = new AbortController().signal;
   await f.make().messages(f.job, say('Funds the channel'), signal);
@@ -560,15 +564,6 @@ it('recovers after a process that died between signing and sending: its lock is 
   });
   expect(f.vouchers).toHaveLength(1);
   die = false;
-  // What a killed process leaves: the run channel's lock, held by a pid that is gone.
-  const gone = spawnSync(process.execPath, ['-e', '']).pid;
-  const lock = join(
-    f.dir,
-    'model-jobs',
-    `${modelInferenceRunScope(BASE, 'test-run').id}.payment.lock`,
-  );
-  await mkdir(lock);
-  await writeFile(join(lock, 'meta'), JSON.stringify({ pid: gone, acquiredAt: Date.now() }));
   // The next process: the same request is not signed again.
   f.setRecoveryState('unknown');
   f.setVoucher('none');
@@ -577,7 +572,8 @@ it('recovers after a process that died between signing and sending: its lock is 
     'no new authorization sent',
   );
   expect(f.vouchers).toHaveLength(1);
-  // Its next call takes over the dead lock on the run's channel and claims the total the
+  // Its next call finds nothing of the dead process's channel turn (it was a queue in that
+  // process, with no file) and claims the total the
   // lost voucher claimed. The router never saw that one, so the total is charged once.
   await expect(next.messages(f.job, say('The next call'), signal)).resolves.toEqual(f.message);
   expect(f.vouchers.map((voucher) => [voucher.max, voucher.status])).toEqual([
@@ -1211,7 +1207,8 @@ it('releases the job lock during inference and atomically refuses a concurrent o
   try {
     await started;
     const path = join(f.dir, 'model-jobs', `${f.job.id}.budget.json`);
-    expect(await lstat(`${path}.lock`).catch(() => null)).toBeNull();
+    // The budget lock is not held during the inference call.
+    (await holdLock(`${path}.lock`, { timeoutMs: 0 }))();
     await expect(
       f
         .make()
