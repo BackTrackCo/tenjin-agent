@@ -73,8 +73,10 @@ describe('held lock, every platform', () => {
   it('discards an idle lock file and leaves a held one', async () => {
     const lock = join(tmp, 'discard');
     (await holdLock(lock))();
-    expect(await discardHeldLock(lock)).toBe(true);
-    expect(existsSync(heldPath(lock))).toBe(false);
+    // Linux keeps lock files: a deleted one can be locked while its replacement is locked too.
+    const linux = process.platform === 'linux';
+    expect(await discardHeldLock(lock)).toBe(!linux);
+    expect(existsSync(heldPath(lock))).toBe(linux);
     const held = await startHolder(lock);
     expect(await discardHeldLock(lock)).toBe(false);
     expect(existsSync(heldPath(lock))).toBe(true);
@@ -88,7 +90,7 @@ describe('held lock, every platform', () => {
     writeFileSync(drop, '');
     await sweepHeldLocks(tmp, async (name) => name === 'drop.held');
     expect(existsSync(keep)).toBe(true);
-    expect(existsSync(drop)).toBe(false);
+    expect(existsSync(drop)).toBe(process.platform === 'linux');
   });
 
   it('rejects a zero-wait probe while this process holds it', async () => {
@@ -238,6 +240,14 @@ describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows
 describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
   'exclusive SQLite transaction (Linux primitive)',
   () => {
+    it.skipIf(process.platform !== 'linux')('a sweep leaves the lock file in place', async () => {
+      const lock = join(tmp, 'sq-keep');
+      (await holdLock(lock))();
+      await sweepHeldLocks(tmp, async () => true);
+      expect(await discardHeldLock(lock)).toBe(false);
+      expect(existsSync(heldPath(lock))).toBe(true);
+    });
+
     const attemptOn = (lock: string) => sqliteAttempt(heldPath(lock), loadSqlite()!);
 
     it('starts over on the new file when the lock file is deleted after its connection opened', async () => {

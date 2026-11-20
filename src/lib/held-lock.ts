@@ -253,13 +253,19 @@ export async function withHeldLock<T>(
 }
 
 /**
- * Removes a lock file no one holds, for the job sweep: macOS and Linux probe, unlink while
+ * Removes a lock file no one holds, for the job sweep, except on Linux, where lock files are
+ * never removed and this returns false: macOS and Linux probe, unlink while
  * holding and then close (an opener that resolved the old file notices its inode changed and
  * starts over); Windows probes, closes and then unlinks, ignoring a lost race. A lock that is
  * held is left alone. True when the lock is gone afterwards.
  */
 export async function discardHeldLock(lockPath: string): Promise<boolean> {
   const held = `${lockPath}.held`;
+  // Linux keeps every lock file. A deleted lock file can still be locked by the process that
+  // opened it before the delete, while another process creates and locks its replacement: two
+  // holders at once, with no way to see it from the path. If no code deletes a lock file, that
+  // cannot happen. The cost is one empty file for each job.
+  if (process.platform === 'linux') return false;
   let release: () => void;
   try {
     release = await holdLockWith(factory, lockPath, { timeoutMs: 0 });
