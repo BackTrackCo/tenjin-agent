@@ -18,6 +18,7 @@ import { RouteSkipped } from './decision';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import {
   fittingOutputTokens,
+  outputTokensPaidBy,
   MODEL_MESSAGES_RESULT_BYTES,
   MODEL_MESSAGES_RESULT_BYTES_MAX,
   MODEL_OUTPUT_FLOOR_TOKENS,
@@ -572,8 +573,6 @@ export class ModelTransport {
         await assertCanTransmit();
       }
     };
-    // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
-    await assertCanTransmit();
     let wire = JSON.stringify(body);
     // AN OUTPUT CAP ABOVE 8,192 IS STEPPED DOWN TO WHAT THE JOB CAN STILL RESERVE, before
     // the quote is asked: the largest cap whose peak quote fits what is left of the job's
@@ -599,6 +598,10 @@ export class ModelTransport {
     let relayed = false;
     /** The unpaid request: the router's quote for this call, and the amount it names. */
     const askQuote = async (): Promise<{ challenge: Response; amount: bigint }> => {
+      // EVERY QUOTE REQUEST sends the conversation, the first and each asked again for a lower
+      // output limit, so each passes the transmit check (consent, workspace, mode) first. Nothing
+      // is reserved or signed yet, so a failure here leaves nothing uncertain.
+      await assertCanTransmit();
       const from = performance.now();
       await paced();
       // The wait is `paceWaitMs`, not the round trip's time.
@@ -645,7 +648,27 @@ export class ModelTransport {
       return { challenge, amount: BigInt(offers[0]!.amount) };
     };
     stepFrom = performance.now();
-    const { challenge, amount: quote } = await askQuote();
+    let { challenge, amount: quote } = await askQuote();
+    // THE ROUTER'S QUOTE IS THE TRUTH, the client's estimate only the first guess. A quote above
+    // what the job's cap has left lowers the output limit by what the difference pays for and
+    // asks again (the quote is unpaid, and nothing is reserved), a few rounds, down to the
+    // floor. Only a quote at the floor that still does not fit ends the job for budget below.
+    for (let round = 0; round < 4 && sentMessages; round++) {
+      const limit = sentMessages.max_tokens;
+      if (typeof limit !== 'number' || limit <= MODEL_OUTPUT_FLOOR_TOKENS) break;
+      const left = await modelLock(`${path}.lock`, async () => {
+        const current = await consent();
+        return jobCap(current, job) - BigInt((await load()).charged);
+      });
+      if (quote <= left) break;
+      const lowered = Math.max(MODEL_OUTPUT_FLOOR_TOKENS, limit - outputTokensPaidBy(quote - left));
+      await challenge.body?.cancel().catch(() => undefined);
+      sentMessages.max_tokens = lowered;
+      wire = JSON.stringify(body);
+      timing.outputCap = lowered;
+      timing.requestBytes = Buffer.byteLength(wire);
+      ({ challenge, amount: quote } = await askQuote());
+    }
     let quotedAt = now();
     step('quoteMs');
     let reservation: Call | undefined;

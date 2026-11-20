@@ -66,21 +66,33 @@ export function paidCallTimeoutMs(decision: Record<string, unknown>): number {
   // Clamped to the longest wait a timer holds: a longer one would fire after 1 ms.
   return Math.min(offered + MODEL_PAID_CALL_MARGIN_MS, 2 ** 31 - 1);
 }
+/** Request-body bytes the router counts as one input token in a quote. Mirrors the router. */
+const QUOTE_BYTES_PER_INPUT_TOKEN = 3;
 /**
  * The router's peak Messages quote, as its `quoteAtomic` makes it (tariff
- * deepseek-flash-1017-2026-11-13): `bytes` of request body plus 4096 framing, at most the
- * 1,048,576-token context, at 300 per thousand, the requested output at 1,200 per
- * thousand, rounded up, then the 5% proxy fee rounded up.
+ * deepseek-flash-1017-2026-11-13): one input token for each 3 bytes of request body (rounded
+ * up) plus 4096 framing, at most the 1,048,576-token context, at 300 per thousand, the
+ * requested output at 1,200 per thousand, rounded up, then the 5% proxy fee rounded up.
  */
 export function modelPeakQuoteAtomic(bytes: number, outputTokens: number): bigint {
   const usage =
-    (BigInt(Math.min(1_048_576, bytes + 4096)) * 300n + BigInt(outputTokens) * 1200n + 999n) /
+    (BigInt(Math.min(1_048_576, Math.ceil(bytes / QUOTE_BYTES_PER_INPUT_TOKEN) + 4096)) * 300n +
+      BigInt(outputTokens) * 1200n +
+      999n) /
     1000n;
   return usage + (usage * 5n + 99n) / 100n;
 }
 /**
+ * How many output tokens `atomic` pays for at the quote's output rate (1,200 per thousand
+ * plus the 5% proxy fee), rounded up: what a call lowers its limit by to take back `atomic`
+ * of a quote that is too high.
+ */
+export function outputTokensPaidBy(atomic: bigint): number {
+  return Number((atomic * 100_000n + 125_999n) / 126_000n);
+}
+/**
  * THE LARGEST OUTPUT CAP, FROM `asked` DOWN, WHOSE PEAK QUOTE FITS `remaining` of a job's
- * ceiling for a request of `bytes`. A quote reserves the input (every body byte counted as a
+ * ceiling for a request of `bytes`. A quote reserves the input (each 3 bytes of body counted as a
  * token, at the full input rate, up to the context) and the output a call asks for, so near
  * the end of a job's ceiling the call asks for less output and the job goes on. Never below
  * 8,192: under that the call's quote is above what is left and the budget rule decides.
