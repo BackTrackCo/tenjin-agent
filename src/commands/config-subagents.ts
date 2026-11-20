@@ -84,7 +84,7 @@ function whyReason(entry: NoOffer): string {
         ? 'The assignment is over the router’s size limit'
         : `The assignment is over the router’s size limit (${entry.bytes.toLocaleString('en-US')} of ${entry.limit?.toLocaleString('en-US') ?? '?'} bytes)`;
     case 'job_cap_too_low':
-      return `The job cap leaves no room for the routing fee above one model call (${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}); raise it with \`tenjin config set maxAutoSpend <usd>\``;
+      return `The job cap leaves no room for the routing fee above one model call (${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}); raise the per-call limit with \`tenjin config set maxAutoSpend <usd>\`, or, if you named a lower job ceiling, that ceiling with \`tenjin config subagents on --max-job <usd>\``;
     case 'job_cap_lowered':
       return 'The job cap was lowered after the call was held; send the call again for an offer at the new cap';
     case 'capture_error':
@@ -249,7 +249,7 @@ export async function runConfigSubagents(
   if (perCall <= MODEL_MINIMUM_CALL_ATOMIC)
     throw new CliError(
       'USAGE',
-      `Your per-call spend limit, ${usd(perCall)}, is not above the ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)} that one model call needs before its routing fee, so no job would be offered. Nothing was changed.`,
+      `Your per-call spend limit, ${usd(perCall)}, is not above ${usdOfAtomic(MODEL_MINIMUM_CALL_ATOMIC)}, the least one model call reserves, so no job would be offered. Nothing was changed.`,
       {
         fix: 'Raise the limit with `tenjin config set maxAutoSpend <usd>`, then run this command again.',
       },
