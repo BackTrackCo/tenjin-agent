@@ -20,7 +20,7 @@ import {
   fittingOutputTokens,
   MODEL_MESSAGES_RESULT_BYTES,
   MODEL_MESSAGES_RESULT_BYTES_MAX,
-  MODEL_OUTPUT_TOKENS,
+  MODEL_OUTPUT_FLOOR_TOKENS,
   paidCallTimeoutMs,
   MODEL_RESPONSE_ENVELOPE_BYTES,
   MODEL_RESPONSES_WIRE_BYTES,
@@ -594,12 +594,12 @@ export class ModelTransport {
     // Nothing is reserved or signed yet, so a failure here leaves nothing uncertain.
     await assertCanTransmit();
     let wire = JSON.stringify(body);
-    // AN OUTPUT CAP ABOVE 65,536 IS STEPPED DOWN TO WHAT THE JOB CAN STILL RESERVE, before
+    // AN OUTPUT CAP ABOVE 8,192 IS STEPPED DOWN TO WHAT THE JOB CAN STILL RESERVE, before
     // the quote is asked: the largest cap whose peak quote fits what is left of the job's
     // ceiling as it stands now. The call's identity stays the request as the worker made it.
     const sentMessages = 'messages' in body ? (body.messages as Record<string, unknown>) : null;
     const asked = sentMessages?.max_tokens;
-    if (sentMessages && typeof asked === 'number' && asked > MODEL_OUTPUT_TOKENS) {
+    if (sentMessages && typeof asked === 'number' && asked > MODEL_OUTPUT_FLOOR_TOKENS) {
       const remaining = await modelLock(`${path}.lock`, async () => {
         const current = await consent();
         const cap = jobCap(current, job);

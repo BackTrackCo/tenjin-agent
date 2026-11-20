@@ -1168,7 +1168,7 @@ it('refuses the next call of a running job whose budget file went missing, and s
 
 // A 256,000-token call reserves about three times what a 65,536-token one does, so a job
 // near its ceiling would stop on a call that a smaller output cap still fits.
-it('asks for the largest output cap the rest of the job ceiling can reserve, never below 65,536, and says which', async () => {
+it('asks for the largest output cap the rest of the job ceiling can reserve, never below 8,192, and says which', async () => {
   const request = { model: 'deepseek-flash', max_tokens: 256_000, messages: [] };
   const sent = async (cap: string, quote = '100000') => {
     // The fake router quotes a fixed amount, so only the client's own fit decides.
@@ -1193,8 +1193,11 @@ it('asks for the largest output cap the rest of the job ceiling can reserve, nev
   expect(stepped.asked).toBeLessThan(256_000);
   expect(modelPeakQuoteAtomic(stepped.bytes, stepped.asked)).toBeLessThanOrEqual(197_000n);
   expect(modelPeakQuoteAtomic(stepped.bytes, stepped.asked + 1_000)).toBeGreaterThan(197_000n);
-  // Too little for more than the floor: 65,536, and the quote decides as it always did.
-  expect((await sent('80000', '50000')).asked).toBe(65_536);
+  // Less than 65,536 reserves: the call asks for what fits and the job goes on.
+  const small = await sent('80000', '50000');
+  expect(small.asked).toBeLessThan(65_536);
+  expect(small.asked).toBeGreaterThanOrEqual(8_192);
+  expect(modelPeakQuoteAtomic(small.bytes, small.asked)).toBeLessThanOrEqual(77_000n);
 });
 
 it('rejects a Messages result above the size the call states even when the receipt envelope fits', async () => {

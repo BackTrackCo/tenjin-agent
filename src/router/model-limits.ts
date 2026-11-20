@@ -5,6 +5,12 @@ export const MODEL_NATIVE_TEXT_BYTES = 256_000;
 /** The least output a worker's own call asks for: the floor a call near the job's ceiling
  *  steps down to, and the cap a side request keeps. */
 export const MODEL_OUTPUT_TOKENS = 65_536;
+/**
+ * The least output a call is stepped down to when the job's ceiling cannot hold more. The
+ * router accepts any `max_tokens` from 1 (its contract), so this is Tenjin's own floor: a
+ * reply of this size is still useful, and the call still goes on when little is left.
+ */
+export const MODEL_OUTPUT_FLOOR_TOKENS = 8_192;
 /** The DeepSeek harness's output cap per request, and the most this CLI asks for: Claude
  *  Code 2.1.325 and 2.1.328 took a reply of that many reported tokens whole. */
 export const MODEL_OUTPUT_TOKENS_MAX = 256_000;
@@ -75,14 +81,15 @@ export function modelPeakQuoteAtomic(bytes: number, outputTokens: number): bigin
 }
 /**
  * THE LARGEST OUTPUT CAP, FROM `asked` DOWN, WHOSE PEAK QUOTE FITS `remaining` of a job's
- * ceiling for a request of `bytes`. A quote reserves the output a call asks for, so a
- * 256,000-token call reserves about $0.37 where a 65,536-token one reserves $0.13: near
- * the end of a job's ceiling the call asks for less output and the job goes on. Never
- * below 65,536, where the ceiling's own rule decides, as it always did.
+ * ceiling for a request of `bytes`. A quote reserves the input (every body byte counted as a
+ * token, at the full input rate, up to the context) and the output a call asks for, so near
+ * the end of a job's ceiling the call asks for less output and the job goes on. Never below
+ * 8,192: under that the call's quote is above what is left and the budget rule decides.
  */
 export function fittingOutputTokens(bytes: number, asked: number, remaining: bigint): number {
-  if (asked <= MODEL_OUTPUT_TOKENS || modelPeakQuoteAtomic(bytes, asked) <= remaining) return asked;
-  let fits = MODEL_OUTPUT_TOKENS;
+  if (asked <= MODEL_OUTPUT_FLOOR_TOKENS || modelPeakQuoteAtomic(bytes, asked) <= remaining)
+    return asked;
+  let fits = MODEL_OUTPUT_FLOOR_TOKENS;
   let over = asked;
   while (over - fits > 1) {
     const middle = Math.floor((fits + over) / 2);

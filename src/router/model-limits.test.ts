@@ -4,6 +4,7 @@ import {
   fittingOutputTokens,
   offeredOutputTokens,
   MODEL_MINIMUM_CALL_ATOMIC,
+  MODEL_OUTPUT_FLOOR_TOKENS,
   MODEL_OUTPUT_TOKENS,
   modelPeakQuoteAtomic,
   paidCallTimeoutMs,
@@ -38,7 +39,7 @@ it("reads a job's output cap from its offer alone, up to 256,000", () => {
 
 // A 256,000-token call reserves $0.365784 for a 130 KiB request where a 65,536-token one
 // reserves $0.125799: without a step down, a job stopped on its ceiling that much sooner.
-it('steps the output cap down to the largest one whose reserve fits what a job has left, never below 65,536', () => {
+it('steps the output cap down to the largest one whose reserve fits what a job has left, never below 8,192', () => {
   const bytes = 130 * 1024;
   expect(modelPeakQuoteAtomic(bytes, 256_000)).toBe(365_784n);
   expect(modelPeakQuoteAtomic(bytes, 128_000)).toBe(204_504n);
@@ -52,11 +53,14 @@ it('steps the output cap down to the largest one whose reserve fits what a job h
     expect(modelPeakQuoteAtomic(bytes, fits + 1)).toBeGreaterThan(remaining);
   }
   expect(fittingOutputTokens(bytes, 256_000, 204_504n)).toBeGreaterThanOrEqual(128_000);
-  // At and under the 65,536 reserve the cap stops there, and the ceiling's own rule decides.
-  expect(fittingOutputTokens(bytes, 256_000, 125_799n)).toBe(65_536);
-  expect(fittingOutputTokens(bytes, 256_000, 1_000n)).toBe(65_536);
-  // A call that asks no more than 65,536 is never changed.
-  expect(fittingOutputTokens(bytes, 32_000, 1_000n)).toBe(32_000);
+  // Under the 65,536 reserve the cap goes on down, to the floor, where the ceiling's own rule decides.
+  const below = fittingOutputTokens(bytes, 256_000, 100_000n);
+  expect(below).toBeLessThan(65_536);
+  expect(below).toBeGreaterThan(MODEL_OUTPUT_FLOOR_TOKENS);
+  expect(modelPeakQuoteAtomic(bytes, below)).toBeLessThanOrEqual(100_000n);
+  expect(fittingOutputTokens(bytes, 256_000, 1_000n)).toBe(MODEL_OUTPUT_FLOOR_TOKENS);
+  // A call that asks no more than the floor is never changed.
+  expect(fittingOutputTokens(bytes, 8_000, 1_000n)).toBe(8_000);
 });
 
 // The DeepSeek harness compacts at floor(min(0.8 * window, window - reply cap - 65,536)). A fixed
@@ -82,4 +86,17 @@ it("waits for a paid call as long as its offer's deadline plus the constant's mi
     { maxCallDurationMs: null },
   ])
     expect(() => paidCallTimeoutMs(decision)).toThrow();
+});
+
+// A job at $0.587365 of a $1.00 cap sent a body past the context bound, so its input alone
+// holds $0.3304: a 65,536 floor needed $0.412877 against the $0.412635 left and stopped it.
+it('keeps a job going on a smaller output cap when what is left cannot hold 65,536', () => {
+  const bytes = 1_300_000;
+  const remaining = 1_000_000n - 587_365n;
+  expect(modelPeakQuoteAtomic(bytes, 65_536)).toBe(412_877n);
+  const fits = fittingOutputTokens(bytes, 256_000, remaining);
+  expect(fits).toBeGreaterThan(60_000);
+  expect(fits).toBeLessThan(65_536);
+  expect(modelPeakQuoteAtomic(bytes, fits)).toBeLessThanOrEqual(remaining);
+  expect(modelPeakQuoteAtomic(bytes, fits + 1)).toBeGreaterThan(remaining);
 });
