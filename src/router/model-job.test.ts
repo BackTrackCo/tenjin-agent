@@ -439,9 +439,11 @@ it('keeps the original job files and conversation of a running continuation, wha
   expect(await Promise.all(files.map(exists))).toEqual([false, false, false]);
 });
 
-// A live pid is a live runner, however long after the accept its process started: a clock
-// step after a host sleep must not strand another session's paid job.
-it('keeps a job running while its recorded pid is alive, whenever that process started', async () => {
+// Failure caught (Greptile): after a crash or a reboot another process holds the recorded pid and a
+// pid-only check left an abandoned job `running` for good. A live pid is the runner while its beat
+// moves, watched on the monotonic clock: no wall time is read, so a clock step changes nothing.
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+async function runningWithBeat(beat?: string) {
   const { store, job } = await heldAgentCall();
   const accepted = await store.accept(job.id, 'root', 'turn');
   const path = join(dir, 'model-jobs', `${job.id}.json`);
@@ -452,6 +454,61 @@ it('keeps a job running while its recorded pid is alive, whenever that process s
       runner: { pid: process.pid + 1, acceptedAt: Date.now() - 3 * 3600_000 },
     }),
   );
-  expect(await store.strand(job.id, { isAlive: () => true })).toBeNull();
-  expect(await store.strand(job.id, { isAlive: () => false })).toMatchObject({ state: 'unknown' });
+  const beatFile = join(dir, 'model-jobs', `${job.id}.beat`);
+  // The accept in this process starts its own beat; this runner is another process's.
+  await store.finish(job.id, 'unknown').catch(() => undefined);
+  await writeFile(
+    path,
+    JSON.stringify({ ...accepted, runner: { pid: process.pid + 1, acceptedAt: 1 } }),
+  );
+  if (beat === undefined) await rm(beatFile, { force: true });
+  else await writeFile(beatFile, beat);
+  return { store, job, beatFile };
+}
+
+it('ends a running job whose live pid shows no beat for the watch window, and not before', async () => {
+  const { store, job } = await runningWithBeat('1');
+  const o = { isAlive: () => true, watchMs: 120 };
+  expect(await store.strand(job.id, o)).toBeNull();
+  await wait(40);
+  expect(await store.strand(job.id, o)).toBeNull();
+  await wait(120);
+  expect(await store.strand(job.id, o)).toMatchObject({ state: 'unknown' });
+});
+
+it('keeps a running job whose runner beats, however long it runs, and one with no beat file', async () => {
+  const { store, job, beatFile } = await runningWithBeat('1');
+  const o = { isAlive: () => true, watchMs: 100 };
+  for (let beat = 2; beat < 8; beat++) {
+    await writeFile(beatFile, String(beat));
+    await wait(40);
+    expect(await store.strand(job.id, o)).toBeNull();
+  }
+  // A record of an older build has no beat: judged by its pid alone.
+  const older = await runningWithBeat();
+  await wait(150);
+  expect(await older.store.strand(older.job.id, o)).toBeNull();
+  expect(await older.store.strand(older.job.id, o)).toBeNull();
+  // A pid that is gone is dead at once.
+  expect(await older.store.strand(older.job.id, { isAlive: () => false })).toMatchObject({
+    state: 'unknown',
+  });
+});
+
+it('is not moved by a step of the wall clock, forward or back', async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now(), shouldAdvanceTime: true });
+  try {
+    const live = await runningWithBeat('1');
+    const o = { isAlive: () => true, watchMs: 150 };
+    expect(await live.store.strand(live.job.id, o)).toBeNull();
+    vi.setSystemTime(Date.now() + 2 * 86_400_000);
+    expect(await live.store.strand(live.job.id, o)).toBeNull();
+    vi.setSystemTime(Date.now() - 4 * 86_400_000);
+    expect(await live.store.strand(live.job.id, o)).toBeNull();
+    // Only the real window ends the job whose beat stood still.
+    await wait(200);
+    expect(await live.store.strand(live.job.id, o)).toMatchObject({ state: 'unknown' });
+  } finally {
+    vi.useRealTimers();
+  }
 });

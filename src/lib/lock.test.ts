@@ -243,13 +243,93 @@ describe('withFileLock with takeOverDead', () => {
     expect(existsSync(join(lock, 'meta'))).toBe(true);
   });
 
-  it('never takes a lock whose pid is alive, however long ago the holder took it', async () => {
-    const lock = join(dir, 'old.lock');
-    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() - 3600_000 }));
+  // Failure caught (Greptile): after a crash or a reboot an unrelated long-lived process took the
+  // recorded pid, and a pid-only check held the lock for ever, with no deadline on the wait.
+  it('takes a beaten lock whose live pid shows no beat for the watch window', async () => {
+    const lock = join(dir, 'reused.lock');
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: Date.now(), beats: true }));
+    // Seen once, then still: not before the window, taken after it.
+    const opts = { timeoutMs: 2000, retryMs: 10, takeOverDead: true, watchMs: 150 };
+    const started = performance.now();
+    expect(await withFileLock(lock, async () => 'ran', opts)).toBe('ran');
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+  });
+
+  it('never takes a lock whose holder beats, however long it holds', async () => {
+    const lock = join(dir, 'beating.lock');
+    let release!: () => void;
+    const holding = withFileLock(lock, () => new Promise<void>((resolve) => (release = resolve)), {
+      takeOverDead: true,
+      beatMs: 20,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Many watch windows pass; the beat moves in each, so the waiter never takes the lock.
     await expect(
-      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true }),
+      withFileLock(lock, async () => 'unreached', {
+        timeoutMs: 700,
+        retryMs: 10,
+        takeOverDead: true,
+        watchMs: 120,
+      }),
     ).rejects.toBeInstanceOf(LockTimeoutError);
-    expect(existsSync(join(lock, 'meta'))).toBe(true);
+    release();
+    await holding;
+  });
+
+  it('is not moved by a step of the wall clock, forward or back', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now(), shouldAdvanceTime: true });
+    try {
+      // A beating holder stays the holder when the clock jumps a day ahead and a day back.
+      const live = join(dir, 'live-step.lock');
+      let release!: () => void;
+      const holding = withFileLock(
+        live,
+        () => new Promise<void>((resolve) => (release = resolve)),
+        { takeOverDead: true, beatMs: 20 },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      vi.setSystemTime(Date.now() + 86_400_000);
+      await expect(
+        withFileLock(live, async () => 'unreached', {
+          timeoutMs: 400,
+          retryMs: 10,
+          takeOverDead: true,
+          watchMs: 120,
+        }),
+      ).rejects.toBeInstanceOf(LockTimeoutError);
+      release();
+      await holding;
+      // A reused pid is not taken sooner by a step, and still taken after the real window.
+      const reused = join(dir, 'reused-step.lock');
+      leave(reused, JSON.stringify({ pid: process.pid, acquiredAt: Date.now(), beats: true }));
+      await expect(
+        withFileLock(reused, async () => 'unreached', {
+          timeoutMs: 60,
+          retryMs: 10,
+          takeOverDead: true,
+          watchMs: 400,
+        }),
+      ).rejects.toBeInstanceOf(LockTimeoutError);
+      vi.setSystemTime(Date.now() - 2 * 86_400_000);
+      expect(
+        await withFileLock(reused, async () => 'ran', {
+          timeoutMs: 2000,
+          retryMs: 10,
+          takeOverDead: true,
+          watchMs: 150,
+        }),
+      ).toBe('ran');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('judges a holder of an older build, which never beats, by its pid alone', async () => {
+    const lock = join(dir, 'older.lock');
+    leave(lock, JSON.stringify({ pid: process.pid, acquiredAt: 0 }));
+    await expect(
+      withFileLock(lock, async () => 'unreached', { ...quick, takeOverDead: true, watchMs: 20 }),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
   });
 
   it('takes a lock with no readable holder only once it is older than 10 s', async () => {
