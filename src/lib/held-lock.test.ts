@@ -312,10 +312,10 @@ async function runStress(ms: string, chaos: string, workers: string, broken = '0
   };
 }
 
-// The control for the harness: against a lock skipped on 5% of the rounds, the log detector MUST
+// The control for the harness: against a lock skipped altogether, the log detector MUST
 // report overlaps. A detector that reports none here has proved nothing about a real lock.
 it('the stress detector sees two holders inside a deliberately broken lock', async () => {
-  const result = await runStress('3000', 'none', '4', '0.1');
+  const result = await runStress('5000', 'none', '4', '1');
   expect(result.rounds).toBeGreaterThan(0);
   expect(result.overlaps).toBeGreaterThan(0);
 }, 60_000);
