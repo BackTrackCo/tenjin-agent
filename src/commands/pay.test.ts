@@ -7,6 +7,7 @@ import {
   paidLegTimeoutMs,
   quoteRouterCall,
   runPay,
+  settlementTx,
   signInForPoll,
   signInOnlyHeader,
   type PaidLeg,
@@ -19,7 +20,11 @@ import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { privateKeyToAccount } from 'viem/accounts';
-import { encodePaymentRequiredHeader } from '@x402/core/http';
+import {
+  decodePaymentRequiredHeader,
+  encodePaymentRequiredHeader,
+  encodePaymentResponseHeader,
+} from '@x402/core/http';
 import { parseSIWxHeader, verifySIWxSignature } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import {
@@ -444,6 +449,36 @@ describe('runPay, tenjin lane', () => {
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  // The SDK's reader accepts a v1 challenge from the body when the header is
+  // absent. This command pays only a v2 header, so it never hands it the body.
+  it('refuses a v1 challenge in the body as a 402 with no PAYMENT-REQUIRED header', async () => {
+    const v1 = { x402Version: 1, accepts: buildPaymentRequired().paymentRequired.accepts };
+    const { fetch, calls } = scriptedFetch([json(402, v1)]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: `The 402 from ${TENJIN_URL} carried no PAYMENT-REQUIRED header.`,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  // The SDK throws one error for an absent header and an empty one; an empty
+  // header was sent, so it is the undecodable one.
+  it.each([
+    ['empty', ''],
+    ['not base64 JSON', 'not base64 json'],
+  ])('a 402 whose PAYMENT-REQUIRED header is %s cannot be decoded', async (_label, value) => {
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': value })]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: 'Could not decode the PAYMENT-REQUIRED header.',
+    });
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -1145,22 +1180,54 @@ describe('runPay, a seller that asks only for a sign-in', () => {
 });
 
 describe('signInForPoll, a router poll the seller answers with a sign-in', () => {
+  /** A 402's header lookup that carries this PAYMENT-REQUIRED value. */
+  const carrying = (value: string) => (name: string) =>
+    name === 'PAYMENT-REQUIRED' ? value : undefined;
+
   // A POST poll reads the challenge with no catch around it: a header that
   // decoded to JSON null threw a raw TypeError out of the poll.
   it('reads a PAYMENT-REQUIRED that decodes to null as no sign-in', () => {
-    expect(signInOnlyHeader(Buffer.from('null').toString('base64'))).toBeUndefined();
+    expect(signInOnlyHeader(carrying(Buffer.from('null').toString('base64')))).toBeUndefined();
   });
 
   const POLL_URL = 'https://seller.example/v1/runs/R1';
   const SUBMIT_URL = 'https://seller.example/v1/run';
   const PAYER = testSigner().address;
   const OTHER = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`)).address;
+  /** The lookup of a 402 that asks only for a sign-in at the poll URL. */
+  const signInHeader = () => carrying(buildSignInChallenge(POLL_URL).header);
+
+  // The SDK reader throws on a 402 with no header, and a POST poll reads the
+  // challenge with no catch around it. The cap is on the header as carried.
+  it.each([
+    { name: 'no header', header: () => undefined },
+    { name: 'an empty header', header: carrying('') },
+    { name: 'a header that is not base64 JSON', header: carrying('!not-base64-json!') },
+    {
+      name: 'a sign-in challenge past the cap',
+      header: carrying(
+        encodePaymentRequiredHeader({
+          ...decodePaymentRequiredHeader(buildSignInChallenge(POLL_URL).header),
+          error: 'x'.repeat(16_384),
+        }),
+      ),
+    },
+  ])('reads $name as no sign-in, and signs nothing for it', async ({ header }) => {
+    expect(signInOnlyHeader(header)).toBeUndefined();
+    const getSigner = vi.fn(async () => testSigner());
+    const answer = await signInForPoll(header, POLL_URL, makeCtx(), {
+      provider: { ...testWalletProvider(), getSigner },
+      paidBy: { from: PAYER, url: SUBMIT_URL },
+    });
+    expect(answer).toBeUndefined();
+    expect(getSigner).not.toHaveBeenCalled();
+  });
 
   // The take is the proof of payment: a submit whose ledger row was never
   // written (its write swallows its own error) still collects its result.
   it('signs for the wallet that paid the take, with no ledger row', async () => {
     const challenge = buildSignInChallenge(POLL_URL);
-    const answer = await signInForPoll(challenge.header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(carrying(challenge.header), POLL_URL, makeCtx(), {
       provider: testWalletProvider(),
       paidBy: { from: PAYER, url: SUBMIT_URL },
     });
@@ -1172,7 +1239,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
   // names the wallet that paid, so the take can wait for it.
   it('signs nothing for a take another wallet paid, and names that wallet', async () => {
     const getSigner = vi.fn(async () => testSigner());
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: { ...testWalletProvider(), getSigner },
       paidBy: { from: OTHER, url: SUBMIT_URL },
     });
@@ -1190,7 +1257,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
     { name: 'a take that names no payer', paidBy: { url: SUBMIT_URL } },
   ])('signs nothing for $name, and opens no wallet', async ({ paidBy }) => {
     const getSigner = vi.fn(async () => testSigner());
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: { ...testWalletProvider(), getSigner },
       paidBy,
     });
@@ -1213,7 +1280,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
       savedFiles: [],
       payer: PAYER,
     });
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: testWalletProvider(),
       paidBy: { url: SUBMIT_URL },
     });
@@ -1225,7 +1292,7 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
   // A locked wallet or a keychain that did not answer ended a paid take for
   // good; it is an error the poll counts and survives.
   it('answers a wallet that will not open with an error, never a refusal', async () => {
-    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+    const answer = await signInForPoll(signInHeader(), POLL_URL, makeCtx(), {
       provider: {
         ...testWalletProvider(),
         getSigner: async () => {
@@ -2061,6 +2128,7 @@ describe('runPay, bazaar lane', () => {
     ['one that names a tx without success', { transaction: `0x${'ab'.repeat(32)}` }],
     ['one that cannot be read', 'not base64 json'],
     ['one that is not an object', Buffer.from('false').toString('base64')],
+    ['one that is JSON null', Buffer.from('null').toString('base64')],
   ])('keeps the unknown-settlement failure for %s', async (_label, settle) => {
     const err = await rejectedWith(settle);
     expect(err.message).toBe('Payment was not accepted by the endpoint.');
@@ -3419,6 +3487,41 @@ describe('a direct pay the seller refused', () => {
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
     expect(await readPaidRecords(dir)).toEqual([]);
+  });
+});
+
+// The SDK's settlement reader, called directly: it throws on an absent or
+// unreadable header, and the read treats that as no settlement.
+describe('settlementTx', () => {
+  const TX = `0x${'ab'.repeat(32)}`;
+  const settle = (transaction: string) =>
+    encodePaymentResponseHeader({ success: true, transaction, network: 'eip155:8453' });
+  const res = (headers: Record<string, string>) => ({
+    header: (name: string) => headers[name],
+  });
+
+  it.each([
+    ['PAYMENT-RESPONSE', { 'PAYMENT-RESPONSE': settle(TX) }],
+    ['X-PAYMENT-RESPONSE alone', { 'X-PAYMENT-RESPONSE': settle(TX) }],
+    [
+      'PAYMENT-RESPONSE over X-PAYMENT-RESPONSE',
+      { 'PAYMENT-RESPONSE': settle(TX), 'X-PAYMENT-RESPONSE': settle(`0x${'cd'.repeat(32)}`) },
+    ],
+    // The SDK's own fall-through: an empty PAYMENT-RESPONSE is no header.
+    [
+      'X-PAYMENT-RESPONSE beside an empty PAYMENT-RESPONSE',
+      { 'PAYMENT-RESPONSE': '', 'X-PAYMENT-RESPONSE': settle(TX) },
+    ],
+  ])('reads %s', (_label, headers) => {
+    expect(settlementTx(res(headers))).toBe(TX);
+  });
+
+  it.each([
+    ['absent', {}],
+    ['not base64 JSON', { 'PAYMENT-RESPONSE': 'not base64 json' }],
+    ['JSON null', { 'PAYMENT-RESPONSE': Buffer.from('null').toString('base64') }],
+  ])('is undefined, and never throws, when the header is %s', (_label, headers) => {
+    expect(settlementTx(res(headers))).toBeUndefined();
   });
 });
 

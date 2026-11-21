@@ -92,6 +92,16 @@ describe('paymentShortOfFunds', () => {
     ).toBe(true);
   });
 
+  // The bound treats an oversized header as absent, so the SDK falls through
+  // to the older X-PAYMENT-RESPONSE beside it.
+  it('reads X-PAYMENT-RESPONSE beside an oversized PAYMENT-RESPONSE', () => {
+    const headers = {
+      'PAYMENT-RESPONSE': 'x'.repeat(16_385),
+      'X-PAYMENT-RESPONSE': encode({ success: false, errorReason: 'insufficient_funds' }),
+    };
+    expect(paymentShortOfFunds(response({}, headers, 200))).toBe(true);
+  });
+
   it('reads body and required errors only on a 402', () => {
     expect(
       paymentShortOfFunds(
