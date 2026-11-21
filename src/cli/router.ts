@@ -179,7 +179,7 @@ Examples:
     });
 
   const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
-    "The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`. A bare `tenjin payments` lists the newest: when, who was paid, how much, whether it settled, and the transaction. A call on your own account reads `your account`, or `your account · may have charged` when it was still running, failed after the account's job started, or got the account's own error.",
+    "The local record of paid router lookups and direct `tenjin pay` calls, in `~/.tenjin/paid/ledger.jsonl`. A bare `tenjin payments` lists the newest: when, who was paid, how much, whether it settled, and the transaction. A call on your own account reads `your account`, or `your account · may have charged` when it was still running, failed after the account's job started, or got the account's own error.",
   );
   payments.action(async function (this: Command) {
     await runCommand('payments', this, async (ctx) => {

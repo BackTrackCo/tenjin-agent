@@ -1,5 +1,31 @@
 # tenjin-cli
 
+## 0.1.0-alpha.35
+
+### Minor Changes
+
+- 25bbbce: Add DeepSeek subagents for Claude Code, off by default. When they are on, Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible subagent job, and Claude accepts or declines each offer. A call that gets no offer, or whose offer Claude declines, runs natively.
+
+  Who sees what: before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, which include what the worker reads in `~/.claude` (session transcripts, prompt history and settings). The worker's web searches run inside its DeepSeek call and are paid as its tokens. A page the worker's WebFetch could not fetch is read through Exa for $0.001 with no routing fee, and its address goes to Exa. Nothing a worker reads or prints is masked, env files and credential command output included; the task and parent context sent for routing before an offer are masked for known secrets, which is not a guarantee.
+
+  Cost: a job's routing, inference and web searches together cost up to your per-call limit ($1 by default), or a lower ceiling you name with `--max-job`, within your daily budget. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked ($0.0081), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job's ceiling. Inference is the reported usage plus 5%. Each worker run pays on its own inference channel, and its unused deposit returns to your wallet when the worker ends.
+
+  Turn them on in fresh setup, with `tenjin install --subagents on`, or with `tenjin config subagents on`, which covers every workspace; `tenjin config subagents on --repository <path>...` covers only those directories and their subfolders. `tenjin config subagents off` turns them off. `tenjin config subagents` and `tenjin status` show whether they are on and where, and `tenjin config subagents why` lists why recent calls got no offer. Existing profiles and updates keep their settings. DeepSeek workers run on Claude Code only; Codex keeps running its own subagents natively, with no offer and no fee. [Sharing, charges and controls](https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md)
+
+- 25bbbce: Raise the default per-call spend limit from $0.25 to $1, for every Tenjin tool, where no limit is saved. A saved limit is unchanged. `tenjin config set maxAutoSpend <usd>` now accepts any non-negative USD amount with up to 6 decimal places, including `0`, which stops every automatic payment so that each call asks first.
+
+### Patch Changes
+
+- bea0e39: Paid results behind a seller's sign-in now come back: when a paid run's status URL asks the wallet that paid to sign in, `tenjin pay` and router job polls sign in and pay nothing. They sign only a GET whose challenge matches the responding origin, with the wallet that paid that host. A run paid before this version cannot be collected this way.
+
+  `tenjin pay` saves a paid image, sound or PDF to a file (`savedTo`), falling back to the temp folder, then to `bodyBase64`. Large output is no longer cut off at 64 KB, and output lost to a full disk exits nonzero (4 after a payment).
+
+  A failed paid call shows the seller's reason and says you were charged only when the chain shows it. A job polled with another wallet keeps running and names the wallet that paid. `tenjin payments` lists every direct `tenjin pay`.
+
+- b2dc6f1: `tenjin fund` now sends a hash of this computer's ID, never the ID itself, so an event or promo code entered under **Have a code?** on the fund page can be redeemed once per computer. An agent asked to use a code runs `tenjin fund` and has the person type the code on that page, never in chat.
+- 25bbbce: Stop Claude Code's auto mode from refusing an Agent call the router suggested a tool for. The router's suggestion for a delegated task was appended to the Agent call's prompt, and auto mode refused the call once because a hook had changed its input after the review. In Claude Code the plugin now takes that line off the call and gives it to the subagent as start-up context, which changes no input.
+- 25bbbce: Allow DeepSeek subagents on native Windows with an explicit worker account and shared Claude profile. Native Claude shell tools use the Windows permissions granted to that account. Tenjin keeps its signing data in the controller’s account.
+
 ## 0.1.0-alpha.34
 
 ### Minor Changes

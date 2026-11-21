@@ -1,3 +1,8 @@
+import { sweepJobFolders } from './job-folders';
+import { isModelWorkerProcess } from './model-worker-context';
+import { registerModelTool, stopModelWorkers } from './model-mcp';
+import { ModelTransport } from './model-transport';
+import type { ModelSession } from './model-handoff';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -6,6 +11,7 @@ import type {
   ServerNotification,
   ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
@@ -18,6 +24,7 @@ import { type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitCodexHookEvent, admitHookEvent } from './hook-session';
+import { observeClaudeWorkerMode } from './claude-model-policy';
 import {
   CODEX_HOOK_KINDS,
   CODEX_HOOK_TOOL_FIELDS,
@@ -31,6 +38,7 @@ import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
 import {
+  chainRefundReads,
   chainReader,
   DETACHED_CEILING_MS,
   RoutingPayer,
@@ -38,6 +46,7 @@ import {
   type RoutingPayerDeps,
 } from './routing-payer';
 import { routerSettings } from './settings';
+import { cachedIdentities, fetchIdentities } from './identities';
 import { handBack, runSwap } from './swap';
 import {
   fail,
@@ -143,7 +152,9 @@ const INSTRUCTIONS =
   'Routing top-ups count once, when sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin fund 5` (or the ' +
-  'amount they name). When a paid call fails for low balance, ask the person once to add ' +
+  'amount they name). When the user has a promo or event code, run `tenjin fund` and tell ' +
+  'them to enter it under Have a code? on that page; never ask them to paste the code here. ' +
+  'When a paid call fails for low balance, ask the person once to add ' +
   'funds, saying what the call is for and what it costs, and run the `tenjin fund` command it ' +
   'names only on a yes. Opening checkout moves no money. Follow its `nextStep`: ' +
   'say in a sentence or two what the money is for, run `tenjin balance --wait` in the ' +
@@ -288,7 +299,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // the hooks gate on and the observer records. The request tool's provider is
   // not unlocked a second time beside it: both share the wallet layer's signer
   // cache, so the payer's unlock serves a paid lookup too.
-  if (opts.payer !== undefined) {
+  if (isModelWorkerProcess(opts.env)) {
+    // A worker's own `tenjin mcp` never unlocks or funds the wallet.
+  } else if (opts.payer !== undefined) {
     void opts.payer.prewarm();
   } else if (opts.handlerDeps?.provider === undefined) {
     void provider.getSigner().catch(() => undefined);
@@ -304,11 +317,116 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
    * call can name no file of its own.
    */
   const sessions = new Map<string, { transcript_path?: unknown; cwd?: unknown }>();
+  let modelSession: ModelSession | undefined;
+  // A `tenjin mcp` STARTED INSIDE A MODEL WORKER, under whatever name the worker's host
+  // registered it, lists and runs one tool: `hook`, which the host's hook legs call and
+  // which answers nothing there. A worker pays for nothing outside its job's budget and
+  // starts no DeepSeek worker (operator ruling 2026-11-17).
+  const inWorker = isModelWorkerProcess(opts.env);
+  // Only Claude Code runs DeepSeek workers: a Codex host gets no `subagent` tool, no offer
+  // and no fee, and its subagent calls run natively.
+  if (opts.harness !== 'codex')
+    registerModelTool(server, {
+      modelWorker: inWorker,
+      dataDir: ctx.dataDir,
+      session: () => modelSession,
+      // Claude Code keeps this process across `/clear`, which starts another session id.
+      // The record of the closed one would refuse every call of the new one (`no_session`).
+      sessionEnded: (sessionId) => {
+        if (modelSession?.sessionId === sessionId) modelSession = undefined;
+      },
+      transport: async () => {
+        const settings = await resolveContextSettings(ctx);
+        return new ModelTransport({
+          dataDir: ctx.dataDir,
+          baseUrl: settings.baseUrl,
+          payerDeps: {
+            dataDir: ctx.dataDir,
+            getSigner: () => provider.getSigner(),
+            policy: async () => (await resolveContextSettings(ctx)).policy,
+            authorizer: (policy) => createLocalSpendAuthorizer({ dir: ctx.dataDir, policy }),
+            walletBalance: (address, timeoutMs) =>
+              readUsdcBalanceWithFallback(address, settings.rpcUrl, { timeoutMs }),
+            readContract: chainReader(settings.rpcUrl),
+            ...chainRefundReads(settings.rpcUrl),
+          },
+        });
+      },
+      // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it
+      // (`model-worker-web.ts`): the person's wallet, limits and settings in the job's root,
+      // no routing fee and no approval, so a call over the limits is refused, never kept.
+      web: async (args, { cwd, watch, signal }) => {
+        const settings = await resolveContextSettings(ctx);
+        const authorizer = watch(
+          opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
+        );
+        const payDeps = opts.handlerDeps?.payDeps;
+        return runRequestTool(args, {
+          ctx,
+          provider,
+          authorizer,
+          cwd,
+          ...(signal !== undefined ? { paymentSignal: signal } : {}),
+          approves: false,
+          harness: 'claude',
+          ...(opts.handlerDeps?.fetchImpl !== undefined
+            ? { fetchImpl: opts.handlerDeps.fetchImpl }
+            : {}),
+          ...(payDeps !== undefined
+            ? {
+                payDeps: {
+                  ...payDeps,
+                  ...(payDeps.authorizer !== undefined
+                    ? { authorizer: watch(payDeps.authorizer) }
+                    : {}),
+                },
+              }
+            : {}),
+        });
+      },
+      // The identities a worker's searches are checked against when the person saved a block
+      // or only rule: read now, free, else the copy the last read kept.
+      webIdentities: async () => {
+        const settings = await resolveContextSettings(ctx);
+        const read = await fetchIdentities(ctx, {
+          baseUrl: settings.baseUrl,
+          ...(opts.handlerDeps?.fetchImpl !== undefined
+            ? { fetchImpl: opts.handlerDeps.fetchImpl }
+            : {}),
+        });
+        return read.ok ? read.identities : cachedIdentities(ctx.dataDir);
+      },
+    });
   const rememberSession = (raw: Record<string, unknown>): void => {
     const id = raw['session_id'];
     if (typeof id !== 'string') return;
     sessions.delete(id);
     sessions.set(id, { transcript_path: raw['transcript_path'], cwd: raw['cwd'] });
+    // A typed prompt renews the session's record. A session whose first event here is
+    // not one (resumed, or woken by a task notification) is known from its first tool
+    // event of the main loop, so its subagent calls can be offered too.
+    const event = raw['hook_event_name'];
+    if (
+      !raw['agent_id'] &&
+      typeof raw['cwd'] === 'string' &&
+      typeof raw['transcript_path'] === 'string' &&
+      (event === 'UserPromptSubmit'
+        ? !modelSession || modelSession.sessionId === id
+        : !modelSession && (event === 'PreToolUse' || event === 'PostToolUse'))
+    ) {
+      modelSession = {
+        sessionId: id,
+        // Unique across processes: a counter restarts with `tenjin mcp`, and the
+        // first turn of a resumed session would then name an earlier turn's records.
+        turnId: randomUUID(),
+        cwd: raw['cwd'],
+        transcript: raw['transcript_path'],
+      };
+    }
+    if (modelSession) {
+      const observed = observeClaudeWorkerMode(raw, modelSession);
+      if (observed) modelSession.claudePermissionMode = observed.mode;
+    }
     for (const old of sessions.keys()) {
       if (sessions.size <= MAX_SESSIONS) break;
       sessions.delete(old);
@@ -345,7 +463,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       return handBack('Tenjin could not decide in time');
     }
   };
-  server.registerTool(
+  const request = server.registerTool(
     'request',
     {
       title: 'Request external information or a computation, paid per call',
@@ -455,6 +573,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       { query, id, input, choice, browse, tool, count, job, source, decide },
       extra,
     ): Promise<CallToolResult> => {
+      if (isModelWorkerProcess(opts.env))
+        return toolResult(
+          fail(
+            'failed',
+            'Nested Tenjin requests are unavailable inside a model worker; use the native tools.',
+          ),
+        );
       // Resolved per call, from settings read now: a policy frozen at the
       // first call would leave a limit the user changed with no effect until
       // the harness restarts the server.
@@ -534,6 +659,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async ({ quote, total, what }, extra): Promise<CallToolResult> => {
+      if (isModelWorkerProcess(opts.env))
+        return toolResult(
+          fail(
+            'failed',
+            'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',
+          ),
+        );
       const settings = await resolveContextSettings(ctx);
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
@@ -561,10 +693,11 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     },
   );
   approve.disable();
+  if (inWorker) request.disable();
   // Known only once the client has said who it is: listed then, and only to
   // the host whose prompt is the yes.
   server.server.oninitialized = () => {
-    if (promptsBeforeApprove(server.server.getClientVersion())) approve.enable();
+    if (!inWorker && promptsBeforeApprove(server.server.getClientVersion())) approve.enable();
   };
   // THE HOOK LEGS' TOOL. The plugin's hooks call it once per routing leg as an
   // `mcp_tool` hook, so the leg runs in this process, which holds the wallet
@@ -589,6 +722,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (args): Promise<CallToolResult> => {
+      if (isModelWorkerProcess(env)) return { content: [{ type: 'text', text: '' }] };
       let response: unknown;
       try {
         const raw = eventFromToolInput(args);
@@ -608,7 +742,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         // THE HOST'S OWN PATH, admitted again when the swap reads it: on a
         // session's first prompt the transcript is not written yet, and the
         // admitted event leaves it out, which would hand back its first search.
-        rememberSession(raw);
+        rememberSession({ ...raw, ...event });
         response = await runHookKind(args.kind, event, {
           ...hookDepsOf(ctx, opts),
           ...(opts.observer !== undefined
@@ -730,6 +864,9 @@ function toolResult(result: RequestToolResult): CallToolResult {
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
   const { server, payer } = await createRouterMcp({ ...opts, topUpAtStart: true });
+  // What a crash or a kill of an earlier `tenjin mcp` left of its jobs' temp folders, in
+  // the background: a folder of a job still running in another process is never touched.
+  if (!isModelWorkerProcess(opts.env)) void sweepJobFolders();
   await server.connect(new StdioServerTransport());
   let ended!: () => void;
   const end = new Promise<void>((resolve) => (ended = resolve));
@@ -739,6 +876,7 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
   // Held through the wait below, so a SIGTERM then does not cut it short.
   process.once('SIGTERM', ended);
   await end;
+  await stopModelWorkers(server);
   await drained(payer);
   process.off('SIGTERM', ended);
 }
@@ -799,7 +937,7 @@ async function createRouterMcp(
     rest.payer ??
     (await routingPayer(ctx, observer, { harness: rest.harness ?? 'claude', ...payerDeps }));
   const server = buildRouterMcpServer({ ...rest, payer, observer });
-  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd());
+  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd(), env);
   return { server, payer };
 }
 
@@ -810,7 +948,13 @@ async function createRouterMcp(
  * the first prompt finds it ready rather than meeting the deposit. Where it is
  * off nothing is sent, and no money is set aside for routing nobody uses.
  */
-async function topUpAtStart(ctx: CommandContext, payer: RoutingPayer, cwd: string): Promise<void> {
+async function topUpAtStart(
+  ctx: CommandContext,
+  payer: RoutingPayer,
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (isModelWorkerProcess(env)) return;
   try {
     const { enabled } = await routerSettings({ cwd, dataDir: ctx.dataDir });
     if (!enabled.value) return;

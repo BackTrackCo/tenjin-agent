@@ -8,10 +8,12 @@ import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { balanceReader, lowBalance } from '../commands/balance';
 import { connectedLabels, describeRules, summarizeRule } from '../commands/config-readback';
+import { subagentsStatusValue } from './subagents-shown';
 import { dollars } from '../commands/fund-watch';
 import { channelCredit, routingSpent } from './channel-credit';
 import { ROUTING_DEPOSIT_KEY, SUGGESTED_FUND_USD } from './fee';
 import { accountJobs, cachedIdentities, labelOf, type Identities } from './identities';
+import { NO_MODEL_REFUNDS, readModelRefundSummary, refundsElsewhereLines } from './model-refund';
 import { readVaultHeader } from './accounts/vault';
 import { routerSettings, type RouterSettings } from './settings';
 import { BUILT_IN_SOURCE, type Target } from './settings-wire';
@@ -52,6 +54,8 @@ export interface StatusDeps {
   cwd?: string;
   /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelRoutingCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Local lifetime routing-cost estimate, separate from the rolling daily budget. */
   routingSpent?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
@@ -76,10 +80,14 @@ async function walletBalance(
 
 /** What the wallet's routing channel still holds; 0n with no wallet, or one
  *  this cannot read without a prompt. */
-async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
+async function walletRoutingCredit(
+  ctx: CommandContext,
+  lane: 'tool' | 'model' | 'model-routing' = 'tool',
+  origin?: string,
+): Promise<bigint> {
   try {
     const { address } = await describeWallet(resolveWalletProvider(ctx));
-    return await channelCredit(ctx.dataDir, address);
+    return await channelCredit(ctx.dataDir, address, lane, origin);
   } catch {
     return 0n;
   }
@@ -367,11 +375,23 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, spentAtomic, wallet] = await Promise.all([
-    (deps.routingCredit ?? walletRoutingCredit)(ctx),
-    (deps.routingSpent ?? walletRoutingSpent)(ctx),
-    (deps.wallet ?? walletBalance)(ctx).catch(() => null),
-  ]);
+  const [creditAtomic, spentAtomic, wallet, modelCreditAtomic, modelRoutingCreditAtomic] =
+    await Promise.all([
+      (deps.routingCredit ?? walletRoutingCredit)(ctx),
+      (deps.routingSpent ?? walletRoutingSpent)(ctx),
+      (deps.wallet ?? walletBalance)(ctx).catch(() => null),
+      deps.modelCredit
+        ? deps.modelCredit(ctx)
+        : walletRoutingCredit(ctx, 'model', settings.baseUrl),
+      deps.modelRoutingCredit
+        ? deps.modelRoutingCredit(ctx)
+        : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
+    ]);
+  const refunds = wallet
+    ? await readModelRefundSummary(ctx.dataDir, settings.baseUrl, wallet.address).catch(
+        () => NO_MODEL_REFUNDS,
+      )
+    : NO_MODEL_REFUNDS;
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const capAtomic = settings.policy.maxAutoSpendAtomic;
   const data = {
@@ -397,6 +417,15 @@ export async function runRouterStatus(
     routingCredit: {
       remaining: toMoney(creditAtomic.toString()),
       spent: toMoney(spentAtomic.toString()),
+    },
+    modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
+    modelRoutingCredit: { remaining: toMoney(modelRoutingCreditAtomic.toString()) },
+    modelInferenceRefunds: {
+      pending: refunds.pending,
+      returned: toMoney(refunds.refundedAtomic),
+      ...(refunds.pendingElsewhere.length > 0
+        ? { pendingElsewhere: refunds.pendingElsewhere }
+        : {}),
     },
     caps: { maxAutoSpend: toMoney(capAtomic.toString()) },
     accounts,
@@ -455,7 +484,29 @@ export async function runRouterStatus(
     humanLines: [
       ...head,
       '',
-      ...rowLines(ctx, [...balance, today, accountsShown.row, settingsShown.row]),
+      ...rowLines(ctx, [
+        ...balance,
+        today,
+        {
+          // Whether DeepSeek subagents are on and where.
+          label: 'Subagents',
+          value: subagentsStatusValue(config),
+        },
+        ...(modelRoutingCreditAtomic > 0n
+          ? [
+              {
+                label: 'Model fee',
+                value: `${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
+              },
+            ]
+          : []),
+        ...(refunds.pending > 0
+          ? [{ label: 'Refunds', value: `${refunds.pending} subagent channel refunds pending` }]
+          : []),
+        ...refundsElsewhereLines(refunds).map((value) => ({ label: 'Refunds', value })),
+        accountsShown.row,
+        settingsShown.row,
+      ]),
       ...(problems.length > 0 ? ['', ...problems.map((problem) => yellow(`! ${problem}`))] : []),
     ],
   };

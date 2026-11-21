@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 
@@ -210,6 +210,10 @@ export async function readClaudeCode(
   if (binary === null) return { binary, version: null, meetsFloor: true };
   const run = await runClaude(binary, ['--version'], { env, cwd, timeoutMs: 15_000 });
   const version = run.code === 0 ? parseClaudeVersion(run.stdout) : null;
+  return stateOf(binary, version);
+}
+
+function stateOf(binary: ClaudeBinary, version: string | null): ClaudeCodeState {
   const ok = version === null || meetsFloor(version);
   return {
     binary,
@@ -217,4 +221,54 @@ export async function readClaudeCode(
     meetsFloor: ok,
     ...(ok ? {} : { fix: CLAUDE_UPDATE_FIX }),
   };
+}
+
+/** Versions read, by the binary file they were read from. */
+const versions = new Map<string, { size: number; mtimeMs: number; at: number; version: string }>();
+/** A wrapper script that runs another `claude` keeps its own size and mtime: read again after this. */
+const VERSION_TTL_MS = 10 * 60_000;
+
+/**
+ * {@link readClaudeCode} for a check made at every DeepSeek offer and accept: the version
+ * is read once per binary file, keyed by its resolved path, size and mtime, so the accept
+ * spawns no `claude --version` of its own. A changed binary (an update, a moved link)
+ * misses; so does any read older than {@link VERSION_TTL_MS}.
+ */
+export async function readClaudeCodeCached(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  find: (env: NodeJS.ProcessEnv) => ClaudeBinary | null = findClaudeBinary,
+  now = Date.now(),
+): Promise<ClaudeCodeState> {
+  const binary = find(env);
+  if (binary === null) return { binary, version: null, meetsFloor: true };
+  let file: { key: string; size: number; mtimeMs: number } | undefined;
+  try {
+    const key = realpathSync(binary.path);
+    const { size, mtimeMs } = statSync(key);
+    file = { key, size, mtimeMs };
+  } catch {
+    // Unreadable: read the version as before.
+  }
+  const held = file && versions.get(file.key);
+  if (
+    file &&
+    held &&
+    held.size === file.size &&
+    held.mtimeMs === file.mtimeMs &&
+    now - held.at < VERSION_TTL_MS
+  )
+    return stateOf(binary, held.version);
+  const state = await readClaudeCode(env, cwd, () => binary);
+  if (file && state.version !== null) {
+    versions.delete(file.key);
+    versions.set(file.key, {
+      size: file.size,
+      mtimeMs: file.mtimeMs,
+      at: now,
+      version: state.version,
+    });
+    if (versions.size > 16) versions.delete(versions.keys().next().value!);
+  }
+  return state;
 }

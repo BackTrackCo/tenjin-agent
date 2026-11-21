@@ -1,10 +1,12 @@
 [
+  "@anthropic-ai/claude-agent-sdk",
   "@clack/core",
   "@clack/prompts",
   "@modelcontextprotocol/sdk",
   "@noble/ciphers",
   "@noble/curves",
   "@noble/hashes",
+  "@scure/base",
   "@signinwithethereum/siwe",
   "@signinwithethereum/siwe-parser",
   "@x402/core",
@@ -30,6 +32,7 @@
   "pkce-challenge",
   "sisteransi",
   "tweetnacl",
+  "undici",
   "viem",
   "zod",
   "zod-to-json-schema"

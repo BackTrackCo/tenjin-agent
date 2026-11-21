@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
-import { buildSiwxHeader, SIWX_HEADER } from './siwx';
+import { buildSiwxHeader, signInOnlyChallenge, SIWX_HEADER } from './siwx';
 import { testSigner } from './read-test-utils';
+
+describe('signInOnlyChallenge', () => {
+  // A POST poll's PAYMENT-REQUIRED that decoded to JSON null threw on
+  // `challenge.accepts`, out of the poll.
+  it('reads a challenge that is not an object as no sign-in', () => {
+    expect(signInOnlyChallenge(null)).toBeUndefined();
+    expect(signInOnlyChallenge(7 as never)).toBeUndefined();
+    expect(signInOnlyChallenge('402' as never)).toBeUndefined();
+  });
+});
 
 describe('buildSiwxHeader', () => {
   it('is the SIGN-IN-WITH-X header name', () => {

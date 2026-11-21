@@ -1,5 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import type { Dir } from 'node:fs';
+import { opendir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './names';
 
 /**
@@ -17,12 +18,9 @@ import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './
  * gets no router call: `claude-code-guide` ships with Bash, Read, WebFetch and
  * WebSearch and no MCP tools, and denying its WebFetch would strand it.
  *
- * WHERE A DEFINITION LIVES, in the harness's own precedence: the project's
- * `.claude/agents` (from `cwd` up to the filesystem root, nearest first), then
- * `~/.claude/agents`, then an installed plugin's `agents/` for a `plugin:agent`
- * type. A file is found by its name first and by its frontmatter `name:`
- * second, because the type is the `name:` and the file name only usually
- * matches it.
+ * Claude Code names project and user agents by frontmatter and scans each
+ * agents directory recursively. Managed agents take precedence. Within one
+ * tree Claude Code does not specify which of two matching definitions wins.
  */
 
 export type RequestToolAccess = 'allowed' | 'excluded' | 'unknown';
@@ -44,10 +42,27 @@ export const MCP_INHERITING_BUILTINS: ReadonlySet<string> = new Set([
 export interface AgentLookup {
   cwd?: string;
   homeDir: string;
+  additionalDirectories?: readonly string[];
 }
 
 const MAX_AGENT_FILE_BYTES = 256 * 1024;
+const MAX_AGENT_ENTRIES = 200;
 const TYPE_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
+const MANAGED_AGENTS = join(
+  process.platform === 'darwin'
+    ? '/Library/Application Support/ClaudeCode'
+    : process.platform === 'win32'
+      ? 'C:\\Program Files\\ClaudeCode'
+      : '/etc/claude-code',
+  '.claude',
+  'agents',
+);
+
+class UncertainAgentDefinition extends Error {
+  constructor(readonly reason: string) {
+    super('Claude Code agent definition could not be established');
+  }
+}
 
 export async function requestToolAccess(
   agentType: string | undefined,
@@ -76,27 +91,27 @@ export async function requestToolAccess(
  */
 export function accessOf(definition: string, tool: string = requestToolName()): RequestToolAccess {
   const frontmatter = frontmatterOf(definition);
-  if (frontmatter === null) return 'unknown';
-  const disallowed = listField(frontmatter, 'disallowedTools');
+  // Frontmatter this cannot read exactly says nothing: a tool limit missed here would
+  // redirect an agent to a tool it cannot call, and `unknown` gets no router call.
+  const read = frontmatter === null ? null : readFrontmatter(frontmatter, ANY_AGENT);
+  if (read === null || 'unmatched' in read) return 'unknown';
   if (
-    disallowed !== undefined &&
-    disallowed.some((entry) => namesRequestTool(entry, tool) || namesLegacyTool(entry))
-  ) {
+    read.disallowedTools?.some((entry) => namesRequestTool(entry, tool) || namesLegacyTool(entry))
+  )
     return 'excluded';
-  }
-  const tools = listField(frontmatter, 'tools');
-  if (tools === undefined) return 'allowed';
-  return tools.some((entry) => namesRequestTool(entry, tool)) ? 'allowed' : 'excluded';
+  if (read.tools === undefined) return 'allowed';
+  return read.tools.some((entry) => namesRequestTool(entry, tool)) ? 'allowed' : 'excluded';
 }
 
 /**
- * Does one `tools:` or `disallowedTools:` entry cover the request tool? The
- * tool itself, its bare server (`mcp__plugin_tenjin_router`), or any
- * `*`-suffixed pattern the tool's name starts with: `*`, `mcp__*`,
+ * Does one `tools:` or `disallowedTools:` entry cover an MCP tool, such as the
+ * request tool? The tool itself, its bare server (`mcp__plugin_tenjin_router`),
+ * or any `*`-suffixed pattern the tool's name starts with: `*`, `mcp__*`,
  * `mcp__plugin_tenjin_router__*` and every prefix between.
  */
 function namesRequestTool(entry: string, tool: string): boolean {
-  if (entry === tool || entry === tool.replace(/__request$/, '')) return true;
+  const server = tool.lastIndexOf('__');
+  if (entry === tool || (server > 0 && entry === tool.slice(0, server))) return true;
   return entry.endsWith('*') && tool.startsWith(entry.slice(0, -1));
 }
 
@@ -117,8 +132,7 @@ export async function agentsWithoutRequestTool(
   const found: string[] = [];
   const seen = new Set<string>();
   for (const directory of agentDirs(lookup)) {
-    for (const { name, text } of await definitionsIn(directory)) {
-      const type = nameOf(text) ?? name;
+    for (const { name: type, text } of await definitionsIn(directory).catch(() => [])) {
       if (seen.has(type)) continue;
       seen.add(type);
       if (accessOf(text, tool) === 'excluded') found.push(type);
@@ -127,21 +141,242 @@ export async function agentsWithoutRequestTool(
   return found.sort();
 }
 
-async function findDefinition(agentType: string, lookup: AgentLookup): Promise<string | null> {
-  for (const directory of agentDirs(lookup)) {
-    const text = await definitionIn(directory, agentType);
-    if (text !== null) return text;
+/** Frontmatter a worker honours or that changes nothing about how the agent runs. */
+const WORKER_MATCHED_KEYS = new Set([
+  'name',
+  'description',
+  'tools',
+  'disallowedTools',
+  'color',
+  'effort',
+]);
+
+/** A tool entry as agent files write one: a name, with an optional rule in parentheses. */
+const TOOL_ENTRY = /^[A-Za-z_][\w*.:-]*(\([^()]*\))?$/;
+
+type Frontmatter = { name?: string; tools?: string[]; disallowedTools?: string[] };
+/** What a reader's caller can take from a definition. */
+type FrontmatterRules = {
+  /** False for a key the caller cannot take: it is reported by its name. */
+  key: (key: string, value: string) => boolean;
+  /** Whether a tool entry is one the caller can use as written. */
+  entry: (entry: string) => boolean;
+  /** Whether a tool list with nothing in it has one reading for the caller. */
+  emptyList: boolean;
+};
+/**
+ * A WORKER RUNS AS THE AGENT, so it takes only what it can match: the agent's
+ * prompt and tools on its own model, in the accepted session's permission
+ * mode, in the foreground. A definition that pins a model, a mode, isolation,
+ * background running, memory, or its own hooks, servers or skills runs
+ * natively. `model: inherit` pins nothing.
+ */
+const WORKER_AGENT: FrontmatterRules = {
+  key: (key, value) =>
+    key === 'model' ? ['', 'inherit'].includes(value) : WORKER_MATCHED_KEYS.has(key),
+  entry: (entry) => TOOL_ENTRY.test(entry) && !entry.includes(','),
+  // All tools to some readers, none to others.
+  emptyList: false,
+};
+/** The router only asks whether an agent can call one tool: every key is its own business. */
+const ANY_AGENT: FrontmatterRules = {
+  key: () => true,
+  entry: (entry) => entry === '*' || TOOL_ENTRY.test(entry),
+  emptyList: true,
+};
+
+/** A one-line value without its trailing comment and quotes; null when it cannot be told. */
+function scalar(raw: string): string | null {
+  const value = raw.trim();
+  if (!/\s#/.test(` ${value}`)) return unquote(value);
+  // A `#` inside quotes is text, and telling which it is takes a YAML reader.
+  return /['"]/.test(value) ? null : value.replace(/(^|\s+)#.*$/, '');
+}
+
+/** A one-line list's entries: commas split it, but not inside a rule's parentheses. */
+function entriesOf(value: string): string[] {
+  return (value.match(/(?:[^,(]|\([^()]*\))+/g) ?? [])
+    .map((part) => unquote(part.trim()))
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * What an agent definition's frontmatter says: its name and tool lists, or the
+ * first thing the caller cannot take.
+ *
+ * READ STRICTLY, NOT AS YAML. This reads plain top-level `key: value` lines, a
+ * one-line or `- item` tool list, a trailing comment, and indented text or
+ * items under a plain key. Any other syntax (a quoted key such as
+ * `'tools': [Read]`, a list over several lines in brackets, a block scalar for
+ * a tool list, a repeated key, a tool entry that is not a plain name) is
+ * `frontmatter`: Claude Code would read it and this would not. A tool list
+ * missed here would give a worker every tool, and send a subagent to a tool it
+ * cannot call.
+ */
+function readFrontmatter(
+  frontmatter: string[],
+  rules: FrontmatterRules = WORKER_AGENT,
+): Frontmatter | { unmatched: string } {
+  const read: Frontmatter = {};
+  const seen = new Set<string>();
+  /** The key the lines below belong to, and whether it is an open tool list. */
+  let under: { key: string; list: boolean } | undefined;
+  for (const line of frontmatter) {
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    // Indented lines, and list items at any indent, belong to the key above them.
+    if (/^(\s|-\s)/.test(line)) {
+      if (!under) return { unmatched: 'frontmatter' };
+      if (!under.list) continue;
+      const entry = scalar(/^\s*-\s+(.+)$/.exec(line)?.[1] ?? '');
+      if (!entry || !rules.entry(entry)) return { unmatched: 'frontmatter' };
+      read[under.key as 'tools' | 'disallowedTools']!.push(entry);
+      continue;
+    }
+    const field = /^([A-Za-z][\w-]*)\s*:(.*)$/.exec(line);
+    if (field === null) return { unmatched: 'frontmatter' };
+    const [, key, raw] = field as unknown as [string, string, string];
+    if (seen.has(key)) return { unmatched: 'frontmatter' };
+    seen.add(key);
+    const list = key === 'tools' || key === 'disallowedTools';
+    const value = scalar(raw);
+    if (value === null) {
+      if (list || key === 'name' || !rules.key(key, raw.trim()))
+        return { unmatched: 'frontmatter' };
+      under = { key, list: false };
+      continue;
+    }
+    if (!rules.key(key, value)) return { unmatched: key };
+    // Text may run on under a plain key, items under an open list, nothing under a one-line list.
+    under = list && value !== '' ? undefined : { key, list };
+    if (key === 'name' && value) read.name = value;
+    if (!list) continue;
+    const bracketed = value.startsWith('[');
+    if (bracketed && !value.endsWith(']')) return { unmatched: 'frontmatter' };
+    const entries = entriesOf(bracketed ? value.slice(1, -1) : value);
+    if (entries.some((entry) => !rules.entry(entry))) return { unmatched: 'frontmatter' };
+    read[key] = entries;
   }
+  if (!rules.emptyList && [read.tools, read.disallowedTools].some((list) => list?.length === 0))
+    return { unmatched: 'frontmatter' };
+  return read;
+}
+
+/** The agent types Claude Code ships that a worker runs as, with no definition file. */
+export const WORKER_BUILTIN_AGENTS: ReadonlySet<string> = new Set(['general-purpose', 'Explore']);
+
+/**
+ * MAY THIS AGENT RUN IN A PERMISSION MODE OF ITS OWN? Its native children inherit
+ * that mode, and a worker accepted in the session's mode would not. True when its
+ * definition sets `permissionMode`, and when no definition can be read for it:
+ * only `general-purpose` and `Explore` with no file of their own take the
+ * session's mode for certain.
+ */
+export async function setsOwnMode(agentType: string, lookup: AgentLookup): Promise<boolean> {
+  if (!TYPE_RE.test(agentType)) return true;
+  try {
+    const text = await findDefinition(agentType, lookup);
+    if (text === null) return !WORKER_BUILTIN_AGENTS.has(agentType);
+    const frontmatter = frontmatterOf(text);
+    return (
+      frontmatter === null ||
+      frontmatter.some((line) => /^\s*['"]?permissionMode['"]?\s*:/.test(line))
+    );
+  } catch {
+    return true;
+  }
+}
+
+export type WorkerAgent = {
+  description: string;
+  prompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+};
+
+/**
+ * Whether a type can be one a person or a project defines in an agent file.
+ * A plugin's agent is namespaced (`codex:codex-rescue`) and never is: its
+ * prompt and tool wiring are the plugin's, not the person's to send to another
+ * model, and a worker cannot stand in for one that wraps another tool.
+ */
+export const isCustomAgentType = (agentType: string): boolean =>
+  TYPE_RE.test(agentType) && !agentType.includes(':') && !WORKER_BUILTIN_AGENTS.has(agentType);
+
+/**
+ * What a worker runs a custom agent as: the definition's own prompt and tools,
+ * handed to its Claude Code by value. Its Claude Code does not find every
+ * definition the session's does (one in a folder above the job's root is
+ * missed, and it then runs with every tool and no agent prompt, seen on
+ * 2.1.326), so the worker never looks one up by name.
+ *
+ * Only the job root's own project definition or the user's may be shared.
+ * Definitions in other native scopes can shadow those definitions. `unmatched`
+ * says why a type has no worker form: no such file (a plugin's agent and the
+ * host's other built-ins included), or the definition's first key a worker
+ * cannot match.
+ */
+export async function workerAgent(
+  agentType: string,
+  lookup: AgentLookup & { root: string },
+): Promise<{ agent: WorkerAgent } | { unmatched: string }> {
+  if (!isCustomAgentType(agentType)) return { unmatched: 'subagent_type' };
+  const native = { ...lookup, cwd: lookup.cwd ?? lookup.root };
+  let definition: Awaited<ReturnType<typeof localDefinition>>;
+  try {
+    definition = await localDefinition(agentType, native);
+  } catch (error) {
+    return {
+      unmatched:
+        error instanceof UncertainAgentDefinition ? error.reason : 'definition:unavailable',
+    };
+  }
+  const allowed = [join(resolve(lookup.root), '.claude', 'agents'), userAgentDir(native)];
+  if (!definition || !allowed.includes(definition.directory)) return { unmatched: 'subagent_type' };
+  const { text } = definition;
+  const frontmatter = frontmatterOf(text);
+  if (frontmatter === null) return { unmatched: 'subagent_type' };
+  const read = readFrontmatter(frontmatter);
+  if ('unmatched' in read) return { unmatched: `definition:${read.unmatched}` };
+  const lines = text.split(/\r?\n/);
+  const open = lines.findIndex((line) => line.trim() === '---');
+  const prompt = lines
+    .slice(lines.findIndex((line, i) => i > open && line.trim() === '---') + 1)
+    .join('\n')
+    .trim();
+  if (!prompt) return { unmatched: 'definition:prompt' };
+  const { tools, disallowedTools } = read;
+  return {
+    agent: {
+      description: agentType,
+      prompt,
+      ...(tools ? { tools } : {}),
+      ...(disallowedTools ? { disallowedTools } : {}),
+    },
+  };
+}
+
+export async function findDefinition(
+  agentType: string,
+  lookup: AgentLookup,
+): Promise<string | null> {
   const colon = agentType.indexOf(':');
+  if (colon < 0) return (await localDefinition(agentType, lookup))?.text ?? null;
   if (colon > 0) {
     const plugin = agentType.slice(0, colon);
     const agent = agentType.slice(colon + 1);
     for (const root of await pluginRoots(plugin, lookup.homeDir)) {
-      const text = await definitionIn(join(root, 'agents'), agent);
+      const text = await pluginDefinitionIn(join(root, 'agents'), agent);
       if (text !== null) return text;
     }
   }
   return null;
+}
+
+function userAgentDir(lookup: AgentLookup): string {
+  return join(
+    resolve(lookup.cwd || '.', process.env.CLAUDE_CONFIG_DIR ?? join(lookup.homeDir, '.claude')),
+    'agents',
+  );
 }
 
 function agentDirs(lookup: AgentLookup): string[] {
@@ -155,34 +390,100 @@ function agentDirs(lookup: AgentLookup): string[] {
       current = parent;
     }
   }
-  const user = join(resolve(lookup.homeDir), '.claude', 'agents');
+  const user = userAgentDir(lookup);
   // The user's directory is also an ancestor of most projects; it counts once,
   // in its own place in the order.
   return [...dirs.filter((d) => d !== user), user];
 }
 
-async function definitionIn(directory: string, agentType: string): Promise<string | null> {
+async function localDefinition(agentType: string, lookup: AgentLookup) {
+  const user = userAgentDir(lookup);
+  const directories = agentDirs(lookup).filter((directory) => directory !== user);
+  const extra = [
+    ...new Set(
+      (lookup.additionalDirectories ?? []).map((dir) =>
+        resolve(lookup.cwd || '.', dir, '.claude', 'agents'),
+      ),
+    ),
+  ].filter((directory) => directory !== user && !directories.includes(directory));
+  let project: { directory: string; text: string } | undefined;
+  for (const directory of [MANAGED_AGENTS, ...directories, ...extra, user]) {
+    if (project && directory === user) break;
+    if (project && directories.includes(directory)) continue;
+    const matches = (await definitionsIn(directory)).filter(
+      (candidate) => candidate.name === agentType,
+    );
+    if (matches.length > 1 || (project && matches.length > 0))
+      throw new UncertainAgentDefinition('definition:ambiguous');
+    if (!matches[0]) continue;
+    project = { directory, text: matches[0].text };
+    if (directory === MANAGED_AGENTS) break;
+  }
+  return project;
+}
+
+async function pluginDefinitionIn(directory: string, agentType: string): Promise<string | null> {
   const direct = await readBounded(join(directory, `${agentType}.md`));
   if (direct !== null && (nameOf(direct) ?? agentType) === agentType) return direct;
-  for (const { text } of await definitionsIn(directory)) {
-    if (nameOf(text) === agentType) return text;
-  }
-  return null;
+  return (
+    (await definitionsIn(directory).catch(() => [])).find((def) => def.name === agentType)?.text ??
+    null
+  );
 }
 
 async function definitionsIn(directory: string): Promise<{ name: string; text: string }[]> {
-  let names: string[];
+  let opened: Dir;
   try {
-    names = (await readdir(directory)).filter((n) => n.endsWith('.md')).slice(0, 200);
-  } catch {
-    return [];
+    // Require the agents tree itself to stay below its canonical config root.
+    const canonical = await realpath(directory);
+    const base = await realpath(dirname(dirname(directory)));
+    if (canonical !== join(base, basename(dirname(directory)), 'agents'))
+      throw new UncertainAgentDefinition('definition:unavailable');
+    opened = await opendir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
   const out: { name: string; text: string }[] = [];
-  for (const file of names) {
-    const text = await readBounded(join(directory, file));
-    if (text !== null) out.push({ name: file.slice(0, -3), text });
+  let entries = 0;
+  async function walk(current: Dir) {
+    for await (const file of current) {
+      if (++entries > MAX_AGENT_ENTRIES || file.isSymbolicLink())
+        throw new UncertainAgentDefinition('definition:unavailable');
+      const path = join(current.path, file.name);
+      if (file.isDirectory()) await walk(await opendir(path));
+      else if (file.isFile() && file.name.endsWith('.md')) {
+        if ((await stat(path)).size > MAX_AGENT_FILE_BYTES)
+          throw new UncertainAgentDefinition('definition:unavailable');
+        const text = await readFile(path, 'utf8');
+        const name = lookupNameOf(text);
+        if (name) out.push({ name, text });
+      }
+    }
   }
+  await walk(opened);
   return out;
+}
+
+/** A name the local tree scanner can compare without guessing about YAML keys or aliases. */
+function lookupNameOf(text: string): string | undefined {
+  const lines = frontmatterOf(text);
+  if (!lines) return undefined;
+  let name: string | undefined;
+  let fieldSeen = false;
+  for (const line of lines) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    if (fieldSeen && /^(\s|-\s)/.test(line)) continue;
+    const field = /^(?:([A-Za-z][\w-]*)|'([A-Za-z][\w-]*)'|"([A-Za-z][\w-]*)")\s*:(.*)$/.exec(line);
+    if (!field) throw new UncertainAgentDefinition('definition:frontmatter');
+    fieldSeen = true;
+    if ((field[1] ?? field[2] ?? field[3]) !== 'name') continue;
+    const value = scalar(field[4]!);
+    if (name !== undefined || value === null || !TYPE_RE.test(value))
+      throw new UncertainAgentDefinition('definition:frontmatter');
+    name = value;
+  }
+  return name;
 }
 
 /** Install paths `installed_plugins.json` records for `<plugin>@<marketplace>`. */
@@ -218,41 +519,19 @@ function frontmatterOf(text: string): string[] | null {
   return end === -1 ? null : lines.slice(open + 1, end);
 }
 
-function nameOf(text: string): string | null {
-  const frontmatter = frontmatterOf(text);
-  if (frontmatter === null) return null;
-  const line = frontmatter.find((l) => /^name\s*:/.test(l));
-  const value = line === undefined ? '' : unquote(line.slice(line.indexOf(':') + 1).trim());
-  return value.length > 0 ? value : null;
-}
-
 /**
- * A top-level list field in the three spellings agent files use: `a, b, c`,
- * `[a, b]`, or a block of `- a` lines. `undefined` when the key is absent.
+ * The `name:` a definition gives its type, read by itself: a file is found by
+ * its name whether or not the rest of its frontmatter can be read, so a project
+ * definition this cannot read still stands in its place, where it keeps the
+ * call native, and lookup never falls through to another file of that name.
  */
-function listField(frontmatter: string[], key: string): string[] | undefined {
-  const index = frontmatter.findIndex((l) => new RegExp(`^${key}\\s*:`).test(l));
-  if (index === -1) return undefined;
-  const line = frontmatter[index]!;
-  const inline = line.slice(line.indexOf(':') + 1).trim();
-  if (inline.length > 0) {
-    const body = inline.startsWith('[') && inline.endsWith(']') ? inline.slice(1, -1) : inline;
-    return body
-      .split(',')
-      .map((part) => unquote(part.trim()))
-      .filter((part) => part.length > 0);
-  }
-  const items: string[] = [];
-  for (const next of frontmatter.slice(index + 1)) {
-    const item = /^\s+-\s*(.*)$/.exec(next);
-    if (item === null) {
-      if (next.trim().length === 0) continue;
-      break;
-    }
-    const value = unquote(item[1]!.trim());
-    if (value.length > 0) items.push(value);
-  }
-  return items;
+function nameOf(text: string): string | null {
+  const line = frontmatterOf(text)
+    ?.map((l) => /^(?:name|'name'|"name")\s*:(.*)$/.exec(l)?.[1])
+    .find((value) => value !== undefined);
+  if (line === undefined) return null;
+  const value = scalar(line) ?? unquote(line.replace(/\s+#.*$/, '').trim());
+  return value.length > 0 ? value : null;
 }
 
 function unquote(value: string): string {

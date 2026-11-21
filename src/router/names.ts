@@ -20,6 +20,7 @@ export const SKILLS_DIR_PLUGIN_ID = `${PLUGIN_NAME}@skills-dir`;
 export const PLUGIN_SERVER = `plugin:${PLUGIN_NAME}:${MCP_SERVER_NAME}`;
 const TOOL_PREFIX = `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER_NAME}`;
 export const REQUEST_TOOL = `${TOOL_PREFIX}__request`;
+export const SUBAGENT_TOOL = `${TOOL_PREFIX}__subagent`;
 /** The tool the plugin's hook legs call, which its own deny hook keeps from the model. */
 export const PLUGIN_HOOK_TOOL = `${TOOL_PREFIX}__hook`;
 
@@ -34,6 +35,21 @@ export const PLUGIN_HOOK_TOOL = `${TOOL_PREFIX}__hook`;
 export const LEGACY_MCP_SERVER_NAME = 'x402';
 export const LEGACY_REQUEST_TOOL = `mcp__${LEGACY_MCP_SERVER_NAME}__request`;
 export const LEGACY_HOOK_TOOL = `mcp__${LEGACY_MCP_SERVER_NAME}__hook`;
+/**
+ * EVERY TENJIN MCP TOOL, under each name Tenjin registers its server by in Claude Code:
+ * the plugin's, and the settings install's. A DeepSeek worker's model is offered none of
+ * them, so a worker starts no DeepSeek worker and pays for nothing outside its job. A
+ * `tenjin mcp` that starts inside a worker also has none of them but `hook`, whatever
+ * name it is registered under (`buildRouterMcpServer`).
+ */
+export const CLAUDE_TENJIN_TOOLS: readonly string[] = [
+  TOOL_PREFIX,
+  `mcp__${LEGACY_MCP_SERVER_NAME}`,
+].flatMap((server) =>
+  ['subagent', 'subagent_activity', 'request', 'approve', 'hook'].map(
+    (tool) => `${server}__${tool}`,
+  ),
+);
 
 /**
  * Is this process one Claude Code launched from the plugin? Claude Code sets

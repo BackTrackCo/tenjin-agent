@@ -37,7 +37,7 @@ const VALIDATOR_CACHE_LIMIT = 128;
 const DRAFT_07 = 'http://json-schema.org/draft-07/schema#';
 
 /** Key-order-independent serialization, so one schema has one cache identity. */
-function stable(value: unknown): string {
+export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const object = value as JsonRecord;

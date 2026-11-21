@@ -7,6 +7,7 @@ import { HARNESSES, type Harness } from '../router/names';
 import type { TargetKind } from '../router/settings-wire';
 import { SETUP, WALLET, collect, type Registration } from './registration';
 import { installOutput } from '../router/install-output';
+import type { SubagentConfigFlags } from '../commands/config-subagents';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -24,15 +25,28 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $0.25 a call)')
+    .option(
+      '--yes',
+      'accept setup and spending defaults ($5 a day, $1 a call). Subagents require their own choice',
+    )
+    .addOption(
+      new Option(
+        '--subagents <on|off>',
+        'answer the DeepSeek subagent question, where no answer is saved yet',
+      ).choices(['on', 'off']),
+    )
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
-    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
+    .option(
+      '--max-auto-spend <usd>',
+      'your own non-negative per-call limit (default 1.00; 0 blocks positive automatic payments)',
+    )
     .addHelpText(
       'after',
       `
 Examples:
   $ tenjin install
   $ tenjin install --project
+  $ tenjin install --yes --subagents off
   $ tenjin install --max-auto-spend 0.50 --session-budget 10
 
 The daily budget is shared across chats. Its spending counter resets 24 hours after its window starts;
@@ -53,6 +67,11 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
+        if (o.refresh === true && o.subagents !== undefined) {
+          throw new CliError('USAGE', 'Omit --refresh when choosing whether to enable subagents.');
+        }
+        const { captureNewInstall, finishNewInstall } = await import('../router/new-install');
+        const newInstall = await captureNewInstall(ctx.dataDir);
         const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
         const hostArgs = {
@@ -73,7 +92,7 @@ Learn more:
               host === 'codex'
                 ? await (
                     await import('../router/codex-install')
-                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding })
+                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding, newInstall })
                 : await (
                     await import('../router/install')
                   ).runRouterInstall(
@@ -90,13 +109,23 @@ Learn more:
                         : {}),
                     },
                     ctx,
-                    { runtime, funding },
+                    { runtime, funding, newInstall },
                   );
             if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          const result = await installAll();
+          const installed = await installAll();
+          // DeepSeek workers run on Claude Code only: with no Claude Code among the hosts of
+          // this run, nothing is asked and nothing is saved, and a later Claude Code setup asks.
+          const result =
+            o.refresh === true || !hosts.includes('claude')
+              ? installed
+              : await finishNewInstall(installed, newInstall, ctx, {
+                  ...(o.subagents !== undefined ? { choice: o.subagents } : {}),
+                  ...(harness !== undefined ? { harness } : {}),
+                  yes: o.yes === true,
+                });
           const finished =
             o.refresh === true
               ? result
@@ -236,6 +265,46 @@ Examples:
         const { runConfigList } = await import('../commands/config');
         return runConfigList(ctx, this.opts().all === true ? { all: true } : {});
       });
+    });
+  addGlobalFlags(config.command('subagents [mode]'))
+    .summary('show DeepSeek subagents, turn them on or off, or list why calls got no offer')
+    .option(
+      '--repository <path...>',
+      'limit the consent to these directories and their subfolders; without it, on covers every workspace',
+    )
+    .option(
+      '--max-job <USD>',
+      'a lower ceiling per job than your per-call spend limit, which is the default cap',
+    )
+    .option('--windows-worker-sid <sid>', 'SID of the dedicated standard Windows worker account')
+    .option('--windows-launcher <path>', 'absolute local path to the Windows worker launcher .exe')
+    .option('--windows-claude <path>', 'absolute local path to the native Claude Code .exe')
+    .option(
+      '--windows-config-dir <path>',
+      'separate shared Claude configuration directory on Windows',
+    )
+    .option(
+      '--accept-windows-shell-access',
+      'allow the unsandboxed Windows worker to share results from files and networks its account can reach with Tenjin and DeepSeek',
+    )
+    .addHelpText(
+      'after',
+      configExamples(
+        [
+          'subagents',
+          'subagents on',
+          'subagents on --max-job 0.50',
+          'subagents on --repository ~/work ~/notes',
+          'subagents off',
+          'subagents why',
+        ],
+        'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
+      ),
+    )
+    .action(async function (this: Command, mode: string | undefined, options: SubagentConfigFlags) {
+      await runCommand('config subagents', this, async (ctx) =>
+        (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
+      );
     });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one value')
@@ -415,6 +484,23 @@ Examples:
         const o = this.opts();
         const { runSend } = await import('../commands/send');
         return runSend({ amount, token, to, ...(o.yes === true ? { yes: true } : {}) }, ctx);
+      });
+    });
+
+  // A one-time recovery for machines that ran a dev build of the DeepSeek subagents: delete it
+  // with `modelCredit` once no such state remains.
+  leaf(
+    WALLET,
+    'reclaim-subagent-credit',
+    'return credit parked in the old shared subagent channels',
+  )
+    .description(
+      'One time, for a machine that ran an early build of DeepSeek subagents: refund to your wallet the credit that build left in its two shared inference channels (shown as `modelCredit` by `tenjin balance --json`). It asks the router for the same cooperative refund a worker run gets at its end and prints what came back with its transaction. Run it twice and the second finds nothing.',
+    )
+    .action(async function (this: Command) {
+      await runCommand('wallet.reclaim-subagent-credit', this, async (ctx) => {
+        const { runReclaimSubagentCredit } = await import('../commands/reclaim-subagent-credit');
+        return runReclaimSubagentCredit(ctx);
       });
     });
 
@@ -615,6 +701,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
+  subagents [on|off|why]        DeepSeek for eligible subagent jobs; why: calls with no offer
 
 Values
   get <key> / set <key> <value>

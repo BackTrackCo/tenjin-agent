@@ -36,6 +36,19 @@ describe('loadConfig', () => {
     expect(cfg.baseUrl).toBe(CONFIG_DEFAULTS.baseUrl);
   });
 
+  it.each([
+    { maxAutoSpend: '0', sessionBudget: '0' },
+    { maxAutoSpend: '250000', sessionBudget: '2000000' },
+    { maxAutoSpend: '500000', sessionBudget: 'none' },
+  ])('keeps explicit spending limits when the code default changes: %j', async (saved) => {
+    await writeFile(configFile(), JSON.stringify(saved));
+    expect(await loadConfig(dir)).toMatchObject(saved);
+    const settings = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
+    expect(settings.maxAutoSpend).toEqual({ value: saved.maxAutoSpend, source: 'file' });
+    expect(settings.sessionBudget).toEqual({ value: saved.sessionBudget, source: 'file' });
+    expect(await loadRawConfig(dir)).toEqual(saved);
+  });
+
   it('throws CONFIG_INVALID on malformed JSON', async () => {
     await writeFile(configFile(), '{ not json');
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
@@ -68,7 +81,12 @@ describe('loadConfig', () => {
     expect(raw).toMatchObject(legacy);
     const cfg = await loadConfig(dir);
     expect(cfg.maxAutoSpend).toBe('500000');
-    expect(cfg.router).toEqual({ enabled: false, context: 'session', improve: false });
+    expect(cfg.router).toEqual({
+      enabled: false,
+      context: 'session',
+      improve: false,
+      subagents: false,
+    });
     expect(cfg.install).toEqual({ routerProjects: [] });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
@@ -117,7 +135,7 @@ describe('resolveSettings — precedence and provenance', () => {
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: CONFIG_DEFAULTS.baseUrl, source: 'default' });
-    expect(s.maxAutoSpend).toEqual({ value: '250000', source: 'default' });
+    expect(s.maxAutoSpend).toEqual({ value: '1000000', source: 'default' });
   });
 
   it('reports file provenance for a file-set key', async () => {
@@ -186,10 +204,20 @@ describe('parseOnOffFlag', () => {
 });
 
 describe('router block: the switch and the context', () => {
-  it('registers three dotted keys and no scalar', () => {
-    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context', 'router.improve']);
+  it('registers four dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual([
+      'router.enabled',
+      'router.context',
+      'router.improve',
+      'router.subagents',
+    ]);
     expect(CONFIG_KEYS as string[]).not.toContain('router');
-    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session', improve: false });
+    expect(CONFIG_DEFAULTS.router).toEqual({
+      enabled: true,
+      context: 'session',
+      improve: false,
+      subagents: false,
+    });
   });
 
   it('loads a partial block over the defaults and keeps an unknown subkey', async () => {
@@ -197,6 +225,7 @@ describe('router block: the switch and the context', () => {
     expect((await loadConfig(dir)).router).toEqual({
       enabled: true,
       context: 'turn',
+      subagents: false,
       improve: false,
     });
     expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });

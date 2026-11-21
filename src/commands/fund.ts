@@ -2,6 +2,7 @@ import { getAddress, isAddress } from 'viem';
 import { CliError } from '../lib/errors';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { deviceName as readDeviceName } from '../lib/device-name';
+import { machineHash as readMachineHash } from '../lib/machine-id';
 import { httpRequest, fetchFailureToCliError, type HttpRequestOptions } from '../lib/http';
 import { liveLine, type LiveLine } from '../lib/live-line';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
@@ -130,6 +131,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   fetchImpl?: typeof fetch;
   openUrl?: typeof openInBrowser;
   deviceName?: () => Promise<string | undefined>;
+  /** This computer's hash for the fund page's one-per-computer code check (`lib/machine-id.ts`). */
+  machineHash?: () => Promise<string | undefined>;
   /** One key from the person, for the expired link's `r` / `q`; null when nobody can answer. */
   readKey?: (keys: readonly string[]) => Promise<string | null>;
   /** Poll seams so tests never sleep for real. */
@@ -206,11 +209,16 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   let signer: TenjinSigner | undefined;
   const mint = async (): Promise<Issued> => {
     signer ??= await provider.getSigner();
+    const [deviceName, machineHash] = await Promise.all([
+      (opts.deviceName ?? readDeviceName)().catch(() => undefined),
+      (opts.machineHash ?? readMachineHash)().catch(() => undefined),
+    ]);
     const url = await mintLink(ctx, signer, address, {
       ...(preset !== undefined ? { presetAmount: preset } : {}),
       ...(need !== undefined ? { need } : {}),
       source,
-      deviceName: await (opts.deviceName ?? readDeviceName)().catch(() => undefined),
+      deviceName,
+      machineHash,
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     });
     const token = tokenOf(url);
@@ -608,6 +616,7 @@ async function mintLink(
     need?: FundNeed;
     source: FundSource;
     deviceName: string | undefined;
+    machineHash: string | undefined;
     fetchImpl?: typeof fetch;
   },
 ): Promise<string> {
@@ -619,12 +628,14 @@ async function mintLink(
     method: 'POST',
     timeoutMs: ctx.flags.timeout,
     headers: { [SIWX_HEADER]: siwxHeader },
-    // `deviceName`, `source` and `need` are display context for the page; a
+    // `deviceName`, `source` and `need` are display context for the page, and
+    // `machineHash` is for its "Have a code?" box's one-per-computer check. A
     // server without them ignores them (its body schema is not strict).
     jsonBody: {
       address,
       ...(extra.presetAmount !== undefined ? { presetAmount: extra.presetAmount } : {}),
       ...(extra.deviceName !== undefined ? { deviceName: extra.deviceName } : {}),
+      ...(extra.machineHash !== undefined ? { machineHash: extra.machineHash } : {}),
       source: extra.source,
       ...(extra.need !== undefined ? { need: extra.need } : {}),
     },
