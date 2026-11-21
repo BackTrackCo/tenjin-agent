@@ -33,6 +33,7 @@ import {
   DEPOSIT_DEFERRED,
   isUnreachable,
   isWarmAnswer,
+  paidOfferCategory,
   PAYMENT_FAILED,
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
@@ -388,6 +389,8 @@ interface Call {
   skipped?: string;
   /** The routing fee the router's 402 quoted, once read. */
   quoted?: bigint;
+  /** The task of the paid offer that 402 quoted, when its body named one. */
+  offerCategory?: string;
   /** A lower ceiling for this call alone, when the job's cap leaves less than the fee ceiling. */
   limitAtomic?: bigint;
   /** Whether a request carrying a payment went out. */
@@ -654,7 +657,10 @@ export class RoutingPayer {
           if (!(err instanceof RouteSkipped) || err.why !== DEPOSIT_DEFERRED || flight === null) {
             throw err;
           }
-          const answered = { answered: err.answered };
+          const answered = {
+            answered: err.answered,
+            ...(err.offerCategory !== undefined ? { offerCategory: err.offerCategory } : {}),
+          };
           const outcome = await this.waitForTopUp(flight, until, sent);
           if (outcome === null) throw new RouteSkipped(TOPPING_UP, answered);
           if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
@@ -932,6 +938,14 @@ export class RoutingPayer {
       firstChallenge = undefined;
       call.answered = true;
       if (asked.status !== 402) return asked;
+      // Read from a copy: the stock wrapper reads this same 402 after.
+      const category = paidOfferCategory(
+        await asked
+          .clone()
+          .json()
+          .catch(() => null),
+      );
+      if (category !== undefined) call.offerCategory = category;
       try {
         // THE QUOTE, read before the wallet is even unlocked: one above the
         // ceiling is not paid, and the rest get the per-payment checks
@@ -1005,7 +1019,10 @@ export class RoutingPayer {
       await this.settleDeposits(call);
     }
     // A skip after the router answered says so: it is reachable.
-    const answered = { answered: call.answered };
+    const answered = {
+      answered: call.answered,
+      ...(call.offerCategory !== undefined ? { offerCategory: call.offerCategory } : {}),
+    };
     if (call.skipped !== undefined) {
       throw new RouteSkipped(call.skipped, {
         ...answered,

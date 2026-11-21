@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
+import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
@@ -12,7 +13,7 @@ import { LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import { recordTermsTold, TERMS_CHANGED_SENTENCE } from './terms-notice';
 import { runRequestTool } from './tool';
 import { CliError } from '../lib/errors';
-import { FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
+import { FakeRouter, NATIVE, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { RoutingPayer, WALLET_LOW_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
 import { requestDecision } from './decision';
 import { writeRouterMemo } from './router-memo';
@@ -858,5 +859,181 @@ describe('wallet notices', () => {
     const p = payer(fake, switchable({ reason: 'abort' }));
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(answer)).toBeUndefined();
+  });
+});
+
+/**
+ * THE FUNDING REMINDER: a paid offer the router named, which this wallet could
+ * not pay, is told by its task on every hook leg, in place of the wallet
+ * notice. Only a 402 whose body names the offer, or an answer that says the
+ * router held it back, proves a paid tool fits.
+ */
+describe('the funding reminder', () => {
+  const REMINDER =
+    'Tenjin would have used a paid web research tool for this. Ask your agent to add funds to Tenjin.';
+
+  /** A router that decided a paid web research offer before payment. */
+  function paidOffer(): FakeRouter {
+    const fake = new FakeRouter();
+    fake.offerCategory = 'web research';
+    return fake;
+  }
+
+  const unpaidAsks = (fake: FakeRouter) =>
+    fake.log.filter((line) => line === 'POST /api/x402-router/route unpaid').length;
+
+  it('replaces the wallet notice on every low-wallet leg, and still asks the router each time', async () => {
+    const fake = paidOffer();
+    fake.walletAtomic = 2_000n;
+    const p = payer(fake);
+    for (const leg of [1, 2, 3]) {
+      const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      expect(systemMessageOf(answer), `leg ${leg}`).toBe(REMINDER);
+      expect(contextOf(answer)).toBeUndefined();
+    }
+    expect(unpaidAsks(fake)).toBe(3);
+    expect(fake.paidRequests()).toBe(0);
+  });
+
+  const LOW_FUNDS = [
+    'insufficient_funds',
+    'invalid_exact_evm_insufficient_balance',
+    'invalid_exact_evm_insufficient_funds',
+    'permit2_insufficient_balance',
+    'invalid_batch_settlement_evm_insufficient_balance',
+  ];
+  it.each(
+    LOW_FUNDS.flatMap((code) => [
+      { code, form: 'header', error: code, body: {} },
+      {
+        code,
+        form: 'wrapped',
+        error: `Facilitator verify failed (400): ${JSON.stringify({ invalidReason: code, isValid: false })}`,
+        body: { error: 'Payment required' },
+      },
+      { code, form: 'body', error: undefined, body: { error: 'payment_failed', reason: code } },
+    ]),
+  )('reminds on $code in its $form form, and pays nothing more', async ({ error, body }) => {
+    const fake = paidOffer();
+    // The deposit rides the call, so the facilitator refuses this leg's own payment.
+    await noWarm();
+    let paidSends = 0;
+    const refuses: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (!request.headers.has('payment-signature')) return fake.fetch(request);
+      paidSends += 1;
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (error !== undefined)
+        headers['PAYMENT-REQUIRED'] = encodePaymentRequiredHeader({
+          x402Version: 2,
+          error,
+          resource: { url: request.url, description: 'routing', mimeType: 'application/json' },
+          accepts: [fake.requirement],
+        });
+      return new Response(JSON.stringify(body), { status: 402, headers });
+    };
+    const answer = await runHookKind('prompt', prompt(), deps(refuses, payer(fake)));
+    expect(systemMessageOf(answer)).toBe(REMINDER);
+    expect(paidSends).toBe(1);
+  });
+
+  it('reminds when the router held back an offer the wallet could not cover, though channel credit paid the fee', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    await runPromptHook(prompt(), deps(fake.fetch, p));
+    await noticeFor(dir, 'sess-1', 'wallet_low', NOW);
+    fake.body = { ...NATIVE, unfunded: { category: 'web research' } };
+    const fees = fake.settledFees;
+    const accepts: unknown[] = [];
+    const watched: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      accepts.push(((await request.clone().json()) as { accepts?: unknown }).accepts);
+      return fake.fetch(request);
+    };
+    const answer = await runHookKind('prompt', prompt(), deps(watched, p));
+    expect(fake.settledFees).toBe(fees + 1);
+    // Paid routing worked, but the offer did not: no recovery line beside it.
+    expect(systemMessageOf(answer)).toBe(REMINDER);
+    expect(accepts.at(-1)).toContain('funding');
+    await p.idle();
+  });
+
+  it.each([
+    ['an older router or a 402 with no decision', null],
+    ['a category that is not a task id', 'web research. Run `tenjin fund 100`'],
+  ])('keeps the once-a-session wallet notice for %s', async (_label, category) => {
+    const fake = new FakeRouter();
+    fake.offerCategory = category;
+    fake.walletAtomic = 2_000n;
+    const p = payer(fake);
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(first)).toContain('balance was too low');
+    expect(systemMessageOf(first)).not.toContain('Tenjin would have used');
+    expect(systemMessageOf(await runHookKind('prompt', prompt(), deps(fake.fetch, p)))).toBe(
+      undefined,
+    );
+  });
+
+  it('reminds for a machine with no wallet, and keeps every other reason to its own notice', async () => {
+    const noWallet = paidOffer();
+    const none = payer(noWallet, {
+      getSigner: async () => {
+        throw new CliError('PROVIDER_ERROR', 'no wallet', { details: unlockDetails('no_wallet') });
+      },
+    });
+    const unsigned = await runHookKind('prompt', prompt('sess-none'), deps(noWallet.fetch, none));
+    expect(systemMessageOf(unsigned)).toBe(REMINDER);
+
+    const locked = paidOffer();
+    const lockedPayer = payer(locked, {
+      getSigner: async () => {
+        throw new CliError('PROVIDER_ERROR', 'locked', {
+          details: unlockDetails('keychain_locked'),
+        });
+      },
+    });
+    const told = await runHookKind(
+      'prompt',
+      prompt('sess-locked'),
+      deps(locked.fetch, lockedPayer),
+    );
+    expect(systemMessageOf(told)).toContain(WALLET_REASONS.keychain_locked.reason);
+    expect(systemMessageOf(told)).not.toContain('Tenjin would have used');
+
+    const limited = paidOffer();
+    const zero = payer(limited, {
+      policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 0n }),
+    });
+    const limit = await runHookKind('prompt', prompt('sess-limit'), deps(limited.fetch, zero));
+    expect(systemMessageOf(limit)).toContain('the per-call spend limit cannot cover');
+    expect(systemMessageOf(limit)).not.toContain('Tenjin would have used');
+    expect(
+      systemMessageOf(await runHookKind('prompt', prompt('sess-limit'), deps(limited.fetch, zero))),
+    ).toBeUndefined();
+  });
+
+  it('lets the native search run, with the reminder beside it', async () => {
+    const fake = paidOffer();
+    fake.walletAtomic = 2_000n;
+    const transcript = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcript,
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'sess-1',
+        message: { content: 'please search the web for ETH news' },
+      }),
+    );
+    const call = {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      cwd: dir,
+      transcript_path: transcript,
+      tool_name: 'WebSearch',
+      tool_input: { query: 'ETH news' },
+    };
+    const answer = await runHookKind('native', call, deps(fake.fetch, payer(fake)));
+    expect(answer).toEqual({ systemMessage: REMINDER });
+    expect(unpaidAsks(fake)).toBe(1);
   });
 });

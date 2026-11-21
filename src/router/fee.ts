@@ -304,6 +304,22 @@ export function unpaidSentence(
   return `Tenjin could not pay the routing fee (${reason}). Free routing still works. ${fix}`;
 }
 
+/** Whether funds would let a call pay: no wallet, or one too low for the fee
+ *  or its deposit, a facilitator's low-funds code included. */
+export function fundsWouldPay(why: string): boolean {
+  return why === 'wallet_low' || why === 'no_wallet';
+}
+
+/**
+ * THE FUNDING REMINDER, for a paid offer the router named that this wallet
+ * could not pay: its task alone, never the tool, its price or its payee, and
+ * no command. It takes the place of the wallet notice, on every such call, not
+ * once per session.
+ */
+export function fundingReminder(category: string): string {
+  return `Tenjin would have used a paid ${category} tool for this. Ask your agent to add funds to Tenjin.`;
+}
+
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
 
 /** One wallet's folder: the SDK's file storage for its routing channel
