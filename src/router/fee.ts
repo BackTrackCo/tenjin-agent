@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { atomicToUsd, formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import {
@@ -212,7 +211,7 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
   // name the setting that is.
   limit_below_deposit: {
     reason: 'the per-call spend limit cannot cover the routing fee or its deposit',
-    fix: `Your balance is fine; this is the per-call limit. Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
+    fix: 'Your balance is fine; this is the per-call limit. Choose an amount that covers the routing fee or its deposit with `tenjin config set maxAutoSpend <usd>`.',
   },
   budget_reached: {
     reason: "today's spend limit is used up",

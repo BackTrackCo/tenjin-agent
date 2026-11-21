@@ -4,7 +4,6 @@ import { homedir } from 'node:os';
 import { dirname, join, posix, resolve, win32 } from 'node:path';
 import pkg from '../../package.json';
 import { autoUpdateLine } from '../lib/auto-update';
-import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -32,7 +31,7 @@ import {
 import { claudeInstallAt, settingsInstallPaths } from './claude-install';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
-import { SUGGESTED_FUND_USD, unpaid, usd } from './fee';
+import { SUGGESTED_FUND_USD, unpaid } from './fee';
 import { NEW_SESSION_STEP, pluginProof, projectInstallHere } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -1362,7 +1361,8 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
   const u = unpaid(why);
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
-    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
+    limit_below_deposit:
+      'Choose an amount that covers the routing fee or its deposit with `tenjin config set maxAutoSpend <usd>`.',
     budget_reached:
       'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
@@ -1409,7 +1409,7 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
+      fix: 'Choose a positive limit with `tenjin config set maxAutoSpend <usd>`.',
     };
   }
   const budget =

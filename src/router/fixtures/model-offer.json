@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "action": "model",
+  "jobId": "53a6f54e-9106-45d1-9719-7ef41ab8a6e2",
+  "model": "deepseek-flash",
+  "label": "DeepSeek V4.1 Flash 1017",
+  "endpoint": "/api/model-proxy/messages",
+  "thinking": true,
+  "effort": "high",
+  "reason": "bounded_work",
+  "policyHash": "0275bb8f0cfa9a409f08f00d36395ad524abe87dbd52ab7514e6318ef342d14b",
+  "rateVersion": "deepseek-flash-1017-2026-11-13",
+  "routingFeeAtomic": "8100",
+  "proxyFeePercent": 5,
+  "started": false,
+  "expectedSpendAtomic": "54000",
+  "estimateVersion": "bounded-helper-v2",
+  "maxResultBytes": 4000000,
+  "maxOutputTokens": 256000,
+  "maxCallDurationMs": 540000,
+  "callIdleLimitMs": 300000,
+  "callLimit": {
+    "max": 120,
+    "windowSeconds": 60
+  },
+  "messagesStream": 1
+}

@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { accessOf, agentsWithoutRequestTool, requestToolAccess } from './agent-tools';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { accessOf, agentsWithoutRequestTool, requestToolAccess, workerAgent } from './agent-tools';
 
 let root: string;
 let home: string;
@@ -13,8 +13,10 @@ beforeEach(async () => {
   project = join(root, 'work', 'repo');
   await mkdir(join(home, '.claude', 'agents'), { recursive: true });
   await mkdir(join(project, 'src'), { recursive: true });
+  vi.stubEnv('CLAUDE_CONFIG_DIR', join(home, '.claude'));
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -56,6 +58,24 @@ describe('what a definition says about the request tool', () => {
 
   it('cannot say anything without frontmatter', () => {
     expect(accessOf('just prose')).toBe('unknown');
+  });
+
+  // Valid frontmatter the older reader got wrong. A limit it missed read as `allowed`, and
+  // the agent's search was then redirected to a tool it cannot call.
+  it.each([
+    ['a trailing comment on a list', 'tools: Read, mcp__x402__request # paid lookups\n', 'allowed'],
+    ['a trailing comment on an item', 'tools:\n  - mcp__x402__request # paid\n', 'allowed'],
+    ["a list at the key's own indent", 'tools:\n- Read\n- mcp__x402__request\n', 'allowed'],
+    ['a rule with a comma in it', 'tools: Agent(a, b), mcp__x402__request\n', 'allowed'],
+    ['a pinned model and its own servers', 'model: sonnet\nmcpServers:\n  - github\n', 'allowed'],
+    ['a quoted tools key', "'tools': [Read]\n", 'unknown'],
+    ['a quoted disallowedTools key', '"disallowedTools": [mcp__x402__request]\n', 'unknown'],
+    ['a list over several lines', 'tools: [Read,\n  mcp__x402__request]\n', 'unknown'],
+    ['a block scalar', 'tools: |\n  Read\n', 'unknown'],
+    ['a repeated key', 'tools: Read\ntools: mcp__x402__request\n', 'unknown'],
+    ['a comment beside a quoted value', 'tools: "Read" # only this\n', 'unknown'],
+  ] as const)('reads %s exactly, or says nothing', (_label, frontmatter, expected) => {
+    expect(accessOf(agent('a', frontmatter))).toBe(expected);
   });
 });
 
@@ -109,6 +129,16 @@ describe('finding the definition an agent type names', () => {
     expect(await requestToolAccess('reader', { homeDir: home })).toBe('allowed');
   });
 
+  it('reads a name with a comment, and says nothing of a file whose name it cannot read', async () => {
+    const agents = join(project, '.claude', 'agents');
+    await define(agents, 'a.md', '---\nname: reader # reads\ntools: Read\n---\n\nReads.\n');
+    expect(await requestToolAccess('reader', { cwd: project, homeDir: home })).toBe('excluded');
+    // The type is `fetcher` to Claude Code: this is no definition of `b`, nor a listed agent.
+    await define(agents, 'b.md', "---\n'name': fetcher\ntools: Read\n---\n\nFetches.\n");
+    expect(await requestToolAccess('b', { cwd: project, homeDir: home })).toBe('unknown');
+    expect(await agentsWithoutRequestTool({ cwd: project, homeDir: home })).toEqual(['reader']);
+  });
+
   it('finds a definition by its name: when the file is named otherwise', async () => {
     await define(join(home, '.claude', 'agents'), 'whatever.md', agent('reader', 'tools: Read\n'));
     expect(await requestToolAccess('reader', { cwd: project, homeDir: home })).toBe('excluded');
@@ -144,8 +174,184 @@ describe('finding the definition an agent type names', () => {
   });
 
   it('lets a definition file override a built-in of the same name', async () => {
-    await define(join(home, '.claude', 'agents'), 'Explore.md', agent('Explore', 'tools: Read\n'));
+    await define(
+      join(home, '.claude', 'agents', 'review'),
+      'reader.md',
+      agent('Explore', 'tools: Read\n'),
+    );
     expect(await requestToolAccess('Explore', { homeDir: home })).toBe('excluded');
+  });
+});
+
+describe('the custom agents a DeepSeek worker can run as', () => {
+  const lookup = () => ({ root: project, homeDir: home });
+  const defined = (frontmatter: string) =>
+    define(join(project, '.claude', 'agents'), 'worker.md', agent('worker', frontmatter));
+
+  it('takes the prompt and tools of a definition that pins no model', async () => {
+    await defined('model: inherit\neffort: high\ntools: Read, Bash\ndisallowedTools: [Write]\n');
+    expect(await workerAgent('worker', lookup())).toEqual({
+      agent: {
+        description: 'worker',
+        prompt: 'You do things.',
+        tools: ['Read', 'Bash'],
+        disallowedTools: ['Write'],
+      },
+    });
+  });
+
+  it.each([
+    ['model: sonnet\n', 'definition:model'],
+    ['permissionMode: bypassPermissions\n', 'definition:permissionMode'],
+    ['isolation: worktree\n', 'definition:isolation'],
+    ['background: true\n', 'definition:background'],
+    ['hooks:\n  PreToolUse: []\n', 'definition:hooks'],
+  ])('keeps a definition with %j native, naming the key', async (frontmatter, unmatched) => {
+    await defined(frontmatter);
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched });
+  });
+
+  it('uses a nested project definition before a less restricted user agent', async () => {
+    await define(join(home, '.claude', 'agents'), 'worker.md', agent('worker', ''));
+    await define(
+      join(project, '.claude', 'agents', 'review'),
+      'reviewer.md',
+      agent('worker', 'model: opus\ntools: Read\n'),
+    );
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched: 'definition:model' });
+  });
+
+  it('keeps a name defined twice in the same tree native', async () => {
+    await defined('tools: Bash\n');
+    await define(
+      join(project, '.claude', 'agents', 'review'),
+      'second.md',
+      agent('worker', 'tools: Read\n'),
+    );
+    expect(await workerAgent('worker', lookup())).toEqual({ unmatched: 'definition:ambiguous' });
+  });
+
+  it('keeps an additional-directory shadow native when precedence is uncertain', async () => {
+    const extra = join(root, 'extra');
+    await defined('tools: Bash\n');
+    await define(join(extra, '.claude', 'agents'), 'reader.md', agent('worker', 'tools: Read\n'));
+    expect(await workerAgent('worker', { ...lookup(), additionalDirectories: [extra] })).toEqual({
+      unmatched: 'definition:ambiguous',
+    });
+  });
+
+  it('reads a block list of tools, and text that runs on under a plain key', async () => {
+    await defined(
+      'color: >\n  blue\n  tools: every one, it says here\ntools:\n  - Read\n  - "Bash(git status:*)"\n',
+    );
+    expect(await workerAgent('worker', lookup())).toMatchObject({
+      agent: { tools: ['Read', 'Bash(git status:*)'] },
+    });
+  });
+
+  // Each is YAML that Claude Code reads and this reader does not: with the tool list
+  // missed, the worker would have run with every tool; with the model missed, on DeepSeek.
+  it.each([
+    ["'tools': [Read]\n"],
+    ['"disallowedTools": [Bash]\n'],
+    ["'model': opus\n"],
+    ['"permissionMode": bypassPermissions\n'],
+    ['tools: [Read,\n  Bash]\n'],
+    ['tools: Read\ntools: Bash\n'],
+    ['tools: Read\n  - Bash\n'],
+    ['tools: Agent(worker, researcher), Read\n'],
+    ['tools: &all [Read]\n'],
+    ['tools:\n'],
+    ['tools:\n  - {name: Read}\n'],
+    ['? tools\n: [Read]\n'],
+  ])(
+    'keeps a definition whose frontmatter it cannot read exactly native: %j',
+    async (frontmatter) => {
+      await defined(frontmatter);
+      expect(await workerAgent('worker', lookup())).toEqual({
+        unmatched: 'definition:frontmatter',
+      });
+    },
+  );
+
+  it("reads the job root's own agents and the person's, never a folder above the root", async () => {
+    await define(join(home, '.claude', 'agents'), 'mine.md', agent('mine', 'tools: Read\n'));
+    expect(await workerAgent('mine', lookup())).toMatchObject({ agent: { tools: ['Read'] } });
+    // Above the root is outside what the job's consent names.
+    await define(join(root, 'work', '.claude', 'agents'), 'above.md', agent('above', ''));
+    expect(await workerAgent('above', lookup())).toEqual({ unmatched: 'subagent_type' });
+  });
+
+  // Claude Code runs the project's definition of a name before the person's. One this
+  // cannot read must keep the call native, not hand the name on to another file.
+  it.each([
+    [
+      'a pinned model and a list over several lines',
+      'model: opus\ntools: [Read,\n  Bash]\n',
+      'name: worker',
+    ],
+    ['a quoted name key', 'tools: Read\n', "'name': worker"],
+  ])(
+    "stays with the project's definition of a name it cannot read: %s",
+    async (_label, rest, name) => {
+      await define(
+        join(project, '.claude', 'agents'),
+        'reviewer.md',
+        `---\n${name}\ndescription: reviews\n${rest}---\n\nReview on Opus.\n`,
+      );
+      await define(join(home, '.claude', 'agents'), 'worker.md', agent('worker', ''));
+      expect(await workerAgent('worker', lookup())).toMatchObject({
+        unmatched: expect.stringMatching(/^definition:/),
+      });
+    },
+  );
+
+  it("never takes a plugin's agent, installed and matching or redefined in the project", async () => {
+    const install = join(root, 'plugins', 'codex', '1.0.0');
+    await define(
+      join(install, 'agents'),
+      'codex-rescue.md',
+      agent('codex-rescue', 'tools: Bash\n'),
+    );
+    await define(
+      join(home, '.claude', 'plugins'),
+      'installed_plugins.json',
+      JSON.stringify({
+        version: 2,
+        plugins: { 'codex@market': [{ scope: 'user', installPath: install }] },
+      }),
+    );
+    // A project file that claims the plugin's own name changes nothing.
+    await define(
+      join(project, '.claude', 'agents'),
+      'rescue.md',
+      agent('codex:codex-rescue', 'tools: Bash\n'),
+    );
+    for (const type of [
+      'codex:codex-rescue',
+      'vercel:deployment-expert',
+      'stripe:Company Researcher',
+    ])
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
+  });
+
+  it.each([['general-purpose'], ['Explore']])(
+    'has no custom form for the built-in %s, which runs as itself',
+    async (type) => {
+      await define(join(project, '.claude', 'agents'), `${type}.md`, agent(type, 'tools: Read\n'));
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
+    },
+  );
+
+  it('has no worker form for a type with no definition file, a plugin agent or an empty prompt', async () => {
+    for (const type of ['Plan', 'claude', 'claude-code-guide', 'web-fetch', 'statusline-setup'])
+      expect(await workerAgent(type, lookup())).toEqual({ unmatched: 'subagent_type' });
+    await define(
+      join(project, '.claude', 'agents'),
+      'empty.md',
+      '---\nname: empty\ndescription: nothing\n---\n\n',
+    );
+    expect(await workerAgent('empty', lookup())).toEqual({ unmatched: 'definition:prompt' });
   });
 });
 

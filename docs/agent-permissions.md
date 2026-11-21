@@ -6,7 +6,9 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, and on a fresh install asks whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. DeepSeek subagents and checkout each require their own choice.
+
+Turning on DeepSeek subagents during fresh setup turns them on in any workspace. Each job costs up to your per-call spend limit, within your daily budget. Claude accepts or declines each offer. Existing users and saved off choices keep their behavior through updates and refreshes. Use `tenjin config subagents off` to turn them off and `tenjin config subagents on` to turn them on. [Scope, sharing and worker controls →](./subagents.md)
 
 Use the activation step the installer returns:
 
@@ -24,9 +26,9 @@ Claude Code requires 2.1.287+. Codex routing hooks require 0.149.0+. Installatio
 
 ## When your agent runs the install
 
-The agent installs for its current host, asks only unanswered spending questions, prepares a funding link and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
+The agent installs for its current host, relays any unanswered spending or subagent choice, and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
 
-When you choose **Add $5**, the agent runs `tenjin fund 5`, which opens checkout in your browser with $5 filled in. Opening checkout moves no money; you confirm the payment there. The agent then runs `tenjin balance --wait` in the background and continues when the money lands, so you never come back to tell it you are done. If you skip funding, the agent continues with available tools and asks when a task first needs a paid tool, saying what the tool is and what it costs. It asks at most once a session. An unknown balance or unconfirmed arrival does not justify another payment: running `tenjin fund` again while a payment is on its way waits on that payment instead of opening a second checkout.
+When you choose **Add $5**, the agent runs `tenjin fund 5`, which opens checkout in your browser with $5 filled in. Opening checkout moves no money; you confirm the payment there. The agent then runs `tenjin balance --wait` in the background and continues when the money lands, so you never come back to tell it you are done. If you skip funding, the agent continues with available tools and asks when a task first needs a paid tool, saying what the tool is and what it costs. It asks at most once a session. An unknown balance or unconfirmed arrival does not justify another payment: running `tenjin fund` again while a payment is on its way waits on that payment instead of opening a second checkout. If you have an event or promo code, the agent runs `tenjin fund` and you type the code yourself under **Have a code?** on that page, never in chat; the agent waits with `tenjin balance --wait` the same way.
 
 A spend limit that is used up is not a funding problem. The agent says the limit is reached, that your balance is fine, and how to raise the limit; it never opens checkout for it.
 
@@ -36,14 +38,16 @@ Installation and the first task add no optional retention or second-host questio
 
 ## What bounds a payment
 
-| Control             | Default and meaning                                                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessionBudget`     | $5 automatic spending shared across chats. Resets 24 hours after its window starts, not on a new chat. Zero blocks automatic payments; `none` removes this ceiling. |
-| `maxAutoSpend`      | $0.25 for one call's total, including multiple takes or comparison options. Installation and config changes refuse a lower amount.                                  |
-| Wallet balance      | No payment can exceed available funds.                                                                                                                              |
-| `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                             |
+| Control             | Default and meaning                                                                                                                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessionBudget`     | $5 automatic spending shared across chats. Resets 24 hours after its window starts, not on a new chat. Zero blocks automatic payments; `none` removes this ceiling.                                                          |
+| `maxAutoSpend`      | $1.00 by default for one call's total, including multiple takes or comparison options. Accepts any non-negative USD amount with up to 6 decimal places; `0` blocks positive automatic payments. Saved limits stay unchanged. |
+| Wallet balance      | No payment can exceed available funds.                                                                                                                                                                                       |
+| `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                                                                                      |
 
-Defaults apply before any answer. Accepting limits records them; explicit amount flags replace the named limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+Ordinary spending defaults apply before any answer. Where DeepSeek subagents are on, a job's cap is your per-call spend limit. Explicit amount flags replace the named ordinary spending limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+
+A DeepSeek job's cap covers its routing, inference and web searches together. It is your per-call spend limit as it stands at each offer, or a lower ceiling you named with `--max-job`, so a job never costs more than one call may; the daily budget still applies, and a per-call limit of zero stops jobs. A worker's web search runs inside its model call, paid as tokens with no search charge; a page its WebFetch could not fetch is read through Exa for $0.001, paid like any lookup, within your per-call limit and daily budget too. [Quotes and cumulative job limits →](./subagents.md#charges-and-limits)
 
 Changing global limits is a normal config write: the CLI does not distinguish a person from an agent. Your host's permissions and filesystem access protect those writes. Authorize limit changes deliberately; the request tool itself cannot raise them.
 
@@ -108,7 +112,9 @@ Bash(tenjin usage:*)
 
 ## What the hooks send
 
-Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
+Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret. This masking applies to routing. A DeepSeek worker you turn on forwards what it reads to Tenjin and DeepSeek unmasked, removing only the job's own tokens and your wallet key and passphrase: see [DeepSeek subagents](./subagents.md#what-goes-where-and-when).
+
+With DeepSeek subagents on, the held assignment and parent context go to Tenjin and TypeSafe before the parent accepts, in a request of at most 16 KB that drops the oldest context first and never cuts the assignment. After the parent accepts, Tenjin and DeepSeek receive the accepted assignment, the instructions Claude Code loads for the worker as it does for a native subagent (your CLAUDE.md, rules and the files under `~/.claude`), and the job's tool results. A worker's web searches run inside the DeepSeek call; the address of a public page its WebFetch could not fetch goes to Exa. Model replies can be replayed for 24 hours; financial and continuation metadata persist. [DeepSeek disclosure and retention →](./subagents.md#data-and-permissions)
 
 For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
 
@@ -129,6 +135,8 @@ Run `tenjin wallet repair` yourself in a terminal when the saved passphrase is m
 ## Codex
 
 Codex support is experimental. It shares the wallet, limits and request executor, but activation and permission behavior differ.
+
+DeepSeek subagents run on Claude Code only. Codex runs its own subagents natively and Tenjin offers none of them to DeepSeek.
 
 Installation uses Codex's plugin commands and trusts only Tenjin's own hook rows through Codex's configuration API. It leaves hooks you disabled off. If trust cannot be saved, approve the hooks in `/hooks`.
 

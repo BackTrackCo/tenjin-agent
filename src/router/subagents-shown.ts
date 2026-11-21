@@ -1,0 +1,129 @@
+import { homedir } from 'node:os';
+import type { CommandContext } from '../context';
+import type { PartialConfig } from '../lib/config';
+import { formatUsdDisplay } from '../lib/money';
+import { paint } from '../lib/output';
+import { tilde } from '../lib/paths';
+import { modelConsentSchema, namedDirectories } from './model-settings';
+
+/**
+ * WHAT A PERSON IS SHOWN ABOUT DEEPSEEK SUBAGENTS, in one place: the block `tenjin config
+ * subagents` and the setup receipt print, the short terms, and the row of `tenjin status`.
+ * It imports nothing of the worker or the job store, so `tenjin status` and the installer
+ * load it without them.
+ */
+
+/** The page the setup question and each turn-on send a person to for the full terms. */
+export const SUBAGENT_DETAILS_URL =
+  'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md';
+
+/**
+ * THE ONE SHORT TERMS TEXT, printed after `tenjin config subagents on` and after "Turn on"
+ * in setup. It names every recipient the consent record names and the `~/.claude` read.
+ * The full terms are the guide and the `disclosure` field of `on --json`.
+ */
+export const SUBAGENT_TERMS: readonly string[] = [
+  'Before each offer, Tenjin and TypeSafe get the task and recent conversation. Routing costs one fee for each offer, also when Claude declines it: what the router quotes ($0.0081), never more than $0.25, paid inside your per-call limit and the job ceiling.',
+  'When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker’s tool results, unmasked: only the job’s tokens and your wallet key and passphrase are removed. A web search runs inside the DeepSeek call; the address of a page the worker could not fetch goes to Exa.',
+  'Its instructions come from your ~/.claude (CLAUDE.md, skills, plugins). Its file tools can read the session transcripts, prompt history and settings there, and what they read can reach Tenjin and DeepSeek.',
+  `Details: ${SUBAGENT_DETAILS_URL}`,
+];
+
+const OFF_HINT = 'Run `tenjin config subagents off` to turn them off.';
+export const ON_HINT = 'Run `tenjin config subagents on` to turn them on.';
+/** After "Keep off" in setup: it is off, and how to turn it on. A job has never started there. */
+export const SUBAGENTS_KEPT_OFF_LINES = ['○ DeepSeek subagents are off', '', ON_HINT] as const;
+/** After `off`. */
+export const SUBAGENTS_OFF_LINE = '○ DeepSeek subagents are off. No new jobs will start.';
+
+/**
+ * THE SCOPE IN PLAIN WORDS, the same in the status, after each `on` and in `tenjin status`:
+ * every workspace, or the listed directories. A listed directory includes its subfolders.
+ */
+export function scopeWords(directories: readonly string[] | null, home = homedir()): string {
+  if (!directories) return 'Every workspace';
+  const shown = directories.map((path) => tilde(path, home)).join(', ');
+  return `${shown} and ${directories.length === 1 ? 'its' : 'their'} subfolders`;
+}
+const usd = (atomic: bigint) => `$${formatUsdDisplay(atomic.toString())}`;
+
+/** What a turn-on or the status shows: the scope, a change of it, and the cap in force. */
+export type SubagentsShown = {
+  directories: readonly string[] | null;
+  /** The scope this turn-on replaced, where it narrowed or widened a saved consent. */
+  was?: readonly string[] | 'every-workspace';
+  perCall: bigint;
+  /** The ceiling named with `--max-job`. */
+  named?: bigint;
+  /** The cap in force before this turn-on, where a saved consent at this router gave one. */
+  wasCap?: bigint;
+  /** Whether a daily budget is set. */
+  daily: boolean;
+  routerOrigin: string;
+};
+
+/** The cap in force, read from the settings: the per-call limit, or a lower named ceiling. */
+function costWords({ perCall, named, wasCap, daily }: SubagentsShown): string {
+  const now = named !== undefined && named < perCall ? named : perCall;
+  const was = wasCap !== undefined && wasCap !== now ? `; was ${usd(wasCap)}` : '';
+  const cap =
+    named === undefined
+      ? `Up to ${usd(perCall)} a job (your per-call limit${was})`
+      : named < perCall
+        ? `Up to ${usd(named)} a job (your --max-job${was})`
+        : `Up to ${usd(perCall)} a job (your per-call limit; your --max-job of ${usd(named)} does not lift it${was})`;
+  return daily ? `${cap} · your daily budget applies` : cap;
+}
+
+const ROW_LABEL = 9;
+const row = (label: string, value: string) => `  ${label.padEnd(ROW_LABEL)}${value}`;
+
+/** The scope row's words: the scope, and the one a turn-on replaced when it changed it. */
+export function scopeShown({ directories, was }: SubagentsShown, home = homedir()): string {
+  const before =
+    was === undefined
+      ? ''
+      : was === 'every-workspace'
+        ? ' (was every workspace)'
+        : ` (was ${was.map((path) => tilde(path, home)).join(', ')} only)`;
+  return scopeWords(directories, home) + before;
+}
+
+/**
+ * THE ON BLOCK, laid out as `tenjin status` is: the header, the scope and cost rows, the
+ * short terms after a turn-on, and how to turn it off. `tenjin config subagents`, its `on`
+ * and the setup receipt after "Turn on" all print this, so there is one layout and one terms text.
+ */
+export function subagentsOnLines(
+  ctx: CommandContext,
+  shown: SubagentsShown,
+  options: { terms?: boolean; notes?: readonly string[] } = {},
+): string[] {
+  return [
+    `${paint(ctx.io, 'green', '●')} DeepSeek subagents are on`,
+    '',
+    row('Scope', scopeShown(shown)),
+    row('Cost', costWords(shown)),
+    // The router is said only when it is not Tenjin's own.
+    ...(shown.routerOrigin === 'https://tenjin.sh' ? [] : [row('Router', shown.routerOrigin)]),
+    ...(options.terms ? ['', ...SUBAGENT_TERMS] : []),
+    ...(options.notes?.length ? ['', ...options.notes] : []),
+    '',
+    OFF_HINT,
+  ];
+}
+
+/** The `Subagents` row of `tenjin status`: on with its scope, or off. */
+export function subagentsStatusValue(config: PartialConfig): string {
+  if (config.router?.subagents !== true) return 'Off';
+  const consent = modelConsentSchema.safeParse(config.router?.subagentConsent);
+  if (!consent.success) return 'On, but no consent is saved';
+  const directories = namedDirectories(consent.data);
+  return `On · ${
+    !directories
+      ? 'every workspace'
+      : directories.length === 1
+        ? scopeWords(directories)
+        : `${directories.length} directories`
+  }`;
+}

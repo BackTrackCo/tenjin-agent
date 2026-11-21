@@ -1,6 +1,27 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
+import {
+  asRecord,
+  HELD_NOT_STARTED,
+  HELD_WITH_OFFER,
+  keepDelegatedHint,
+  parseJson,
+  readJson,
+  tenjinDataDir,
+  textOf,
+} from './hook-data';
 
 import type { TenjinHeld, TenjinRow } from '../types';
+import {
+  keptNative,
+  modelStep,
+  raisedByThisPlugin,
+  registerModelViewer,
+  rememberModelOffer,
+  watchContinuation,
+  sessionLives,
+  translateViewerContinuation,
+  VIEWER_TYPE,
+} from './model-viewer';
 
 /**
  * THE TENJIN MOD: one line per paid lookup, drawn from documented props only.
@@ -91,7 +112,159 @@ type Shape = {
 };
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
+/**
+ * A DEEPSEEK WORKER GETS THE HOOK EVENTS A NATIVE SUBAGENT GETS. A native subagent fires
+ * no `SessionStart` when it starts or resumes and no `UserPromptSubmit` for its prompts,
+ * so in a worker's process those two events end here, above the person's settings hooks
+ * and the plugins' command hooks: none of them runs, and no context they add reaches the
+ * worker. A compaction's `SessionStart` still runs, as it does in a native subagent, and
+ * so does every other event (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`
+ * and the rest), untouched. Managed settings hooks sit above every mod and still run.
+ * Where the worker flag cannot be read, the event runs as before.
+ */
+async function inWorker($: Dollar): Promise<boolean> {
+  return (await $.env.get('TENJIN_MODEL_WORKER').catch(() => undefined)) === '1';
+}
+
 export const register: Register = (on) => {
+  on('classic.PreToolUse', async ($, e, next) => {
+    const input: Json = { ...e };
+    delete input.tool;
+    delete input.tool_use_id;
+    return keepDelegatedHint($, e.tool, input, await next(e));
+  });
+  on('classic.SessionStart', async ($, e, next) =>
+    (e.source === 'startup' || e.source === 'resume') && (await inWorker($)) ? {} : next(e),
+  );
+  on('classic.UserPromptSubmit', async ($, e, next) => ((await inWorker($)) ? {} : next(e)));
+  registerModelViewer(on);
+  on('tool.describe', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
+    const data = await tenjinDataDir($);
+    const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
+    if (router?.subagents !== true) return next(e);
+    return {
+      description: `${e.description}\n\nCopy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.`,
+    };
+  });
+  on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
+    // THE PLUGIN'S OWN AGENT IS NOT THE PARENT'S CALL. The host raises this mod's start of
+    // the worker's viewer agent as an Agent call too (seen live: a no-offer record,
+    // `input_filter:run_in_background`, at the second of every accept). It is never
+    // judged, offered or recorded: told by who raised it, and by its type.
+    if (raisedByThisPlugin(next.origin) || (e as Json).subagent_type === VIEWER_TYPE)
+      return next(e);
+    const { tool_use_id, ...raw } = e;
+    delete (raw as Json).tool;
+    // A NATIVE SUBAGENT'S CALL IS JUDGED AS THE MAIN LOOP'S, at any depth. The host
+    // adds the id of the loop that made a call to its event; that is no field of the
+    // call, so it leaves the input and goes as `agent`, the loop that gets the offer.
+    delete (raw as Json).agentId;
+    const translated = await translateViewerContinuation($, e.tool, raw);
+    const input = translated.input;
+    const owned = translated.owned || ownedContinuationAddress(input, e.tool);
+    const unavailable = () =>
+      heldAnswer(
+        e.tool,
+        'Tenjin continuation is unavailable. No continuation started. Do not retry this owned handle through native tools.',
+      );
+    if (translated.unavailable) return unavailable();
+    if (e.tool === 'SendMessage' && !owned) return next(e);
+    try {
+      const data = await tenjinDataDir($);
+      const router = data
+        ? asRecord((await readJson($, `${data}/config.json`))?.router)
+        : undefined;
+      if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
+        return owned ? unavailable() : next(e);
+      // A held call is never rewritten: the parent keeps it native by sending it
+      // again unchanged, and that repeat runs here as it was reviewed. The model
+      // request that made it tells that repeat from a second call of one response.
+      const step = modelStep(e.agentId);
+      const agent = e.agentId === undefined ? undefined : await callerOf($, e.agentId);
+      const response = await $.tool.call({
+        tool: 'mcp__plugin_tenjin_router__subagent',
+        capture: {
+          session_id: await $.session.id(),
+          tool_use_id,
+          input,
+          tool: e.tool,
+          ...(step !== undefined ? { step } : {}),
+          ...(agent !== undefined ? { agent } : {}),
+        },
+      });
+      const text = textOf(response.result) ?? response.text;
+      const offer = asRecord(parseJson(text));
+      if (offer?.action === 'native') await keptNative($, offer.settled);
+      // A MESSAGE THE WORKER TOOK is answered as a native send is: the call ran and succeeded.
+      // `delivered`: to a worker that runs, at its next turn. `continued`: a finished worker,
+      // resumed by the message, whose result arrives by itself as a background agent's does.
+      if (
+        e.tool === 'SendMessage' &&
+        (offer?.action === 'delivered' || offer?.action === 'continued') &&
+        typeof offer.message === 'string' &&
+        offer.message.trim().length > 0 &&
+        offer.message.length <= 2000
+      ) {
+        if (
+          offer.action === 'continued' &&
+          typeof offer.offer_id === 'string' &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            offer.offer_id,
+          )
+        ) {
+          const offerId = offer.offer_id;
+          await rememberModelOffer($, offerId, { ...input, run_in_background: true }).catch(
+            () => undefined,
+          );
+          // THE FOLLOW-UP IS AN ACCEPTED JOB, so it has what one has: its agent-list entry with
+          // the activity and the stop control, tied to the calling agent, and its result handed
+          // over once it ends. The accept hook does not see it, so it is set up here.
+          await watchContinuation($, offerId, e.agentId).catch(() => undefined);
+        }
+        return { result: { success: true, message: offer.message } };
+      }
+      if (
+        offer?.action === 'refused' &&
+        offer.started === false &&
+        typeof offer.reason === 'string' &&
+        offer.reason.trim().length > 0 &&
+        offer.reason.length <= 4000 &&
+        typeof offer.instruction === 'string' &&
+        offer.instruction.trim().length > 0 &&
+        offer.instruction.length <= 4000
+      )
+        return heldAnswer(
+          e.tool,
+          JSON.stringify({
+            action: 'refused',
+            started: false,
+            reason: offer.reason,
+            instruction: offer.instruction,
+          }),
+        );
+      if (
+        offer?.action === 'offer' &&
+        offer.started === false &&
+        typeof offer.offer_id === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          offer.offer_id,
+        )
+      ) {
+        await rememberModelOffer($, offer.offer_id, input).catch(() => undefined);
+        // The handoff marks a follow-up to an owned worker, whichever tool carried it.
+        const continuation = offer.continuation === true || e.tool === 'SendMessage';
+        return heldAnswer(e.tool, text ?? JSON.stringify(offer), {
+          offer: offer.offer_id,
+          context: heldOfferContext(offer, continuation),
+          continuation,
+        });
+      }
+    } catch {
+      /* An owned handle must never reach a native executor, including on local failure. */
+    }
+    return owned ? unavailable() : next(e);
+  });
+
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
     // The swap's own `decide` call is drawn on the native call's row.
     if (e.decide !== undefined) return next(e);
@@ -169,6 +342,7 @@ export const register: Register = (on) => {
 
   // The CLI's prompt hook keeps the record before this existing turn surface.
   on('turn.start', async ($, e, next) => {
+    sessionLives();
     if (e.agentId === undefined) {
       const now = await $.clock.now();
       const previous = (await $.state.get(LAST_TURN_START)).value;
@@ -808,17 +982,6 @@ function envelopeOf(text: string | undefined): Json | undefined {
   return undefined;
 }
 
-/** A stored result's text: a string, or MCP content blocks bare or in `content`. */
-function textOf(output: unknown): string | undefined {
-  if (typeof output === 'string') return output;
-  const blocks = Array.isArray(output) ? output : asRecord(output)?.content;
-  if (!Array.isArray(blocks)) return undefined;
-  return blocks
-    .map((block) => asRecord(block)?.text)
-    .filter((text) => typeof text === 'string')
-    .join('');
-}
-
 /** USDC has 6 decimals; whole cents keep two. */
 function usd(atomic: bigint): string {
   const fraction = (atomic % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
@@ -829,34 +992,106 @@ function atomicOf(value: unknown): string | undefined {
   return typeof value === 'string' && /^\d{1,30}$/.test(value) ? value : undefined;
 }
 
-async function tenjinDataDir($: Dollar): Promise<string | null> {
-  const override = await $.env.get('TENJIN_DATA_DIR');
-  if (override !== undefined && override.length > 0) return override;
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'));
-  return home !== undefined && home.length > 0 ? `${home}/.tenjin` : null;
+/** Reserve address fields only; backend validation owns identity and follow-up semantics. */
+function ownedContinuationAddress(input: Json, tool: string): boolean {
+  const addresses = tool === 'SendMessage' ? [input.to, input.recipient] : [input.resume];
+  return addresses
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .some((value) => typeof value === 'string' && /^tenjin-(worker|offer)-/i.test(value.trim()));
 }
 
-async function readJson($: Dollar, path: string): Promise<Json | null> {
+/**
+ * THE NATIVE SUBAGENT THAT MADE A CALL, as the host lists it: its id, the type it runs
+ * as, the types of the agents above it (nearest first, '' for one no longer listed)
+ * and the folder it works in. The CLI judges from these whether it can accept an offer
+ * and whether a worker would run as its native child would. One the host does not list
+ * goes by its id alone, and the CLI keeps its call native.
+ */
+async function callerOf($: Dollar, agentId: string): Promise<Json> {
   try {
-    return asRecord(parseJson(await $.fs.read(path))) ?? null;
+    const agents = await $.agent.list();
+    const own = agents.find((agent) => agent.id === agentId);
+    if (!own) return { id: agentId };
+    const parents: string[] = [];
+    let above = own.parentId;
+    while (above !== undefined) {
+      const parent = parents.length < 16 ? agents.find((agent) => agent.id === above) : undefined;
+      parents.push(parent?.type ?? '');
+      above = parent?.parentId;
+    }
+    return { id: agentId, type: own.type, parents, cwd: own.cwd };
   } catch {
-    return null;
+    return { id: agentId };
   }
 }
 
-function parseJson(text: unknown): unknown {
-  if (typeof text !== 'string') return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
+/**
+ * A held call's answer. An Agent or Task call is refused, with the offer as the refusal's
+ * text (`hook-data.ts` says why): the first line for a person, then what the parent is to
+ * do with it, then what the hook would have added as context (a refusal carries none),
+ * then the offer itself. A refusal reads as an error to a model, so the text says first
+ * that nothing failed and names the only two moves; a parent that took a held call for a
+ * failure once switched to another tool. THAT THE CALL WAS HELD AND DID NOT RUN IS SAID
+ * HERE ONLY: the context line and the offer's instruction do not say it again.
+ */
+function heldAnswer(
+  tool: string,
+  offerText: string,
+  held?: { offer: string; context: string[] | undefined; continuation?: boolean },
+) {
+  // Native SendMessage refusals return this data shape; an offer is not a delivered message.
+  if (tool === 'SendMessage')
+    return {
+      result: {
+        success: false,
+        // The statement of what happened comes first: the host shows a held call as a refusal.
+        message: held
+          ? `Not delivered yet: the follow-up to the DeepSeek worker is held until you run it with subagent({offer_id}) or cancel it. ${offerText}`
+          : offerText,
+      },
+      ...(held?.context ? { context: held.context } : {}),
+    };
+  if (!held) return { deny: `${HELD_NOT_STARTED}.\n${offerText}` };
+  return {
+    deny: [
+      `${HELD_WITH_OFFER} (offer ${held.offer}). It has not run.`,
+      // A FOLLOW-UP TO A TENJIN WORKER HAS NO NATIVE FORM: its handle never reaches a native
+      // tool, so the same call sent again is held again, as a new offer in place of this one.
+      held.continuation
+        ? `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this follow-up to a DeepSeek worker until you choose. Your two moves are to run it with subagent({offer_id}), or to cancel it with subagent({cancel: offer_id}). Sending this same ${tool} call again does not run it: a Tenjin worker handle never runs natively, and the repeat is held again. Do not switch to another tool or do the work yourself because of this message.`
+        : `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this ${tool} call until you choose. Your two moves are to accept the offer with subagent({offer_id}), or to send this same ${tool} call again unchanged, which runs it natively. Do not switch to another tool or do the work yourself because of this message.`,
+      ...(held.context ?? []),
+      offerText,
+    ].join('\n'),
+  };
+}
+
+function heldOfferContext(offer: Json, continuation = false): string[] | undefined {
+  const consent = asRecord(offer.consent);
+  if (
+    consent?.version !== 2 ||
+    typeof consent.repository !== 'string' ||
+    !consent.repository.trim() ||
+    typeof consent.routerOrigin !== 'string' ||
+    !/^https?:\/\/\S+$/.test(consent.routerOrigin) ||
+    !Array.isArray(consent.recipients) ||
+    consent.recipients.length !== 3 ||
+    consent.recipients[0] !== 'Tenjin' ||
+    consent.recipients[1] !== 'DeepSeek' ||
+    consent.recipients[2] !== 'Exa' ||
+    typeof offer.capAtomic !== 'string' ||
+    !/^[1-9][0-9]*$/.test(offer.capAtomic) ||
+    typeof offer.parentPolicy !== 'string' ||
+    !offer.parentPolicy.trim()
+  )
     return undefined;
-  }
-}
-
-function asRecord(value: unknown): Json | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Json)
-    : undefined;
+  // This field is constructed by the local handoff, after its consent check.
+  // Never promote the router's reason or other model/provider text into context.
+  return [
+    continuation
+      ? "This local Tenjin hook held the continuation; no continuation started. The user has installed Tenjin and turned DeepSeek subagents on. Run it with the subagent tool and this offer_id, or cancel it with that id. Its suitability is not judged again; the binding model, privacy and planning restrictions in the offer's parentPolicy still apply to its text. It reuses the worker's history and the original job's budget, with no routing fee."
+      : "The user has installed Tenjin and turned DeepSeek subagents on. The offer's parentPolicy is local Tenjin guidance: apply it with the full assignment, the repository/configuration risk rules and the binding model/privacy restrictions.",
+  ];
 }
 
 async function sha256Hex(text: string): Promise<string> {

@@ -150,7 +150,7 @@ describe('routingFeeRow', () => {
       'limit_below_deposit',
       routing(READY, { depositRefusal: 'limit_below_deposit' }),
       'the per-call spend limit cannot cover the routing fee or its deposit',
-      'Raise it with `tenjin config set maxAutoSpend 0.25`.',
+      'Choose an amount that covers the routing fee or its deposit with `tenjin config set maxAutoSpend <usd>`.',
     ],
     [
       'budget_reached',

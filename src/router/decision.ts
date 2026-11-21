@@ -1338,6 +1338,9 @@ export interface DecisionRoute {
   /** The most recent call completed a signed routing payment successfully.
    *  Free answers, background top-ups and payments still settling do not count. */
   paid?: () => boolean;
+  /** The most the last call's signed payment could charge: the fee its 402 stated, 0n when
+   *  nothing was signed. */
+  authorized?: () => bigint;
 }
 
 /** The paid route gave this call no answer: the wallet locked, low or over

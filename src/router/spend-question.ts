@@ -10,7 +10,7 @@ import { usd } from './fee';
  * whether or not anyone answers.
  */
 
-/** The automatic router defaults, in atomic USDC: $0.25 a call, $5 a day. */
+/** The automatic router defaults, in atomic USDC: $1 a call, $5 a day. */
 export const ROUTER_DEFAULTS = {
   maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
   sessionBudget: DEFAULT_SESSION_BUDGET,
@@ -33,7 +33,7 @@ export function shownLimits(config: {
   };
 }
 
-/** `$0.25 a call · $5.00 a day`: the limits a policy holds, as a person reads them. */
+/** `$1.00 a call · $5.00 a day`: the limits a policy holds, as a person reads them. */
 export function limitsLine(policy: {
   maxAutoSpendAtomic: bigint;
   sessionBudgetAtomic: bigint | null;
@@ -98,7 +98,7 @@ export function spendOptions(install: string): SpendOption[] {
       recommended: false,
       ask: [
         'Daily budget shared across chats, in USD, or none for no limit',
-        'The most it may pay for one call, in USD, at least 0.25',
+        'Ordinary-tool per-call limit in USD. DeepSeek inference uses its separate job ceiling. Zero blocks positive automatic payments.',
       ],
       command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,
     },

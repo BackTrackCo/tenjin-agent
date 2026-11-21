@@ -16,6 +16,7 @@ describe('hookToolInput', () => {
       session_id: '${session_id}',
       transcript_path: '${transcript_path}',
       cwd: '${cwd}',
+      permission_mode: '${permission_mode}',
       prompt: '${prompt}',
     });
     expect(Object.keys(hookToolInput('shortfall'))).toEqual(

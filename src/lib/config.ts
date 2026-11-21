@@ -38,6 +38,7 @@ export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
 export const RouterLayerSchema = z.object({
   enabled: z.boolean().optional(),
   context: z.enum(ROUTER_CONTEXTS).optional(),
+  subagents: z.boolean().optional(),
 });
 export type RouterLayer = z.infer<typeof RouterLayerSchema>;
 /**
@@ -184,9 +185,10 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
       details: parsed.error.issues,
     });
   }
-  const { enabled, context } = parsed.data;
+  const { enabled, context, subagents } = parsed.data;
   return {
     ...(enabled !== undefined ? { enabled } : {}),
+    ...(subagents !== undefined ? { subagents } : {}),
     ...(context !== undefined ? { context } : {}),
   };
 }
@@ -253,6 +255,8 @@ const InstallConfigSchema = z.object({
    * project's settings file no longer carries our entries.
    */
   routerProjects: z.array(z.string()),
+  /** A new profile whose subagent question is still to be asked; neither consent nor an enabled feature. */
+  freshSetup: z.literal(true).optional(),
 });
 
 /**
@@ -306,6 +310,9 @@ export const RawConfigSchema = ConfigSchema.partial()
     // `readPersonalRouter`, so one this build cannot read never makes the
     // whole file unreadable.
     router: RouterGlobalSchema.extend({
+      subagents: z.unknown().optional(),
+      subagentConsent: z.unknown().optional(),
+      windowsWorker: z.unknown().optional(),
       policy: z.unknown().optional(),
       nativeReplacement: z.unknown().optional(),
       nativeReplacementProviders: z.unknown().optional(),
@@ -345,19 +352,13 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 
 /**
  * THE TWO SPEND LIMITS, IN EFFECT WHETHER OR NOT ANYONE ANSWERED. The daily
- * budget ($5) is the control; the per-call ceiling ($0.25) is the runaway
+ * budget ($5) is the control; the per-call ceiling ($1) is the runaway
  * guard; the wallet balance is the hard stop. Install asks once, these or your
  * own limits, and an install nobody answered still runs on these. A call
  * priced above the ceiling is approved once, for that call.
  */
-export const DEFAULT_MAX_AUTO_SPEND = '250000';
+export const DEFAULT_MAX_AUTO_SPEND = '1000000';
 export const DEFAULT_SESSION_BUDGET = '5000000';
-
-/** The lowest configurable per-call ceiling, atomic USDC ($0.25). */
-export const MAX_AUTO_SPEND_FLOOR_ATOMIC = 250_000n;
-/** Why: said by install, `config set` and doctor wherever the floor refuses. */
-export const MAX_AUTO_SPEND_FLOOR_WHY =
-  'The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
@@ -375,7 +376,7 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   install: { routerProjects: [] },
   update: { mode: 'auto' },
-  router: { enabled: true, context: 'session', improve: false },
+  router: { enabled: true, context: 'session', improve: false, subagents: false },
   experimental: { bazaar: 'off' },
 };
 
@@ -411,7 +412,12 @@ export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
  *  and automatic use are not among them: they change only through their own
  *  operations (`tenjin config prefer|only|block|unblock|reset|speed|
  *  replacement`), which validate what they couple. */
-export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
+export const ROUTER_CONFIG_KEYS = [
+  'router.enabled',
+  'router.context',
+  'router.improve',
+  'router.subagents',
+] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
 /** The personal router keys that only their own operations write. */
@@ -503,6 +509,7 @@ export async function loadConfig(dir: string): Promise<Config> {
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     router: {
+      subagents: raw.router?.subagents === true,
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
       improve: raw.router?.improve ?? CONFIG_DEFAULTS.router.improve,

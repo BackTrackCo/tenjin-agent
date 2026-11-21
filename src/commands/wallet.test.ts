@@ -1147,7 +1147,7 @@ describe('runWalletBalance', () => {
     const res = await runWalletBalance(makeCtx(), { provider });
     expect(res.humanLines).toEqual([
       '  Balance   $0.00  low',
-      '  Limits    $0.25 a call · $5.00 a day',
+      '  Limits    $1.00 a call · $5.00 a day',
       '  Set aside about $0.018 for routing',
       '  Spent     about $0.012 on routing',
     ]);
@@ -1172,7 +1172,7 @@ describe('runWalletBalance', () => {
     expect(res.data).toMatchObject({ routingCredit: { atomic: '241000', usd: '0.241' } });
     expect(res.humanLines).toEqual([
       '  Balance   $1.70',
-      '  Limits    $0.25 a call · $5.00 a day',
+      '  Limits    $1.00 a call · $5.00 a day',
       '  Set aside about $0.241 for routing',
       '  Spent     about $0.009 on routing',
     ]);
@@ -1188,7 +1188,7 @@ describe('runWalletBalance', () => {
     expect(none.data).toMatchObject({ routingSpent: { atomic: '0' } });
     expect(none.humanLines).toEqual([
       '  Balance   $1.00',
-      '  Limits    $0.25 a call · $5.00 a day',
+      '  Limits    $1.00 a call · $5.00 a day',
     ]);
     const storage = new FileClientChannelStorage({ directory: payerDir(dataDir, address) });
     await storage.set(`0x${'ab'.repeat(32)}`, {
@@ -1223,7 +1223,7 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(1000000n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect((res.data as { balance: { usd: string } }).balance.usd).toBe('1');
-    expect(res.humanLines).toEqual(['  Balance   $1.00', '  Limits    $0.25 a call · $5.00 a day']);
+    expect(res.humanLines).toEqual(['  Balance   $1.00', '  Limits    $1.00 a call · $5.00 a day']);
     expect(getSigner).not.toHaveBeenCalled();
   });
 
@@ -1234,7 +1234,7 @@ describe('runWalletBalance', () => {
     const empty = await runWalletBalance(makeCtx(), { provider });
     expect(empty.humanLines).toEqual([
       '  Balance   $0.00  low',
-      '  Limits    $0.25 a call · $5.00 a day',
+      '  Limits    $1.00 a call · $5.00 a day',
       '',
       '  Add funds with `tenjin fund`, or ask your agent.',
     ]);
@@ -1243,11 +1243,11 @@ describe('runWalletBalance', () => {
     const funded = await runWalletBalance(makeCtx(), { provider });
     expect(funded.humanLines).toEqual([
       '  Balance   $5.00',
-      '  Limits    $0.25 a call · $5.00 a day',
+      '  Limits    $1.00 a call · $5.00 a day',
     ]);
     expect(funded.data).toMatchObject({
       low: false,
-      limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
+      limits: { maxAutoSpend: '1', sessionBudget: '5' },
     });
   });
 });

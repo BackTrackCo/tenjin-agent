@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,7 +47,8 @@ describe('status, the balance line', () => {
       '● Tenjin is on',
       '',
       'Balance $5.00',
-      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Today $0.00 of $5.00 · up to $1.00 a call',
+      'Subagents Off',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);
@@ -64,6 +65,49 @@ describe('status, the balance line', () => {
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
+  it('shows model-routing and inference credit in JSON, and the model fee line', async () => {
+    const result = await runRouterStatus(ctx(), {
+      cwd: dir,
+      routingCredit: async () => 21000n,
+      modelCredit: async () => 977000n,
+      modelRoutingCredit: async () => 47000n,
+      wallet: async () => ({ address: ADDRESS, atomic: 5000000n }),
+    });
+    expect(result.data).toMatchObject({
+      routingCredit: { remaining: { atomic: '21000' } },
+      modelCredit: { remaining: { atomic: '977000' } },
+      modelRoutingCredit: { remaining: { atomic: '47000' } },
+    });
+    // The inference credit is JSON only; the model fee keeps its own row.
+    expect(lines(result)).toContain('Subagents Off');
+    expect(lines(result)).toContain('Model fee $0.047 set aside for model routing');
+  });
+
+  // Review of 2120958a: the row only showed money set aside, so `tenjin status` never said
+  // whether DeepSeek subagents were on, nor where.
+  it('says whether DeepSeek subagents are on, and their scope', async () => {
+    const save = (router: Record<string, unknown>) =>
+      writeFile(join(dir, 'config.json'), JSON.stringify({ router }));
+    const row = async () =>
+      lines(await status(5_000_000n)).find((line) => line.startsWith('Subagents'));
+    const consent = {
+      version: 2,
+      instructions: 'applicable',
+      reads: 'claude-home',
+      recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+      routerOrigin: 'https://tenjin.sh',
+    };
+    await save({ subagents: true, subagentConsent: consent });
+    expect(await row()).toBe('Subagents On · every workspace');
+    const real = await realpath(dir);
+    await save({ subagents: true, subagentConsent: { ...consent, repositories: [real] } });
+    expect(await row()).toBe(`Subagents On · ${real} and its subfolders`);
+    await save({ subagents: true });
+    expect(await row()).toBe('Subagents On, but no consent is saved');
+    await save({ subagents: false, subagentConsent: consent });
+    expect(await row()).toBe('Subagents Off');
+  });
+
   it('keeps lifetime routing spend in JSON without changing the terminal rows', async () => {
     const result = await runRouterStatus(ctx(), {
       cwd: dir,
@@ -75,7 +119,8 @@ describe('status, the balance line', () => {
       '● Tenjin is on',
       '',
       'Balance $5.00',
-      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Today $0.00 of $5.00 · up to $1.00 a call',
+      'Subagents Off',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);
@@ -88,15 +133,15 @@ describe('status, the balance line', () => {
   });
 
   it('says the balance is low below the per-call limit, as `tenjin balance` does, and how to fund it', async () => {
-    for (const atomic of [0n, 249_999n]) {
+    for (const atomic of [0n, 999_999n]) {
       const result = await status(atomic);
       expect(lines(result).slice(0, 3)).toEqual([
         '! Tenjin is on, but your balance is low',
         '',
-        `Balance ${atomic === 0n ? '$0.00' : '$0.249999'} tenjin fund 5`,
+        `Balance ${atomic === 0n ? '$0.00' : '$0.999999'} tenjin fund 5`,
       ]);
     }
-    const enough = await status(250_000n);
+    const enough = await status(1_000_000n);
     expect(lines(enough)[0]).toBe('● Tenjin is on');
   });
 
