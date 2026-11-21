@@ -217,7 +217,7 @@ Modified for hash-wasm by Dani Biró
 
 ## undici
 
-The paid model call bundles [undici](https://github.com/nodejs/undici) 7.28.0 (MIT), whose HTTP dispatcher carries its own waits for headers and body. Its license is reproduced below.
+The paid model call bundles [undici](https://github.com/nodejs/undici) 7.30.2 (MIT), whose HTTP dispatcher carries its own waits for headers and body. Its license is reproduced below.
 
 MIT License
 
