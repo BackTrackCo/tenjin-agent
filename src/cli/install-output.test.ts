@@ -66,7 +66,7 @@ const full = () => ({
   },
   claudeCode: { binary: '/usr/local/bin/claude', version: '2.1.311', meetsFloor: true },
   migration: { state: 'absent' },
-  spend: { set: [], kept: [], effective: { maxAutoSpend: '0.25', sessionBudget: '5' } },
+  spend: { set: [], kept: [], effective: { maxAutoSpend: '1', sessionBudget: '5' } },
   wallet: {
     status: 'created',
     address: '0x1111111111111111111111111111111111111111',

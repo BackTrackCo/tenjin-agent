@@ -1,0 +1,228 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import {
+  prepareWorkerGithub,
+  redactGithubTokenShapes,
+  redactWorkerJson,
+  redactWorkerSecrets,
+  settingsFileWalletValues,
+  workerWalletValues,
+  workerGithubToken,
+  workerTokenValues,
+  type WorkerGithub,
+} from './worker-github';
+
+const TOKEN = `gho_${'Zx9'.repeat(12)}`;
+const NAMED = `github_pat_${'q'.repeat(40)}`;
+let prepared: WorkerGithub | undefined;
+afterEach(async () => {
+  await prepared?.close();
+  prepared = undefined;
+});
+
+/** Stands in for gh and git config; records what was asked. */
+const runner = (answers: { token?: string; name?: string; email?: string } = {}) =>
+  vi.fn(async (file: string, args: string[]) => {
+    if (file === 'gh' && args[0] === 'auth' && args[1] === 'token') {
+      if (answers.token === undefined) throw new Error('not logged in');
+      return `${answers.token}\n`;
+    }
+    if (file === 'git' && args.at(-1) === 'user.name' && answers.name) return `${answers.name}\n`;
+    if (file === 'git' && args.at(-1) === 'user.email' && answers.email)
+      return `${answers.email}\n`;
+    throw new Error('unset');
+  });
+
+/** Asks the job's git, as the worker's git would, for GitHub credentials. */
+function fill(job: WorkerGithub, host: string) {
+  return execFileSync('git', ['credential', 'fill'], {
+    input: `protocol=https\nhost=${host}\n\n`,
+    env: {
+      PATH: process.env.PATH,
+      HOME: job.directory,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
+      ...job.env,
+    },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  }).toString();
+}
+
+it('prefers a token the person names for workers and never widens a bad one to the gh login', async () => {
+  const run = runner({ token: TOKEN });
+  expect(await workerGithubToken({ TENJIN_WORKER_GITHUB_TOKEN: NAMED }, run)).toBe(NAMED);
+  const dir = await mkdtemp(join(tmpdir(), 'worker-token-'));
+  try {
+    await writeFile(join(dir, 'token'), `${NAMED}\n`);
+    expect(
+      await workerGithubToken({ TENJIN_WORKER_GITHUB_TOKEN_FILE: join(dir, 'token') }, run),
+    ).toBe(NAMED);
+    expect(
+      await workerGithubToken({ TENJIN_WORKER_GITHUB_TOKEN_FILE: join(dir, 'missing') }, run),
+    ).toBeNull();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  expect(await workerGithubToken({ TENJIN_WORKER_GITHUB_TOKEN: 'not a token' }, run)).toBeNull();
+  expect(run).not.toHaveBeenCalled();
+  expect(await workerGithubToken({}, run)).toBe(TOKEN);
+  expect(await workerGithubToken({}, runner())).toBeNull();
+});
+
+it('gives git the person identity and a GitHub-only credential helper fed by the job token', async () => {
+  prepared = await prepareWorkerGithub(
+    {},
+    { run: runner({ token: TOKEN, name: 'Ada "A" Lovelace', email: 'ada@example.com' }) },
+  );
+  expect(prepared.authenticated).toBe(true);
+  expect(prepared.env).toMatchObject({ GH_TOKEN: TOKEN, GH_PROMPT_DISABLED: '1' });
+  const config = (key: string) =>
+    execFileSync('git', ['config', '--file', prepared!.env.GIT_CONFIG_GLOBAL!, '--get', key])
+      .toString()
+      .trim();
+  expect(config('user.name')).toBe('Ada "A" Lovelace');
+  expect(config('user.email')).toBe('ada@example.com');
+  expect(fill(prepared, 'github.com')).toContain(`password=${TOKEN}`);
+  // No other host is handed the token.
+  expect(() => fill(prepared!, 'gitlab.com')).toThrow();
+  expect((await stat(prepared.env.GH_CONFIG_DIR!)).isDirectory()).toBe(true);
+  const directory = prepared.directory;
+  await prepared.close();
+  prepared = undefined;
+  await expect(stat(directory)).rejects.toThrow();
+});
+
+it('still gives git a readable global config with no token, and no credential helper', async () => {
+  prepared = await prepareWorkerGithub({}, { run: runner({ name: 'Ada' }) });
+  expect(prepared.authenticated).toBe(false);
+  expect(prepared.env.GH_TOKEN).toBeUndefined();
+  expect(() => fill(prepared!, 'github.com')).toThrow();
+});
+
+it("clears the session's own GitHub tokens from a worker that was named a token, also one that cannot be read", async () => {
+  const broad = `ghp_${'b'.repeat(36)}`;
+  const session = { GH_TOKEN: broad, GITHUB_TOKEN: broad, GITHUB_ENTERPRISE_TOKEN: broad };
+  // The worker's environment is its parent's with this laid over it.
+  const worker = (env: Record<string, string | undefined>) => ({ ...session, ...env });
+  prepared = await prepareWorkerGithub(
+    { ...session, TENJIN_WORKER_GITHUB_TOKEN_FILE: join(tmpdir(), 'tenjin-no-such-token') },
+    { run: runner({ token: broad }) },
+  );
+  expect(prepared.authenticated).toBe(false);
+  expect(Object.values(worker(prepared.env))).not.toContain(broad);
+  // Its commands could still print it from the parent's memory of it: it stays replaced.
+  expect(prepared.secrets).toContain(broad);
+  await prepared.close();
+  prepared = await prepareWorkerGithub(
+    { ...session, TENJIN_WORKER_GITHUB_TOKEN: NAMED },
+    { run: runner({ token: broad }) },
+  );
+  expect(worker(prepared.env)).toMatchObject({ GH_TOKEN: NAMED, GITHUB_TOKEN: '' });
+  expect(Object.values(worker(prepared.env))).not.toContain(broad);
+  await prepared.close();
+  // No token named: the worker keeps what a native subagent has, the session's own.
+  prepared = await prepareWorkerGithub(session, { run: runner({ token: broad }) });
+  expect(worker(prepared.env)).toMatchObject({ GH_TOKEN: broad, GITHUB_TOKEN: broad });
+});
+
+it('redacts the job token and any inherited GitHub token everywhere they appear', async () => {
+  const inherited = `ghp_${'k'.repeat(36)}`;
+  const configured = `ghs_${'s'.repeat(36)}`;
+  prepared = await prepareWorkerGithub(
+    { GITHUB_TOKEN: inherited },
+    { run: runner({ token: TOKEN }) },
+  );
+  expect(prepared.secrets.sort()).toEqual([TOKEN, inherited].sort());
+  // A token in the person's settings env reaches the worker's commands as well.
+  const secrets = [...prepared.secrets, ...workerTokenValues({ GH_TOKEN: configured })];
+  expect(redactWorkerSecrets(`${TOKEN} and ${TOKEN}; ${inherited}; ${configured}`, secrets)).toBe(
+    '[redacted job secret] and [redacted job secret]; [redacted job secret]; [redacted job secret]',
+  );
+});
+
+// Another job's GitHub folder holds its gh caches and run logs.
+it("names every job's GitHub folder by each spelling of the temp folder, for the sandbox to deny", async () => {
+  prepared = await prepareWorkerGithub({}, { run: runner() });
+  const other = await prepareWorkerGithub({}, { run: runner() });
+  try {
+    const named = (path: string) =>
+      prepared!.others.some((glob) => glob.endsWith('*') && path.startsWith(glob.slice(0, -1)));
+    for (const path of [other.directory, await realpath(other.directory), prepared.directory])
+      expect(named(path), path).toBe(true);
+  } finally {
+    await other.close();
+  }
+});
+
+// Failure caught: a job's GitHub folder that a kill of `tenjin mcp` left behind could not
+// be told from one a live job of another process still uses, so it stayed for good.
+it('names the process that made the job folder, and removes the folder on close', async () => {
+  prepared = await prepareWorkerGithub({}, { run: runner() });
+  const marker = JSON.parse(await readFile(join(prepared.directory, 'tenjin-owner.json'), 'utf8'));
+  expect(marker.pid).toBe(process.pid);
+  const { directory } = prepared;
+  await prepared.close();
+  await expect(stat(directory)).rejects.toThrow();
+});
+
+it('reads the wallet values from the env block of a settings file, and only those', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wallet-settings-'));
+  try {
+    const file = join(dir, 'settings.json');
+    await writeFile(
+      file,
+      JSON.stringify({
+        env: { TENJIN_WALLET_PASSPHRASE: 'fixture-pass-1', OTHER: 'fixture-other' },
+      }),
+    );
+    const broken = join(dir, 'settings.local.json');
+    await writeFile(broken, '{ not json');
+    expect(await settingsFileWalletValues([file, broken, join(dir, 'missing.json')])).toEqual([
+      'fixture-pass-1',
+    ]);
+    expect(
+      workerWalletValues({ TENJIN_WALLET_KEY: 'abc', TENJIN_WALLET_PASSPHRASE: ' fixture-2 ' }),
+    ).toEqual(['fixture-2']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it.each(['\\walletPass123', 'walletPass123\\', 'pa"ss\\"word', 'caf\u00e9\\u00e9\nline'])(
+  'removes the secret %j from a JSON body and leaves a body that still parses',
+  (secret) => {
+    const body = JSON.stringify({ [`k${secret}`]: `a ${secret} b`, keep: 'c:\\d "q" \u00e9' });
+    const out = redactWorkerJson(body, (text) => redactWorkerSecrets(text, [secret]));
+    expect(JSON.parse(out)).toEqual({
+      'k[redacted job secret]': 'a [redacted job secret] b',
+      keep: 'c:\\d "q" \u00e9',
+    });
+  },
+);
+
+it('removes the escaped form a settings file holds, and the body still parses', () => {
+  const secret = 'pa"ss\\word\nx';
+  const file = JSON.stringify({ env: { TENJIN_WALLET_PASSPHRASE: secret } });
+  const out = redactWorkerJson(JSON.stringify({ result: file }), (text) =>
+    redactWorkerSecrets(text, [secret]),
+  );
+  const decoded = (JSON.parse(out) as { result: string }).result;
+  expect(decoded).not.toContain(JSON.stringify(secret).slice(1, -1));
+  expect(decoded).toContain('[redacted job secret]');
+  expect(() => JSON.parse(decoded)).not.toThrow();
+});
+
+it('removes a GitHub token by its shape', () => {
+  expect(redactGithubTokenShapes(`x ${TOKEN} ${NAMED} y`)).toBe(
+    'x [redacted job secret] [redacted job secret] y',
+  );
+  expect(redactGithubTokenShapes('ghost story, ghp_short')).toBe('ghost story, ghp_short');
+});
+
+it("names the job's GitHub folder by its real path", async () => {
+  prepared = await prepareWorkerGithub({}, { run: async () => '' });
+  expect(prepared.directory).toBe(await realpath(prepared.directory));
+});

@@ -61,6 +61,20 @@ export async function claudePluginPresent(
 }
 
 /**
+ * Is Claude Code one of the hosts Tenjin is set up for here? DeepSeek workers run
+ * there only. The record install wrote decides; a machine set up before the record
+ * falls back to the plugin check.
+ */
+export async function claudeHostSetUp(
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): Promise<boolean> {
+  const hosts = await readInstalledHosts(dataDir);
+  return hosts !== null ? hosts.includes('claude') : claudePluginPresent(env, home);
+}
+
+/**
  * A host whose setup finished. The first record on a machine whose Claude
  * Code plugin came from a release before the record starts with Claude Code,
  * so doctor and uninstall keep covering it.

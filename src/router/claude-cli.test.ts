@@ -17,6 +17,7 @@ import {
   meetsFloor,
   parseClaudeVersion,
   readClaudeCode,
+  readClaudeCodeCached,
   userMcpFile,
   userSettingsPath,
 } from './claude-cli';
@@ -74,6 +75,30 @@ describe('finding the claude binary', () => {
     expect(old).toMatchObject({ version: '2.1.286', meetsFloor: false });
     expect(old.fix).toContain('Run `claude update` in this session');
     expect(old.fix).not.toMatch(/terminal/i);
+  });
+});
+
+// Each DeepSeek offer and its accept read the version: the accept spawned `claude --version`
+// again. Read once per binary file; a changed binary is read again.
+describe('the cached version read', () => {
+  it('spawns no second version read for the same binary file, and reads a changed one again', async () => {
+    const fake = await fakeClaude(root);
+    const versionReads = async () =>
+      (await fake.calls()).filter((call) => call.includes('--version')).length;
+    expect(await readClaudeCodeCached(fake.env, root)).toMatchObject({ version: '2.1.296' });
+    expect(await readClaudeCodeCached(fake.env, root)).toMatchObject({ version: '2.1.296' });
+    expect(await versionReads()).toBe(1);
+    // An update: the binary file changes, so the version is read again.
+    await fake.respond('version', '2.1.300 (Claude Code)\n');
+    await utimes(fake.bin, new Date(), new Date(Date.now() + 5000));
+    expect(await readClaudeCodeCached(fake.env, root)).toMatchObject({ version: '2.1.300' });
+    expect(await versionReads()).toBe(2);
+    // Past ten minutes a wrapper script that runs another `claude` is read again too.
+    await fake.respond('version', '2.1.301 (Claude Code)\n');
+    const later = Date.now() + 11 * 60_000;
+    expect(await readClaudeCodeCached(fake.env, root, undefined, later)).toMatchObject({
+      version: '2.1.301',
+    });
   });
 });
 

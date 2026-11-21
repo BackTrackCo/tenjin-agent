@@ -17,6 +17,7 @@ import {
   PLUGIN_NAME,
   PLUGIN_SERVER,
   REQUEST_TOOL,
+  SUBAGENT_TOOL,
 } from './names';
 
 /**
@@ -230,7 +231,13 @@ export function renderPluginHooks(
     { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, o)) },
     ...routerHookPlan(),
     { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(o)) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(o)) },
+    {
+      event: 'PreToolUse',
+      // With the mod, its `tool.check` allows an accept of an offer, and no hook runs
+      // for it, so the host draws no row of its own beside the accept's.
+      matcher: o.mod !== undefined ? REQUEST_TOOL : `${REQUEST_TOOL}|${SUBAGENT_TOOL}`,
+      hooks: command(allowHook(o)),
+    },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -322,6 +329,8 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 export const PLUGIN_FILES = [
   '.mcp.json',
   'types/index.d.ts',
+  'hooks/hook-data.ts',
+  'hooks/model-viewer.tsx',
   'hooks/register.tsx',
   'hooks/hooks.json',
   PAY_SKILL_PATH,
@@ -336,7 +345,12 @@ export const MOD_TYPES = 'types/index.d.ts';
  * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
  * later); nothing here builds or imports it.
  */
-export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
+export const MOD_FILES = [
+  MOD_TYPES,
+  'hooks/hook-data.ts',
+  'hooks/model-viewer.tsx',
+  'hooks/register.tsx',
+] as const;
 export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;

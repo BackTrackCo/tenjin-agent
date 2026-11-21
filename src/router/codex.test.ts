@@ -663,7 +663,7 @@ describe('Codex install, uninstall and doctor', () => {
       spend: { effective: { maxAutoSpend: string; sessionBudget: string } };
       nextSteps: { id: string; options: { command: string | null }[] }[];
     };
-    expect(data.spend.effective).toEqual({ maxAutoSpend: '0.25', sessionBudget: '5' });
+    expect(data.spend.effective).toEqual({ maxAutoSpend: '1', sessionBudget: '5' });
     expect(data.nextSteps.map((s) => s.id)).toEqual(['spend']);
     expect(data.nextSteps[0]?.options.map((o) => o.command)).toEqual([
       'tenjin install --yes',
@@ -712,33 +712,45 @@ describe('Codex install, uninstall and doctor', () => {
         expect.stringContaining('https://tenjin.sh/privacy'),
       ],
     });
+    // The subagent terms follow an opt-in only: a receipt's disclosure does not repeat them.
+    expect(JSON.stringify(out.data)).not.toContain('with parent accept or veto');
     expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
     expect(JSON.stringify(out)).not.toContain('Help improve routing');
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });
 
-  it('writes the limits the two flags name, and asks nothing', async () => {
+  it.each([
+    ['0', '0', '0.00'],
+    ['0.000001', '1', '0.000001'],
+    ['0.1', '100000', '0.10'],
+    ['0.24', '240000', '0.24'],
+    ['0.25', '250000', '0.25'],
+    ['0.5', '500000', '0.50'],
+  ])('writes a %s USD per-call limit and asks nothing', async (input, atomic, display) => {
     await writeFile(join(dir, 'config.json'), '{}');
     const { deps } = host();
-    const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
+    const out = await runCodexInstall({ maxAutoSpend: input, sessionBudget: 'none' }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
-    expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
-    expect(receipt(out)).toContain('Limits    $0.50 a call · no daily limit');
+    expect(config).toMatchObject({ maxAutoSpend: atomic, sessionBudget: 'none' });
+    expect(receipt(out)).toContain(`Limits    $${display} a call · no daily limit`);
     expect(out.data).toMatchObject({
-      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+      spend: { effective: { maxAutoSpend: input, sessionBudget: 'no daily budget limit' } },
     });
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 
-  it('refuses a per-call limit under the 0.25 floor before any write', async () => {
-    await writeFile(join(dir, 'config.json'), '{}');
-    const { steps, deps } = host();
-    await expect(runCodexInstall({ maxAutoSpend: '0.1' }, ctx(), deps)).rejects.toThrow(
-      '--max-auto-spend 0.1',
-    );
-    expect(steps).toEqual([]);
-    expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe('{}');
-  });
+  it.each(['-1', 'NaN', 'Infinity', '0.0000001'])(
+    'refuses invalid per-call limit %s before any write',
+    async (input) => {
+      await writeFile(join(dir, 'config.json'), '{}');
+      const { steps, deps } = host();
+      await expect(runCodexInstall({ maxAutoSpend: input }, ctx(), deps)).rejects.toThrow(
+        `--max-auto-spend ${input}`,
+      );
+      expect(steps).toEqual([]);
+      expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe('{}');
+    },
+  );
 
   it('refuses project scope before any write', async () => {
     const { steps, deps } = host();
@@ -946,13 +958,7 @@ describe('Codex install, uninstall and doctor', () => {
     // The allow hook off is the documented opt-out, so the plugin still counts as ready.
     expect(
       codexHookRows(
-        listed(
-          legRow('a'),
-          legRow('b'),
-          legRow('c'),
-          row('d'),
-          allowRow({ enabled: false, trustStatus: 'untrusted' }),
-        ),
+        listed(...allRows().slice(0, -1), allowRow({ enabled: false, trustStatus: 'untrusted' })),
       ),
     ).toEqual({ state: 'trusted', allowOff: true, routing: 'paid' });
   });
@@ -1038,8 +1044,7 @@ describe('Codex install, uninstall and doctor', () => {
   });
 
   it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
-    const off = () =>
-      listed(legRow('a'), legRow('b'), legRow('c'), row('d'), allowRow({ enabled: false }));
+    const off = () => listed(...allRows().slice(0, -1), allowRow({ enabled: false }));
     const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
     expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
     await expect(
