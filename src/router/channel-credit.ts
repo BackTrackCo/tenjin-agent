@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { payerDir } from './fee';
+import { modelChannelDir } from './model-channel';
 
 /**
  * The wallet's routing channels, from the SDK's own files: what each one was
@@ -10,11 +11,7 @@ import { payerDir } from './fee';
  *
  * Not hook-safe (it loads the x402 SDK's storage), so `fee.ts` does not carry it.
  */
-async function channels(
-  dataDir: string,
-  address: string,
-): Promise<{ depositedAtomic: bigint; leftAtomic: bigint }[]> {
-  const dir = payerDir(dataDir, address);
+async function channels(dir: string): Promise<{ depositedAtomic: bigint; leftAtomic: bigint }[]> {
   const storage = new FileClientChannelStorage({ directory: dir });
   const out: { depositedAtomic: bigint; leftAtomic: bigint }[] = [];
   for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {
@@ -28,18 +25,30 @@ async function channels(
   return out;
 }
 
-/**
- * What the wallet's routing channel still holds for fees: what was deposited
- * less what the router has charged against it. It is the estimate of funds set
- * aside for routing that status and wallet balance show, and what
- * `tenjin doctor` reads to know whether the next call needs a deposit.
- */
-export async function channelCredit(dataDir: string, address: string): Promise<bigint> {
+async function bestCredit(dir: string): Promise<bigint> {
   let best = 0n;
-  for (const { leftAtomic } of await channels(dataDir, address)) {
+  for (const { leftAtomic } of await channels(dir)) {
     if (leftAtomic > best) best = leftAtomic;
   }
   return best;
+}
+
+/**
+ * What the wallet has set aside in the active routing channel, or in the
+ * reusable inference channel. Each directory may contain earlier channel
+ * records, so take its largest available balance.
+ */
+export async function channelCredit(
+  dataDir: string,
+  address: string,
+  lane: 'tool' | 'model' | 'model-routing' = 'tool',
+  origin?: string,
+): Promise<bigint> {
+  if (lane === 'tool') return bestCredit(payerDir(dataDir, address));
+  if (!origin) throw new Error('Model credit requires its server origin');
+  return bestCredit(
+    modelChannelDir(dataDir, address, lane === 'model' ? 'model-inference' : lane, origin),
+  );
 }
 
 /**
@@ -49,7 +58,7 @@ export async function channelCredit(dataDir: string, address: string): Promise<b
  */
 export async function routingSpent(dataDir: string, address: string): Promise<bigint> {
   let total = 0n;
-  for (const { depositedAtomic, leftAtomic } of await channels(dataDir, address)) {
+  for (const { depositedAtomic, leftAtomic } of await channels(payerDir(dataDir, address))) {
     total += depositedAtomic - leftAtomic;
   }
   return total;

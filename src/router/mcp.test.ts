@@ -221,14 +221,34 @@ describe('the router MCP server', () => {
     try {
       const tools = await client.listTools();
       // `approve` is Claude Code's alone (below): this client never sees it.
-      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
+      expect(tools.tools.map((t) => t.name)).toEqual([
+        'subagent_activity',
+        'subagent',
+        'request',
+        'hook',
+      ]);
+      const activity = tools.tools.find((tool) => tool.name === 'subagent_activity')!;
+      expect(activity.annotations?.readOnlyHint).toBe(true);
+      expect(Object.keys(activity.inputSchema.properties ?? {})).toEqual([
+        'offer_id',
+        'follow',
+        'after',
+      ]);
+      expect(activity.inputSchema).toMatchObject({
+        type: 'object',
+        required: ['offer_id'],
+        properties: { offer_id: { type: 'string', format: 'uuid' }, follow: { type: 'boolean' } },
+      });
       // The harness reads its inline-result threshold from the listed tool,
       // and keeps it out of tool search.
-      expect(tools.tools[0]!._meta).toEqual({
+      expect(tools.tools.find((tool) => tool.name === 'request')!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
         [ALWAYS_LOAD_KEY]: true,
       });
-      expect(tools.tools[1]!._meta).toBeUndefined();
+      expect(tools.tools.find((tool) => tool.name === 'subagent')!._meta).toEqual({
+        [ALWAYS_LOAD_KEY]: true,
+      });
+      expect(tools.tools.find((tool) => tool.name === 'hook')!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
@@ -278,7 +298,12 @@ describe('the router MCP server', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       try {
         const names = (await client.listTools()).tools.map((t) => t.name);
-        expect(names).toEqual(['request', 'hook']);
+        expect(names).toEqual(
+          // DeepSeek workers run on Claude Code only: a Codex host is offered no subagent tool.
+          harness === 'codex'
+            ? ['request', 'hook']
+            : ['subagent_activity', 'subagent', 'request', 'hook'],
+        );
         await client.callTool({ name: 'request', arguments: { query: 'weather' } });
         expect(bodies.at(-1)).toMatchObject({ harness: harness ?? 'claude' });
       } finally {
@@ -534,6 +559,37 @@ describe('the hook tool', () => {
     transcript_path: transcript,
     cwd: dir,
     prompt: 'what is the current price of ETH in USD',
+  });
+
+  it('does not run Tenjin routing legs inside a model worker', async () => {
+    const { homeDir, transcript } = await home('worker-hook');
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = testWalletProvider();
+    const getSigner = vi.spyOn(provider, 'getSigner');
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      env: { TENJIN_MODEL_WORKER: '1' },
+      handlerDeps: { cwd: dir, provider, fetchImpl },
+      hookDeps: {
+        baseUrl: 'https://router.test',
+        fetchImpl,
+        env: { TENJIN_WALLET_KEY: generatePrivateKey() },
+      },
+    });
+    const client = await connect(server);
+    try {
+      const called = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('worker-hook', transcript)),
+      });
+      expect(called.content).toEqual([{ type: 'text', text: '' }]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(getSigner).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
@@ -1416,3 +1472,54 @@ describe('the top-up at the start of tenjin mcp', () => {
     }
   });
 });
+
+// Live on alpha.70: a worker's Claude Code listed `mcp__x402__subagent` and
+// `mcp__x402__request`, from the settings install's registration of this same server.
+it.each(['claude', 'codex'] as const)(
+  'a server started inside a %s worker has no tool but the hook legs, under any registration name, and unlocks and fetches nothing',
+  async (harness) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = testWalletProvider();
+    const getSigner = vi.spyOn(provider, 'getSigner');
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      harness,
+      env: { TENJIN_MODEL_WORKER: '1' },
+      handlerDeps: { cwd: dir, provider, fetchImpl },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'claude-code', version: '2.1.325' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(['hook']);
+      for (const [name, args] of [
+        ['request', { query: 'ETH price' }],
+        ['request', { id: 'fixture', input: { symbol: 'ETH' } }],
+        [
+          'request',
+          {
+            decide: {
+              tool: 'WebSearch',
+              input: { query: 'ETH' },
+              tool_use_id: 'worker-call',
+              session_id: 'worker',
+            },
+          },
+        ],
+        ['approve', { quote: 'fixture-quote' }],
+        ['subagent', { offer_id: '53a6f54e-9106-45d1-9719-7ef41ab8a6e2' }],
+        ['subagent_activity', { offer_id: '53a6f54e-9106-45d1-9719-7ef41ab8a6e2' }],
+      ] as const) {
+        const called = await client
+          .callTool({ name, arguments: args })
+          .catch(() => ({ isError: true }));
+        expect(called.isError).toBe(true);
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(getSigner).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  },
+);

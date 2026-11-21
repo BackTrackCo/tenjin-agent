@@ -1,4 +1,5 @@
 import { tmpdir } from 'node:os';
+import { isModelWorkerProcess } from '../router/model-worker-context';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements, SettleResponse } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
@@ -203,6 +204,8 @@ export interface PaidLeg {
 
 export interface PayDeps {
   fetchImpl?: typeof fetch;
+  /** Cancel before transmission. The signed leg keeps its own settlement deadline. */
+  signal?: AbortSignal;
   /** Legacy injection seam, no longer consulted: exact payment signing is offline. */
   readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
@@ -227,6 +230,11 @@ export async function runPay(
   ctx: CommandContext,
   deps: PayDeps = {},
 ): Promise<CommandResult> {
+  if (isModelWorkerProcess())
+    throw new CliError(
+      'REFUSED',
+      'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',
+    );
   const warnings: RegistryWarning[] = [];
   try {
     return await executePay(args, ctx, deps, warnings);
@@ -246,12 +254,21 @@ export async function runPay(
   }
 }
 
+function checkPaymentActive(signal: AbortSignal | undefined): void {
+  if (signal?.aborted)
+    throw new CliError('REFUSED', 'The request was stopped before payment was sent.', {
+      details: { reason: 'cancelled' },
+    });
+}
+
 async function executePay(
   args: PayArgs,
   ctx: CommandContext,
   deps: PayDeps,
   warnings: RegistryWarning[],
 ): Promise<CommandResult> {
+  const { signal } = deps;
+  checkPaymentActive(signal);
   const router = args.execution === 'router' || args.terms !== undefined;
   if (router) {
     const terms = args.terms;
@@ -318,7 +335,23 @@ async function executePay(
     method,
   };
 
-  const probe = await httpRequest(url, fetchOpts);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const prepaymentFetchOpts =
+    signal === undefined
+      ? fetchOpts
+      : {
+          ...fetchOpts,
+          fetchImpl: ((input, init) => {
+            checkPaymentActive(signal);
+            return fetchImpl(input, {
+              ...init,
+              signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
+            });
+          }) satisfies typeof fetch,
+        };
+  checkPaymentActive(signal);
+  const probe = await httpRequest(url, prepaymentFetchOpts);
+  checkPaymentActive(signal);
   // The unpaid leg says so itself: the transport is shared with the paid retry
   // and asserts nothing about money either way.
   if (!probe.ok) {
@@ -432,9 +465,10 @@ async function executePay(
       );
     }
     const signed = await httpRequest(url, {
-      ...fetchOpts,
+      ...prepaymentFetchOpts,
       headers: { ...headers, ...answer.headers },
     });
+    checkPaymentActive(signal);
     if (!signed.ok) {
       throw fetchFailureToCliError(signed, {
         fix: `Nothing was paid: the request carried a sign-in, not a payment. ${legFix(signed)}`,
@@ -493,14 +527,17 @@ async function executePay(
   // that takes sign-in-with-x is asked first, below: a wallet that already
   // owns the result re-reads it free, and is never quoted a payment for it.
   const entitlement = paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined;
+  checkPaymentActive(signal);
   let slot = router && !entitlement ? await args.admit!(firstSeenAmount) : undefined;
 
+  checkPaymentActive(signal);
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
   const signer = await openWallet(provider);
   openedSigner.current = signer;
+  checkPaymentActive(signal);
 
   // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
   // advertises it, an entitled wallet re-reads FREE before any payment exists,
@@ -515,9 +552,10 @@ async function executePay(
       chainId: requirement.network,
     });
     const recheck = await httpRequest(url, {
-      ...fetchOpts,
+      ...prepaymentFetchOpts,
       headers: { ...headers, [SIWX_HEADER]: siwxHeader },
     });
+    checkPaymentActive(signal);
     if (!recheck.ok) throw fetchFailureToCliError(recheck);
     if (recheck.status >= 200 && recheck.status < 300) {
       const caveat = assertUsableResult(
@@ -590,6 +628,7 @@ async function executePay(
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
+  checkPaymentActive(signal);
   if (router && entitlement) slot = await args.admit!(amountAtomic);
   if (router) {
     const refusal = spendSlot(slot, amountAtomic);
@@ -629,6 +668,7 @@ async function executePay(
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
   const mode = router && !approved ? 'automatic' : 'manual';
+  checkPaymentActive(signal);
   const reservationId = await gateSpend({
     mode,
     ctx,
@@ -644,10 +684,10 @@ async function executePay(
     notConfirmedMessage: 'Payment not confirmed.',
   });
 
-  // A failure BEFORE transmission (the build) releases: no signature exists,
-  // nothing can move. That is the last point where releasing is honest.
+  // Cancellation or signing failure before transmission releases the reservation.
   let payment: Awaited<ReturnType<typeof buildExactPayment>>;
   try {
+    checkPaymentActive(signal);
     // The SIGNED entry is the CHECKED entry, by construction: the challenge is
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
@@ -658,7 +698,7 @@ async function executePay(
     throw err;
   }
 
-  // From here the signed EIP-3009 authorization leaves the process, and it is a
+  // Once the signed EIP-3009 authorization leaves the process, it is a
   // bearer instrument: the counterparty can settle it whatever it answers, or
   // if it answers nothing. So EVERY post-transmission outcome commits the
   // reservation; money that may move is money accounted. Releasing here let a
@@ -671,11 +711,26 @@ async function executePay(
     effectiveRequirement,
     Math.max(legTimeoutMs, ctx.flags.timeout),
   );
+  // The HTTP helper can await request preparation before invoking fetch.
+  let transmitted = false;
   const paid = await httpRequest(url, {
     ...fetchOpts,
     timeoutMs: paidTimeoutMs,
     headers: { ...headers, ...payment.headers },
+    ...(signal !== undefined
+      ? {
+          fetchImpl: ((input, init) => {
+            checkPaymentActive(signal);
+            transmitted = true;
+            return fetchImpl(input, init);
+          }) satisfies typeof fetch,
+        }
+      : {}),
   });
+  if (!transmitted && signal?.aborted) {
+    await authorizer.release(reservationId);
+    checkPaymentActive(signal);
+  }
   await authorizer.commit(reservationId, payment.amountAtomic, {
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),

@@ -1,0 +1,27 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+  // Renovate runs from the Renovate workflow in BackTrackCo/tenjin, which covers
+  // this repo too, and these rules extend that repo's renovate.json5: one
+  // schedule, cooldown and security policy for both (its docs/DEPENDENCIES.md).
+  // Change a shared rule there. Only this repo's own rules go here.
+  extends: ['local>BackTrackCo/tenjin//renovate.json5'],
+
+  packageRules: [
+    {
+      // Tracks the oldest Node the CLI supports (`engines.node`): a newer major
+      // types APIs that Node 22 lacks. Bump it together with `engines.node`.
+      matchPackageNames: ['@types/node'],
+      matchUpdateTypes: ['major'],
+      enabled: false,
+    },
+    {
+      // The github-actions manager also bumps `node-version` in `actions/setup-node`
+      // steps. Those pins follow `engines.node` (ci.yml's `22.0.0` is the floor
+      // smoke), so change them by hand, together with `engines.node`.
+      matchManagers: ['github-actions'],
+      matchDepNames: ['node'],
+      enabled: false,
+    },
+  ],
+}

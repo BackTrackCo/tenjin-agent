@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { hookToolInput } from './hook-tool';
+import { CODEX_HOOK_KINDS, hookToolInput } from './hook-tool';
 import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { handlersIn } from './hook-form';
 import { commandForm, shellDependence } from './hook-form-test-utils';
@@ -123,10 +123,19 @@ describe('the mod', () => {
       types: './types/index.d.ts',
     });
     expect(withMod['hooks/register.tsx']).toBe(mod['hooks/register.tsx']);
+    // With the mod, its `tool.check` allows the accept: the allow leg names the request tool alone.
+    const legs = (files: Record<string, string>) =>
+      (
+        JSON.parse(files['hooks/hooks.json']!) as { hooks: { PreToolUse: { matcher: string }[] } }
+      ).hooks.PreToolUse.at(-1)?.matcher;
+    expect(legs(withMod)).toBe('mcp__plugin_tenjin_router__request');
     // A folder written without the mod's sources names no module that is not there.
     const bare = renderPluginFiles('1.2.3');
     expect(Object.keys(bare)).not.toContain('hooks/register.tsx');
     expect(JSON.parse(bare['hooks/hooks.json']!)).not.toHaveProperty('modules');
+    expect(legs(bare)).toBe(
+      'mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent',
+    );
     expect(JSON.parse(bare['.claude-plugin/plugin.json']!)).not.toHaveProperty('types');
   });
 
@@ -150,7 +159,10 @@ describe("the plugin's hooks", () => {
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
       { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
+      {
+        matcher: 'mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent',
+        hooks: command(ALLOW_HOOK),
+      },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -465,6 +477,13 @@ describe('the checked-in hosts/codex templates', () => {
     });
   });
 
+  it('carries no leg for a subagent, so a Codex agent starts its own subagents natively, with no offer and no fee', () => {
+    // DeepSeek workers run on Claude Code only: nothing in the Codex plugin sees a delegation.
+    const text = JSON.stringify(renderCodexHooks());
+    expect(text).not.toMatch(/delegation|spawn_agent|"Agent"|Interrupt|mcp__router__subagent/);
+    expect(CODEX_HOOK_KINDS).toEqual(['prompt', 'native', 'shortfall']);
+  });
+
   it('allows the request tool with the static answer Codex documents for PermissionRequest', () => {
     expect(CODEX_ALLOW_HOOK_COMMAND).toBe(
       `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'`,
@@ -513,7 +532,7 @@ describe('the checked-in hosts/codex templates', () => {
     expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
   });
 
-  it("passes CODEX_HOME through Codex's cleared MCP environment", () => {
+  it("passes session home and Desktop executable through Codex's cleared MCP environment", () => {
     // Codex starts a stdio server with an allowlist that has no CODEX_HOME
     // (openai/codex `rmcp-client/src/utils.rs`, DEFAULT_ENV_VARS); `env_vars` adds it.
     for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
@@ -612,4 +631,14 @@ describe('the Codex runtime render', () => {
       expect(rendered['tenjin/bin/tenjin.cmd']).toBe(renderPluginBin(win.launch)['bin/tenjin.cmd']);
     });
   });
+});
+
+it('registers no Elicitation hook on any host, so only the person answers a worker permission dialog', async () => {
+  // Such a hook "can auto-respond (accept/decline) instead of showing the dialog": with one,
+  // "Allow for this job" could be chosen by something other than the person.
+  for (const { hooks } of [renderPluginHooks(), renderCodexHooks()])
+    expect(Object.keys(hooks).filter((event) => /elicitation/i.test(event))).toEqual([]);
+  // Nor does the mod hook it as a function hook (`classic.Elicitation`, `classic.ElicitationResult`).
+  for (const [path, source] of Object.entries(await checkedInMod()))
+    expect(/elicitation/i.test(String(source)), path).toBe(false);
 });

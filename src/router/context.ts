@@ -320,11 +320,22 @@ export async function buildPromptPacket(
   sessionId: string,
   prompt: string,
   harness: Harness = 'claude',
-  opts: { delegated?: boolean } = {},
+  opts: { delegated?: boolean; agentId?: string } = {},
 ): Promise<Packet> {
   const trimmed = prompt.trim();
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
-  const read = await readHistory(transcriptPath, { sessionId, harness });
+  const session = await readHistory(transcriptPath, { sessionId, harness });
+  // A subagent's prompt belongs to its own task: its transcript follows the session's,
+  // as for a subagent's tool call (see buildNativePacket). One that cannot be read
+  // leaves the session's history alone.
+  const own =
+    opts.agentId === undefined || harness === 'codex' || session === null
+      ? null
+      : await readHistory(subagentTranscriptPath(transcriptPath, sessionId, opts.agentId), {
+          sessionId,
+          agentId: opts.agentId,
+        });
+  const read = own === null ? session : [...session!, ...own];
   // A delegated task is the agent's words, so no harness mark is read in it.
   const current: PacketMessage = { role: 'user', text };
   return {
