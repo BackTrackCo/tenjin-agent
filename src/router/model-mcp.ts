@@ -21,7 +21,7 @@ import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { WORKER_ENDS, workerEnd, workerEndText, workerStop } from './model-worker-control';
+import { workerEnd, workerEndText, workerStop } from './model-worker-control';
 import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, nativeBackground, ownedModelReference } from './model-continuation';
