@@ -155,6 +155,8 @@ export type NeonTransportOptions = {
 export class NeonTransport {
   /** The jobs this run's calls touched, whose wall time the run adds when it ends. */
   private touched = new Set<string>();
+  /** The last paid reply's raw text, kept for the dev probe's failure summary. */
+  lastRaw = '';
   constructor(private options: NeonTransportOptions) {}
   /** The seller's origin: the consent and the job's decision name it. */
   get origin() {
@@ -423,6 +425,7 @@ export class NeonTransport {
       amountPaid?: { atomic?: string };
     };
     const quoted = BigInt(data.amountPaid?.atomic ?? '0');
+    this.lastRaw = typeof data.bodyText === 'string' ? data.bodyText : '';
     // A streamed reply arrives as text: its events are folded into the whole reply.
     let unreadable: NeonReplyInvalid | undefined;
     let usage: NeonUsage = {

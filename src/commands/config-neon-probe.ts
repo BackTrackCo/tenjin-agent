@@ -68,15 +68,45 @@ export async function runNeonProbe(
     state: 'running',
     expiresAt: Date.now() + 60_000,
   } as unknown as ModelJob;
-  const message = await transport.messages(job, body, abort.signal);
-  const call = (await readNeonRecord(ctx.dataDir, job.id))?.calls.at(-1);
+  let failure: unknown;
+  let message: Record<string, unknown> | undefined;
+  try {
+    message = await transport.messages(job, body, abort.signal);
+  } catch (error) {
+    failure = error;
+  }
+  return summary(seller, job.id, ctx.dataDir, message, failure, transport.lastRaw);
+}
+
+/** The seller's own notice in a reply, such as NanoGPT's reasoning-budget message. */
+export function sellerNotice(raw: string): string | undefined {
+  return /"([^"]*max_tokens[^"]*(?:reasoning|effort)[^"]*)"/i.exec(raw)?.[1];
+}
+
+/** The same summary for a reply and for a failure: what was asked, charged and spent on thought. */
+export async function summary(
+  seller: string,
+  jobId: string,
+  dataDir: string,
+  message: Record<string, unknown> | undefined,
+  failure: unknown,
+  raw: string,
+): Promise<CommandResult> {
+  const call = (await readNeonRecord(dataDir, jobId))?.calls.at(-1);
+  const stop = message
+    ? String(message.stop_reason)
+    : failure instanceof Error
+      ? failure.message
+      : String(failure);
+  const notice = sellerNotice(raw);
   return {
-    data: { seller, message, call },
+    data: { seller, ok: message !== undefined, stop, message, call, ...(notice ? { notice } : {}) },
     humanLines: [
       `seller ${seller}`,
-      `stop ${String(message.stop_reason)}  usage ${JSON.stringify(message.usage)}`,
-      `ceiling ${call?.quotedAtomic}  charged ${call?.settledAtomic}  reasoning ${call?.reasoningTokens ?? 0}  cached ${call?.cachedInputTokens}`,
-      `text ${JSON.stringify(message.content).slice(0, 400)}`,
+      message ? `stop ${stop}  usage ${JSON.stringify(message.usage)}` : `failed ${stop}`,
+      `ceiling ${call?.quotedAtomic}  charged ${call?.settledAtomic}  output ${call?.outputTokens}  reasoning ${call?.reasoningTokens ?? 0}  cached ${call?.cachedInputTokens}`,
+      ...(notice ? [`seller notice ${notice}`] : []),
+      ...(message ? [`text ${JSON.stringify(message.content).slice(0, 400)}`] : []),
     ],
   };
 }

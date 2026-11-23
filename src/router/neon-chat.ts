@@ -35,6 +35,21 @@ const NEON_BYTES_PER_INPUT_TOKEN = 2;
  * needs little thought, so the bridge asks for the least that still reasons.
  */
 export const NEON_REASONING_EFFORT = 'low';
+/**
+ * EVAL ONLY: the value the bridge sends instead, from `TENJIN_NEON_REASONING_EFFORT`: `none`,
+ * `minimal`, `low`, `medium`, `high`, or `omit` to send no field. Both routes and both sellers
+ * read it: chat completions send it as `reasoning_effort`, the Messages route maps it to a
+ * thinking budget (`none` disables thinking, `omit` sends no `thinking`).
+ */
+export const NEON_REASONING_EFFORT_ENV = 'TENJIN_NEON_REASONING_EFFORT';
+const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'omit'] as const;
+export type NeonEffort = (typeof EFFORTS)[number];
+export function neonEffort(env: NodeJS.ProcessEnv = process.env): NeonEffort {
+  const asked = env[NEON_REASONING_EFFORT_ENV];
+  return (EFFORTS as readonly string[]).includes(asked ?? '')
+    ? (asked as NeonEffort)
+    : NEON_REASONING_EFFORT;
+}
 /** How long one paid call waits: BlockRun's own `maxTimeoutSeconds`. */
 export const NEON_CALL_TIMEOUT_MS = 300_000;
 
@@ -115,7 +130,7 @@ export type ChatBody = {
   max_tokens: number;
   /** Streamed: bytes flow while the model thinks and writes, so no gateway idle limit cuts a long turn. */
   stream: boolean;
-  reasoning_effort: typeof NEON_REASONING_EFFORT;
+  reasoning_effort?: string;
   stream_options?: { include_usage: true };
   messages: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
@@ -227,7 +242,7 @@ export function chatBody(
     max_tokens: maxTokens,
     stream,
     ...(stream ? { stream_options: { include_usage: true } } : {}),
-    reasoning_effort: NEON_REASONING_EFFORT,
+    ...(neonEffort() === 'omit' ? {} : { reasoning_effort: neonEffort() }),
     messages,
     ...(tools.length > 0 ? { tools } : {}),
     ...(stop.length > 0 ? { stop } : {}),
@@ -494,15 +509,26 @@ export function messagesRequest(
   // The worker's own `thinking` is replaced by the budget below.
   const rest = Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'thinking'));
   // The budget stays below the cap by at least the floor, so a stepped-down turn still writes.
-  const budget = Math.min(NEON_THINKING_BUDGET_TOKENS, maxTokens - NEON_THINKING_BUDGET_FLOOR);
+  const effort = neonEffort();
+  const wanted = {
+    minimal: NEON_THINKING_BUDGET_FLOOR,
+    low: NEON_THINKING_BUDGET_TOKENS,
+    medium: 4_096,
+    high: 8_192,
+    none: 0,
+    omit: 0,
+  }[effort];
+  const budget = Math.min(wanted, maxTokens - NEON_THINKING_BUDGET_FLOOR);
   return {
     ...rest,
     model: NEON_MODEL,
     max_tokens: maxTokens,
     stream: true,
-    ...(budget >= NEON_THINKING_BUDGET_FLOOR
-      ? { thinking: { type: 'enabled', budget_tokens: budget } }
-      : {}),
+    ...(effort === 'none'
+      ? { thinking: { type: 'disabled' } }
+      : effort !== 'omit' && budget >= NEON_THINKING_BUDGET_FLOOR
+        ? { thinking: { type: 'enabled', budget_tokens: budget } }
+        : {}),
   };
 }
 

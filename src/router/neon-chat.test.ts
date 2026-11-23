@@ -1,9 +1,11 @@
-import { expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+afterEach(() => vi.unstubAllEnvs());
 import {
   capturedRequest,
   chatBody,
   chatUsage,
   hoistedForNeon,
+  messagesRequest,
   NEON_BESIDE_RESULT_LABEL,
   fittingNeonTokens,
   messageOf,
@@ -380,4 +382,27 @@ it('moves system messages and text beside a tool result into the system prompt',
   const chat = chatBody(body, {}, 64);
   expect(chat.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool']);
   expect(String(chat.messages[0]!.content)).toContain('Deferred tools are now available.');
+});
+
+it('reads the eval reasoning override on both routes, and keeps low as the default', () => {
+  const send = (env?: string) => {
+    if (env !== undefined) vi.stubEnv('TENJIN_NEON_REASONING_EFFORT', env);
+    return {
+      chat: chatBody({ messages: [] }, {}, 8192) as Record<string, unknown>,
+      messages: messagesRequest({ messages: [] }, 8192),
+    };
+  };
+  expect(send().chat.reasoning_effort).toBe('low');
+  expect(send().messages.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+  const none = send('none');
+  expect(none.chat.reasoning_effort).toBe('none');
+  expect(none.messages.thinking).toEqual({ type: 'disabled' });
+  const high = send('high');
+  expect(high.chat.reasoning_effort).toBe('high');
+  expect(high.messages.thinking).toEqual({ type: 'enabled', budget_tokens: 7168 });
+  const omit = send('omit');
+  expect('reasoning_effort' in omit.chat).toBe(false);
+  expect('thinking' in omit.messages).toBe(false);
+  // A value it does not know is the default.
+  expect(send('wild').chat.reasoning_effort).toBe('low');
 });
