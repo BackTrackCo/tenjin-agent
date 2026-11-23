@@ -24,6 +24,18 @@ const NEON_MINIMUM_CALL_ATOMIC = 2_000n;
  * long document written in one turn. A reply that reaches it ends as `max_tokens`.
  */
 export const NEON_TURN_MAX_TOKENS = 8_192;
+/**
+ * EVAL ONLY: `TENJIN_NEON_MAX_TOKENS` replaces the per-turn cap, from 1 to 32,768. The quote still
+ * has to fit the job's room, so a larger cap is stepped down as the cap already is.
+ */
+export const NEON_MAX_TOKENS_ENV = 'TENJIN_NEON_MAX_TOKENS';
+export const NEON_MAX_TOKENS_LIMIT = 32_768;
+export function neonMaxTokens(env: NodeJS.ProcessEnv = process.env): number {
+  const asked = Number(env[NEON_MAX_TOKENS_ENV]);
+  return Number.isInteger(asked) && asked >= 1 && asked <= NEON_MAX_TOKENS_LIMIT
+    ? asked
+    : NEON_TURN_MAX_TOKENS;
+}
 /** The least a turn is stepped down to when the job's ceiling cannot hold more. */
 export const NEON_TURN_FLOOR_TOKENS = 1_024;
 /** Bytes of request body counted as one input token in the estimate: an upper bound. */
@@ -76,7 +88,7 @@ export const NEON_MINIMUM_JOB_ATOMIC = neonPeakQuoteAtomic(0, NEON_TURN_FLOOR_TO
  * the floor does not fit: the call is not sent.
  */
 export function fittingNeonTokens(bytes: number, asked: number, remaining: bigint): number | null {
-  const capped = Math.max(1, Math.min(asked, NEON_TURN_MAX_TOKENS));
+  const capped = Math.max(1, Math.min(asked, neonMaxTokens()));
   if (neonPeakQuoteAtomic(bytes, capped) <= remaining) return capped;
   if (
     capped <= NEON_TURN_FLOOR_TOKENS ||

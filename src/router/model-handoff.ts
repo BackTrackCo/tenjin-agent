@@ -36,7 +36,7 @@ import {
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { NEON_MODEL, NEON_MINIMUM_JOB_ATOMIC, NEON_TURN_MAX_TOKENS } from './neon-chat';
+import { NEON_MODEL, NEON_MINIMUM_JOB_ATOMIC, neonMaxTokens } from './neon-chat';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -448,7 +448,7 @@ export class ModelHandoff {
         routerOrigin: NEON_ORIGIN,
         // No routing call was paid: the job starts with nothing spent.
         routingAuthorizedAtomic: '0',
-        maxOutputTokens: NEON_TURN_MAX_TOKENS,
+        maxOutputTokens: neonMaxTokens(),
         claudePermissionMode: session.claudePermissionMode,
         claudeWorkspace: worker.claudeWorkspace,
       },

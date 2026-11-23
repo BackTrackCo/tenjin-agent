@@ -7,6 +7,7 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import type { TypedDataDefinition } from 'viem';
 import { USDC_ADDRESS } from '../lib/usdc';
+import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { WalletProvider } from '../lib/wallet';
 
 /**
@@ -28,6 +29,49 @@ export const X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 const BASE = 'eip155:8453';
 
 export class ChannelDepositRefused extends Error {}
+
+/**
+ * EVERY VOUCHER COUNTS AGAINST THE PERSON'S LIMITS, a pre-funded channel's too. A voucher spends
+ * from money already in the channel, so no wallet payment shows it: without this the daily
+ * budget never saw a call a funded channel paid. The call's ceiling is authorized (per-call
+ * limit, daily budget, allowlist) before the voucher is signed, and what the seller charged is
+ * committed after. A ceiling that was sent and never answered stays committed in full.
+ */
+export class VoucherSpend {
+  private reservation: string | undefined;
+  private held = false;
+  constructor(
+    private authorizer: SpendAuthorizer,
+    private creator: string,
+    private requestKey: string,
+  ) {}
+  /** The hook before a payment is created: abort it where the limits refuse it. */
+  async before(ceilingAtomic: bigint): Promise<void | { abort: true; reason: string }> {
+    // A corrective retry signs again under the reservation the call already holds.
+    if (this.held) return;
+    const authorization = await this.authorizer.authorize({
+      mode: 'automatic',
+      amountAtomic: ceilingAtomic,
+      creator: this.creator,
+      requestKey: this.requestKey,
+    });
+    if (authorization.decision !== 'allow')
+      return { abort: true, reason: authorization.message ?? 'Over your spend limits.' };
+    this.reservation = authorization.reservationId;
+    this.held = true;
+  }
+  /** After the call: the real charge, or the ceiling where it is not known and a voucher left. */
+  async settle(costAtomic: bigint | undefined, ceilingAtomic: bigint, transmitted: boolean) {
+    if (!this.held) return;
+    this.held = false;
+    if (!transmitted) return this.authorizer.release(this.reservation);
+    // The reservation held the ceiling only to refuse a call over the limits. What counts is
+    // what left the channel: the real charge, or the ceiling where it is not known.
+    const charged = costAtomic ?? ceilingAtomic;
+    await this.authorizer.release(this.reservation);
+    await this.authorizer.commit(undefined, charged, { mode: 'automatic' });
+  }
+}
 
 /**
  * HOW MUCH A DEPOSIT PUTS INTO THE CHANNEL: what fills it to the cap, never more, and never
@@ -68,6 +112,10 @@ export type BatchSellerOptions = {
   provider: WalletProvider;
   /** The person's own limits meet a deposit before it is signed: throws where it is over them. */
   admit: (amountAtomic: bigint) => Promise<void>;
+  /** Where each call's ceiling and real charge are counted, pre-funded channel or not. */
+  authorizer?: SpendAuthorizer;
+  /** Names the call, so one request in flight cannot become two. */
+  requestKey?: string;
   fetchImpl?: typeof fetch;
   /** Chain reads for the scheme's channel checks. */
   readContract?: ChainRead;
@@ -127,17 +175,41 @@ export class BatchSeller {
         if (fit[0]) ceiling = BigInt(fit[0].amount);
         return fit;
       });
+    const spend = this.options.authorizer
+      ? new VoucherSpend(
+          this.options.authorizer,
+          new URL(X402INFERENCE_CHAT_URL).host,
+          this.options.requestKey ?? `x402inference:${Date.now()}`,
+        )
+      : undefined;
+    if (spend)
+      client.onBeforePaymentCreation((ctx) =>
+        spend.before(BigInt(ctx.selectedRequirements.amount)),
+      );
     const base = this.options.fetchImpl ?? fetch;
     const watched: typeof fetch = (input, init) => {
       if (new Headers(init?.headers).has('payment-signature')) this.transmitted = true;
       return base(input, { ...init, signal });
     };
-    const response = await wrapFetchWithPayment(watched, client)(X402INFERENCE_CHAT_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body,
-    });
+    let response: Response;
+    try {
+      response = await wrapFetchWithPayment(watched, client)(X402INFERENCE_CHAT_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body,
+      });
+    } catch (error) {
+      await spend?.settle(undefined, ceiling ?? room, this.transmitted).catch(() => undefined);
+      throw error;
+    }
     const cost = response.headers.get('x-request-cost-atomic');
+    await spend
+      ?.settle(
+        cost !== null && /^\d+$/.test(cost) ? BigInt(cost) : undefined,
+        ceiling ?? room,
+        this.transmitted,
+      )
+      .catch(() => undefined);
     return {
       status: response.status,
       text: await response.text(),

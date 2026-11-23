@@ -15,7 +15,11 @@ import {
 } from './model-worker-control';
 import { messagesRequest, NEON_TURN_MAX_TOKENS, neonRoute } from './neon-chat';
 import { NeonTransport, readNeonRecord } from './neon-transport';
+import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
+import { readSpendSummary, spentOf } from '../lib/spend-ledger';
+import { neonMaxTokens } from './neon-chat';
 import {
+  VoucherSpend,
   channelDeposit,
   ChannelDepositRefused,
   X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC,
@@ -684,4 +688,48 @@ it('asks the channel for its remainder through the batch payer', async () => {
   const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
   expect(await neon.refundChannel(new AbortController().signal)).toEqual({ success: true });
   expect(batch.refund).toHaveBeenCalledTimes(1);
+});
+
+it('counts every voucher against the daily budget, a pre-funded channel included, at its real charge', async () => {
+  const { data } = await fixture(consented);
+  const policy = {
+    maxAutoSpendAtomic: 250_000n,
+    sessionBudgetAtomic: 280_000n,
+    allowlistCreators: [],
+  };
+  const authorizer = createLocalSpendAuthorizer({ dir: data, policy });
+  const spentNow = async () => {
+    const ledger = await readSpendSummary(data);
+    return ledger === null ? 0n : spentOf(ledger);
+  };
+  // A call on a funded channel pays no deposit, only a voucher: it still counts.
+  const first = new VoucherSpend(authorizer, 'x402inference.com', 'call-1');
+  expect(await first.before(40_000n)).toBeUndefined();
+  await first.settle(7_321n, 40_000n, true);
+  expect(await spentNow()).toBe(7_321n);
+  // A call whose voucher was sent and never answered stays counted at its ceiling.
+  const lost = new VoucherSpend(authorizer, 'x402inference.com', 'call-2');
+  await lost.before(40_000n);
+  await lost.settle(undefined, 40_000n, true);
+  expect(await spentNow()).toBe(47_321n);
+  // A call that signed nothing gives its reservation back.
+  const unsent = new VoucherSpend(authorizer, 'x402inference.com', 'call-3');
+  await unsent.before(40_000n);
+  await unsent.settle(undefined, 40_000n, false);
+  expect(await spentNow()).toBe(47_321n);
+  // A ceiling over the per-call limit, or past what the daily budget has left, is refused
+  // before any voucher is signed.
+  expect(
+    await new VoucherSpend(authorizer, 'x402inference.com', 'call-4').before(260_000n),
+  ).toMatchObject({ abort: true });
+  expect(
+    await new VoucherSpend(authorizer, 'x402inference.com', 'call-5').before(250_000n),
+  ).toMatchObject({ abort: true });
+});
+
+it('reads the eval output cap override, bounded', () => {
+  expect(neonMaxTokens({})).toBe(8_192);
+  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '20000' })).toBe(20_000);
+  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '40000' })).toBe(8_192);
+  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '0' })).toBe(8_192);
 });

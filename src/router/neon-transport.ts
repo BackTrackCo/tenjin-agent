@@ -38,7 +38,7 @@ import {
   messageOf,
   NEON_CALL_TIMEOUT_MS,
   NEON_CHAT_URL,
-  NEON_TURN_MAX_TOKENS,
+  neonMaxTokens,
   NeonNoText,
   NeonReplyInvalid,
   replyOfBody,
@@ -283,7 +283,7 @@ export class NeonTransport {
     const asked =
       typeof messages.max_tokens === 'number' && Number.isInteger(messages.max_tokens)
         ? messages.max_tokens
-        : NEON_TURN_MAX_TOKENS;
+        : neonMaxTokens();
     // The body's size is the input estimate's basis; the output cap is stepped down to fit.
     const carry: ThoughtCarry = record.signatures;
     const seller = neonSeller();
@@ -346,17 +346,20 @@ export class NeonTransport {
     let sellerCharge: { ceiling?: bigint; cost?: bigint } | undefined;
     if (plain) {
       // The batch-settlement seller: a deposit meets the person's limits like any payment.
-      const batch = this.batchPayer(async (amountAtomic) => {
-        const admission = await admitAmount(amountAtomic);
-        if (!('admitted' in admission))
-          throw new CliError(
-            'POLICY_REFUSED',
-            'over' in admission
-              ? 'This Neon deposit is over your spend limits; nothing was paid.'
-              : admission.refused.message,
-            { details: { reason: 'neon_limits' } },
-          );
-      });
+      const batch = this.batchPayer(
+        async (amountAtomic) => {
+          const admission = await admitAmount(amountAtomic);
+          if (!('admitted' in admission))
+            throw new CliError(
+              'POLICY_REFUSED',
+              'over' in admission
+                ? 'This Neon deposit is over your spend limits; nothing was paid.'
+                : admission.refused.message,
+              { details: { reason: 'neon_limits' } },
+            );
+        },
+        canonicalHash({ job: job.id, n, body }),
+      );
       let answer;
       try {
         answer = await batch.post(body, signal, remaining);
@@ -516,12 +519,17 @@ export class NeonTransport {
   }
 
   /** The batch-settlement payer, made at the call. */
-  private batchPayer(admit: (amountAtomic: bigint) => Promise<void>): BatchLike {
+  private batchPayer(
+    admit: (amountAtomic: bigint) => Promise<void>,
+    requestKey = `x402inference:${Date.now()}`,
+  ): BatchLike {
     if (this.options.batch) return this.options.batch(admit);
     return new BatchSeller({
       dataDir: this.options.dataDir,
       provider: this.options.provider,
       admit,
+      authorizer: this.options.authorizer,
+      requestKey,
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.payDeps?.fetchImpl ? { fetchImpl: this.options.payDeps.fetchImpl } : {}),
     });
