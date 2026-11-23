@@ -27,7 +27,14 @@ export const NEON_TURN_MAX_TOKENS = 8_192;
 /** The least a turn is stepped down to when the job's ceiling cannot hold more. */
 export const NEON_TURN_FLOOR_TOKENS = 1_024;
 /** Bytes of request body counted as one input token in the estimate: an upper bound. */
-const NEON_BYTES_PER_INPUT_TOKEN = 3;
+const NEON_BYTES_PER_INPUT_TOKEN = 2;
+/**
+ * HOW MUCH GEMINI THINKS BEFORE IT WRITES, as the OpenAI-compatible `reasoning_effort`. Thought
+ * tokens are output tokens: a turn capped at {@link NEON_TURN_MAX_TOKENS} that thinks at the
+ * model's default can spend the whole cap and write nothing (two live turns did). A writing job
+ * needs little thought, so the bridge asks for the least that still reasons.
+ */
+export const NEON_REASONING_EFFORT = 'low';
 /** How long one paid call waits: BlockRun's own `maxTimeoutSeconds`. */
 export const NEON_CALL_TIMEOUT_MS = 300_000;
 
@@ -105,6 +112,7 @@ export type ChatBody = {
   max_tokens: number;
   /** Streamed: bytes flow while the model thinks and writes, so no gateway idle limit cuts a long turn. */
   stream: true;
+  reasoning_effort: typeof NEON_REASONING_EFFORT;
   stream_options: { include_usage: true };
   messages: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
@@ -212,6 +220,7 @@ export function chatBody(
     max_tokens: maxTokens,
     stream: true,
     stream_options: { include_usage: true },
+    reasoning_effort: NEON_REASONING_EFFORT,
     messages,
     ...(tools.length > 0 ? { tools } : {}),
     ...(stop.length > 0 ? { stop } : {}),
@@ -240,6 +249,12 @@ export function chatUsage(reply: unknown): NeonUsage {
 }
 
 export class NeonReplyInvalid extends Error {}
+/**
+ * A reply that ended at the output cap with no text and no tool call: the turn's output went on
+ * thought, and nothing can be handed to the worker. Sent again, the same turn would spend the
+ * same again, so the job ends here.
+ */
+export class NeonNoText extends Error {}
 
 const STOP_REASONS: Record<string, string> = {
   stop: 'end_turn',
@@ -301,6 +316,8 @@ export function messageOf(reply: unknown, carry: ThoughtCarry): Record<string, u
   }
   const usage = chatUsage(reply);
   const finish = typeof choice.finish_reason === 'string' ? choice.finish_reason : 'stop';
+  if (content.length === 0 && finish === 'length')
+    throw new NeonNoText('The turn reached the output cap with no text');
   const stopReason = content.some((b) => b.type === 'tool_use')
     ? 'tool_use'
     : (STOP_REASONS[finish] ?? 'end_turn');

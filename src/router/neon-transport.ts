@@ -12,7 +12,7 @@ import { USDC_ADDRESS } from '../lib/usdc';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import { modelLock, type ModelJob } from './model-job';
 import { modelSettings, NEON_ORIGIN } from './model-settings';
-import { ModelCallFailed } from './model-worker-control';
+import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import { appendPaidRecord, recordedSent, type SignedAuthorization } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
 import {
@@ -23,6 +23,7 @@ import {
   NEON_CALL_TIMEOUT_MS,
   NEON_CHAT_URL,
   NEON_TURN_MAX_TOKENS,
+  NeonNoText,
   NeonReplyInvalid,
   replyOfBody,
   type ThoughtCarry,
@@ -342,7 +343,10 @@ export class NeonTransport {
       }
     }
     const usage = chatUsage(reply);
-    const settled = data.settlementTxHash !== undefined;
+    // A streamed reply may carry no receipt header. BlockRun charges an exact stream when its
+    // output starts, so a 2xx that came back with a body is a charge of the quote: never
+    // recorded as unknown, nor reported as nothing spent. A receipt, when sent, adds its tx.
+    const settled = true;
     await this.ledger(job, n, quoted, data, settled);
     const call: NeonCall = {
       n,
@@ -361,6 +365,10 @@ export class NeonTransport {
       if (unreadable) throw unreadable;
       message = messageOf(reply, carry);
     } catch (error) {
+      if (error instanceof NeonNoText) {
+        await this.record(job, { ...call, ok: false }, carry);
+        throw new ModelWorkerStopped({ kind: 'provider_limit', reason: 'output_limit' });
+      }
       if (!(error instanceof NeonReplyInvalid)) throw error;
       await this.record(job, { ...call, ok: false }, carry);
       // Paid, and the reply is unusable: never asked again.
@@ -438,7 +446,11 @@ export class NeonTransport {
       const status = statusOf(error);
       return new ModelCallFailed(`The Neon call was not paid: ${error.code}`, {
         cause:
-          error.code === 'POLICY_REFUSED' || error.code === 'REFUSED'
+          error.code === 'POLICY_REFUSED' ||
+          error.code === 'REFUSED' ||
+          // The live quote is above the job's remaining ceiling: nothing was signed, and the
+          // same request is quoted the same, so it is never tried again.
+          error.code === 'REGISTRY_MISMATCH'
             ? 'budget'
             : error.code === 'PAYMENT_FAILED'
               ? 'payment_refused'

@@ -112,6 +112,7 @@ it('pays BlockRun at most the output cap per turn and records the job for the ex
   expect(request.model).toBe('google/gemini-4-neon');
   // Streamed, so a long turn is not cut by a gateway's idle limit.
   expect(request.stream).toBe(true);
+  expect(request.reasoning_effort).toBe('low');
   expect(pay.mock.calls[0]![0]).toMatchObject({
     url: 'https://blockrun.ai/api/v1/chat/completions',
     execution: 'router',
@@ -302,4 +303,46 @@ it('reads a streamed reply that arrives as text, and words an end for BlockRun, 
     'Its model call to BlockRun returned no result; that call stays reserved until its receipt is read.',
   );
   expect(workerEndText('model_call_failed', 'deepseek')).toContain('through Tenjin');
+});
+
+it('records a streamed call with no receipt as charged at its quote, never as nothing spent', async () => {
+  const { ctx, repo, data } = await fixture(consented);
+  const pay = payer(() => ({ status: 200, bodyText: streamed, amountPaid: { atomic: '9000' } }));
+  const neon = transport(ctx, pay);
+  const sent = job(repo);
+  await neon.messages(sent, MESSAGES, new AbortController().signal);
+  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
+    settlement: 'settled',
+    settledAtomic: '9000',
+  });
+  expect(await neon.summary(sent)).toMatchObject({ reservedAtomic: '9000', actualAtomic: '9000' });
+});
+
+it('ends the job, with no second try, when a turn spends its cap and writes nothing', async () => {
+  const { ctx, repo } = await fixture(consented);
+  const empty = `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\ndata: [DONE]\n\n`;
+  const pay = payer(() => ({ status: 200, bodyText: empty, amountPaid: { atomic: '9000' } }));
+  const failure = await withModelRetry(
+    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
+    new AbortController().signal,
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ stop: { kind: 'provider_limit', reason: 'output_limit' } });
+  expect(pay).toHaveBeenCalledTimes(1);
+});
+
+it('does not try a quote above the job ceiling again: that is a budget end, not a transient failure', async () => {
+  const { ctx, repo } = await fixture(consented);
+  const pay = payer(
+    () => new CliError('REGISTRY_MISMATCH', 'The live 402 exceeds the terms.', { details: {} }),
+  );
+  const failure = await withModelRetry(
+    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
+    new AbortController().signal,
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect(pay).toHaveBeenCalledTimes(1);
 });

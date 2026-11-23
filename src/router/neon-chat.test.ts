@@ -9,6 +9,7 @@ import {
   neonPeakQuoteAtomic,
   NEON_TURN_FLOOR_TOKENS,
   NEON_TURN_MAX_TOKENS,
+  NeonNoText,
   NeonReplyInvalid,
   type ThoughtCarry,
 } from './neon-chat';
@@ -111,6 +112,7 @@ it('sends the tool call back with its thought signature, and the tool result as 
     max_tokens: NEON_TURN_MAX_TOKENS,
     stream: true,
     stream_options: { include_usage: true },
+    reasoning_effort: 'low',
     messages: [
       { role: 'system', content: 'You write documentation.' },
       { role: 'user', content: 'Summarize the notes.' },
@@ -245,4 +247,20 @@ it('folds a streamed reply with a split tool call, its signature and its usage i
   // A plain JSON body is still one reply; a stream that carries an error is not a reply.
   expect(replyOfBody(JSON.stringify(REPLY))).toEqual(REPLY);
   expect(() => replyOfBody(frame({ error: { message: 'upstream' } }))).toThrow(NeonReplyInvalid);
+});
+
+it('refuses a turn that spent its output cap and wrote nothing, so it is not sent again', () => {
+  expect(() =>
+    messageOf(
+      { choices: [{ finish_reason: 'length', message: { role: 'assistant', content: null } }] },
+      {},
+    ),
+  ).toThrow(NeonNoText);
+  // Text that reached the cap is a reply, cut at max_tokens.
+  expect(
+    messageOf(
+      { choices: [{ finish_reason: 'length', message: { role: 'assistant', content: 'Part' } }] },
+      {},
+    ).stop_reason,
+  ).toBe('max_tokens');
 });
