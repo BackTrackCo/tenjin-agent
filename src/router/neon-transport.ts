@@ -1,3 +1,4 @@
+import type { ChainRead } from './routing-payer';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -15,6 +16,12 @@ import { modelSettings, NEON_ORIGIN } from './model-settings';
 import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import { appendPaidRecord, recordedSent, type SignedAuthorization } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
+import {
+  BatchSeller,
+  ChannelDepositRefused,
+  neonSeller,
+  X402INFERENCE_CHAT_URL,
+} from './neon-seller';
 import {
   capturedMessagesRequest,
   capturedRequest,
@@ -108,11 +115,18 @@ function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
   return turn;
 }
 
+/** What the transport needs of the batch payer. */
+export type BatchLike = Pick<BatchSeller, 'post' | 'refund'> & { transmitted: boolean };
+
 export type NeonTransportOptions = {
   dataDir: string;
   ctx: CommandContext;
   provider: WalletProvider;
   authorizer: SpendAuthorizer;
+  /** Chain reads the batch scheme's channel checks need. */
+  readContract?: ChainRead;
+  /** The batch-settlement payer for the x402inference seller. A test replaces it. */
+  batch?: (admit: (amountAtomic: bigint) => Promise<void>) => BatchLike;
   /** Payment seams: the network and the chain read. Production leaves them unset. */
   payDeps?: Pick<PayDeps, 'fetchImpl' | 'chainFetch' | 'destination'>;
   /** The payer. A test replaces it. */
@@ -270,19 +284,33 @@ export class NeonTransport {
         : NEON_TURN_MAX_TOKENS;
     // The body's size is the input estimate's basis; the output cap is stepped down to fit.
     const carry: ThoughtCarry = record.signatures;
-    const route = neonRoute();
+    const seller = neonSeller();
+    // x402inference takes chat completions only, as a plain reply carrying its real charge.
+    const route = seller === 'x402inference' ? 'chat' : neonRoute();
+    const plain = seller === 'x402inference';
     const probe = JSON.stringify(
-      route === 'chat' ? chatBody(messages, carry, 1) : messagesRequest(messages, 1),
+      route === 'chat' ? chatBody(messages, carry, 1, !plain) : messagesRequest(messages, 1),
     );
     const maxTokens = fittingNeonTokens(Buffer.byteLength(probe), asked, remaining);
     if (maxTokens === null || remaining <= 0n)
       throw nothingSigned('The job ceiling has no room for another Neon call', { cause: 'budget' });
-    const chat = route === 'chat' ? chatBody(messages, carry, maxTokens) : undefined;
+    const chat = route === 'chat' ? chatBody(messages, carry, maxTokens, !plain) : undefined;
     const wire = chat ?? messagesRequest(messages, maxTokens);
     const body = JSON.stringify(wire);
     const n = record.calls.length + 1;
     const started = this.now();
     const settings = await resolveContextSettings(ctx);
+    const admitAmount = async (amountAtomic: bigint) => {
+      const admission = await admitPlan(
+        [{ amountAtomic, creator: new URL(plain ? X402INFERENCE_CHAT_URL : NEON_CHAT_URL).host }],
+        {
+          dataDir,
+          policy: settings.policy,
+          ...(this.options.now ? { now: this.options.now } : {}),
+        },
+      );
+      return admission;
+    };
     const args: PayArgs = {
       url: route === 'chat' ? NEON_CHAT_URL : NEON_MESSAGES_URL,
       method: 'POST',
@@ -298,14 +326,7 @@ export class NeonTransport {
       // The person's own limits meet this payment at the live price, before it is signed:
       // the per-call limit, the daily budget and the allowlist.
       admit: async (amountAtomic) => {
-        const admission = await admitPlan(
-          [{ amountAtomic, creator: new URL(NEON_CHAT_URL).host }],
-          {
-            dataDir,
-            policy: settings.policy,
-            ...(this.options.now ? { now: this.options.now } : {}),
-          },
-        );
+        const admission = await admitAmount(amountAtomic);
         if ('admitted' in admission) return admission.admitted[0]!;
         throw new CliError(
           'POLICY_REFUSED',
@@ -319,24 +340,79 @@ export class NeonTransport {
       timeoutMs: NEON_CALL_TIMEOUT_MS,
       printBody: true,
     };
-    let paid;
-    try {
-      paid = await (this.options.pay ?? runPay)(args, ctx, {
-        provider: this.options.provider,
-        authorizer: this.options.authorizer,
-        signal,
-        confirm: async () => false,
-        ...(this.options.payDeps?.fetchImpl ? { fetchImpl: this.options.payDeps.fetchImpl } : {}),
-        ...(this.options.payDeps?.chainFetch
-          ? { chainFetch: this.options.payDeps.chainFetch }
-          : {}),
-        ...(this.options.payDeps?.destination
-          ? { destination: this.options.payDeps.destination }
-          : {}),
+    let paid: { data: unknown };
+    let sellerCharge: { ceiling?: bigint; cost?: bigint } | undefined;
+    if (plain) {
+      // The batch-settlement seller: a deposit meets the person's limits like any payment.
+      const batch = this.batchPayer(async (amountAtomic) => {
+        const admission = await admitAmount(amountAtomic);
+        if (!('admitted' in admission))
+          throw new CliError(
+            'POLICY_REFUSED',
+            'over' in admission
+              ? 'This Neon deposit is over your spend limits; nothing was paid.'
+              : admission.refused.message,
+            { details: { reason: 'neon_limits' } },
+          );
       });
-    } catch (error) {
-      throw await this.failed(job, n, started, maxTokens, error, signal);
-    }
+      let answer;
+      try {
+        answer = await batch.post(body, signal, remaining);
+      } catch (error) {
+        throw await this.failedBatch(
+          job,
+          n,
+          started,
+          maxTokens,
+          error,
+          batch.transmitted,
+          remaining,
+          signal,
+        );
+      }
+      if (answer.status < 200 || answer.status >= 300)
+        throw await this.failedBatch(
+          job,
+          n,
+          started,
+          maxTokens,
+          new CliError('PAYMENT_FAILED', `x402inference answered ${answer.status}`, {
+            details: { status: answer.status },
+          }),
+          true,
+          answer.ceilingAtomic ?? remaining,
+          signal,
+        );
+      sellerCharge = {
+        ...(answer.ceilingAtomic !== undefined ? { ceiling: answer.ceilingAtomic } : {}),
+        ...(answer.costAtomic !== undefined ? { cost: answer.costAtomic } : {}),
+      };
+      paid = {
+        data: {
+          status: answer.status,
+          bodyText: answer.text,
+          // The real charge where the seller said it; else the ceiling, which it may not exceed.
+          amountPaid: { atomic: (answer.costAtomic ?? answer.ceilingAtomic ?? 0n).toString() },
+        },
+      };
+    } else
+      try {
+        paid = await (this.options.pay ?? runPay)(args, ctx, {
+          provider: this.options.provider,
+          authorizer: this.options.authorizer,
+          signal,
+          confirm: async () => false,
+          ...(this.options.payDeps?.fetchImpl ? { fetchImpl: this.options.payDeps.fetchImpl } : {}),
+          ...(this.options.payDeps?.chainFetch
+            ? { chainFetch: this.options.payDeps.chainFetch }
+            : {}),
+          ...(this.options.payDeps?.destination
+            ? { destination: this.options.payDeps.destination }
+            : {}),
+        });
+      } catch (error) {
+        throw await this.failed(job, n, started, maxTokens, error, signal);
+      }
     const data = paid.data as {
       status?: number;
       body?: unknown;
@@ -376,7 +452,8 @@ export class NeonTransport {
     // A streamed reply may carry no receipt header. BlockRun charges an exact stream when its
     // output starts, so a 2xx that came back with a body is a charge of the quote: never
     // recorded as unknown, nor reported as nothing spent. A receipt, when sent, adds its tx.
-    const settled = true;
+    // A seller that names the real charge is settled at it; else a paid stream is at its quote.
+    const settled = sellerCharge === undefined || sellerCharge.cost !== undefined;
     if (process.env[NEON_CAPTURE_ENV] === '1')
       await this.capture(
         job,
@@ -390,7 +467,7 @@ export class NeonTransport {
       at: started,
       ...usage,
       maxTokens,
-      quotedAtomic: quoted.toString(),
+      quotedAtomic: (sellerCharge?.ceiling ?? quoted).toString(),
       settledAtomic: settled ? quoted.toString() : null,
       settlement: settled ? 'settled' : 'unknown',
       ok: true,
@@ -435,6 +512,75 @@ export class NeonTransport {
     await writePrivate(join(folder, `call-${n}.response.sse`), raw);
   }
 
+  /** The batch-settlement payer, made at the call. */
+  private batchPayer(admit: (amountAtomic: bigint) => Promise<void>): BatchLike {
+    if (this.options.batch) return this.options.batch(admit);
+    return new BatchSeller({
+      dataDir: this.options.dataDir,
+      provider: this.options.provider,
+      admit,
+      ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
+      ...(this.options.payDeps?.fetchImpl ? { fetchImpl: this.options.payDeps.fetchImpl } : {}),
+    });
+  }
+
+  /** The cooperative refund of the x402inference channel's remainder. */
+  async refundChannel(signal: AbortSignal) {
+    return this.batchPayer(async () => {
+      throw new CliError('POLICY_REFUSED', 'A refund deposits nothing.');
+    }).refund(signal);
+  }
+
+  /**
+   * A BATCH CALL THAT FAILED. Where nothing was sent to the seller beyond the unpaid request, it
+   * is proven unpaid and may be tried again (a limit or a policy refusal ends the job as
+   * budget). Once a voucher reached the seller, its ceiling stays counted against the job as
+   * uncertain and the call is never tried again.
+   */
+  private async failedBatch(
+    job: ModelJob,
+    n: number,
+    started: number,
+    maxTokens: number,
+    error: unknown,
+    transmitted: boolean,
+    atRisk: bigint,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    if (signal.aborted && !transmitted) return signal.reason ?? error;
+    if (!transmitted) {
+      const refused =
+        (error instanceof CliError && error.code === 'POLICY_REFUSED') ||
+        error instanceof ChannelDepositRefused ||
+        (error instanceof Error && /no .*(scheme|network|requirement)|policy/i.test(error.message));
+      return new ModelCallFailed('The Neon call was not sent to its seller', {
+        cause: refused ? 'budget' : 'failed',
+        uncharged: true,
+      });
+    }
+    await this.record(
+      job,
+      {
+        n,
+        at: started,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        maxTokens,
+        quotedAtomic: atRisk.toString(),
+        settledAtomic: null,
+        settlement: 'unknown',
+        ok: false,
+        ms: this.now() - started,
+      },
+      (await readNeonRecord(this.options.dataDir, job.id))?.signatures ?? {},
+    ).catch(() => undefined);
+    return new ModelCallFailed(
+      'The Neon call failed after its voucher was sent; it stays counted until its charge is read',
+      { cause: 'failed' },
+    );
+  }
+
   /** The amount a call signed, for `tenjin payments` and its reconcile. */
   private async ledger(
     job: ModelJob,
@@ -447,10 +593,11 @@ export class NeonTransport {
       version: 1,
       ts: new Date(this.now()).toISOString(),
       capabilityId: 'neon-worker',
-      provider: new URL(NEON_CHAT_URL).host,
+      provider: new URL(neonSeller() === 'x402inference' ? X402INFERENCE_CHAT_URL : NEON_CHAT_URL)
+        .host,
       label: 'Gemini 4 Neon worker',
       source: 'tenjin',
-      url: NEON_CHAT_URL,
+      url: neonSeller() === 'x402inference' ? X402INFERENCE_CHAT_URL : NEON_CHAT_URL,
       sent: recordedSent(`neon worker job ${job.id} call ${n}`),
       amountAtomic: amountAtomic.toString(),
       ...(paid.settlementTxHash !== undefined ? { txHash: paid.settlementTxHash } : {}),
@@ -463,7 +610,7 @@ export class NeonTransport {
 
   private async record(job: ModelJob, call: NeonCall, carry: ThoughtCarry) {
     await this.update(job.id, (record) => {
-      const spent = BigInt(record.spentAtomic) + BigInt(call.quotedAtomic);
+      const spent = BigInt(record.spentAtomic) + BigInt(call.settledAtomic ?? call.quotedAtomic);
       const settled = BigInt(record.settledAtomic) + BigInt(call.settledAtomic ?? '0');
       return {
         ...record,

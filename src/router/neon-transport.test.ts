@@ -15,6 +15,11 @@ import {
 } from './model-worker-control';
 import { messagesRequest, NEON_TURN_MAX_TOKENS, neonRoute } from './neon-chat';
 import { NeonTransport, readNeonRecord } from './neon-transport';
+import {
+  channelDeposit,
+  ChannelDepositRefused,
+  X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC,
+} from './neon-seller';
 import { ModelHandoff, NEON_CONSENT_REFUSAL } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 
@@ -539,4 +544,144 @@ it('steps the thinking budget down with the cap, and drops it where the cap leav
     budget_tokens: 1_476,
   });
   expect(messagesRequest({ messages: [] }, 2_000).thinking).toBeUndefined();
+});
+
+// ---- The x402inference seller (evaluation only) ----
+const batchAnswer = (
+  over: Partial<{
+    status: number;
+    text: string;
+    ceilingAtomic: bigint;
+    costAtomic: bigint;
+    depositedAtomic: bigint;
+  }> = {},
+) => ({
+  status: 200,
+  text: JSON.stringify(REPLY),
+  ceilingAtomic: 40_000n,
+  costAtomic: 7_321n,
+  depositedAtomic: 0n,
+  ...over,
+});
+function withBatch(
+  ctx: CommandContext,
+  post: (
+    body: string,
+    signal: AbortSignal,
+    room: bigint,
+  ) => Promise<ReturnType<typeof batchAnswer>>,
+  state: { transmitted: boolean } = { transmitted: false },
+) {
+  const refund = vi.fn(async () => ({ success: true }));
+  const batch = {
+    post: vi.fn(post),
+    refund,
+    get transmitted() {
+      return state.transmitted;
+    },
+  };
+  return {
+    batch,
+    transport: new NeonTransport({
+      dataDir: ctx.dataDir,
+      ctx,
+      provider: {} as never,
+      authorizer: {} as never,
+      batch: () => batch as never,
+    }),
+  };
+}
+
+it('sends chat completions to x402inference as a plain reply and records the real charge beside the ceiling', async () => {
+  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
+  const { ctx, repo, data } = await fixture(consented);
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  const sent = job(repo);
+  await neon.messages(sent, MESSAGES, new AbortController().signal);
+  const [body, , room] = batch.post.mock.calls[0]!;
+  expect(JSON.parse(body)).toMatchObject({
+    model: 'google/gemini-4-neon',
+    stream: false,
+    reasoning_effort: 'low',
+    max_tokens: NEON_TURN_MAX_TOKENS,
+  });
+  expect(room).toBe(1_000_000n);
+  const record = await readNeonRecord(data, sent.id);
+  // The job counts what was charged, not the ceiling the voucher allowed.
+  expect(record).toMatchObject({ spentAtomic: '7321', settledAtomic: '7321' });
+  expect(record!.calls[0]).toMatchObject({
+    quotedAtomic: '40000',
+    settledAtomic: '7321',
+    settlement: 'settled',
+    outputTokens: 12,
+    cachedInputTokens: 8,
+  });
+});
+
+it('keeps a deposit at the channel cap and inside the person limits', async () => {
+  const admitted: bigint[] = [];
+  const admit = async (amount: bigint) => void admitted.push(amount);
+  expect(X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC).toBe(250_000n);
+  // An empty channel fills to the cap, and the limits see that amount.
+  expect(await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '0' }, admit)).toBe(
+    250_000n,
+  );
+  expect(admitted).toEqual([250_000n]);
+  // A channel part full tops up to the cap only.
+  expect(
+    await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '100000' }, admit),
+  ).toBe(150_000n);
+  // The seller's own ceiling on a deposit is kept, and a call it cannot cover is refused.
+  expect(
+    await channelDeposit(
+      { minimumDepositAmount: '40000', currentBalance: '0', maxDeposit: '90000' },
+      admit,
+    ),
+  ).toBe(90_000n);
+  await expect(
+    channelDeposit({ minimumDepositAmount: '40000', currentBalance: '230000' }, admit),
+  ).rejects.toThrow(ChannelDepositRefused);
+  await expect(
+    channelDeposit({ minimumDepositAmount: '300000', currentBalance: '0' }, admit),
+  ).rejects.toThrow(ChannelDepositRefused);
+  // A deposit over the person's limits stops before it is signed.
+  await expect(
+    channelDeposit({ minimumDepositAmount: '1', currentBalance: '0' }, async () => {
+      throw new Error('over limits');
+    }),
+  ).rejects.toThrow('over limits');
+});
+
+it('does not try a batch call again once a voucher was sent, and may where none was', async () => {
+  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
+  const { ctx, repo } = await fixture(consented);
+  const sentVoucher = withBatch(ctx, async () => batchAnswer({ status: 502 }), {
+    transmitted: true,
+  });
+  const failure = await withModelRetry(
+    () => sentVoucher.transport.messages(job(repo), MESSAGES, new AbortController().signal),
+    new AbortController().signal,
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect(retryableModelCall(failure)).toBe(false);
+  expect(sentVoucher.batch.post).toHaveBeenCalledTimes(1);
+  const unsent = withBatch(
+    ctx,
+    async () => {
+      throw new Error('network down');
+    },
+    { transmitted: false },
+  );
+  const again = await unsent.transport
+    .messages(job(repo), MESSAGES, new AbortController().signal)
+    .catch((error: unknown) => error);
+  expect((again as ModelCallFailed).detail).toMatchObject({ uncharged: true });
+});
+
+it('asks the channel for its remainder through the batch payer', async () => {
+  const { ctx } = await fixture(consented);
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  expect(await neon.refundChannel(new AbortController().signal)).toEqual({ success: true });
+  expect(batch.refund).toHaveBeenCalledTimes(1);
 });

@@ -329,6 +329,18 @@ Examples:
         (await import('../commands/config-neon')).runConfigNeon(mode, options, ctx),
       );
     });
+  // A hidden dev door for the Neon evaluation; it refuses unless TENJIN_NEON_PROBE=1.
+  addGlobalFlags(config.command('neon-probe [file]', { hidden: true }))
+    .option('--refund', 'ask the x402inference channel for its remainder instead')
+    .action(async function (
+      this: Command,
+      file: string | undefined,
+      options: { refund?: boolean },
+    ) {
+      await runCommand('config neon-probe', this, async (ctx) =>
+        (await import('../commands/config-neon-probe')).runNeonProbe(file, options, ctx),
+      );
+    });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one value')
     .description("Print one setting's value as Tenjin uses it, defaults and environment included.")

@@ -361,6 +361,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           dataDir: ctx.dataDir,
           ctx,
           provider,
+          readContract: chainReader(settings.rpcUrl),
           authorizer: opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
           ...(opts.handlerDeps?.fetchImpl !== undefined || opts.handlerDeps?.payDeps !== undefined
             ? {

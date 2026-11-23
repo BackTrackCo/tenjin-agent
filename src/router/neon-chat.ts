@@ -114,9 +114,9 @@ export type ChatBody = {
   model: string;
   max_tokens: number;
   /** Streamed: bytes flow while the model thinks and writes, so no gateway idle limit cuts a long turn. */
-  stream: true;
+  stream: boolean;
   reasoning_effort: typeof NEON_REASONING_EFFORT;
-  stream_options: { include_usage: true };
+  stream_options?: { include_usage: true };
   messages: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
   stop?: string[];
@@ -146,6 +146,8 @@ export function chatBody(
   asked: Record<string, unknown>,
   carry: ThoughtCarry,
   maxTokens: number,
+  /** A seller whose real charge comes on the response header asks for a plain reply. */
+  stream = true,
 ): ChatBody {
   const body = hoistedForNeon(asked);
   const messages: Record<string, unknown>[] = [];
@@ -223,8 +225,8 @@ export function chatBody(
   return {
     model: NEON_MODEL,
     max_tokens: maxTokens,
-    stream: true,
-    stream_options: { include_usage: true },
+    stream,
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
     reasoning_effort: NEON_REASONING_EFFORT,
     messages,
     ...(tools.length > 0 ? { tools } : {}),
