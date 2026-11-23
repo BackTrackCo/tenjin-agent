@@ -234,6 +234,17 @@ it("marks the worker's session as one the plugin serves, as the plugin's Session
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+// Failure caught: the first live Neon job ended in 73 ms with "workspace scope changed or is
+// unavailable". The worker recomputed the scope under the DeepSeek consent, which the person
+// had not given, so it had none to match against the scope the Neon door saved.
+it("computes a Neon job's scope under the Neon consent, as the door saved it", async () => {
+  sdkResult({ subtype: 'success', result: 'done' }, '33333333-4444-4555-8666-777777777777');
+  const neon = { ...job, decision: { ...job.decision, provider: 'neon' } } as unknown as ModelJob;
+  await runModelWorker(neon, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'neon-')) });
+  const providers = vi.mocked(modelSettings).mock.calls.map((call) => call[2]);
+  expect(providers.length).toBeGreaterThan(0);
+  expect(providers.every((provider) => provider === 'neon')).toBe(true);
+});
 function sdkResult(
   result: Record<string, unknown>,
   sessionId?: string,

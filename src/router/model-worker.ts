@@ -318,6 +318,8 @@ export async function runModelWorker(
       current.dataDir,
       signal,
       current.claudePermissionMode,
+      // The job's own provider: a Neon job's scope is computed under the Neon consent.
+      providerOf(job),
     );
     signal.throwIfAborted();
     assertClaudeWorkerMode(
