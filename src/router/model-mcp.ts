@@ -21,7 +21,7 @@ import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { WORKER_ENDS, workerEnd, workerStop } from './model-worker-control';
+import { WORKER_ENDS, workerEnd, workerEndText, workerStop } from './model-worker-control';
 import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, nativeBackground, ownedModelReference } from './model-continuation';
@@ -1373,7 +1373,7 @@ export function registerModelTool(
                             ? 'stopped'
                             : 'unknown',
                       endedBy,
-                      ended: WORKER_ENDS[endedBy],
+                      ended: workerEndText(endedBy, provider),
                       // A model call the payer could not complete: why, and what the person can do,
                       // in the words Tenjin uses for an unpaid routing fee.
                       ...(stop?.payer && unpaid(stop.payer) ? { payment: unpaid(stop.payer) } : {}),

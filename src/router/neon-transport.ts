@@ -24,6 +24,7 @@ import {
   NEON_CHAT_URL,
   NEON_TURN_MAX_TOKENS,
   NeonReplyInvalid,
+  replyOfBody,
   type ThoughtCarry,
 } from './neon-chat';
 
@@ -330,11 +331,14 @@ export class NeonTransport {
     };
     const quoted = BigInt(data.amountPaid?.atomic ?? '0');
     let reply: unknown = data.body;
+    let unreadable: NeonReplyInvalid | undefined;
+    // A streamed reply arrives as text: its chunks are folded into the whole reply.
     if (reply === undefined && typeof data.bodyText === 'string') {
       try {
-        reply = JSON.parse(data.bodyText);
-      } catch {
-        reply = undefined;
+        reply = replyOfBody(data.bodyText);
+      } catch (error) {
+        if (!(error instanceof NeonReplyInvalid)) throw error;
+        unreadable = error;
       }
     }
     const usage = chatUsage(reply);
@@ -354,6 +358,7 @@ export class NeonTransport {
     };
     let message: Record<string, unknown>;
     try {
+      if (unreadable) throw unreadable;
       message = messageOf(reply, carry);
     } catch (error) {
       if (!(error instanceof NeonReplyInvalid)) throw error;

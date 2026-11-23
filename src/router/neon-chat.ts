@@ -103,7 +103,9 @@ const MESSAGE_KEY = 'message:';
 export type ChatBody = {
   model: string;
   max_tokens: number;
-  stream: false;
+  /** Streamed: bytes flow while the model thinks and writes, so no gateway idle limit cuts a long turn. */
+  stream: true;
+  stream_options: { include_usage: true };
   messages: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
   stop?: string[];
@@ -208,7 +210,8 @@ export function chatBody(
   return {
     model: NEON_MODEL,
     max_tokens: maxTokens,
-    stream: false,
+    stream: true,
+    stream_options: { include_usage: true },
     messages,
     ...(tools.length > 0 ? { tools } : {}),
     ...(stop.length > 0 ? { stop } : {}),
@@ -314,5 +317,92 @@ export function messageOf(reply: unknown, carry: ThoughtCarry): Record<string, u
       output_tokens: usage.outputTokens,
       cache_read_input_tokens: usage.cachedInputTokens,
     },
+  };
+}
+
+/**
+ * A STREAMED CHAT REPLY AS THE WHOLE REPLY. BlockRun answers a `stream: true` call as server-sent
+ * `data:` chunks and charges the `exact` quote when output starts. The chunks are folded into
+ * the one message a non-streamed reply carries: text, tool calls by index (their arguments
+ * come in pieces) with any extra fields kept as they came, the finish reason and the usage.
+ * A body that is plain JSON is read as one reply, and a chunk that carries an error is invalid.
+ */
+export function replyOfBody(text: string): unknown {
+  if (!/^\s*(data:|:|event:)/.test(text)) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new NeonReplyInvalid('The reply is neither JSON nor a stream');
+    }
+  }
+  let content = '';
+  let finish: string | undefined;
+  let usage: unknown;
+  const calls = new Map<number, Record<string, unknown>>();
+  const extras: Record<string, unknown> = {};
+  const merge = (into: Record<string, unknown>, from: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(from)) {
+      const old = into[key];
+      into[key] = isRecord(old) && isRecord(value) ? merge({ ...old }, value) : (value ?? old);
+    }
+    return into;
+  };
+  for (const line of text.split('\n')) {
+    const payload = /^data:\s?(.*)$/.exec(line.replace(/\r$/, ''))?.[1];
+    if (payload === undefined || payload.trim() === '' || payload.trim() === '[DONE]') continue;
+    let chunk: unknown;
+    try {
+      chunk = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    if (!isRecord(chunk)) continue;
+    if (chunk.error !== undefined) throw new NeonReplyInvalid('The stream carried an error');
+    if (chunk.usage !== undefined && chunk.usage !== null) usage = chunk.usage;
+    const choice =
+      Array.isArray(chunk.choices) && isRecord(chunk.choices[0]) ? chunk.choices[0] : undefined;
+    if (!choice) continue;
+    if (typeof choice.finish_reason === 'string') finish = choice.finish_reason;
+    const delta = isRecord(choice.delta) ? choice.delta : {};
+    if (typeof delta.content === 'string') content += delta.content;
+    for (const [key, value] of Object.entries(delta))
+      if (!MESSAGE_FIELDS.has(key))
+        extras[key] =
+          isRecord(extras[key]) && isRecord(value)
+            ? merge({ ...(extras[key] as Record<string, unknown>) }, value)
+            : value;
+    for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+      if (!isRecord(call)) continue;
+      const index = typeof call.index === 'number' ? call.index : calls.size;
+      const held = calls.get(index) ?? { type: 'function', function: { name: '', arguments: '' } };
+      const fn = held.function as { name: string; arguments: string };
+      if (typeof call.id === 'string' && call.id.length > 0) held.id = call.id;
+      if (isRecord(call.function)) {
+        if (typeof call.function.name === 'string') fn.name += call.function.name;
+        if (typeof call.function.arguments === 'string') fn.arguments += call.function.arguments;
+      }
+      for (const [key, value] of Object.entries(call))
+        if (!TOOL_CALL_FIELDS.has(key))
+          held[key] =
+            isRecord(held[key]) && isRecord(value)
+              ? merge({ ...(held[key] as Record<string, unknown>) }, value)
+              : value;
+      calls.set(index, held);
+    }
+  }
+  const tool_calls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+  return {
+    choices: [
+      {
+        finish_reason: finish ?? 'stop',
+        message: {
+          role: 'assistant',
+          content: content.length > 0 ? content : null,
+          ...(tool_calls.length > 0 ? { tool_calls } : {}),
+          ...extras,
+        },
+      },
+    ],
+    ...(usage !== undefined ? { usage } : {}),
   };
 }

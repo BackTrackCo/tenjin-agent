@@ -7,7 +7,12 @@ import { CliError } from '../lib/errors';
 import type { runPay } from '../commands/pay';
 import type { ModelJob } from './model-job';
 import { modelSettings, neonConsent, modelConsent } from './model-settings';
-import { ModelCallFailed, retryableModelCall, withModelRetry } from './model-worker-control';
+import {
+  ModelCallFailed,
+  retryableModelCall,
+  withModelRetry,
+  workerEndText,
+} from './model-worker-control';
 import { NEON_TURN_MAX_TOKENS } from './neon-chat';
 import { NeonTransport, readNeonRecord } from './neon-transport';
 import { ModelHandoff, NEON_CONSENT_REFUSAL } from './model-handoff';
@@ -66,6 +71,7 @@ function payer(answer: (args: Parameters<typeof runPay>[0]) => unknown | Promise
     return { data: value } as Awaited<ReturnType<typeof runPay>>;
   });
 }
+const streamed = `data: ${JSON.stringify({ choices: [{ delta: { content: 'Release notes.' }, finish_reason: 'stop' }] })}\n\ndata: ${JSON.stringify({ choices: [], usage: REPLY.usage })}\n\ndata: [DONE]\n\n`;
 const paidAnswer = (amount = '9000', tx: string | undefined = '0xabc') => ({
   status: 200,
   body: REPLY,
@@ -104,6 +110,8 @@ it('pays BlockRun at most the output cap per turn and records the job for the ex
   const request = JSON.parse(pay.mock.calls[0]![0].rawBody!);
   expect(request.max_tokens).toBe(NEON_TURN_MAX_TOKENS);
   expect(request.model).toBe('google/gemini-4-neon');
+  // Streamed, so a long turn is not cut by a gateway's idle limit.
+  expect(request.stream).toBe(true);
   expect(pay.mock.calls[0]![0]).toMatchObject({
     url: 'https://blockrun.ai/api/v1/chat/completions',
     execution: 'router',
@@ -271,4 +279,27 @@ it('refuses the explicit door without Neon consent, naming the consent step, and
   expect(await handoff.store.owned('00000000-0000-4000-8000-000000000000', 's')).toBeNull();
   // No held call and no routing: the store has no job for the session at all.
   expect(await handoff.store.unfinished()).toEqual([]);
+});
+
+it('reads a streamed reply that arrives as text, and words an end for BlockRun, not Tenjin', async () => {
+  const { ctx, repo } = await fixture(consented);
+  const pay = payer(() => ({
+    status: 200,
+    bodyText: streamed,
+    amountPaid: { atomic: '9000' },
+    settlementTxHash: '0xabc',
+  }));
+  const message = await transport(ctx, pay).messages(
+    job(repo),
+    MESSAGES,
+    new AbortController().signal,
+  );
+  expect(message).toMatchObject({
+    content: [{ text: 'Release notes.' }],
+    usage: { output_tokens: 12 },
+  });
+  expect(workerEndText('model_call_failed', 'neon')).toBe(
+    'Its model call to BlockRun returned no result; that call stays reserved until its receipt is read.',
+  );
+  expect(workerEndText('model_call_failed', 'deepseek')).toContain('through Tenjin');
 });

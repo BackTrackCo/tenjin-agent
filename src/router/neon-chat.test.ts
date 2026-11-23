@@ -3,6 +3,7 @@ import {
   chatBody,
   fittingNeonTokens,
   messageOf,
+  replyOfBody,
   NEON_MINIMUM_JOB_ATOMIC,
   NEON_MODEL,
   neonPeakQuoteAtomic,
@@ -108,7 +109,8 @@ it('sends the tool call back with its thought signature, and the tool result as 
   expect(body).toEqual({
     model: NEON_MODEL,
     max_tokens: NEON_TURN_MAX_TOKENS,
-    stream: false,
+    stream: true,
+    stream_options: { include_usage: true },
     messages: [
       { role: 'system', content: 'You write documentation.' },
       { role: 'user', content: 'Summarize the notes.' },
@@ -188,4 +190,59 @@ it('caps a turn near need, and steps it down to what the job ceiling has left', 
     fittingNeonTokens(30_000, 65_536, neonPeakQuoteAtomic(30_000, NEON_TURN_FLOOR_TOKENS) - 1n),
   ).toBeNull();
   expect(NEON_MINIMUM_JOB_ATOMIC).toBe(neonPeakQuoteAtomic(0, NEON_TURN_FLOOR_TOKENS));
+});
+
+// Failure caught: a non-streamed call that thinks and writes for two minutes got a 504 from
+// the gateway after BlockRun had quoted $0.27. The call is streamed, and the chunks fold into
+// the same reply a non-streamed call carries.
+it('folds a streamed reply with a split tool call, its signature and its usage into one reply', () => {
+  const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+  const body =
+    frame({ choices: [{ index: 0, delta: { role: 'assistant', content: 'I will read ' } }] }) +
+    frame({ choices: [{ index: 0, delta: { content: 'the file.' } }] }) +
+    frame({
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_abc',
+                type: 'function',
+                function: { name: 'Read', arguments: '{"file_path":' },
+                extra_content: { google: { thought_signature: 'SIG-1' } },
+              },
+            ],
+          },
+        },
+      ],
+    }) +
+    frame({
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'tool_calls',
+          delta: { tool_calls: [{ index: 0, function: { arguments: '"/work/notes.md"}' } }] },
+        },
+      ],
+    }) +
+    frame({ choices: [], usage: REPLY.usage }) +
+    'data: [DONE]\n\n';
+  const carry: ThoughtCarry = {};
+  const message = messageOf(replyOfBody(body), carry);
+  expect(message).toMatchObject({
+    stop_reason: 'tool_use',
+    content: [
+      { type: 'text', text: 'I will read the file.' },
+      { type: 'tool_use', id: 'call_abc', name: 'Read', input: { file_path: '/work/notes.md' } },
+    ],
+    usage: { input_tokens: 200, output_tokens: 85, cache_read_input_tokens: 1000 },
+  });
+  expect(carry).toEqual({
+    call_abc: { extra_content: { google: { thought_signature: 'SIG-1' } } },
+  });
+  // A plain JSON body is still one reply; a stream that carries an error is not a reply.
+  expect(replyOfBody(JSON.stringify(REPLY))).toEqual(REPLY);
+  expect(() => replyOfBody(frame({ error: { message: 'upstream' } }))).toThrow(NeonReplyInvalid);
 });

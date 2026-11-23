@@ -331,3 +331,21 @@ export class WorkerRepeatReminder {
     };
   }
 }
+
+/**
+ * WORKER_ENDS in the words of the job's provider. The Neon worker's model calls go to
+ * BlockRun and are paid by this machine, not sent through Tenjin: "through Tenjin" and
+ * DeepSeek's name would say what did not happen.
+ */
+export function workerEndText(code: WorkerEnd, provider: 'deepseek' | 'neon'): string {
+  const text: string = WORKER_ENDS[code];
+  if (provider !== 'neon') return text;
+  return text
+    .replace('through Tenjin', 'to BlockRun')
+    .replace(
+      'Tenjin refused to pay for its next model call, and sent nothing for it.',
+      'Tenjin did not pay for its next model call, and sent nothing for it.',
+    )
+    .replace('DeepSeek could not take', 'BlockRun could not take')
+    .replace('DeepSeek refused', 'The model refused');
+}
