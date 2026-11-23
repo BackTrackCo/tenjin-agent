@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -345,4 +345,32 @@ it('does not try a quote above the job ceiling again: that is a budget end, not 
   ).catch((error: unknown) => error);
   expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
   expect(pay).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a call raw stream and request only when asked, and never the system prompt text', async () => {
+  const { ctx, repo, data } = await fixture(consented);
+  const pay = payer(() => ({ status: 200, bodyText: streamed, amountPaid: { atomic: '9000' } }));
+  const sent = job(repo);
+  await transport(ctx, pay).messages(
+    sent,
+    { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' },
+    new AbortController().signal,
+  );
+  const folder = join(data, 'model-jobs', `${sent.id}.neon-raw`);
+  await expect(readFile(join(folder, 'call-1.request.json'), 'utf8')).rejects.toThrow();
+  vi.stubEnv('TENJIN_NEON_CAPTURE', '1');
+  try {
+    await transport(ctx, pay).messages(
+      { ...sent, id: '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12' },
+      { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' },
+      new AbortController().signal,
+    );
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  const kept = join(data, 'model-jobs', '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12.neon-raw');
+  expect(await readFile(join(kept, 'call-1.response.sse'), 'utf8')).toBe(streamed);
+  const request = await readFile(join(kept, 'call-1.request.json'), 'utf8');
+  expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
+  expect(JSON.parse(request).messages[0]).toMatchObject({ role: 'system', content: { bytes: 22 } });
 });

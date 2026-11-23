@@ -1,6 +1,8 @@
 import { expect, it } from 'vitest';
 import {
+  capturedRequest,
   chatBody,
+  chatUsage,
   fittingNeonTokens,
   messageOf,
   replyOfBody,
@@ -263,4 +265,57 @@ it('refuses a turn that spent its output cap and wrote nothing, so it is not sen
       {},
     ).stop_reason,
   ).toBe('max_tokens');
+});
+
+it('folds content sent as parts and keeps the reasoning it does not hand the worker', () => {
+  const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+  const reply = replyOfBody(
+    frame({ choices: [{ delta: { reasoning_content: 'thinking...' } }] }) +
+      frame({ choices: [{ delta: { content: [{ type: 'text', text: 'Hello' }] } }] }) +
+      frame({
+        choices: [{ finish_reason: 'stop', delta: {} }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 40,
+          completion_tokens_details: { reasoning_tokens: 30 },
+        },
+      }),
+  ) as { choices: { message: Record<string, unknown> }[] };
+  expect(reply.choices[0]!.message).toMatchObject({
+    content: 'Hello',
+    reasoning_content: 'thinking...',
+  });
+  const message = messageOf(reply, {});
+  expect(message.content).toEqual([{ type: 'text', text: 'Hello' }]);
+  expect(chatUsage(reply)).toMatchObject({ outputTokens: 40, reasoningTokens: 30 });
+});
+
+it('gives Gemini plain text for a tool result, and says so when there is none', () => {
+  const body = chatBody(
+    {
+      messages: [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: [], is_error: false },
+            {
+              type: 'tool_result',
+              tool_use_id: 't2',
+              content: [{ type: 'text', text: 'boom' }],
+              is_error: true,
+            },
+          ],
+        },
+      ],
+    },
+    {},
+    1024,
+  );
+  expect(body.messages.slice(1)).toEqual([
+    { role: 'tool', tool_call_id: 't1', content: '(no output)' },
+    { role: 'tool', tool_call_id: 't2', content: 'Error: boom' },
+  ]);
+  const shown = capturedRequest(chatBody({ system: 'You write.', messages: [] }, {}, 64));
+  expect(shown.messages).toEqual([{ role: 'system', content: { bytes: 12, approxTokens: 3 } }]);
 });

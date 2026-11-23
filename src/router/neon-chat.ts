@@ -107,6 +107,9 @@ const MESSAGE_FIELDS = new Set([
 /** Carry keys of a whole assistant message are stored under this prefix of its first call id. */
 const MESSAGE_KEY = 'message:';
 
+/** Set to 1 to keep each Neon call's raw stream and its request (sizes only for the prompt). */
+export const NEON_CAPTURE_ENV = 'TENJIN_NEON_CAPTURE';
+
 export type ChatBody = {
   model: string;
   max_tokens: number;
@@ -183,7 +186,8 @@ export function chatBody(
     // A user message: its tool results come first, as one `tool` message each, then its text.
     for (const b of blocks) {
       if (!isRecord(b) || b.type !== 'tool_result' || typeof b.tool_use_id !== 'string') continue;
-      const result = textOf(b.content);
+      // Gemini takes plain text; a result with none is said to have none, not left empty.
+      const result = textOf(b.content) || '(no output)';
       messages.push({
         role: 'tool',
         tool_call_id: b.tool_use_id,
@@ -232,6 +236,8 @@ export type NeonUsage = {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** Thought tokens inside the output count, where the reply says so. */
+  reasoningTokens: number;
 };
 
 const count = (value: unknown) =>
@@ -245,6 +251,11 @@ export function chatUsage(reply: unknown): NeonUsage {
     inputTokens: count(usage.prompt_tokens),
     cachedInputTokens: cached,
     outputTokens: count(usage.completion_tokens),
+    reasoningTokens: count(
+      isRecord(usage.completion_tokens_details)
+        ? usage.completion_tokens_details.reasoning_tokens
+        : 0,
+    ),
   };
 }
 
@@ -353,6 +364,7 @@ export function replyOfBody(text: string): unknown {
     }
   }
   let content = '';
+  let reasoning = '';
   let finish: string | undefined;
   let usage: unknown;
   const calls = new Map<number, Record<string, unknown>>();
@@ -382,6 +394,13 @@ export function replyOfBody(text: string): unknown {
     if (typeof choice.finish_reason === 'string') finish = choice.finish_reason;
     const delta = isRecord(choice.delta) ? choice.delta : {};
     if (typeof delta.content === 'string') content += delta.content;
+    // Some chat endpoints send content as an array of parts.
+    else if (Array.isArray(delta.content))
+      for (const part of delta.content)
+        if (isRecord(part) && typeof part.text === 'string' && part.thought !== true)
+          content += part.text;
+    for (const key of ['reasoning_content', 'reasoning'] as const)
+      if (typeof delta[key] === 'string') reasoning += delta[key];
     for (const [key, value] of Object.entries(delta))
       if (!MESSAGE_FIELDS.has(key))
         extras[key] =
@@ -415,11 +434,31 @@ export function replyOfBody(text: string): unknown {
         message: {
           role: 'assistant',
           content: content.length > 0 ? content : null,
+          // Kept for the capture and the count: never handed to the worker.
+          ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
           ...(tool_calls.length > 0 ? { tool_calls } : {}),
           ...extras,
         },
       },
     ],
     ...(usage !== undefined ? { usage } : {}),
+  };
+}
+
+/**
+ * THE REQUEST AS A CAPTURE KEEPS IT: the system prompt and the tools, which are large and the
+ * same each turn, as their sizes; the messages, the tool results among them, as sent.
+ */
+export function capturedRequest(body: ChatBody): Record<string, unknown> {
+  const size = (value: unknown) => {
+    const bytes = Buffer.byteLength(JSON.stringify(value));
+    return { bytes, approxTokens: Math.ceil(bytes / 4) };
+  };
+  return {
+    ...body,
+    messages: body.messages.map((m) =>
+      m.role === 'system' ? { role: 'system', content: size(m.content) } : m,
+    ),
+    ...(body.tools ? { tools: { count: body.tools.length, ...size(body.tools) } } : {}),
   };
 }

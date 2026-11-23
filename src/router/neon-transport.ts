@@ -16,7 +16,10 @@ import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import { appendPaidRecord, recordedSent, type SignedAuthorization } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
 import {
+  capturedRequest,
   chatBody,
+  type ChatBody,
+  NEON_CAPTURE_ENV,
   chatUsage,
   fittingNeonTokens,
   messageOf,
@@ -41,6 +44,8 @@ const callSchema = z.object({
   inputTokens: z.number(),
   cachedInputTokens: z.number(),
   outputTokens: z.number(),
+  /** Thought tokens counted in the output, where BlockRun reports them. */
+  reasoningTokens: z.number().optional(),
   /** The `max_tokens` the call asked for: what BlockRun's quote was sized by. */
   maxTokens: z.number(),
   /** What BlockRun quoted and the wallet signed, atomic USDC. */
@@ -263,7 +268,8 @@ export class NeonTransport {
     const maxTokens = fittingNeonTokens(Buffer.byteLength(probe), asked, remaining);
     if (maxTokens === null || remaining <= 0n)
       throw nothingSigned('The job ceiling has no room for another Neon call', { cause: 'budget' });
-    const body = JSON.stringify(chatBody(messages, carry, maxTokens));
+    const chat = chatBody(messages, carry, maxTokens);
+    const body = JSON.stringify(chat);
     const n = record.calls.length + 1;
     const started = this.now();
     const settings = await resolveContextSettings(ctx);
@@ -347,6 +353,13 @@ export class NeonTransport {
     // output starts, so a 2xx that came back with a body is a charge of the quote: never
     // recorded as unknown, nor reported as nothing spent. A receipt, when sent, adds its tx.
     const settled = true;
+    if (process.env[NEON_CAPTURE_ENV] === '1')
+      await this.capture(
+        job,
+        n,
+        chat,
+        typeof data.bodyText === 'string' ? data.bodyText : '',
+      ).catch(() => undefined);
     await this.ledger(job, n, quoted, data, settled);
     const call: NeonCall = {
       n,
@@ -379,6 +392,22 @@ export class NeonTransport {
     }
     await this.record(job, call, carry);
     return message;
+  }
+
+  /**
+   * OPT-IN CAPTURE (`TENJIN_NEON_CAPTURE=1` in the environment of `tenjin mcp`): the call's raw
+   * response and its request beside the job's record, to see what a turn really carried. The
+   * request keeps the system prompt and the tools as sizes. No payment header or signature is
+   * ever in either: the body is what the seller's reply carried.
+   */
+  private async capture(job: ModelJob, n: number, chat: ChatBody, raw: string) {
+    const folder = join(this.options.dataDir, 'model-jobs', `${job.id}.neon-raw`);
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    await writePrivate(
+      join(folder, `call-${n}.request.json`),
+      JSON.stringify(capturedRequest(chat), null, 1),
+    );
+    await writePrivate(join(folder, `call-${n}.response.sse`), raw);
   }
 
   /** The amount a call signed, for `tenjin payments` and its reconcile. */
