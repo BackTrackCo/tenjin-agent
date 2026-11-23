@@ -3,6 +3,8 @@ import {
   capturedRequest,
   chatBody,
   chatUsage,
+  hoistedForNeon,
+  NEON_BESIDE_RESULT_LABEL,
   fittingNeonTokens,
   messageOf,
   replyOfBody,
@@ -116,7 +118,10 @@ it('sends the tool call back with its thought signature, and the tool result as 
     stream_options: { include_usage: true },
     reasoning_effort: 'low',
     messages: [
-      { role: 'system', content: 'You write documentation.' },
+      {
+        role: 'system',
+        content: `You write documentation.\n${NEON_BESIDE_RESULT_LABEL}\nGo on.`,
+      },
       { role: 'user', content: 'Summarize the notes.' },
       {
         role: 'assistant',
@@ -131,7 +136,6 @@ it('sends the tool call back with its thought signature, and the tool result as 
         ],
       },
       { role: 'tool', tool_call_id: 'call_abc', content: '# Notes' },
-      { role: 'user', content: 'Go on.' },
     ],
     tools: [
       {
@@ -318,4 +322,62 @@ it('gives Gemini plain text for a tool result, and says so when there is none', 
   ]);
   const shown = capturedRequest(chatBody({ system: 'You write.', messages: [] }, {}, 64));
   expect(shown.messages).toEqual([{ role: 'system', content: { bytes: 12, approxTokens: 3 } }]);
+});
+
+// Failure caught by paid replays of a live run: a system message among the messages made Neon
+// spend its whole cap on hidden thought, and text beside a tool result made BlockRun lose the
+// result. The shape is run 6's second call.
+it('moves system messages and text beside a tool result into the system prompt', () => {
+  const body = {
+    model: 'deepseek-flash',
+    system: [
+      { type: 'text', text: 'You are a coding agent.', cache_control: { type: 'ephemeral' } },
+    ],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Read README.md, then write notes.' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'plan', signature: 'S' },
+          { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'README.md' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'README text' },
+          { type: 'text', text: 'Mind the style guide.' },
+        ],
+      },
+      { role: 'system', content: [{ type: 'text', text: 'Deferred tools are now available.' }] },
+      { role: 'user', content: 'Go on.' },
+    ],
+  };
+  const out = hoistedForNeon(body) as {
+    system: unknown[];
+    messages: { role: string; content: unknown[] }[];
+  };
+  expect(out.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+  expect(out.messages.some((m) => m.role === 'system')).toBe(false);
+  // The tool result is alone in its message, and the thinking block survives.
+  expect(out.messages[2]!.content).toEqual([
+    { type: 'tool_result', tool_use_id: 't1', content: 'README text' },
+  ]);
+  expect(out.messages[1]!.content[0]).toMatchObject({ type: 'thinking', signature: 'S' });
+  // The real system prompt (with its cache control) first, the hoisted system text next, then
+  // the labelled text that came beside the result and the user text that followed it.
+  expect(out.system).toEqual([
+    { type: 'text', text: 'You are a coding agent.', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'Deferred tools are now available.' },
+    { type: 'text', text: NEON_BESIDE_RESULT_LABEL },
+    { type: 'text', text: 'Mind the style guide.' },
+    { type: 'text', text: 'Go on.' },
+  ]);
+  // A body with neither shape is left as it is, and a user message with no tool result keeps its text.
+  const plain = { messages: [{ role: 'user', content: 'Hi' }] };
+  expect(hoistedForNeon(plain)).toBe(plain);
+  // The chat route reads the same hoisted body.
+  const chat = chatBody(body, {}, 64);
+  expect(chat.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool']);
+  expect(String(chat.messages[0]!.content)).toContain('Deferred tools are now available.');
 });

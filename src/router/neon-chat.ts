@@ -143,10 +143,11 @@ function textOf(content: unknown): string {
  * own thought is not carried by the chat format, only the signatures kept in `carry`.
  */
 export function chatBody(
-  body: Record<string, unknown>,
+  asked: Record<string, unknown>,
   carry: ThoughtCarry,
   maxTokens: number,
 ): ChatBody {
+  const body = hoistedForNeon(asked);
   const messages: Record<string, unknown>[] = [];
   const system = textOf(body.system);
   if (system) messages.push({ role: 'system', content: system });
@@ -484,9 +485,10 @@ export const NEON_THINKING_BUDGET_TOKENS = 2_048;
 const NEON_THINKING_BUDGET_FLOOR = 1_024;
 
 export function messagesRequest(
-  body: Record<string, unknown>,
+  asked: Record<string, unknown>,
   maxTokens: number,
 ): Record<string, unknown> {
+  const body = hoistedForNeon(asked);
   // The worker's own `thinking` is replaced by the budget below.
   const rest = Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'thinking'));
   // The budget stays below the cap by at least the floor, so a stepped-down turn still writes.
@@ -659,4 +661,75 @@ export function messageHasNoText(message: Record<string, unknown>): boolean {
         b.type === 'tool_use'),
   );
   return !wrote && message.stop_reason === 'max_tokens';
+}
+
+/** How the text that came beside a tool result is introduced once it is moved to the system prompt. */
+export const NEON_BESIDE_RESULT_LABEL =
+  'Text that arrived in the same message as a tool result (not part of the result):';
+
+/**
+ * THE REQUEST SHAPE BLOCKRUN'S GEMINI TAKES. Two shapes in Claude Code's own requests made Neon
+ * produce nothing (live replays, 2026-11-23):
+ *
+ * - A `role: "system"` message inside `messages`, which Claude Code adds mid-conversation and
+ *   after tool results: Gemini then spent its whole output cap on hidden thought and wrote no
+ *   text. Every such message moves, in order, to the top-level `system`, after the real one.
+ * - Text in the same user message as a `tool_result` block: the tool result was lost. The text
+ *   moves to `system` too, after the hoisted system text and under a label, and the tool
+ *   results stay alone in their message.
+ *
+ * A user message with no tool result keeps its text. Turns still alternate: messages left side
+ * by side with one role are joined, and text that would land beside a tool result is hoisted
+ * instead. Thinking blocks, tool calls and any cache control on the system blocks are kept.
+ */
+export function hoistedForNeon(body: Record<string, unknown>): Record<string, unknown> {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const asBlocks = (content: unknown): Record<string, unknown>[] =>
+    typeof content === 'string'
+      ? [{ type: 'text', text: content }]
+      : Array.isArray(content)
+        ? content.filter(isRecord)
+        : [];
+  const isResult = (b: Record<string, unknown>) => b.type === 'tool_result';
+  const system: Record<string, unknown>[] = asBlocks(body.system);
+  const labelled: Record<string, unknown>[] = [];
+  const out: { role: unknown; content: Record<string, unknown>[] }[] = [];
+  const hoistedSystem: Record<string, unknown>[] = [];
+  let moved = false;
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const blocks = asBlocks(message.content);
+    const last = out.at(-1);
+    if (message.role === 'system') {
+      hoistedSystem.push(...blocks);
+      moved = true;
+      continue;
+    }
+    if (message.role === 'user') {
+      const results = blocks.filter(isResult);
+      const rest = blocks.filter((b) => !isResult(b));
+      const afterResult = last?.role === 'user' && last.content.some(isResult);
+      if (results.length > 0 || afterResult) {
+        if (rest.length > 0) {
+          labelled.push(...rest);
+          moved = true;
+        }
+        if (results.length > 0 && last?.role === 'user') last.content.push(...results);
+        else if (results.length > 0) out.push({ role: 'user', content: results });
+        continue;
+      }
+    }
+    if (last && last.role === message.role) last.content.push(...blocks);
+    else out.push({ role: message.role, content: [...blocks] });
+  }
+  if (!moved) return body;
+  const extra = [
+    ...hoistedSystem,
+    ...(labelled.length > 0 ? [{ type: 'text', text: NEON_BESIDE_RESULT_LABEL }, ...labelled] : []),
+  ];
+  return {
+    ...body,
+    system: [...system, ...extra],
+    messages: out.filter((m) => m.content.length > 0),
+  };
 }
