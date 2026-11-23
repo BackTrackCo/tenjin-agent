@@ -8,7 +8,7 @@ import { modelSettings } from '../router/model-settings';
 import type { ModelJob } from '../router/model-job';
 import { chainReader } from '../router/routing-payer';
 import { NEON_TURN_MAX_TOKENS } from '../router/neon-chat';
-import { neonSeller } from '../router/neon-seller';
+import { neonSeller, recountX402inference } from '../router/neon-seller';
 import { NeonTransport, readNeonRecord } from '../router/neon-transport';
 
 export const NEON_PROBE_ENV = 'TENJIN_NEON_PROBE';
@@ -22,7 +22,7 @@ export const NEON_PROBE_ENV = 'TENJIN_NEON_PROBE';
  */
 export async function runNeonProbe(
   file: string | undefined,
-  flags: { refund?: boolean },
+  flags: { refund?: boolean; recount?: boolean },
   ctx: CommandContext,
 ): Promise<CommandResult> {
   if (process.env[NEON_PROBE_ENV] !== '1')
@@ -37,6 +37,18 @@ export async function runNeonProbe(
     readContract: chainReader(settings.rpcUrl),
   });
   const seller = neonSeller();
+  if (flags.recount) {
+    const done = await recountX402inference(
+      ctx.dataDir,
+      resolveSpendAuthorizer(ctx, settings.policy),
+    );
+    return {
+      data: { counted: done.counted, atomic: done.atomic.toString() },
+      humanLines: [
+        `Counted ${done.counted} earlier x402inference calls (${done.atomic} atomic) in the daily window.`,
+      ],
+    };
+  }
   const abort = new AbortController();
   if (flags.refund) {
     if (seller !== 'x402inference')

@@ -1,4 +1,5 @@
 import type { ChainRead } from './routing-payer';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { x402Client } from '@x402/core/client';
 import { toClientEvmSigner } from '@x402/evm';
@@ -7,6 +8,8 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import type { TypedDataDefinition } from 'viem';
 import { USDC_ADDRESS } from '../lib/usdc';
+import { readPaidRecords } from './paid';
+import { writePrivate } from './store-files';
 import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { WalletProvider } from '../lib/wallet';
 
@@ -188,7 +191,9 @@ export class BatchSeller {
       );
     const base = this.options.fetchImpl ?? fetch;
     const watched: typeof fetch = (input, init) => {
-      if (new Headers(init?.headers).has('payment-signature')) this.transmitted = true;
+      // The payment wrapper calls fetch with a Request and no init: read its headers too.
+      const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+      if (headers.has('payment-signature')) this.transmitted = true;
       return base(input, { ...init, signal });
     };
     let response: Response;
@@ -230,4 +235,47 @@ export class BatchSeller {
     const { scheme } = await this.scheme(signal, { sum: 0n });
     return scheme.refund(X402INFERENCE_CHAT_URL, { fetch: this.options.fetchImpl ?? fetch });
   }
+}
+
+/**
+ * The x402inference calls paid before vouchers were counted (alpha.105 to alpha.107) reached the
+ * paid ledger but never the daily window. Rows dated before this instant are the ones missed;
+ * a later row was counted when it was paid.
+ */
+export const X402INFERENCE_UNCOUNTED_BEFORE = '2026-11-23T09:05:00Z';
+
+/**
+ * ONE-TIME RECOUNT of those rows into the daily window, for a person who asks for it: each is
+ * committed at its charge, and a marker file names the rows already counted, so running it
+ * again counts nothing twice. Rows older than the window's own length are left out, as the
+ * window has already let them go.
+ */
+export async function recountX402inference(
+  dataDir: string,
+  authorizer: SpendAuthorizer,
+  now: () => number = Date.now,
+): Promise<{ counted: number; atomic: bigint }> {
+  const markerPath = join(dataDir, 'x402inference-recounted.json');
+  const done = new Set<string>(
+    (JSON.parse(await readFile(markerPath, 'utf8').catch(() => '[]')) as string[]) ?? [],
+  );
+  const cutoff = Date.parse(X402INFERENCE_UNCOUNTED_BEFORE);
+  let counted = 0;
+  let atomic = 0n;
+  for (const row of await readPaidRecords(dataDir)) {
+    const at = Date.parse(row.ts);
+    if (
+      row.provider !== new URL(X402INFERENCE_CHAT_URL).host ||
+      at >= cutoff ||
+      now() - at >= 86_400_000 ||
+      done.has(row.ts)
+    )
+      continue;
+    await authorizer.commit(undefined, BigInt(row.amountAtomic), { mode: 'automatic' });
+    done.add(row.ts);
+    counted += 1;
+    atomic += BigInt(row.amountAtomic);
+  }
+  await writePrivate(markerPath, JSON.stringify([...done]));
+  return { counted, atomic };
 }

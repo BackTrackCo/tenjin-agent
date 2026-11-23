@@ -332,10 +332,11 @@ Examples:
   // A hidden dev door for the Neon evaluation; it refuses unless TENJIN_NEON_PROBE=1.
   addGlobalFlags(config.command('neon-probe [file]', { hidden: true }))
     .option('--refund', 'ask the x402inference channel for its remainder instead')
+    .option('--recount', 'count earlier uncounted x402inference calls in the daily window, once')
     .action(async function (
       this: Command,
       file: string | undefined,
-      options: { refund?: boolean },
+      options: { refund?: boolean; recount?: boolean },
     ) {
       await runCommand('config neon-probe', this, async (ctx) =>
         (await import('../commands/config-neon-probe')).runNeonProbe(file, options, ctx),
