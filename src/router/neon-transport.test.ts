@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { runPay } from '../commands/pay';
@@ -13,13 +13,18 @@ import {
   withModelRetry,
   workerEndText,
 } from './model-worker-control';
-import { NEON_TURN_MAX_TOKENS } from './neon-chat';
+import { messagesRequest, NEON_TURN_MAX_TOKENS, neonRoute } from './neon-chat';
 import { NeonTransport, readNeonRecord } from './neon-transport';
 import { ModelHandoff, NEON_CONSENT_REFUSAL } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 
 let dir: string;
+// The tests below the Messages section drive the chat completions route, which the env keeps.
+beforeEach(() => {
+  vi.stubEnv('TENJIN_NEON_ROUTE', 'chat');
+});
 afterEach(async () => {
+  vi.unstubAllEnvs();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
@@ -373,4 +378,165 @@ it('keeps a call raw stream and request only when asked, and never the system pr
   const request = await readFile(join(kept, 'call-1.request.json'), 'utf8');
   expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
   expect(JSON.parse(request).messages[0]).toMatchObject({ role: 'system', content: { bytes: 22 } });
+});
+
+// ---- The Messages route, which is the default ----
+const event = (type: string, body: Record<string, unknown>) =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}\n\n`;
+const anthropicStream = (
+  blocks: string[],
+  stop = 'end_turn',
+  usage: Record<string, unknown> = {
+    input_tokens: 40,
+    cache_read_input_tokens: 8,
+    output_tokens: 12,
+  },
+) =>
+  event('message_start', {
+    message: {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      usage: { input_tokens: 40, output_tokens: 1 },
+    },
+  }) +
+  blocks.join('') +
+  event('message_delta', { delta: { stop_reason: stop, stop_sequence: null }, usage }) +
+  event('message_stop', {});
+const textBlock = (text: string, index = 0) =>
+  event('content_block_start', { index, content_block: { type: 'text', text: '' } }) +
+  event('content_block_delta', { index, delta: { type: 'text_delta', text } }) +
+  event('content_block_stop', { index });
+
+it('sends the worker request to /v1/messages with a thinking budget under the cap, and folds the reply', async () => {
+  vi.unstubAllEnvs();
+  const { ctx, repo, data } = await fixture(consented);
+  const thinking =
+    event('content_block_start', {
+      index: 0,
+      content_block: { type: 'thinking', thinking: '', signature: '' },
+    }) +
+    event('content_block_delta', {
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'Let me see.' },
+    }) +
+    event('content_block_delta', {
+      index: 0,
+      delta: { type: 'signature_delta', signature: 'SIG-A' },
+    }) +
+    event('content_block_stop', { index: 0 });
+  const tool =
+    event('content_block_start', {
+      index: 2,
+      content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} },
+    }) +
+    event('content_block_delta', {
+      index: 2,
+      delta: { type: 'input_json_delta', partial_json: '{"file_path":' },
+    }) +
+    event('content_block_delta', {
+      index: 2,
+      delta: { type: 'input_json_delta', partial_json: '"/a.md"}' },
+    }) +
+    event('content_block_stop', { index: 2 });
+  const pay = payer(() => ({
+    status: 200,
+    bodyText: anthropicStream([thinking, textBlock('Reading.', 1), tool], 'tool_use'),
+    amountPaid: { atomic: '9000' },
+  }));
+  const sent = job(repo);
+  const message = await transport(ctx, pay).messages(
+    sent,
+    { ...MESSAGES, thinking: { type: 'enabled' }, system: 'Write.' },
+    new AbortController().signal,
+  );
+  const call = pay.mock.calls[0]![0];
+  expect(call.url).toBe('https://blockrun.ai/api/v1/messages');
+  expect(JSON.parse(call.rawBody!)).toMatchObject({
+    model: 'google/gemini-4-neon',
+    max_tokens: NEON_TURN_MAX_TOKENS,
+    stream: true,
+    thinking: { type: 'enabled', budget_tokens: 2048 },
+    system: 'Write.',
+  });
+  expect(message).toMatchObject({
+    stop_reason: 'tool_use',
+    model: 'deepseek-flash',
+    content: [
+      { type: 'thinking', thinking: 'Let me see.', signature: 'SIG-A' },
+      { type: 'text', text: 'Reading.' },
+      { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/a.md' } },
+    ],
+    usage: { input_tokens: 40, output_tokens: 12, cache_read_input_tokens: 8 },
+  });
+  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
+    inputTokens: 48,
+    cachedInputTokens: 8,
+    outputTokens: 12,
+    settlement: 'settled',
+  });
+});
+
+it('ends the job on a Messages turn that spent its cap on thought, and never sends it again', async () => {
+  vi.unstubAllEnvs();
+  const { ctx, repo } = await fixture(consented);
+  const thought =
+    event('content_block_start', {
+      index: 0,
+      content_block: { type: 'thinking', thinking: '', signature: '' },
+    }) + event('content_block_stop', { index: 0 });
+  const pay = payer(() => ({
+    status: 200,
+    bodyText: anthropicStream([thought], 'max_tokens'),
+    amountPaid: { atomic: '9000' },
+  }));
+  const failure = await withModelRetry(
+    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
+    new AbortController().signal,
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ stop: { kind: 'provider_limit', reason: 'output_limit' } });
+  expect(pay).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the chat route only on TENJIN_NEON_ROUTE=chat, and the capture for either route', async () => {
+  expect(neonRoute({})).toBe('messages');
+  expect(neonRoute({ TENJIN_NEON_ROUTE: 'chat' })).toBe('chat');
+  vi.unstubAllEnvs();
+  vi.stubEnv('TENJIN_NEON_CAPTURE', '1');
+  const { ctx, repo, data } = await fixture(consented);
+  const pay = payer(() => ({
+    status: 200,
+    bodyText: anthropicStream([textBlock('Done.')]),
+    amountPaid: { atomic: '9000' },
+  }));
+  const sent = job(repo);
+  await transport(ctx, pay).messages(
+    sent,
+    {
+      ...MESSAGES,
+      system: 'SECRET-SYSTEM-PROMPT',
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+    },
+    new AbortController().signal,
+  );
+  const folder = join(data, 'model-jobs', `${sent.id}.neon-raw`);
+  expect(await readFile(join(folder, 'call-1.response.sse'), 'utf8')).toContain('text_delta');
+  const request = await readFile(join(folder, 'call-1.request.json'), 'utf8');
+  expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
+  expect(JSON.parse(request)).toMatchObject({ tools: { count: 1 }, system: { bytes: 22 } });
+});
+
+it('steps the thinking budget down with the cap, and drops it where the cap leaves no room', () => {
+  expect(messagesRequest({ messages: [] }, 8_192).thinking).toEqual({
+    type: 'enabled',
+    budget_tokens: 2_048,
+  });
+  expect(messagesRequest({ messages: [] }, 2_500).thinking).toEqual({
+    type: 'enabled',
+    budget_tokens: 1_476,
+  });
+  expect(messagesRequest({ messages: [] }, 2_000).thinking).toBeUndefined();
 });

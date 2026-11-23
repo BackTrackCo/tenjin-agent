@@ -16,9 +16,15 @@ import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import { appendPaidRecord, recordedSent, type SignedAuthorization } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
 import {
+  capturedMessagesRequest,
   capturedRequest,
   chatBody,
-  type ChatBody,
+  messageHasNoText,
+  messageOfStream,
+  messagesRequest,
+  NEON_MESSAGES_URL,
+  neonRoute,
+  type NeonUsage,
   NEON_CAPTURE_ENV,
   chatUsage,
   fittingNeonTokens,
@@ -264,17 +270,21 @@ export class NeonTransport {
         : NEON_TURN_MAX_TOKENS;
     // The body's size is the input estimate's basis; the output cap is stepped down to fit.
     const carry: ThoughtCarry = record.signatures;
-    const probe = JSON.stringify(chatBody(messages, carry, 1));
+    const route = neonRoute();
+    const probe = JSON.stringify(
+      route === 'chat' ? chatBody(messages, carry, 1) : messagesRequest(messages, 1),
+    );
     const maxTokens = fittingNeonTokens(Buffer.byteLength(probe), asked, remaining);
     if (maxTokens === null || remaining <= 0n)
       throw nothingSigned('The job ceiling has no room for another Neon call', { cause: 'budget' });
-    const chat = chatBody(messages, carry, maxTokens);
-    const body = JSON.stringify(chat);
+    const chat = route === 'chat' ? chatBody(messages, carry, maxTokens) : undefined;
+    const wire = chat ?? messagesRequest(messages, maxTokens);
+    const body = JSON.stringify(wire);
     const n = record.calls.length + 1;
     const started = this.now();
     const settings = await resolveContextSettings(ctx);
     const args: PayArgs = {
-      url: NEON_CHAT_URL,
+      url: route === 'chat' ? NEON_CHAT_URL : NEON_MESSAGES_URL,
       method: 'POST',
       rawBody: body,
       headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -337,18 +347,32 @@ export class NeonTransport {
       amountPaid?: { atomic?: string };
     };
     const quoted = BigInt(data.amountPaid?.atomic ?? '0');
-    let reply: unknown = data.body;
+    // A streamed reply arrives as text: its events are folded into the whole reply.
     let unreadable: NeonReplyInvalid | undefined;
-    // A streamed reply arrives as text: its chunks are folded into the whole reply.
-    if (reply === undefined && typeof data.bodyText === 'string') {
-      try {
-        reply = replyOfBody(data.bodyText);
-      } catch (error) {
-        if (!(error instanceof NeonReplyInvalid)) throw error;
-        unreadable = error;
+    let usage: NeonUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    };
+    let reply: unknown = data.body;
+    let folded: Record<string, unknown> | undefined;
+    try {
+      if (route === 'messages') {
+        const read = messageOfStream(
+          typeof data.bodyText === 'string' ? data.bodyText : JSON.stringify(data.body ?? ''),
+        );
+        folded = read.message;
+        usage = read.usage;
+      } else {
+        if (reply === undefined && typeof data.bodyText === 'string')
+          reply = replyOfBody(data.bodyText);
+        usage = chatUsage(reply);
       }
+    } catch (error) {
+      if (!(error instanceof NeonReplyInvalid)) throw error;
+      unreadable = error;
     }
-    const usage = chatUsage(reply);
     // A streamed reply may carry no receipt header. BlockRun charges an exact stream when its
     // output starts, so a 2xx that came back with a body is a charge of the quote: never
     // recorded as unknown, nor reported as nothing spent. A receipt, when sent, adds its tx.
@@ -357,7 +381,7 @@ export class NeonTransport {
       await this.capture(
         job,
         n,
-        chat,
+        chat ? capturedRequest(chat) : capturedMessagesRequest(wire),
         typeof data.bodyText === 'string' ? data.bodyText : '',
       ).catch(() => undefined);
     await this.ledger(job, n, quoted, data, settled);
@@ -376,7 +400,11 @@ export class NeonTransport {
     let message: Record<string, unknown>;
     try {
       if (unreadable) throw unreadable;
-      message = messageOf(reply, carry);
+      if (folded) {
+        if (messageHasNoText(folded))
+          throw new NeonNoText('The turn reached the output cap with no text');
+        message = folded;
+      } else message = messageOf(reply, carry);
     } catch (error) {
       if (error instanceof NeonNoText) {
         await this.record(job, { ...call, ok: false }, carry);
@@ -400,13 +428,10 @@ export class NeonTransport {
    * request keeps the system prompt and the tools as sizes. No payment header or signature is
    * ever in either: the body is what the seller's reply carried.
    */
-  private async capture(job: ModelJob, n: number, chat: ChatBody, raw: string) {
+  private async capture(job: ModelJob, n: number, shown: Record<string, unknown>, raw: string) {
     const folder = join(this.options.dataDir, 'model-jobs', `${job.id}.neon-raw`);
     await mkdir(folder, { recursive: true, mode: 0o700 });
-    await writePrivate(
-      join(folder, `call-${n}.request.json`),
-      JSON.stringify(capturedRequest(chat), null, 1),
-    );
+    await writePrivate(join(folder, `call-${n}.request.json`), JSON.stringify(shown, null, 1));
     await writePrivate(join(folder, `call-${n}.response.sse`), raw);
   }
 

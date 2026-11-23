@@ -462,3 +462,200 @@ export function capturedRequest(body: ChatBody): Record<string, unknown> {
     ...(body.tools ? { tools: { count: body.tools.length, ...size(body.tools) } } : {}),
   };
 }
+
+/**
+ * THE MESSAGES ROUTE: BlockRun's Anthropic-compatible `POST /api/v1/messages`. The worker already
+ * speaks Messages, so its request passes through nearly as it is and BlockRun's reply is read back
+ * as the Messages message the worker expects. It is the default; the chat completions route above
+ * stays selectable with `TENJIN_NEON_ROUTE=chat` for the evaluation only.
+ */
+export const NEON_MESSAGES_URL = `${NEON_ORIGIN}/api/v1/messages`;
+export const NEON_ROUTE_ENV = 'TENJIN_NEON_ROUTE';
+export function neonRoute(env: NodeJS.ProcessEnv = process.env): 'messages' | 'chat' {
+  return env[NEON_ROUTE_ENV] === 'chat' ? 'chat' : 'messages';
+}
+/**
+ * THE THINKING BUDGET OF ONE TURN, well under the output cap so visible text keeps room: thought
+ * tokens count as output, and turns capped at 8,192 spent all of it thinking. BlockRun's schema
+ * for the route does not list `thinking`, so whether it is honoured is checked by the first run.
+ */
+export const NEON_THINKING_BUDGET_TOKENS = 2_048;
+/** Anthropic's least budget; a turn whose cap leaves less than this above it asks for no thinking. */
+const NEON_THINKING_BUDGET_FLOOR = 1_024;
+
+export function messagesRequest(
+  body: Record<string, unknown>,
+  maxTokens: number,
+): Record<string, unknown> {
+  const { thinking: _asked, ...rest } = body;
+  // The budget stays below the cap by at least the floor, so a stepped-down turn still writes.
+  const budget = Math.min(NEON_THINKING_BUDGET_TOKENS, maxTokens - NEON_THINKING_BUDGET_FLOOR);
+  return {
+    ...rest,
+    model: NEON_MODEL,
+    max_tokens: maxTokens,
+    stream: true,
+    ...(budget >= NEON_THINKING_BUDGET_FLOOR
+      ? { thinking: { type: 'enabled', budget_tokens: budget } }
+      : {}),
+  };
+}
+
+/** The request as a capture keeps it: the system prompt and tools as sizes. */
+export function capturedMessagesRequest(body: Record<string, unknown>): Record<string, unknown> {
+  const size = (value: unknown) => {
+    const bytes = Buffer.byteLength(JSON.stringify(value));
+    return { bytes, approxTokens: Math.ceil(bytes / 4) };
+  };
+  return {
+    ...body,
+    ...(body.system !== undefined ? { system: size(body.system) } : {}),
+    ...(Array.isArray(body.tools)
+      ? { tools: { count: body.tools.length, ...size(body.tools) } }
+      : {}),
+  };
+}
+
+const tokens = (value: unknown) =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+
+/**
+ * BLOCKRUN'S ANTHROPIC EVENT STREAM AS THE ONE MESSAGE THE WORKER EXPECTS: text, `tool_use`
+ * (its input arrives as JSON pieces), thinking blocks with their `signature` as BlockRun sent
+ * them, the stop reason and the usage. A body that is already a message is taken as it is. An
+ * `error` event, or a stream that never began a message, is invalid.
+ */
+export function messageOfStream(text: string): {
+  message: Record<string, unknown>;
+  usage: NeonUsage;
+} {
+  let start: Record<string, unknown> | undefined;
+  const blocks = new Map<number, Record<string, unknown>>();
+  const pieces = new Map<number, string>();
+  let stop: Record<string, unknown> = {};
+  let usage: Record<string, unknown> = {};
+  const events: Record<string, unknown>[] = [];
+  if (!/^\s*(data:|event:|:)/.test(text)) {
+    let whole: unknown;
+    try {
+      whole = JSON.parse(text);
+    } catch {
+      throw new NeonReplyInvalid('The reply is neither JSON nor a stream');
+    }
+    if (!isRecord(whole) || whole.type !== 'message')
+      throw new NeonReplyInvalid('The reply is not a message');
+    events.push({ type: 'whole', whole });
+  } else {
+    for (const line of text.split('\n')) {
+      const payload = /^data:\s?(.*)$/.exec(line.replace(/\r$/, ''))?.[1];
+      if (payload === undefined || payload.trim() === '' || payload.trim() === '[DONE]') continue;
+      try {
+        const event: unknown = JSON.parse(payload);
+        if (isRecord(event)) events.push(event);
+      } catch {
+        // A line that is not an event is ignored.
+      }
+    }
+  }
+  for (const event of events) {
+    const index = typeof event.index === 'number' ? event.index : 0;
+    switch (event.type) {
+      case 'error':
+        throw new NeonReplyInvalid('The stream carried an error');
+      case 'whole': {
+        const whole = event.whole as Record<string, unknown>;
+        start = whole;
+        (Array.isArray(whole.content) ? whole.content : []).forEach((block, i) => {
+          if (isRecord(block)) blocks.set(i, { ...block });
+        });
+        stop = whole;
+        usage = isRecord(whole.usage) ? whole.usage : {};
+        break;
+      }
+      case 'message_start':
+        if (isRecord(event.message)) {
+          start = event.message;
+          if (isRecord(event.message.usage)) usage = { ...event.message.usage };
+        }
+        break;
+      case 'content_block_start':
+        if (isRecord(event.content_block)) blocks.set(index, { ...event.content_block });
+        break;
+      case 'content_block_delta': {
+        const block = blocks.get(index);
+        const delta = isRecord(event.delta) ? event.delta : {};
+        if (!block) break;
+        const join = (key: string, add: unknown) => {
+          if (typeof add === 'string')
+            block[key] = `${typeof block[key] === 'string' ? block[key] : ''}${add}`;
+        };
+        if (delta.type === 'text_delta') join('text', delta.text);
+        else if (delta.type === 'thinking_delta') join('thinking', delta.thinking);
+        else if (delta.type === 'signature_delta') join('signature', delta.signature);
+        else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string')
+          pieces.set(index, `${pieces.get(index) ?? ''}${delta.partial_json}`);
+        break;
+      }
+      case 'message_delta':
+        if (isRecord(event.delta)) stop = event.delta;
+        if (isRecord(event.usage)) usage = { ...usage, ...event.usage };
+        break;
+      default:
+    }
+  }
+  if (!start) throw new NeonReplyInvalid('The stream never began a message');
+  const content = [...blocks.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, block]) => {
+      if (block.type !== 'tool_use') return block;
+      const raw = pieces.get(index);
+      let input: unknown = isRecord(block.input) ? block.input : {};
+      if (raw !== undefined && raw.trim() !== '') {
+        try {
+          input = JSON.parse(raw);
+        } catch {
+          throw new NeonReplyInvalid('A tool call has arguments that are not JSON');
+        }
+      }
+      if (!isRecord(input))
+        throw new NeonReplyInvalid('A tool call has arguments that are not an object');
+      return { ...block, input };
+    });
+  const cached = tokens(usage.cache_read_input_tokens);
+  const written = tokens(usage.cache_creation_input_tokens);
+  return {
+    message: {
+      id: typeof start.id === 'string' ? start.id : `msg_neon_${randomBytes(12).toString('hex')}`,
+      type: 'message',
+      role: 'assistant',
+      model: CLAUDE_DEEPSEEK_MODEL,
+      content,
+      stop_reason: typeof stop.stop_reason === 'string' ? stop.stop_reason : 'end_turn',
+      stop_sequence: typeof stop.stop_sequence === 'string' ? stop.stop_sequence : null,
+      usage: {
+        input_tokens: tokens(usage.input_tokens),
+        output_tokens: tokens(usage.output_tokens),
+        ...(cached > 0 ? { cache_read_input_tokens: cached } : {}),
+        ...(written > 0 ? { cache_creation_input_tokens: written } : {}),
+      },
+    },
+    usage: {
+      inputTokens: tokens(usage.input_tokens) + cached + written,
+      cachedInputTokens: cached,
+      outputTokens: tokens(usage.output_tokens),
+      reasoningTokens: tokens(usage.thinking_tokens ?? usage.reasoning_tokens),
+    },
+  };
+}
+
+/** A turn that ended at the cap with no text and no tool call: its output went on thought. */
+export function messageHasNoText(message: Record<string, unknown>): boolean {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const wrote = content.some(
+    (b) =>
+      isRecord(b) &&
+      ((b.type === 'text' && typeof b.text === 'string' && b.text.length > 0) ||
+        b.type === 'tool_use'),
+  );
+  return !wrote && message.stop_reason === 'max_tokens';
+}
