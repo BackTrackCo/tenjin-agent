@@ -9,7 +9,7 @@ import { NEON_ORIGIN } from './model-settings';
  * worker's Anthropic Messages in and sends chat completions out; this file is that
  * translation, with no network and no payment in it.
  */
-export const NEON_MODEL: 'google/gemini-4-neon' = 'google/gemini-4-neon';
+export const NEON_MODEL = 'google/gemini-4-neon' as const;
 export const NEON_CHAT_URL = `${NEON_ORIGIN}/api/v1/chat/completions`;
 /** BlockRun's list prices for Neon, in atomic USDC (millionths of a dollar) per token. */
 /**
