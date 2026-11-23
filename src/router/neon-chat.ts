@@ -800,3 +800,31 @@ export function hoistedForNeon(body: Record<string, unknown>): Record<string, un
     messages: out.filter((m) => m.content.length > 0),
   };
 }
+
+/**
+ * WHERE A CALL'S INPUT TOKENS WENT: its system part, its tools and its messages. The seller
+ * reports one input total, so the total is shared by the bytes of each part (the system text,
+ * the tools as JSON, the rest). Where no total was reported, a byte count over four stands in.
+ */
+export function inputSplit(
+  wire: Record<string, unknown>,
+  totalTokens: number,
+): { systemTokens: number; toolsTokens: number; messageTokens: number } {
+  const size = (value: unknown) =>
+    value === undefined || (Array.isArray(value) && value.length === 0)
+      ? 0
+      : Buffer.byteLength(JSON.stringify(value));
+  const messages = Array.isArray(wire.messages) ? wire.messages : [];
+  const isSystem = (m: unknown) => isRecord(m) && m.role === 'system';
+  const systemBytes = size(wire.system) + size(messages.filter(isSystem));
+  const toolsBytes = size(wire.tools);
+  const messageBytes = size(messages.filter((m) => !isSystem(m)));
+  const all = systemBytes + toolsBytes + messageBytes;
+  const total = totalTokens > 0 ? totalTokens : Math.ceil(all / 4);
+  const share = (bytes: number) => (all === 0 ? 0 : Math.round((total * bytes) / all));
+  return {
+    systemTokens: share(systemBytes),
+    toolsTokens: share(toolsBytes),
+    messageTokens: share(messageBytes),
+  };
+}

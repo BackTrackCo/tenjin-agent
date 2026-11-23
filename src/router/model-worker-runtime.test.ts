@@ -245,6 +245,26 @@ it("computes a Neon job's scope under the Neon consent, as the door saved it", a
   expect(providers.length).toBeGreaterThan(0);
   expect(providers.every((provider) => provider === 'neon')).toBe(true);
 });
+it('starts a Neon worker lean (no MCP, five file tools, default output style) and a DeepSeek worker as before', async () => {
+  const settingsOf = async () => given(vi.mocked(query).mock.calls.at(-1)![0].options);
+  sdkResult({ subtype: 'success', result: 'done' }, '44444444-5555-4666-8777-888888888888');
+  const neon = { ...job, decision: { ...job.decision, provider: 'neon' } } as unknown as ModelJob;
+  await runModelWorker(neon, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'neon-')) });
+  const lean = await settingsOf();
+  expect(lean.tools).toEqual(['Read', 'Glob', 'Grep', 'Edit', 'Write']);
+  expect(lean.tools).not.toContain('Bash');
+  expect(lean.mcpServers).toEqual({});
+  expect(lean.strictMcpConfig).toBe(true);
+  // The person's CLAUDE.md files and settings still load.
+  expect(lean.settingSources).toEqual(['user', 'project', 'local']);
+  expect(lean.settings).toMatchObject({ outputStyle: 'default' });
+  sdkResult({ subtype: 'success', result: 'done' }, '55555555-6666-4777-8888-999999999999');
+  await runModelWorker(job, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'ds-')) });
+  const normal = await settingsOf();
+  expect(normal.tools).toBeUndefined();
+  expect(normal.strictMcpConfig).toBeUndefined();
+  expect(normal.settings).not.toHaveProperty('outputStyle');
+});
 function sdkResult(
   result: Record<string, unknown>,
   sessionId?: string,

@@ -5,6 +5,7 @@ import {
   chatBody,
   chatUsage,
   hoistedForNeon,
+  inputSplit,
   neonLabel,
   neonModel,
   messagesRequest,
@@ -426,4 +427,29 @@ it('lets the eval name one of four Gemini 4 models, falls back to Neon, and pric
   expect(messagesRequest({ messages: [] }, 64).model).toBe('google/gemini-4-hydrogen');
   expect(neonPeakQuoteAtomic(0, 2_048)).toBe(16_128n);
   expect(neonPeakQuoteAtomic(0, 2_048, 'google/gemini-4-neon')).toBe(32_256n);
+});
+
+it('shares a call input total by the bytes of its system part, tools and messages', () => {
+  const split = inputSplit(
+    {
+      system: 'x'.repeat(100),
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'y'.repeat(300) }],
+    },
+    1_000,
+  );
+  expect(split.systemTokens + split.toolsTokens + split.messageTokens).toBeGreaterThanOrEqual(998);
+  expect(split.messageTokens).toBeGreaterThan(split.systemTokens);
+  expect(split.systemTokens).toBeGreaterThan(split.toolsTokens);
+  // Chat completions carry the system text as a message of its own.
+  const chat = inputSplit(
+    {
+      messages: [
+        { role: 'system', content: 'z'.repeat(400) },
+        { role: 'user', content: 'hi' },
+      ],
+    },
+    100,
+  );
+  expect(chat.systemTokens).toBeGreaterThan(chat.messageTokens);
 });

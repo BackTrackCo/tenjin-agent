@@ -619,7 +619,10 @@ it('sends chat completions to x402inference as a plain reply and records the rea
     settlement: 'settled',
     outputTokens: 12,
     cachedInputTokens: 8,
+    // Where the input went is kept for each call.
+    systemTokens: 0,
   });
+  expect(record!.calls[0]!.messageTokens).toBeGreaterThan(0);
 });
 
 it('keeps a deposit at the channel cap and inside the person limits', async () => {

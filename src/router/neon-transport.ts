@@ -38,6 +38,7 @@ import {
   messageOf,
   NEON_CALL_TIMEOUT_MS,
   NEON_CHAT_URL,
+  inputSplit,
   neonLabel,
   neonMaxTokens,
   neonModel,
@@ -59,6 +60,10 @@ const callSchema = z.object({
   inputTokens: z.number(),
   cachedInputTokens: z.number(),
   outputTokens: z.number(),
+  /** Where the input tokens went, shared by bytes: the system part, the tools, the messages. */
+  systemTokens: z.number().optional(),
+  toolsTokens: z.number().optional(),
+  messageTokens: z.number().optional(),
   /** The model that answered the call, as it was asked for. */
   model: z.string().optional(),
   /** Thought tokens counted in the output, where BlockRun reports them. */
@@ -476,6 +481,7 @@ export class NeonTransport {
       n,
       at: started,
       ...usage,
+      ...inputSplit(wire, usage.inputTokens),
       maxTokens,
       model: neonModel(),
       quotedAtomic: (sellerCharge?.ceiling ?? quoted).toString(),
