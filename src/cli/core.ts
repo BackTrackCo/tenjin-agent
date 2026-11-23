@@ -8,6 +8,7 @@ import type { TargetKind } from '../router/settings-wire';
 import { SETUP, WALLET, collect, type Registration } from './registration';
 import { installOutput } from '../router/install-output';
 import type { SubagentConfigFlags } from '../commands/config-subagents';
+import type { NeonConfigFlags } from '../commands/config-neon';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -304,6 +305,28 @@ Examples:
     .action(async function (this: Command, mode: string | undefined, options: SubagentConfigFlags) {
       await runCommand('config subagents', this, async (ctx) =>
         (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
+      );
+    });
+  addGlobalFlags(config.command('neon [mode]'))
+    .summary('show Gemini 4 Neon subagents, or turn them on or off')
+    .option(
+      '--repository <path...>',
+      'limit the consent to these directories and their subfolders; without it, on covers every workspace',
+    )
+    .option(
+      '--max-job <USD>',
+      'a lower ceiling per job than your per-call spend limit, which is the default cap',
+    )
+    .addHelpText(
+      'after',
+      configExamples(
+        ['neon', 'neon on', 'neon on --max-job 0.50', 'neon on --repository ~/notes', 'neon off'],
+        'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/neon-subagent.md',
+      ),
+    )
+    .action(async function (this: Command, mode: string | undefined, options: NeonConfigFlags) {
+      await runCommand('config neon', this, async (ctx) =>
+        (await import('../commands/config-neon')).runConfigNeon(mode, options, ctx),
       );
     });
   addGlobalFlags(config.command('get <key>'))

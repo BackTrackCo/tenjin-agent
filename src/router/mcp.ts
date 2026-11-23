@@ -2,6 +2,7 @@ import { sweepJobFolders } from './job-folders';
 import { isModelWorkerProcess } from './model-worker-context';
 import { registerModelTool, stopModelWorkers } from './model-mcp';
 import { ModelTransport } from './model-transport';
+import { NeonTransport } from './neon-transport';
 import type { ModelSession } from './model-handoff';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -350,6 +351,33 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             readContract: chainReader(settings.rpcUrl),
             ...chainRefundReads(settings.rpcUrl),
           },
+        });
+      },
+      // THE NEON WORKER'S model calls are paid to BlockRun by this process, from the person's
+      // wallet, through the CLI's own payer: its limits, its daily budget, no Tenjin proxy.
+      neonTransport: async () => {
+        const settings = await resolveContextSettings(ctx);
+        return new NeonTransport({
+          dataDir: ctx.dataDir,
+          ctx,
+          provider,
+          authorizer: opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
+          ...(opts.handlerDeps?.fetchImpl !== undefined || opts.handlerDeps?.payDeps !== undefined
+            ? {
+                payDeps: {
+                  ...(opts.handlerDeps.payDeps?.destination !== undefined
+                    ? { destination: opts.handlerDeps.payDeps.destination }
+                    : {}),
+                  ...((opts.handlerDeps.fetchImpl ?? opts.handlerDeps.payDeps?.fetchImpl) !==
+                  undefined
+                    ? {
+                        fetchImpl: (opts.handlerDeps.fetchImpl ??
+                          opts.handlerDeps.payDeps?.fetchImpl)!,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
         });
       },
       // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it

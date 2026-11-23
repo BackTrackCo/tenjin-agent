@@ -747,6 +747,9 @@ it('advertises read-only display activity and write-capable single and batch acc
       // The id of the session that closed, from the plugin alone: it ends that session's
       // background workers and nothing else.
       'end_session',
+      // The explicit Neon door: an assignment for a Neon writing worker, which carries no
+      // permission and needs the person's own Neon consent.
+      'neon',
       'offer_id',
       'offer_ids',
       // With cancel: a label for the job's record of who ended it, fixed values.

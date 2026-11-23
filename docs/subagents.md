@@ -1,10 +1,11 @@
 # DeepSeek subagents
 
 - **What it is.** Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job. Claude keeps its own model and accepts or declines each offer. DeepSeek subagents are off by default.
-- **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. A web search runs inside the DeepSeek call; a page its WebFetch could not fetch goes to Exa.
+- **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and the route's model provider (DeepSeek, or Google through BlockRun) get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. A web search runs inside the DeepSeek call; a page its WebFetch could not fetch goes to Exa.
 - **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked ($0.0081, 15% of an expected job spend of $0.054), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job's ceiling.
 - **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
 - **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.
+- **Gemini 4 Neon.** A separate worker for writing jobs, started only when you ask for it by name, has its own consent and its own page: [Gemini 4 Neon subagents](./neon-subagent.md). Turning DeepSeek subagents on does not turn it on.
 
 Ordinary implementation and scoped review can qualify; planning stays native. Repository instructions and model or privacy restrictions still apply. Nothing a worker reads or prints is masked: env files, secrets in a known token shape and credential command output go to Tenjin and DeepSeek as written. Before an offer, the task and parent context sent for routing are masked for known secrets, which is not a guarantee. See also the [privacy policy](https://tenjin.sh/privacy).
 

@@ -38,7 +38,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk/core';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { markSessionServed } from './alive';
-import { modelSettings } from './model-settings';
+import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
 import { CLAUDE_TENJIN_TOOLS } from './names';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
@@ -47,7 +47,7 @@ import {
   offeredOutputTokens,
 } from './model-limits';
 import type { ModelJob } from './model-job';
-import type { ModelTransport } from './model-transport';
+import type { WorkerTransport } from './model-transport';
 import {
   assertClaudeWorkerMode,
   claudeDeepSeekWorkerApiKeyHelper,
@@ -151,11 +151,15 @@ export async function qualifiedModelWorker(
   dataDir?: string,
   signal?: AbortSignal,
   claudePermissionMode?: ClaudeWorkerPermissionMode,
+  /** The provider whose consent covers the worker: Neon has its own record. */
+  provider: WorkerProvider = 'deepseek',
 ): Promise<QualifiedWorker | null> {
   if (!dataDir) return null;
   if (!claudeWorkerAuthCompatible(process.env)) return null;
   const windows = await windowsWorkerLaunch(dataDir, cwd);
   if (process.platform === 'win32' && !windows) return null;
+  // The Windows worker's account is set up against Tenjin's router: the Neon worker has none.
+  if (provider === 'neon' && windows) return null;
   // Read at every offer and again at its accept: once per binary file, not per call.
   const state = await readWorkerClaudeCode(cwd, windows ?? undefined);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
@@ -174,7 +178,7 @@ export async function qualifiedModelWorker(
       effective.permissions?.disableBypassPermissionsMode === 'disable')
   )
     return null;
-  const disclosure = await modelSettings(dataDir, cwd);
+  const disclosure = await modelSettings(dataDir, cwd, provider);
   const claudeWorkspace =
     disclosure &&
     (await resolveClaudeWorkspace(
@@ -222,7 +226,7 @@ export type EarlyWorkerAccept = {
   job: ModelJob;
   /** What the parent writes to the worker while it runs. */
   inbox?: WorkerInbox;
-  transport: ModelTransport;
+  transport: WorkerTransport;
   accepted?: { at: number; marks: Record<string, number> };
   /** The job's image and document blocks sent as text, which the released worker adds to. */
   omitted?: Set<string>;
@@ -251,7 +255,7 @@ export async function runModelWorker(
   job: ModelJob,
   options: {
     dataDir: string;
-    transport: ModelTransport;
+    transport: WorkerTransport;
     signal: AbortSignal;
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
@@ -359,6 +363,8 @@ async function runQualifiedWorker(
 ) {
   // A worker started at offer time sends nothing until its accept releases it.
   let released = !early;
+  // Whose consent covers the job, and whose model its calls go to.
+  const provider = providerOf(job);
   // The start time for the diagnostic record, which is made further down.
   const workerStart = Date.now();
   options.signal.throwIfAborted();
@@ -374,7 +380,7 @@ async function runQualifiedWorker(
   const assertCurrentWorkspace = async () => {
     if (!claudeWorkerAuthCompatible(process.env))
       throw new Error('Native Claude authentication is owned by its host; keep native');
-    const disclosure = await modelSettings(options.dataDir, job.root);
+    const disclosure = await modelSettings(options.dataDir, job.root, provider);
     const windows = binary.windows ? await windowsWorkerLaunch(options.dataDir, job.root) : null;
     const resolved = await resolveWorkerSettings({
       cwd: job.root,
@@ -629,6 +635,8 @@ async function runQualifiedWorker(
   };
   const fetchFallback = async (event: WorkerFetchEvent, id: unknown) => {
     if (!released || controller.signal.aborted) return null;
+    // The Neon worker sends nothing to Tenjin's router: a page it could not fetch is not read.
+    if (provider === 'neon') return null;
     await assertCurrentSend();
     return workerFetchFallback(event, {
       ...web,
@@ -722,11 +730,13 @@ async function runQualifiedWorker(
         const search = workerWebSearch(raw);
         if (search) {
           const why =
-            search.refused !== null
-              ? `the request's ${search.refused} filter is not supported`
-              : search.query.length === 0
-                ? 'the search had no query'
-                : null;
+            provider === 'neon'
+              ? 'the Neon worker has no web search'
+              : search.refused !== null
+                ? `the request's ${search.refused} filter is not supported`
+                : search.query.length === 0
+                  ? 'the search had no query'
+                  : null;
           if (why !== null) {
             send(searchRefusedMessage(search, why));
             return;

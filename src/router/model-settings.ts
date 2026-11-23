@@ -19,19 +19,46 @@ const RECIPIENTS = ['Tenjin', 'DeepSeek', 'Exa'] as const;
  * record never moves from the limited scope to the wide one but by the person's own
  * `on` with no `--repository`.
  */
-export const modelConsentSchema = z.object({
-  version: z.literal(2),
+const consentFields = {
   routerOrigin: z.url(),
   instructions: z.literal('applicable'),
   /** A worker reads the person's global Claude Code folder, session transcripts included. */
   reads: z.literal('claude-home'),
-  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
   /** The limited scope: only sessions inside these directories, whose workers get all of them. */
   repositories: z.array(z.string()).min(1).optional(),
   /** A ceiling named with `--max-job`. Absent, a job's cap is the per-call spend limit. */
   maxJobAtomic: z.string().regex(/^\d+$/).optional(),
+};
+export const modelConsentSchema = z.object({
+  ...consentFields,
+  version: z.literal(2),
+  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
 });
 export type ModelConsent = z.infer<typeof modelConsentSchema>;
+
+/** The seller the Neon worker pays directly: its origin is the consent's `routerOrigin`. */
+export const NEON_ORIGIN = 'https://blockrun.ai';
+/**
+ * THE NEON CONSENT IS ITS OWN RECORD (`router.neonConsent`, switched by `router.neon`), never
+ * the DeepSeek one: turning DeepSeek subagents on, or a usage setting, grants nothing here,
+ * and this record grants nothing there. Its recipients are BlockRun, which takes the calls and
+ * the payment, and Google, whose Gemini 4 Neon reads the assignment, the worker's instructions
+ * and its tool results. Tenjin's router receives nothing: the worker's web search and its
+ * page-read fallback are not used.
+ */
+export const neonConsentSchema = z.object({
+  ...consentFields,
+  version: z.literal(1),
+  routerOrigin: z.literal(NEON_ORIGIN),
+  recipients: z.tuple([z.literal('BlockRun'), z.literal('Google')]),
+});
+export type NeonConsent = z.infer<typeof neonConsentSchema>;
+/** Which provider's consent and worker a job or a call belongs to. */
+export type WorkerProvider = 'deepseek' | 'neon';
+/** The provider a job runs on: Neon only when its decision says so, else DeepSeek. */
+export function providerOf(job: { decision: Record<string, unknown> }): WorkerProvider {
+  return job.decision.provider === 'neon' ? 'neon' : 'deepseek';
+}
 
 /** The person's per-call spend limit, the same one the tool router applies to one paid call. */
 export function perCallLimitAtomic(config: PartialConfig): bigint {
@@ -52,7 +79,7 @@ function jobCapAtomic(named: string | undefined, perCall: bigint): bigint {
  * real paths. Null where it names none: a wide consent, another router's, or no consent.
  */
 export function namedDirectories(consent: unknown, routerOrigin?: string): string[] | null {
-  const parsed = modelConsentSchema.safeParse(consent);
+  const parsed = z.union([modelConsentSchema, neonConsentSchema]).safeParse(consent);
   if (!parsed.success || parsed.data.repositories === undefined) return null;
   if (routerOrigin !== undefined && parsed.data.routerOrigin !== routerOrigin) return null;
   return parsed.data.repositories.flatMap((path) => {
@@ -93,16 +120,48 @@ export function disclosureCovers(repositories: readonly string[], path: string):
     (root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`),
   );
 }
-/** Separate inference consent: legacy native-tier/effort settings grant nothing. */
-export async function modelSettings(dataDir: string, cwd: string) {
+/**
+ * The record a Neon turn-on writes: the same scope and ceiling as a DeepSeek one, its own
+ * recipients, and the seller's origin in place of Tenjin's.
+ */
+export function neonConsent(options: {
+  /** Real paths: the limited scope. */
+  repositories?: readonly string[];
+  maxJobAtomic?: string;
+}): NeonConsent {
+  return neonConsentSchema.parse({
+    version: 1,
+    instructions: 'applicable',
+    reads: 'claude-home',
+    recipients: ['BlockRun', 'Google'],
+    routerOrigin: NEON_ORIGIN,
+    ...(options.repositories?.length ? { repositories: [...new Set(options.repositories)] } : {}),
+    ...(options.maxJobAtomic === undefined ? {} : { maxJobAtomic: options.maxJobAtomic }),
+  });
+}
+
+/**
+ * Separate inference consent: legacy native-tier/effort settings grant nothing. The Neon
+ * worker reads its own record (`provider: 'neon'`); the DeepSeek `subagents` switch and its
+ * consent never stand in for it.
+ */
+export async function modelSettings(
+  dataDir: string,
+  cwd: string,
+  provider: WorkerProvider = 'deepseek',
+) {
   const config = await loadRawConfig(dataDir);
   const settings = await routerSettings({ cwd, dataDir, config });
   const block = config.router as Record<string, unknown> | undefined;
-  const parsed = modelConsentSchema.safeParse(block?.subagentConsent);
+  const parsed =
+    provider === 'neon'
+      ? neonConsentSchema.safeParse(block?.neonConsent)
+      : modelConsentSchema.safeParse(block?.subagentConsent);
   if (
     !settings.enabled.value ||
-    !settings.subagents.value ||
-    block?.subagents !== true ||
+    (provider === 'neon'
+      ? block?.neon !== true
+      : !settings.subagents.value || block?.subagents !== true) ||
     !parsed.success
   )
     return null;

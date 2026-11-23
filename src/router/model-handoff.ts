@@ -10,9 +10,15 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, routingAuthorizedAtomic, type NoOffer } from './model-job';
-import { modelSettings, type ModelSettings } from './model-settings';
+import {
+  modelSettings,
+  NEON_ORIGIN,
+  providerOf,
+  type ModelSettings,
+  type WorkerProvider,
+} from './model-settings';
 import { modelGithubRepositories } from './model-repositories';
-import type { ModelTransport } from './model-transport';
+import type { ModelTransport, WorkerTransport } from './model-transport';
 import type { ModelJob } from './model-job';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
@@ -28,6 +34,9 @@ import {
   type ClaudeWorkspace,
 } from './claude-workspace';
 import { homedir } from 'node:os';
+import { realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { NEON_MODEL, NEON_MINIMUM_JOB_ATOMIC, NEON_TURN_MAX_TOKENS } from './neon-chat';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -80,6 +89,11 @@ export const modelOfferSchema = z.object({
    *  it, so an offer without it, or with another value, is invalid and the call stays native. */
   messagesStream: z.literal(1),
 });
+/** What the door answers where the person has not turned Neon on: it names the step. */
+export const NEON_CONSENT_REFUSAL =
+  "Gemini 4 Neon subagents are off. Nothing was sent and nothing was charged. Ask the person to turn them on with `tenjin config neon on`: that is their own consent, separate from DeepSeek subagents, and it names Google and BlockRun as the recipients of the worker's requests. Then call again.";
+/** The Neon worker's name in an answer, and what its consent names as recipients. */
+export const NEON_LABEL = 'Gemini 4 Neon';
 export interface ModelSession {
   sessionId: string;
   turnId: string;
@@ -92,7 +106,11 @@ export interface ModelSession {
  * What the offer tells the parent of its consent: under the wide scope the directories are
  * the worker's own, under the limited one the directories the person named.
  */
-function offerConsent(settings: ModelSettings, nativeRepositories: readonly string[]) {
+function offerConsent(
+  settings: ModelSettings,
+  nativeRepositories: readonly string[],
+  provider: WorkerProvider = 'deepseek',
+) {
   const repositories =
     settings.scope === 'native-workspace' ? [...nativeRepositories] : settings.repositories;
   return {
@@ -103,7 +121,7 @@ function offerConsent(settings: ModelSettings, nativeRepositories: readonly stri
     githubRepositories: modelGithubRepositories(repositories),
     routerOrigin: settings.routerOrigin,
     // As the consent record names them: Exa reads a page the worker's WebFetch could not fetch.
-    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+    recipients: provider === 'neon' ? ['BlockRun', 'Google'] : ['Tenjin', 'DeepSeek', 'Exa'],
   };
 }
 
@@ -223,13 +241,23 @@ export type CaptureTiming = {
 export class ModelHandoff {
   readonly store: ModelJobStore;
   readonly conversations: ModelConversationStore;
-  constructor(private options: { dataDir: string; transport: ModelTransport }) {
+  constructor(
+    private options: {
+      dataDir: string;
+      transport: ModelTransport;
+      /** The Neon worker's transport, made when a Neon job's follow-up needs it. */
+      neonTransport?: () => Promise<WorkerTransport>;
+    },
+  ) {
     this.store = new ModelJobStore(options.dataDir);
     this.conversations = new ModelConversationStore(options.dataDir);
   }
-  private async currentConsent(cwd: string) {
-    const settings = await modelSettings(this.options.dataDir, cwd);
-    return settings?.routerOrigin === this.options.transport.origin ? settings : null;
+  private async currentConsent(cwd: string, provider: WorkerProvider = 'deepseek') {
+    const settings = await modelSettings(this.options.dataDir, cwd, provider);
+    return settings?.routerOrigin ===
+      (provider === 'neon' ? NEON_ORIGIN : this.options.transport.origin)
+      ? settings
+      : null;
   }
   /** Records why a call got no offer and answers that it runs natively. Codes only. */
   private async stay(
@@ -359,6 +387,84 @@ export class ModelHandoff {
     }
     return this.route(session, job, signal, timing);
   }
+  /**
+   * THE EXPLICIT DOOR to a Gemini 4 Neon worker: the parent chose it, so there is no held call,
+   * no routing and no offer to judge. It makes the job's record, the way a held call's offer
+   * does, and answers with the offer the accept then runs. It refuses, naming the consent
+   * step, where the person has not turned Neon on, and in every other case the DeepSeek
+   * worker would also stay out: no permission mode, a Windows host, a worker that does not
+   * qualify, a job ceiling with no room for one call. It sends nothing and pays nothing.
+   */
+  async neon(
+    session: ModelSession,
+    input: { prompt: string; description?: string; subagent_type?: string },
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const refuse = (reason: string) => ({ action: 'refused' as const, reason, charged: false });
+    if (isModelWorkerProcess()) return refuse('A worker starts no other worker.');
+    const settings = await this.currentConsent(session.cwd, 'neon');
+    if (!settings) return refuse(NEON_CONSENT_REFUSAL);
+    if (!claudeWorkerPermissionMode(session.claudePermissionMode))
+      return refuse(
+        `A Neon worker cannot run in this session's permission mode (${modeName(session.claudePermissionMode)}).`,
+      );
+    if (!lockSupport().ok)
+      return refuse('A Neon worker needs Node 22.13 or later on Linux; this one cannot run it.');
+    const agentType = input.subagent_type ?? 'general-purpose';
+    signal?.throwIfAborted();
+    const worker = await qualifiedModelWorker(
+      session.cwd,
+      agentType,
+      this.options.dataDir,
+      signal,
+      session.claudePermissionMode,
+      'neon',
+    );
+    if (!worker?.claudeWorkspace)
+      return refuse(
+        'This Claude Code, its login, policy, sandbox or the subagent type does not qualify for a worker here.',
+      );
+    if (settings.maxJobAtomic < NEON_MINIMUM_JOB_ATOMIC)
+      return refuse(
+        'The job ceiling has no room for one Neon call. Raise the per-call limit or the --max-job ceiling.',
+      );
+    const native = {
+      prompt: input.prompt,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      subagent_type: agentType,
+    };
+    const job = await this.store.offer({
+      sessionId: session.sessionId,
+      turnId: session.turnId,
+      // A door call is no held call: its id is its own, so a repeat is a second job.
+      callId: `neon-${randomUUID()}`,
+      root: settings.root,
+      task: input.prompt,
+      native,
+      decision: {
+        action: 'model',
+        provider: 'neon',
+        model: NEON_MODEL,
+        routerOrigin: NEON_ORIGIN,
+        // No routing call was paid: the job starts with nothing spent.
+        routingAuthorizedAtomic: '0',
+        maxOutputTokens: NEON_TURN_MAX_TOKENS,
+        claudePermissionMode: session.claudePermissionMode,
+        claudeWorkspace: worker.claudeWorkspace,
+      },
+      capAtomic: settings.maxJobAtomic.toString(),
+    });
+    return {
+      action: 'offer',
+      started: false,
+      offer_id: job.id,
+      label: NEON_LABEL,
+      capAtomic: job.capAtomic,
+      workspace: worker.claudeWorkspace,
+      consent: offerConsent(settings, nativeRepositories(worker.claudeWorkspace), 'neon'),
+      worker_handle: workerHandleFor(job.id),
+    };
+  }
   private async continue(
     session: ModelSession,
     callId: string,
@@ -368,23 +474,32 @@ export class ModelHandoff {
     signal?: AbortSignal,
     direct = false,
   ) {
-    const { dataDir, transport } = this.options;
-    const settings = await this.currentConsent(session.cwd);
+    const { dataDir } = this.options;
+    const here = await realpath(session.cwd).catch(() => null);
     if (
-      !settings ||
+      !here ||
       isModelWorkerProcess() ||
       !claudeWorkerPermissionMode(session.claudePermissionMode)
     )
       return continuationRefusal('Current model consent or Claude permission mode is unavailable');
     const owner = {
       parentSessionId: session.sessionId,
-      root: settings.root,
-      configDir: claudeWorkerConfigDir(settings.root),
+      root: here,
+      configDir: claudeWorkerConfigDir(here),
     };
     const conversation = await this.conversations.lookup(handle, owner);
     if (!conversation || !['idle', 'offered'].includes(conversation.state))
       return continuationRefusal('Worker history is foreign, unavailable or already active');
     const original = conversation.originalJob;
+    // A follow-up runs under the consent of the provider its worker began under.
+    const provider = providerOf(original);
+    const settings = await this.currentConsent(session.cwd, provider);
+    if (!settings || settings.root !== here)
+      return continuationRefusal('Current model consent or Claude permission mode is unavailable');
+    const transport =
+      provider === 'neon' && this.options.neonTransport
+        ? await this.options.neonTransport()
+        : this.options.transport;
     if (
       native.subagent_type !== undefined &&
       native.subagent_type !== (original.native.subagent_type ?? 'general-purpose')
@@ -406,6 +521,7 @@ export class ModelHandoff {
       dataDir,
       signal,
       session.claudePermissionMode,
+      provider,
     );
     const originalWorkspace = savedClaudeWorkspace(original.decision.claudeWorkspace);
     if (
@@ -418,7 +534,7 @@ export class ModelHandoff {
         'Current native workspace scope changed or its original disclosure is unavailable',
       );
     signal?.throwIfAborted();
-    const latest = await this.currentConsent(session.cwd);
+    const latest = await this.currentConsent(session.cwd, provider);
     if (
       !latest ||
       latest.root !== settings.root ||
@@ -464,15 +580,19 @@ export class ModelHandoff {
       worker_handle: handle,
       continuation: true,
       ...(direct ? { direct: true } : {}),
-      label: 'DeepSeek V4.1 Flash 1017',
+      label: provider === 'neon' ? NEON_LABEL : 'DeepSeek V4.1 Flash 1017',
       routingFeeAtomic: '0',
       proxyFeePercent: 5,
       capAtomic: cap,
-      reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
+      reason: `Continue the owned ${provider === 'neon' ? 'Neon' : 'DeepSeek'} worker with its history and remaining original budget`,
       parentPolicy: continuationPolicy,
       workspace: worker.claudeWorkspace,
       ...droppedNote(worker.claudeWorkspace),
-      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
+      consent: offerConsent(
+        latest,
+        modelClaudeRepositories(worker.claudeWorkspace, latest),
+        provider,
+      ),
       instruction:
         "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
     };
