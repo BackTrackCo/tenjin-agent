@@ -487,7 +487,8 @@ export function messagesRequest(
   body: Record<string, unknown>,
   maxTokens: number,
 ): Record<string, unknown> {
-  const { thinking: _asked, ...rest } = body;
+  // The worker's own `thinking` is replaced by the budget below.
+  const rest = Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'thinking'));
   // The budget stays below the cap by at least the floor, so a stepped-down turn still writes.
   const budget = Math.min(NEON_THINKING_BUDGET_TOKENS, maxTokens - NEON_THINKING_BUDGET_FLOOR);
   return {
