@@ -36,7 +36,7 @@ import {
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { NEON_MODEL, NEON_MINIMUM_JOB_ATOMIC, neonMaxTokens } from './neon-chat';
+import { neonLabel, neonModel, NEON_MINIMUM_JOB_ATOMIC, neonMaxTokens } from './neon-chat';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -93,7 +93,8 @@ export const modelOfferSchema = z.object({
 export const NEON_CONSENT_REFUSAL =
   "Gemini 4 Neon subagents are off. Nothing was sent and nothing was charged. Ask the person to turn them on with `tenjin config neon on`: that is their own consent, separate from DeepSeek subagents, and it names Google and BlockRun as the recipients of the worker's requests. Then call again.";
 /** The Neon worker's name in an answer, and what its consent names as recipients. */
-export const NEON_LABEL = 'Gemini 4 Neon';
+/** The Neon worker's name in an answer: the model of the job, never another's. */
+export const NEON_LABEL = neonLabel(undefined);
 export interface ModelSession {
   sessionId: string;
   turnId: string;
@@ -444,7 +445,7 @@ export class ModelHandoff {
       decision: {
         action: 'model',
         provider: 'neon',
-        model: NEON_MODEL,
+        model: neonModel(),
         routerOrigin: NEON_ORIGIN,
         // No routing call was paid: the job starts with nothing spent.
         routingAuthorizedAtomic: '0',
@@ -458,7 +459,7 @@ export class ModelHandoff {
       action: 'offer',
       started: false,
       offer_id: job.id,
-      label: NEON_LABEL,
+      label: neonLabel(neonModel()),
       capAtomic: job.capAtomic,
       workspace: worker.claudeWorkspace,
       consent: offerConsent(settings, nativeRepositories(worker.claudeWorkspace), 'neon'),
@@ -580,7 +581,7 @@ export class ModelHandoff {
       worker_handle: handle,
       continuation: true,
       ...(direct ? { direct: true } : {}),
-      label: provider === 'neon' ? NEON_LABEL : 'DeepSeek V4.1 Flash 1017',
+      label: provider === 'neon' ? neonLabel(original.decision.model) : 'DeepSeek V4.1 Flash 1017',
       routingFeeAtomic: '0',
       proxyFeePercent: 5,
       capAtomic: cap,

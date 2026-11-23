@@ -5,7 +5,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import { ModelHandoff, NEON_LABEL, type CaptureTiming, type ModelSession } from './model-handoff';
+import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
+import { neonLabel } from './neon-chat';
 import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
@@ -1290,7 +1291,10 @@ export function registerModelTool(
                     );
                     const envelope = {
                       status: 'completed',
-                      label: provider === 'neon' ? NEON_LABEL : 'DeepSeek V4.1 Flash 1017',
+                      label:
+                        provider === 'neon'
+                          ? neonLabel(job.decision.model)
+                          : 'DeepSeek V4.1 Flash 1017',
                       elapsedMs: Date.now() - started,
                       ...counts(),
                       ...(await refundOutcome()),
@@ -1450,7 +1454,10 @@ export function registerModelTool(
                 return answer({
                   status: 'started',
                   background: true,
-                  label: provider === 'neon' ? NEON_LABEL : 'DeepSeek V4.1 Flash 1017',
+                  label:
+                    provider === 'neon'
+                      ? neonLabel(job.decision.model)
+                      : 'DeepSeek V4.1 Flash 1017',
                   offer_id: job.id,
                   worker_handle: activeConversation.handle,
                   instruction: BACKGROUND_STARTED,

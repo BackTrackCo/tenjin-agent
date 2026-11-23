@@ -5,6 +5,8 @@ import {
   chatBody,
   chatUsage,
   hoistedForNeon,
+  neonLabel,
+  neonModel,
   messagesRequest,
   NEON_BESIDE_RESULT_LABEL,
   fittingNeonTokens,
@@ -405,4 +407,23 @@ it('reads the eval reasoning override on both routes, and keeps low as the defau
   expect('thinking' in omit.messages).toBe(false);
   // A value it does not know is the default.
   expect(send('wild').chat.reasoning_effort).toBe('low');
+});
+
+it('lets the eval name one of four Gemini 4 models, falls back to Neon, and prices each as itself', () => {
+  expect(neonModel({})).toBe('google/gemini-4-neon');
+  expect(neonModel({ TENJIN_NEON_MODEL: 'google/gemini-4-hydrogen' })).toBe(
+    'google/gemini-4-hydrogen',
+  );
+  expect(neonModel({ TENJIN_NEON_MODEL: 'google/gemini-4-carbon' })).toBe('google/gemini-4-carbon');
+  for (const wild of ['gpt-6', 'google/gemini-3.8-flash', '', 'toString'])
+    expect(neonModel({ TENJIN_NEON_MODEL: wild })).toBe('google/gemini-4-neon');
+  // The label follows the model that ran, and an unknown one reads as the default.
+  expect(neonLabel('google/gemini-4-hydrogen')).toBe('Gemini 4 Hydrogen');
+  expect(neonLabel(undefined)).toBe('Gemini 4 Neon');
+  // The body names the model and the quote uses its prices: 2,048 output tokens, no input.
+  vi.stubEnv('TENJIN_NEON_MODEL', 'google/gemini-4-hydrogen');
+  expect(chatBody({ messages: [] }, {}, 64).model).toBe('google/gemini-4-hydrogen');
+  expect(messagesRequest({ messages: [] }, 64).model).toBe('google/gemini-4-hydrogen');
+  expect(neonPeakQuoteAtomic(0, 2_048)).toBe(16_128n);
+  expect(neonPeakQuoteAtomic(0, 2_048, 'google/gemini-4-neon')).toBe(32_256n);
 });

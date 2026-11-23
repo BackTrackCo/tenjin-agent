@@ -7,7 +7,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { modelSettings } from '../router/model-settings';
 import type { ModelJob } from '../router/model-job';
 import { chainReader } from '../router/routing-payer';
-import { NEON_TURN_MAX_TOKENS } from '../router/neon-chat';
+import { neonLabel, NEON_TURN_MAX_TOKENS } from '../router/neon-chat';
 import { neonSeller, recountX402inference } from '../router/neon-seller';
 import { NeonTransport, readNeonRecord } from '../router/neon-transport';
 
@@ -114,7 +114,7 @@ export async function summary(
   return {
     data: { seller, ok: message !== undefined, stop, message, call, ...(notice ? { notice } : {}) },
     humanLines: [
-      `seller ${seller}`,
+      `seller ${seller}  model ${neonLabel(call?.model)}`,
       message ? `stop ${stop}  usage ${JSON.stringify(message.usage)}` : `failed ${stop}`,
       `ceiling ${call?.quotedAtomic}  charged ${call?.settledAtomic}  output ${call?.outputTokens}  reasoning ${call?.reasoningTokens ?? 0}  cached ${call?.cachedInputTokens}`,
       ...(notice ? [`seller notice ${notice}`] : []),

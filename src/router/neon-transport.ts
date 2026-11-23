@@ -38,7 +38,9 @@ import {
   messageOf,
   NEON_CALL_TIMEOUT_MS,
   NEON_CHAT_URL,
+  neonLabel,
   neonMaxTokens,
+  neonModel,
   NeonNoText,
   NeonReplyInvalid,
   replyOfBody,
@@ -57,6 +59,8 @@ const callSchema = z.object({
   inputTokens: z.number(),
   cachedInputTokens: z.number(),
   outputTokens: z.number(),
+  /** The model that answered the call, as it was asked for. */
+  model: z.string().optional(),
   /** Thought tokens counted in the output, where BlockRun reports them. */
   reasoningTokens: z.number().optional(),
   /** The `max_tokens` the call asked for: what BlockRun's quote was sized by. */
@@ -473,6 +477,7 @@ export class NeonTransport {
       at: started,
       ...usage,
       maxTokens,
+      model: neonModel(),
       quotedAtomic: (sellerCharge?.ceiling ?? quoted).toString(),
       settledAtomic: settled ? quoted.toString() : null,
       settlement: settled ? 'settled' : 'unknown',
@@ -606,7 +611,7 @@ export class NeonTransport {
       capabilityId: 'neon-worker',
       provider: new URL(neonSeller() === 'x402inference' ? X402INFERENCE_CHAT_URL : NEON_CHAT_URL)
         .host,
-      label: 'Gemini 4 Neon worker',
+      label: `${neonLabel(neonModel())} worker`,
       source: 'tenjin',
       url: neonSeller() === 'x402inference' ? X402INFERENCE_CHAT_URL : NEON_CHAT_URL,
       sent: recordedSent(`neon worker job ${job.id} call ${n}`),

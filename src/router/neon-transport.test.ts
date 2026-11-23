@@ -733,3 +733,19 @@ it('reads the eval output cap override, bounded', () => {
   expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '40000' })).toBe(8_192);
   expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '0' })).toBe(8_192);
 });
+
+it('asks for the model the eval named and records it, with the ledger label of that model', async () => {
+  vi.stubEnv('TENJIN_NEON_MODEL', 'google/gemini-4-hydrogen');
+  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
+  const { ctx, repo, data } = await fixture(consented);
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  const sent = job(repo);
+  await neon.messages(sent, MESSAGES, new AbortController().signal);
+  expect(JSON.parse(batch.post.mock.calls[0]![0]).model).toBe('google/gemini-4-hydrogen');
+  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
+    model: 'google/gemini-4-hydrogen',
+  });
+  const ledger = await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8');
+  expect(ledger).toContain('Gemini 4 Hydrogen worker');
+  expect(ledger).not.toContain('Gemini 4 Neon worker');
+});

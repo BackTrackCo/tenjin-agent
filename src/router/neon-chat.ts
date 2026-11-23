@@ -9,11 +9,33 @@ import { NEON_ORIGIN } from './model-settings';
  * worker's Anthropic Messages in and sends chat completions out; this file is that
  * translation, with no network and no payment in it.
  */
-export const NEON_MODEL = 'google/gemini-4-neon';
+export const NEON_MODEL: 'google/gemini-4-neon' = 'google/gemini-4-neon';
 export const NEON_CHAT_URL = `${NEON_ORIGIN}/api/v1/chat/completions`;
 /** BlockRun's list prices for Neon, in atomic USDC (millionths of a dollar) per token. */
-const NEON_INPUT_ATOMIC_PER_TOKEN = 3n;
-const NEON_OUTPUT_ATOMIC_PER_TOKEN = 15n;
+/**
+ * THE GEMINI 4 MODELS THE EVAL MAY NAME, with their list prices in thousandths of a dollar per
+ * million tokens (1,500 is $1.50), as BlockRun's `/api/v1/models` lists them and as x402inference
+ * lists them before its 5% (read 2026-11-23). Both sellers sell all four. Neon is the default.
+ */
+export const NEON_MODELS = {
+  'google/gemini-4-neon': { label: 'Gemini 4 Neon', inMilli: 3_000n, outMilli: 15_000n },
+  'google/gemini-4-carbon': { label: 'Gemini 4 Carbon', inMilli: 2_000n, outMilli: 10_000n },
+  'google/gemini-4-argon': { label: 'Gemini 4 Argon', inMilli: 2_000n, outMilli: 10_000n },
+  'google/gemini-4-hydrogen': { label: 'Gemini 4 Hydrogen', inMilli: 1_500n, outMilli: 7_500n },
+} as const;
+export type NeonModelId = keyof typeof NEON_MODELS;
+/** EVAL ONLY: `TENJIN_NEON_MODEL` names one of the four; any other value is Neon. */
+export const NEON_MODEL_ENV = 'TENJIN_NEON_MODEL';
+export function neonModel(env: NodeJS.ProcessEnv = process.env): NeonModelId {
+  const asked = env[NEON_MODEL_ENV] ?? '';
+  return Object.hasOwn(NEON_MODELS, asked) ? (asked as NeonModelId) : NEON_MODEL;
+}
+/** The name shown for a model id (a job's `decision.model`, a call's `model`); Neon when unknown. */
+export function neonLabel(model: unknown): string {
+  return typeof model === 'string' && Object.hasOwn(NEON_MODELS, model)
+    ? NEON_MODELS[model as NeonModelId].label
+    : NEON_MODELS[NEON_MODEL].label;
+}
 /** BlockRun's platform fee, percent, and its least charge per call. */
 const NEON_FEE_PERCENT = 105n;
 const NEON_MINIMUM_CALL_ATOMIC = 2_000n;
@@ -71,10 +93,15 @@ export const NEON_CALL_TIMEOUT_MS = 300_000;
  * at least $0.002. An estimate: the live 402 is the price, and is checked against the job's
  * ceiling before anything is signed.
  */
-export function neonPeakQuoteAtomic(bytes: number, outputTokens: number): bigint {
+export function neonPeakQuoteAtomic(
+  bytes: number,
+  outputTokens: number,
+  model: NeonModelId = neonModel(),
+): bigint {
   const input = BigInt(Math.ceil(bytes / NEON_BYTES_PER_INPUT_TOKEN));
-  const raw =
-    input * NEON_INPUT_ATOMIC_PER_TOKEN + BigInt(outputTokens) * NEON_OUTPUT_ATOMIC_PER_TOKEN;
+  const price = NEON_MODELS[model];
+  // A model's list price per million tokens is its atomic USDC per token, in thousandths here.
+  const raw = (input * price.inMilli + BigInt(outputTokens) * price.outMilli + 999n) / 1000n;
   const quoted = (raw * NEON_FEE_PERCENT + 99n) / 100n;
   return quoted < NEON_MINIMUM_CALL_ATOMIC ? NEON_MINIMUM_CALL_ATOMIC : quoted;
 }
@@ -250,7 +277,7 @@ export function chatBody(
     ? body.stop_sequences.filter((s): s is string => typeof s === 'string').slice(0, 4)
     : [];
   return {
-    model: NEON_MODEL,
+    model: neonModel(),
     max_tokens: maxTokens,
     stream,
     ...(stream ? { stream_options: { include_usage: true } } : {}),
@@ -533,7 +560,7 @@ export function messagesRequest(
   const budget = Math.min(wanted, maxTokens - NEON_THINKING_BUDGET_FLOOR);
   return {
     ...rest,
-    model: NEON_MODEL,
+    model: neonModel(),
     max_tokens: maxTokens,
     stream: true,
     ...(effort === 'none'
