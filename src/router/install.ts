@@ -109,7 +109,7 @@ export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin
 
 export const DISCLOSURE: readonly string[] = [
   'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
-  'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
+  'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and Privacy Policy (https://tenjin.sh/privacy).',
 ];
 
 /**
