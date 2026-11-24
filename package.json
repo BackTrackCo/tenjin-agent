@@ -50,7 +50,7 @@
     "scripts/installers",
     "NOTICE.md"
   ],
-  "packageManager": "pnpm@11.28.12",
+  "packageManager": "pnpm@12.15.0",
   "scripts": {
     "build": "rm -rf dist .bundle-meta && tsup",
     "test": "vitest run",
