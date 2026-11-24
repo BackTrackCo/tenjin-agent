@@ -455,12 +455,11 @@ function agentNextStep(o: {
       ? `what the money is for (${o.need.label}, $${o.need.priceUsd} a call)`
       : 'what the money is for (the paid tool and its price, if any)';
   // Only the Tenjin fund page takes a code; a hosted Coinbase checkout does not.
-  const page = o.hosted ? 'checkout' : 'the fund page';
-  const use = o.hosted ? '' : ' to pay or enter a code (under Have a code?)';
-  const where = o.opened
-    ? `that ${page} is open in their browser${use}`
-    : `that ${page} is ready${use}, and show checkoutUrl as a clickable link`;
-  return `Tell the person in one or two sentences ${what} and ${where}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
+  const where = o.hosted
+    ? `that checkout is ${o.opened ? 'open in their browser' : 'ready'}`
+    : `that the fund page${o.opened ? ' in their browser' : ''} takes a payment or a code (under Have a code?)`;
+  const link = o.opened ? '' : ', and show checkoutUrl as a clickable link';
+  return `Tell the person in one or two sentences ${what} and ${where}${link}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
 }
 
 /**

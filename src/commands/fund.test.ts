@@ -803,7 +803,7 @@ describe('runFund: the link, its context and its status', () => {
     });
     expect(stderr.join('')).toContain(`  ${name}  opened in your browser`);
     const nextStep = (res.data as { nextStep: string }).nextStep;
-    expect(nextStep.includes('enter a code (under Have a code?)')).toBe(code);
+    expect(nextStep.includes('takes a payment or a code (under Have a code?)')).toBe(code);
     expect(nextStep).not.toContain('filled in');
 
     stderr.length = 0;
