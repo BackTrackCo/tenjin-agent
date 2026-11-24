@@ -784,6 +784,58 @@ describe('runFund: the link, its context and its status', () => {
     expect(server.mints[1]!.body).not.toHaveProperty('machineHash');
   });
 
+  // Only the Tenjin fund page has "Have a code?"; a hosted Coinbase checkout takes a payment only.
+  it.each([
+    [
+      'the fund page, which takes a code',
+      pageLink(Date.now() + 600_000),
+      'Fund page',
+      'add funds',
+      true,
+    ],
+    ['a hosted checkout, which does not', CHECKOUT, 'Checkout', 'pay', false],
+  ])('names %s, to the person and the agent', async (_label, url, name, toDo, code) => {
+    const { provider } = fakeProvider();
+    const base = { provider, fetchImpl: fundServer([url]).fetchImpl, wait: false };
+    const res = await fund(makeCtx({ isTTY: true, json: false }), {
+      ...base,
+      openUrl: async () => true,
+    });
+    expect(stderr.join('')).toContain(`  ${name}  opened in your browser`);
+    const nextStep = (res.data as { nextStep: string }).nextStep;
+    expect(nextStep.includes('enter a code (under Have a code?)')).toBe(code);
+    expect(nextStep).not.toContain('filled in');
+
+    stderr.length = 0;
+    await fund(makeCtx({ isTTY: true, json: false }), { ...base, open: false });
+    expect(stderr.join('')).toContain(`  ${name}  open this link to ${toDo}:`);
+  });
+
+  it('ends on the code accepted, then the balance, when a code lands', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValueOnce(0n).mockResolvedValueOnce(0n).mockResolvedValue(1_000_000n);
+    let clock = 1_000_000;
+    const server = fundServer(
+      [pageLink(clock + 600_000)],
+      [[200, { state: 'paying', via: 'code', updatedAt: 'x' }]],
+    );
+    const res = await fund(makeCtx({ isTTY: true, json: false }), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      openUrl: async () => true,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    const out = stderr.join('');
+    expect(out).toContain('Redeeming your code…');
+    expect(out).toContain('✓ Code accepted');
+    expect(out).not.toContain('Added to your balance');
+    expect(res.data).toMatchObject({ funded: true, added: { usd: '1' } });
+    expect(res.humanLines?.join('\n')).toContain('You can close the browser tab.');
+  });
+
   it('waits on a payment already on its way instead of opening a second checkout', async () => {
     const { provider } = fakeProvider();
     const link = pageLink(Date.now() + 600_000);
@@ -840,7 +892,7 @@ describe('runFund: the link, its context and its status', () => {
     });
     expect(server.mints).toHaveLength(2);
     expect(readKey).toHaveBeenCalledTimes(1);
-    expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
+    expect(stderr.join('')).toContain('The link expired. Nothing was charged.');
     expect(res.data).toMatchObject({ funded: false, checkoutUrl: pageLink(1_000_000 + 600_000) });
   });
 
@@ -879,7 +931,7 @@ describe('runFund: the link, its context and its status', () => {
           }),
       },
     );
-    expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
+    expect(stderr.join('')).toContain('The link expired. Nothing was charged.');
     expect(out.humanLines).toEqual([]);
   });
 
