@@ -10,11 +10,13 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
  *
  * - THE LINK'S PAYMENT STATUS, `GET /api/fund/status` with the link's own
  *   token: what the fund page reported (opened, paying, paid, failed,
- *   cancelled). It is what lets the terminal say "Checkout open" and "Payment
- *   received" while the browser works, and what stops a second checkout while
- *   a payment is still landing. A 404 or 401 (the route is not deployed, or the
- *   token is past its grace) turns it off for the rest of the wait; a 429 or a
- *   network error is one round with no status.
+ *   cancelled), with `via: 'code'` while a code under "Have a code?" is
+ *   redeemed or refused. It is what lets the terminal say "Fund page open",
+ *   "Payment received" and "Redeeming your code" while the browser works, and
+ *   what stops a second checkout while a payment is still landing. A 404 or
+ *   401 (the route is not deployed, or the token is past its grace) turns it
+ *   off for the rest of the wait; a 429 or a network error is one round with
+ *   no status.
  * - THE BALANCE. Only a rise counts as arrived: the status says what the page
  *   saw, never that the money is spendable.
  *
@@ -41,7 +43,10 @@ export interface LinkStatus {
   updatedAt?: string;
   /** What the person was charged, in USD, on `paid`. */
   amountUsd?: number;
+  /** Why it failed: the page's own short sentence, printable text only. */
   reason?: string;
+  /** A code redeemed on the page, not a payment. Servers before codes never send it. */
+  via?: 'code';
 }
 
 /** A payment that started, or went through, and may not be in the balance yet. */
@@ -83,7 +88,7 @@ export async function readLinkStatus(
   }
 }
 
-/** `{ state }`, with `updatedAt`, `amountUsd` and `reason` only when the server sent them well formed. */
+/** `{ state }`, with `updatedAt`, `amountUsd`, `reason` and `via` only when the server sent them well formed. */
 export function parseStatus(json: unknown): LinkStatus | null {
   if (typeof json !== 'object' || json === null) return null;
   const raw = json as Record<string, unknown>;
@@ -101,7 +106,17 @@ export function parseStatus(json: unknown): LinkStatus | null {
   ) {
     out.amountUsd = raw.amountUsd;
   }
-  if (typeof raw.reason === 'string' && raw.reason.length <= 120) out.reason = raw.reason;
+  // The reason is printed at the terminal, so no control or direction characters.
+  if (
+    typeof raw.reason === 'string' &&
+    raw.reason.length <= 120 &&
+    raw.reason.trim() !== '' &&
+    // eslint-disable-next-line no-control-regex
+    !/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(raw.reason)
+  ) {
+    out.reason = raw.reason.trim();
+  }
+  if (raw.via === 'code') out.via = 'code';
   return out;
 }
 
@@ -247,7 +262,7 @@ export interface WatchOptions {
   expiresAt?: number;
   /** End with `timed-out` once this passes. */
   deadline: number;
-  /** What the lines say: a checkout in the browser, or a crypto send. */
+  /** What the lines say: the fund page in the browser, or a crypto send. */
   view: 'checkout' | 'usdc' | 'funds';
   live?: LiveLine;
   fetchImpl?: typeof fetch;
@@ -275,22 +290,28 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   let backoff = 0;
   let saidOpen = false;
   let saidPaid = false;
-  let lastSaid: LinkState | undefined;
+  let lastSaid: string | undefined;
+  // Was the last payment in flight a code? Then its arrival is the code's. A
+  // refused or cancelled one is over, so a later rise is a payment's.
+  let viaCode = false;
 
   const render = (t: number) => {
     if (live === undefined) return;
     if (o.view === 'usdc') return live.spin('Watching for it to arrive…');
     const left =
       o.expiresAt !== undefined && t < o.expiresAt ? timeLeft(o.expiresAt - t) : undefined;
+    // Only the Tenjin fund page, the link with a token, takes a code.
+    const waiting =
+      o.token !== undefined ? 'Waiting for a payment or a code…' : 'Waiting for your payment…';
     if (!statusKnown) {
       return o.view === 'funds' && o.token === undefined
         ? live.spin('Waiting for funds to arrive…')
-        : live.spin('Waiting for your payment…', left);
+        : live.spin(waiting, left);
     }
-    const state = status!.state;
+    const { state, via, reason } = status!;
     if (state !== 'none' && !saidOpen) {
       saidOpen = true;
-      live.ok('Checkout open');
+      live.ok('Fund page open');
     }
     if (state === 'paid' && !saidPaid) {
       saidPaid = true;
@@ -299,15 +320,25 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         status!.amountUsd !== undefined ? `${chargedUsd(status!.amountUsd)} charged` : undefined,
       );
     }
-    if (state !== lastSaid) {
-      if (state === 'failed') live.warn("That payment didn't go through. Nothing was charged.");
+    // A second code refused is news even with no state between: the page's time tells them apart.
+    const news = via === 'code' ? `${state} code ${status!.updatedAt ?? ''}` : state;
+    if (news !== lastSaid) {
+      if (state === 'failed') {
+        live.warn(
+          via === 'code'
+            ? `That code didn't work. ${reason ?? 'The fund page says why.'}`
+            : "That payment didn't go through. Nothing was charged.",
+        );
+      }
       if (state === 'cancelled') live.line('  No payment was made.');
-      lastSaid = state;
+      lastSaid = news;
     }
     if (state === 'none') return live.spin('Waiting for the page to open…');
     if (state === 'paid') return live.spin('Adding to your balance…');
-    if (state === 'paying') return live.spin('Waiting for your payment…');
-    return live.spin('Waiting for your payment…', left);
+    if (state === 'paying') {
+      return live.spin(via === 'code' ? 'Redeeming your code…' : 'Waiting for your payment…');
+    }
+    return live.spin(waiting, left);
   };
 
   for (let round = 0; ; round++) {
@@ -323,6 +354,8 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         status = read.status;
         statusKnown = true;
         fresh = true;
+        if (inFlight(status)) viaCode = status.via === 'code';
+        else if (status.state === 'failed' || status.state === 'cancelled') viaCode = false;
       } else if (read.unavailable === 'gone') {
         statusOn = false;
         statusKnown = false;
@@ -351,7 +384,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
                   : undefined,
               );
             }
-            live.ok('Added to your balance', `+${dollars(added)}`);
+            live.ok(viaCode ? 'Code accepted' : 'Added to your balance', `+${dollars(added)}`);
           }
         }
         return { kind: 'arrived', balance, added, ...(status !== undefined ? { status } : {}) };
