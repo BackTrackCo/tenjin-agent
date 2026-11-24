@@ -1205,16 +1205,20 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
     expect(fund).toMatchObject({
-      question: 'Add $5 to your balance now?',
+      question: 'Add funds to your balance now?',
       options: [
-        { id: 'fund', label: 'Add $5', command: 'tenjin fund 5 --source install' },
+        {
+          id: 'fund',
+          label: 'Add funds: pay or use a code',
+          command: 'tenjin fund 5 --source install',
+        },
         { id: 'later', label: 'Not now', command: null },
       ],
     });
     expect(fund).not.toHaveProperty('url');
     // The agent opens checkout itself, waits in the background, and carries on.
     expect(fund.next).toContain('run its command yourself');
-    expect(fund.next).toContain('the person confirms the payment in their browser');
+    expect(fund.next).toContain('the person confirms any payment in their browser');
     expect(fund.next).toContain('`tenjin balance --wait` in the background');
     expect(fund.next).toContain('Never ask the person to type "done"');
     expect(fund.next).toContain('you ask when a task first needs a paid tool');
@@ -1273,7 +1277,7 @@ describe('install run by an agent hands back spending and funding instructions',
       fundingWarning: expect.stringContaining('Could not check your Tenjin funds'),
     });
     expect(receipt(result).join(' ')).toContain('does not mean you need to add money again');
-    expect(receipt(result).join(' ')).not.toContain('Add $5');
+    expect(receipt(result).join(' ')).not.toContain('Add funds:');
     expect(nextLine(result)).toBe(`Next: ${RELOAD}`);
   });
 
@@ -1491,7 +1495,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',
-        question: 'Add $5 to your balance now?',
+        question: 'Add funds to your balance now?',
       }),
     ]);
   });
