@@ -83,7 +83,7 @@
     "eslint-config-prettier": "^10",
     "hash-wasm": "4.13.0",
     "lean-qr": "^2.7.4",
-    "ox": "0.14.67",
+    "ox": "1.8.9",
     "prettier": "^3",
     "tsup": "^9.0.0",
     "typescript": "^6",
