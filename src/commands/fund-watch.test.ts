@@ -62,19 +62,9 @@ describe('the fund status a link reports', () => {
     expect(parseStatus({ url: 'https://tenjin.sh/fund' })).toBeNull();
   });
 
-  it('keeps `via` only for a code, and a reason only as printable text', () => {
+  it('keeps `via` only for a code', () => {
     expect(parseStatus({ state: 'paying', via: 'code' })).toEqual({ state: 'paying', via: 'code' });
     expect(parseStatus({ state: 'paying', via: 'card' })).toEqual({ state: 'paying' });
-    expect(parseStatus({ state: 'failed', via: 'code', reason: 'This code has expired.' })).toEqual(
-      { state: 'failed', via: 'code', reason: 'This code has expired.' },
-    );
-    // Printed at the terminal: an escape sequence or a direction override never is.
-    for (const reason of ['\x1b[2J', 'a\u202eb', 'x'.repeat(121), '  ']) {
-      expect(parseStatus({ state: 'failed', via: 'code', reason })).toEqual({
-        state: 'failed',
-        via: 'code',
-      });
-    }
   });
 
   it('takes the token from a Tenjin /fund link only', () => {
@@ -194,13 +184,14 @@ describe('watching a link until the money lands', () => {
     ]);
   });
 
-  it('says a refused code with the page reason, keeps waiting, and a card payment still lands', async () => {
+  // The fund page says why a code was refused; the terminal only goes back to waiting.
+  it('prints no line for a refused code, and a card payment still lands', async () => {
     const { end, said } = await watchCode(
       [
         [200, { state: 'opened', updatedAt: 'a' }],
         [200, { state: 'paying', via: 'code', updatedAt: 'b' }],
-        [200, { state: 'failed', via: 'code', reason: 'This code has expired.', updatedAt: 'c' }],
-        [200, { state: 'failed', via: 'code', reason: 'This code has expired.', updatedAt: 'c' }],
+        [200, { state: 'opened', updatedAt: 'c' }],
+        [200, { state: 'opened', updatedAt: 'c' }],
         [200, { state: 'paying', updatedAt: 'd' }],
         [200, { state: 'paid', updatedAt: 'e', amountUsd: 5 }],
       ],
@@ -211,7 +202,6 @@ describe('watching a link until the money lands', () => {
       '✓ Fund page open',
       '… Waiting for a payment or a code…',
       '… Redeeming your code…',
-      "! That code didn't work. This code has expired.",
       '… Waiting for a payment or a code…',
       '… Waiting for your payment…',
       '✓ Payment received $5.00 charged',
@@ -220,24 +210,24 @@ describe('watching a link until the money lands', () => {
     ]);
   });
 
-  it('says each refused code once, with no reason sent, and a later code is accepted', async () => {
+  it('prints no line for each wrong code tried, and a later code is accepted', async () => {
     const { end, said } = await watchCode(
       [
-        [200, { state: 'failed', via: 'code', updatedAt: 'a' }],
-        [200, { state: 'failed', via: 'code', updatedAt: 'a' }],
-        [200, { state: 'failed', via: 'code', updatedAt: 'b' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'a' }],
+        [200, { state: 'opened', updatedAt: 'b' }],
         [200, { state: 'paying', via: 'code', updatedAt: 'c' }],
+        [200, { state: 'opened', updatedAt: 'd' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'e' }],
       ],
-      (read) => (read >= 4 ? 1_000_000n : 0n),
+      (read) => (read >= 3 ? 1_000_000n : 0n),
     );
     expect(end).toMatchObject({ kind: 'arrived' });
     expect(said).toEqual([
       '✓ Fund page open',
-      "! That code didn't work. The fund page says why.",
-      '… Waiting for a payment or a code…',
-      "! That code didn't work. The fund page says why.",
+      '… Redeeming your code…',
       '… Waiting for a payment or a code…',
       '… Redeeming your code…',
+      '… Waiting for a payment or a code…',
       '✓ Code accepted +$1.00',
     ]);
   });
@@ -246,7 +236,7 @@ describe('watching a link until the money lands', () => {
     const { said } = await watchCode(
       [
         [200, { state: 'paying', via: 'code', updatedAt: 'a' }],
-        [200, { state: 'failed', via: 'code', updatedAt: 'b' }],
+        [200, { state: 'opened', updatedAt: 'b' }],
         [500, {}],
       ],
       (read) => (read >= 4 ? 5_000_000n : 0n),

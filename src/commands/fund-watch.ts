@@ -11,7 +11,7 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
  * - THE LINK'S PAYMENT STATUS, `GET /api/fund/status` with the link's own
  *   token: what the fund page reported (opened, paying, paid, failed,
  *   cancelled), with `via: 'code'` while a code under "Have a code?" is
- *   redeemed or refused. It is what lets the terminal say "Fund page open",
+ *   redeemed. It is what lets the terminal say "Fund page open",
  *   "Payment received" and "Redeeming your code" while the browser works, and
  *   what stops a second checkout while a payment is still landing. A 404 or
  *   401 (the route is not deployed, or the token is past its grace) turns it
@@ -43,7 +43,6 @@ export interface LinkStatus {
   updatedAt?: string;
   /** What the person was charged, in USD, on `paid`. */
   amountUsd?: number;
-  /** Why it failed: the page's own short sentence, printable text only. */
   reason?: string;
   /** A code redeemed on the page, not a payment. Servers before codes never send it. */
   via?: 'code';
@@ -106,16 +105,7 @@ export function parseStatus(json: unknown): LinkStatus | null {
   ) {
     out.amountUsd = raw.amountUsd;
   }
-  // The reason is printed at the terminal, so no control or direction characters.
-  if (
-    typeof raw.reason === 'string' &&
-    raw.reason.length <= 120 &&
-    raw.reason.trim() !== '' &&
-    // eslint-disable-next-line no-control-regex
-    !/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(raw.reason)
-  ) {
-    out.reason = raw.reason.trim();
-  }
+  if (typeof raw.reason === 'string' && raw.reason.length <= 120) out.reason = raw.reason;
   if (raw.via === 'code') out.via = 'code';
   return out;
 }
@@ -290,9 +280,9 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   let backoff = 0;
   let saidOpen = false;
   let saidPaid = false;
-  let lastSaid: string | undefined;
-  // Was the last payment in flight a code? Then its arrival is the code's. A
-  // refused or cancelled one is over, so a later rise is a payment's.
+  let lastSaid: LinkState | undefined;
+  // Is the money in flight a code's? Then its arrival is the code's. A refused
+  // code takes the page back to `opened`, so a later rise is a payment's.
   let viaCode = false;
 
   const render = (t: number) => {
@@ -308,7 +298,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         ? live.spin('Waiting for funds to arrive…')
         : live.spin(waiting, left);
     }
-    const { state, via, reason } = status!;
+    const { state, via } = status!;
     if (state !== 'none' && !saidOpen) {
       saidOpen = true;
       live.ok('Fund page open');
@@ -320,18 +310,10 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         status!.amountUsd !== undefined ? `${chargedUsd(status!.amountUsd)} charged` : undefined,
       );
     }
-    // A second code refused is news even with no state between: the page's time tells them apart.
-    const news = via === 'code' ? `${state} code ${status!.updatedAt ?? ''}` : state;
-    if (news !== lastSaid) {
-      if (state === 'failed') {
-        live.warn(
-          via === 'code'
-            ? `That code didn't work. ${reason ?? 'The fund page says why.'}`
-            : "That payment didn't go through. Nothing was charged.",
-        );
-      }
+    if (state !== lastSaid) {
+      if (state === 'failed') live.warn("That payment didn't go through. Nothing was charged.");
       if (state === 'cancelled') live.line('  No payment was made.');
-      lastSaid = news;
+      lastSaid = state;
     }
     if (state === 'none') return live.spin('Waiting for the page to open…');
     if (state === 'paid') return live.spin('Adding to your balance…');
@@ -354,8 +336,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         status = read.status;
         statusKnown = true;
         fresh = true;
-        if (inFlight(status)) viaCode = status.via === 'code';
-        else if (status.state === 'failed' || status.state === 'cancelled') viaCode = false;
+        viaCode = inFlight(status) && status.via === 'code';
       } else if (read.unavailable === 'gone') {
         statusOn = false;
         statusKnown = false;
