@@ -123,10 +123,7 @@ it('sends the tool call back with its thought signature, and the tool result as 
     stream_options: { include_usage: true },
     reasoning_effort: 'low',
     messages: [
-      {
-        role: 'system',
-        content: `You write documentation.\n${NEON_BESIDE_RESULT_LABEL}\nGo on.`,
-      },
+      { role: 'system', content: 'You write documentation.' },
       { role: 'user', content: 'Summarize the notes.' },
       {
         role: 'assistant',
@@ -141,6 +138,8 @@ it('sends the tool call back with its thought signature, and the tool result as 
         ],
       },
       { role: 'tool', tool_call_id: 'call_abc', content: '# Notes' },
+      // The text that came beside the result is a user message after it, in its place.
+      { role: 'user', content: 'Go on.' },
     ],
     tools: [
       {
@@ -381,10 +380,100 @@ it('moves system messages and text beside a tool result into the system prompt',
   // A body with neither shape is left as it is, and a user message with no tool result keeps its text.
   const plain = { messages: [{ role: 'user', content: 'Hi' }] };
   expect(hoistedForNeon(plain)).toBe(plain);
-  // The chat route reads the same hoisted body.
-  const chat = chatBody(body, {}, 64);
-  expect(chat.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool']);
-  expect(String(chat.messages[0]!.content)).toContain('Deferred tools are now available.');
+});
+
+// Gemini 4 caches implicitly: a request is cheap when it starts with the whole previous one.
+// The chat route therefore never moves anything into the system message, which opens the request.
+it('keeps the chat body a prefix of the next one when a system message and text beside a result arrive', () => {
+  const first = {
+    system: [{ type: 'text', text: 'You are a coding agent.' }],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Read README.md, then write notes.' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'README.md' } }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 't1', content: 'README text' }],
+      },
+    ],
+  };
+  const longer = {
+    ...first,
+    messages: [
+      ...first.messages.slice(0, 2),
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'README text' },
+          { type: 'text', text: 'Mind the style guide.' },
+        ],
+      },
+      { role: 'system', content: [{ type: 'text', text: 'Deferred tools are now available.' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+      { role: 'user', content: 'Go on.' },
+    ],
+  };
+  const short = chatBody(first, {}, 64);
+  const long = chatBody(longer, {}, 64);
+  // The system message is the real system prompt, the same bytes in both.
+  expect(short.messages[0]).toEqual({ role: 'system', content: 'You are a coding agent.' });
+  expect(long.messages[0]).toEqual(short.messages[0]);
+  expect(long.messages.filter((m) => m.role === 'system')).toHaveLength(1);
+  // The earlier request's messages are an exact prefix of the later one's.
+  expect(long.messages.slice(0, short.messages.length)).toEqual(short.messages);
+  expect(long.messages.slice(short.messages.length).map((m) => [m.role, m.content])).toEqual([
+    ['user', 'Mind the style guide.'],
+    ['user', 'Deferred tools are now available.'],
+    ['assistant', 'Done.'],
+    ['user', 'Go on.'],
+  ]);
+  // Never between an assistant's tool calls and their results: a system message that arrives
+  // there waits for the results.
+  const between = chatBody(
+    {
+      messages: [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't9', name: 'Read', input: {} }] },
+        { role: 'system', content: 'Mid-turn note.' },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't9', content: 'ok' }] },
+      ],
+    },
+    {},
+    64,
+  );
+  expect(between.messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'user']);
+});
+
+it('reads NanoGPT cache hits that the standard usage fields leave at zero', () => {
+  // The shape of job 7e7ad935, call 2: billed at the cached rate, reported in a block of its own.
+  const reply = {
+    usage: {
+      prompt_tokens: 9_000,
+      completion_tokens: 300,
+      prompt_tokens_details: { cached_tokens: 0 },
+    },
+    x_nanogpt_cache: {
+      requested: false,
+      enabledForDispatch: false,
+      supported: true,
+      status: 'hit',
+      readTokens: 6_544,
+    },
+  };
+  expect(chatUsage(reply)).toMatchObject({ inputTokens: 9_000, cachedInputTokens: 6_544 });
+  // A standard field above zero wins, a miss reads as none, and the count never passes the prompt.
+  expect(
+    chatUsage({
+      ...reply,
+      usage: { prompt_tokens: 9_000, prompt_tokens_details: { cached_tokens: 100 } },
+    }).cachedInputTokens,
+  ).toBe(100);
+  expect(
+    chatUsage({ ...reply, x_nanogpt_cache: { status: 'miss', readTokens: 6_544 } })
+      .cachedInputTokens,
+  ).toBe(0);
+  expect(chatUsage({ ...reply, usage: { prompt_tokens: 5_000 } }).cachedInputTokens).toBe(5_000);
 });
 
 it('reads the eval reasoning override on both routes, and keeps low as the default', () => {

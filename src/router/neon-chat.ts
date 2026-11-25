@@ -203,10 +203,17 @@ export function chatBody(
   /** A seller whose real charge comes on the response header asks for a plain reply. */
   stream = true,
 ): ChatBody {
-  const body = hoistedForNeon(asked);
+  // NO HOIST ON THIS ROUTE. Gemini 4 caches implicitly, by reusing the whole of the previous
+  // request as a prefix. The system message opens the request, so anything moved into it changes
+  // the start and loses the cache. It is the real system prompt only, the same bytes on every
+  // call of a job; a system message that arrives mid-conversation, and text beside a tool
+  // result, stay where they came, as `user` messages after the tool messages of their turn.
+  const body = asked;
   const messages: Record<string, unknown>[] = [];
   const system = textOf(body.system);
   if (system) messages.push({ role: 'system', content: system });
+  // Text that came between an assistant's tool calls and their results waits for the results.
+  const waiting: string[] = [];
   for (const message of Array.isArray(body.messages) ? body.messages : []) {
     if (!isRecord(message)) continue;
     const blocks: unknown[] =
@@ -215,6 +222,14 @@ export function chatBody(
         : Array.isArray(message.content)
           ? message.content
           : [];
+    if (message.role === 'system' && messages.at(-1)?.tool_calls !== undefined) {
+      const held = blocks
+        .filter((b) => isRecord(b) && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => (b as { text: string }).text)
+        .join('\n');
+      if (held.length > 0) waiting.push(held);
+      continue;
+    }
     if (message.role === 'assistant') {
       const text = blocks
         .filter((b) => isRecord(b) && b.type === 'text' && typeof b.text === 'string')
@@ -251,6 +266,7 @@ export function chatBody(
         content: b.is_error === true ? `Error: ${result}` : result,
       });
     }
+    for (const held of waiting.splice(0)) messages.push({ role: 'user', content: held });
     const text = blocks
       .filter((b) => isRecord(b) && b.type === 'text' && typeof b.text === 'string')
       .map((b) => (b as { text: string }).text)
@@ -303,7 +319,14 @@ const count = (value: unknown) =>
 export function chatUsage(reply: unknown): NeonUsage {
   const usage = isRecord(reply) && isRecord(reply.usage) ? reply.usage : {};
   const details = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : {};
-  const cached = Math.min(count(details.cached_tokens), count(usage.prompt_tokens));
+  // The standard field wins when it says anything. NanoGPT (x402inference) bills its cache hits
+  // at the cached rate but reports them in its own block, with the standard fields left at 0.
+  const nano =
+    isRecord(reply) && isRecord(reply.x_nanogpt_cache) && reply.x_nanogpt_cache.status === 'hit'
+      ? count(reply.x_nanogpt_cache.readTokens)
+      : 0;
+  const standard = count(details.cached_tokens);
+  const cached = Math.min(standard > 0 ? standard : nano, count(usage.prompt_tokens));
   return {
     inputTokens: count(usage.prompt_tokens),
     cachedInputTokens: cached,
@@ -745,6 +768,8 @@ export const NEON_BESIDE_RESULT_LABEL =
  *   moves to `system` too, after the hoisted system text and under a label, and the tool
  *   results stay alone in their message.
  *
+ * The Messages route only: the chat route never calls this, since moving text into the system message
+ * changes the start of the request and loses Gemini's implicit prefix cache.
  * A user message with no tool result keeps its text. Turns still alternate: messages left side
  * by side with one role are joined, and text that would land beside a tool result is hoisted
  * instead. Thinking blocks, tool calls and any cache control on the system blocks are kept.
