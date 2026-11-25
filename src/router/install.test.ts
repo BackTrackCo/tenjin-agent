@@ -237,7 +237,7 @@ describe('tenjin install', () => {
     const text = receipt(result).join('\n');
     expect(text).toContain('task context and your wallet address are sent to Tenjin for routing');
     expect(text).toContain(
-      'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and Privacy Policy (https://tenjin.sh/privacy).',
+      'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and acknowledge the Privacy Policy (https://tenjin.sh/privacy).',
     );
     expect(text).toContain('Limits    $1.00 a call · $5.00 a day');
     expect(text).toContain('open a new Claude Code session');
