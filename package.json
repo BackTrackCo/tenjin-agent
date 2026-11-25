@@ -86,7 +86,7 @@
     "ox": "1.8.9",
     "prettier": "^3",
     "tsup": "^9.0.0",
-    "typescript": "^6",
+    "typescript": "^7.0.0",
     "typescript-eslint": "^8",
     "undici": "7.28.0",
     "viem": "^2.53.1",
