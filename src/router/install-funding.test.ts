@@ -59,10 +59,10 @@ describe('installation funding', () => {
     const out = await finishTerminalFunding(result, ctx, { isInteractive: true, fund });
     expect(selectOne).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: 'Add $5 to your balance now?',
+        message: 'Add funds to your balance now?',
         initialValue: 'fund',
         choices: expect.arrayContaining([
-          expect.objectContaining({ value: 'fund', hint: 'opens checkout in your browser' }),
+          expect.objectContaining({ value: 'fund', label: 'Add funds: pay or use a code' }),
         ]),
       }),
     );

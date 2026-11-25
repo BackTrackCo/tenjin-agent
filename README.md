@@ -72,7 +72,7 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits and, on a fresh install, whether to turn on DeepSeek subagents. It then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
+Setup asks about spending limits and, on a fresh install, whether to turn on DeepSeek subagents. It then offers **Add funds**, which opens the fund page in your browser to pay or enter a code; Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
 DeepSeek subagents are off by default. Turn them on during setup or with `tenjin config subagents on`, and Tenjin can offer DeepSeek V4.1 Flash for eligible Claude Code subagent jobs; Claude accepts or declines each one. A job costs up to your per-call limit ($1 by default), within your daily budget. Existing users keep their settings. Turn them off with `tenjin config subagents off`. [Sharing, charges and controls →](./docs/subagents.md)
 
