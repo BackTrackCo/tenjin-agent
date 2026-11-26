@@ -14,14 +14,18 @@ import {
 } from './settings-wire';
 
 /**
- * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
- * and the `request` tool's, goes to the paid route ({@link ROUTE_PAID_PATH}).
- * Inside `tenjin mcp` the payer sends it through the stock x402 client and
- * pays the routing fee its 402 quotes ({@link DecisionRoute},
- * `routing-payer.ts`); a call it cannot pay is skipped, with no request to any
- * other route. One whose channel needs a deposit waits for the payer's
- * background top-up inside its budget first. The free route ({@link ROUTER_PATH}) keeps only what stays free:
- * browse, a browse row's spec and the outcome report.
+ * OFFERS GO TO THE FREE ROUTE, A RUN TO THE PAID ONE. A task client's offers,
+ * the hook's and the `request` tool's, go to the free route
+ * ({@link ROUTER_PATH}) as plain requests: no payer, no wallet and no 402
+ * ({@link DecisionDeps.free}). Only a task run goes to the paid route
+ * ({@link ROUTE_PAID_PATH}), where inside `tenjin mcp` the payer sends it
+ * through the stock x402 client and pays the routing fee its 402 quotes
+ * ({@link DecisionRoute}, `routing-payer.ts`); a call it cannot pay is
+ * skipped, with no request to any other route. A router that predates routed
+ * tasks answers an offer request on the free route with `fee_required`, and
+ * the same call then goes to the paid route exactly as it always did
+ * (`task-request.ts`). The free route also keeps browse, a task read and the
+ * outcome report.
  *
  * The backend answers with what it would do and what the provider charges,
  * and the provider is paid by `runPay`, from a spec, under the local spend

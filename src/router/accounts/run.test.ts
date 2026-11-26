@@ -11,6 +11,7 @@ import {
 } from '../../lib/read-test-utils';
 import { sourceVaultPath } from '../../lib/paths';
 import { MAX_CALL_WAIT_MS } from '../jobs';
+import { writeRouterMemo } from '../router-memo';
 import { readPaidRecords, type MediaTransport } from '../paid';
 import { acceptsFor, type AccountOfferSpec, type OfferSpec } from '../decision';
 import { personalSettingsAt } from '../settings';
@@ -70,6 +71,8 @@ let keychain: ReturnType<typeof fakeKeychain>;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-account-run-'));
   await mkdir(join(dir, '.git'));
+  // These tests are about today's paid flow: the router predates routed tasks.
+  await writeRouterMemo(dir, 'task-absent', ROUTER, { now: Date.now(), ttlMs: 10 ** 12 });
   keychain = fakeKeychain();
   clearVaultKeyCache();
 });
