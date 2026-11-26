@@ -315,6 +315,17 @@ export async function runRouterDoctor(
       ),
     );
   }
+  // THE ROUTED-TASK ANSWER, only once the router itself answered.
+  if (probe.status !== 'fail') {
+    const { checkTaskAnswer } = await import('./task-request');
+    const task = await checkTaskAnswer({
+      ctx,
+      baseUrl: settings.baseUrl,
+      timeoutMs: ctx.flags.timeout,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    checks.push({ name: 'routed tasks', required: false, ...task });
+  }
   const agents = await subagentsCheck(cwd, home);
   if (agents !== null) checks.push(agents);
 

@@ -316,8 +316,8 @@ export async function runRequestTool(
       ? call
       : {
           ...call,
-          route: (baseUrl) => {
-            const picked = route(baseUrl);
+          route: (baseUrl, limitAtomic) => {
+            const picked = route(baseUrl, limitAtomic);
             routes.push(picked);
             return picked;
           },

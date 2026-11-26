@@ -661,7 +661,7 @@ describe('runRouterDoctor, with its seams injected', () => {
       fix: 'Add funds with `tenjin fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(
-      `${checks.length} checks, 1 to act on, 1 not checked.`,
+      `${checks.length} checks, 1 to act on, 2 not checked.`,
     );
   });
 

@@ -128,12 +128,17 @@ const sessionOf = (request: { sessionId?: string }) =>
 const idOf = (request: { id?: string }) => (request.id !== undefined ? { id: request.id } : {});
 
 /** `{task}`: what one task takes, returns and costs, free, with no seller. */
-export async function requestTaskRead(task: string, deps: Omit<DecisionDeps, 'route'>) {
+export async function requestTaskRead(
+  task: string,
+  deps: Omit<DecisionDeps, 'route'>,
+  opts: { anonymous?: boolean } = {},
+) {
   return readDecision(
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       method: 'POST',
       timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
       blockRedirects: true,
+      ...(opts.anonymous === true ? { anonymous: true } : {}),
       jsonBody: buildTaskReadBody({
         task,
         bazaar: deps.acceptsBazaar === true,
@@ -215,4 +220,35 @@ export async function requestRunOnce(
     (first.status === 'failed' && first.noAnswer === true && first.unreachable !== true);
   if (!mayHaveLostIt) return first;
   return { ...(await requestRun(request, deps)), resent: true };
+}
+
+/**
+ * DOCTOR'S CHECK OF THE ROUTED-TASK ANSWER: one free read of a task id nobody
+ * has. A router that knows routed tasks answers it with a decision (`needs_input`);
+ * one that predates them refuses the unknown form (`validation_failed`), and
+ * this CLI then sends offers to the paid route as it always did. Nothing is
+ * paid and no gate runs; the request does not count this machine as an install.
+ */
+export async function checkTaskAnswer(deps: Omit<DecisionDeps, 'route'>): Promise<{
+  status: 'ok' | 'warn';
+  detail: string;
+  fix?: string;
+  checked?: false;
+}> {
+  const read = await requestTaskRead('doctor-check-no-such-task', deps, { anonymous: true });
+  if (read.status === 'decided') {
+    return { status: 'ok', detail: 'the router answers a task read, and offers are free' };
+  }
+  if (read.status === 'failed' && read.errorCode === 'validation_failed') {
+    // Nothing to fix: the paid route serves every offer, as it always did.
+    return {
+      status: 'ok',
+      detail: 'the router predates routed tasks, so offers still go to its paid route as before',
+    };
+  }
+  return {
+    status: 'warn',
+    detail: `the task read was not checked (${read.status === 'failed' ? read.reason : 'no answer'})`,
+    checked: false,
+  };
 }
