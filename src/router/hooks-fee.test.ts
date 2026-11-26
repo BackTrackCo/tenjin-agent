@@ -15,7 +15,7 @@ import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { RoutingPayer, WALLET_LOW_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
 import { requestDecision } from './decision';
-import { writeRouterMemo } from './router-memo';
+import { clearRouterMemo, writeRouterMemo } from './router-memo';
 import { noticeFor } from './notice-markers';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
@@ -98,6 +98,17 @@ function feeAsked(): {
   }) as typeof fetch;
   return { fetchImpl, calls };
 }
+
+it('on a cold first call asks the free route once, then pays the fee on the paid route', async () => {
+  await clearRouterMemo(dir, 'task-absent', BASE);
+  const fake = new FakeRouter();
+  fake.body = OFFER;
+  const out = await runPromptHook(prompt(), deps(fake.fetch, payer(fake)));
+  expect(out.action).toBe('execute');
+  expect(fake.log[0]).toBe('POST /api/x402-router unpaid');
+  expect(fake.log.slice(1).every((line) => line.includes('/route'))).toBe(true);
+  expect(fake.settledFees).toBe(1);
+});
 
 function payer(
   fake: FakeRouter,

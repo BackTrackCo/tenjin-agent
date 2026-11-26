@@ -30,7 +30,7 @@ import { bindDecision, claimRedirect, noteSession, renderProgress } from './prog
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { TERMS_CHANGED_SENTENCE } from './terms-notice';
-import { TASK_ABSENT_MS, writeRouterMemo } from './router-memo';
+import { clearRouterMemo, TASK_ABSENT_MS, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -217,6 +217,42 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
 
 /** The settings field a user with no rules sends on every routing call. */
 const NO_RULES = wireSettings(undefined, { mode: 'off' });
+
+describe('a cold first call, with no memo of the router', () => {
+  it("asks the free route once, is told fee_required, and then makes today's paid call", async () => {
+    await clearRouterMemo(dir, 'task-absent', ROUTER);
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            reason: 'no',
+            diagnostics: {
+              reasonCode: 'fee_required',
+              stage: 'capability',
+              missing: [],
+              nextAction: 'x',
+            },
+          },
+        },
+      },
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+    expect(calls[1]!.url).toBe(`${ROUTER}${ROUTE_PAID_PATH}`);
+    expect(calls.filter((c) => c.paid)).toHaveLength(1);
+  });
+});
 
 describe('the request tool, one decision and one payment per lookup', () => {
   it('sends the query and the turn id, and pays the provider once', async () => {

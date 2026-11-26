@@ -1015,8 +1015,6 @@ async function finish(
       },
     };
   }
-  const bodyText =
-    typeof result.envelope['result'] === 'string' ? (result.envelope['result'] as string) : '';
   const cost = costOf(at.feePaid, money.amountAtomic, false);
   const receipt = receiptOf(at.feePaid, spec.payTo, {
     state: 'paid',

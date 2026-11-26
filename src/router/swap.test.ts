@@ -8,6 +8,7 @@ import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib
 import { testCtx } from '../context-test-utils';
 import { paidLedgerPath } from '../lib/paths';
 import { runSwap } from './swap';
+import { writeRouterMemo } from './router-memo';
 import { runNativeHook } from './hooks';
 import { hashNow } from './settings-test-utils';
 import { acceptsFor, ROUTER_PATH } from './decision';
@@ -346,6 +347,8 @@ describe('the swap on a connected account', () => {
   });
 
   it('stops the call once with the refusal and the re-ask’s offer when the account refuses', async () => {
+    // The pinned body is the paid route's: the router predates routed tasks.
+    await writeRouterMemo(dir, 'task-absent', BASE, { now: Date.now(), ttlMs: 10 ** 12 });
     const { accounts, called } = await firecrawl('expired');
     const fixture = (name: string) =>
       JSON.parse(
@@ -374,5 +377,123 @@ describe('the swap on a connected account', () => {
     // The retry runs natively: this call is routed once.
     const again = await runSwap(fetchEvent(), hook, { ...request, accounts });
     expect(again.envelope).toMatchObject({ swap: 'handback', reason: 'already routed once' });
+  });
+});
+
+describe('the swap of a bound task input', () => {
+  const OFFER_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
+  const RUN_PATH = `${BASE}/api/x402-router/route`;
+  const TASK = {
+    id: 'web-search',
+    label: 'Web search',
+    does: 'searches the web',
+    input: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    price: { expectedAtomic: '7000', maxAtomic: '7700', feeAtomic: '1050' },
+    free: false,
+    kind: 'search',
+  };
+
+  /** A router that serves task offers: the free route answers the hook with a
+   *  bound offer, a task read, and a run; Exa's paid search is the provider. */
+  function taskNetwork() {
+    const paidRoute: Record<string, unknown>[] = [];
+    const provider: { body?: string }[] = [];
+    let exa = 0;
+    const json = (value: unknown, status = 200, headers: Record<string, string> = {}) =>
+      new Response(JSON.stringify(value), {
+        status,
+        headers: { 'content-type': 'application/json', ...headers },
+      });
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      const body = typeof init?.body === 'string' ? init.body : undefined;
+      if (url.startsWith(EXA)) {
+        provider.push({ ...(body !== undefined ? { body } : {}) });
+        exa += 1;
+        return exa === 1
+          ? json({}, 402, {
+              'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '7000', payTo: PAYEE }).header,
+            })
+          : json({ results: [{ title: 'BTC' }] });
+      }
+      const parsed = JSON.parse(body ?? 'null') as Record<string, unknown>;
+      if (url === RUN_PATH) {
+        paidRoute.push(parsed);
+        return json({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'run',
+            run: parsed.run,
+            task: parsed.task,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            routingFeeAtomic: '1050',
+            spec: {
+              capabilityId: 'web-search-seller',
+              provider: 'Exa',
+              label: 'Exa search',
+              description: 'search',
+              priceAtomic: '7000',
+              priceVaries: false,
+              maxAmountAtomic: '7700',
+              payTo: PAYEE,
+              network: 'eip155:8453',
+              asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+              request: { method: 'POST', url: EXA, fields: {}, location: 'body' },
+              input: TASK.input,
+              pinned: {},
+            },
+          },
+        });
+      }
+      if (parsed.task !== undefined)
+        return json({ schemaVersion: 1, routerVersion: 'v', task: TASK });
+      return json({
+        schemaVersion: 1,
+        routerVersion: 'v',
+        settingsHash: await hashNow(dir),
+        decision: {
+          action: 'offer',
+          id: OFFER_ID,
+          need: 'web search',
+          tasks: [{ task: 'web-search', label: 'Web search', does: 'searches', price: '$0.0077' }],
+          hint: 'Call request({"task":"web-search","input":{"query":"btc"}}) alone and wait for its result.',
+          bound: { task: 'web-search', input: { query: QUERY } },
+        },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, paidRoute, provider };
+  }
+
+  it("runs the bound input as a task in the native call's place, joined to its offer, with no provider named", async () => {
+    const net = taskNetwork();
+    const { hook, request } = depsFor(net.fetchImpl);
+    const ran = await runSwap(event(), hook, request);
+    expect(ran.envelope).toMatchObject({
+      status: 'fulfilled',
+      via: 'swap',
+      inPlaceOf: 'WebSearch',
+    });
+    expect(ran.summary).toContain('Tenjin ran Web search ($0.0077) in place of this web search');
+    expect(net.paidRoute).toHaveLength(1);
+    expect(net.paidRoute[0]).toMatchObject({ task: 'web-search', offer: OFFER_ID });
+    expect(JSON.stringify(net.paidRoute[0])).not.toContain(QUERY);
+    expect(JSON.parse(net.provider.at(-1)!.body!)).toMatchObject({ query: QUERY });
+    expect(ran.summary).not.toContain('api.exa.ai');
+  });
+
+  it('hands back a run over the per-call limit, with nothing sent to the paid route or the provider', async () => {
+    await save({ nativeReplacement: 'when-routed' }, '1000');
+    const net = taskNetwork();
+    const { hook, request } = depsFor(net.fetchImpl);
+    const ran = await runSwap(event(), hook, request);
+    expect(ran.envelope).toMatchObject({ status: 'native', swap: 'handback' });
+    expect(net.paidRoute).toEqual([]);
+    expect(net.provider).toEqual([]);
   });
 });

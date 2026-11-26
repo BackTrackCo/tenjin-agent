@@ -5,13 +5,14 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runHookKind } from './hook-command';
 import type { HookDeps } from './hooks';
-import { FakeRouter, NATIVE, payerDeps } from './fee-test-utils';
+import { FakeRouter, legacyFree, NATIVE, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import {
   claimRouterMemo,
   readRouterMemo,
   releaseRouterMemo,
   UNREACHABLE_BACKOFF_MS,
+  clearRouterMemo,
   writeRouterMemo,
 } from './router-memo';
 import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
@@ -131,6 +132,16 @@ describe('the routing legs back off a router they cannot reach', () => {
     await runHookKind('prompt', prompt(), deps(r.fetchImpl));
     expect(r.state.calls).toBe(2);
     expect(await memo()).toBeNull();
+  });
+
+  it('on a cold first call asks the free route once, then the paid route, as before', async () => {
+    await clearRouterMemo(dir, 'task-absent', BASE);
+    const seen: string[] = [];
+    const r = router();
+    r.state.down = false;
+    await runHookKind('prompt', prompt(), deps(legacyFree(r.fetchImpl, seen)));
+    expect(seen).toEqual(['free']);
+    expect(r.state.calls).toBe(1);
   });
 
   it('does not start the window on an HTTP answer, even a 5xx', async () => {

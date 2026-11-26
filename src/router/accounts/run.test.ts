@@ -11,7 +11,8 @@ import {
 } from '../../lib/read-test-utils';
 import { sourceVaultPath } from '../../lib/paths';
 import { MAX_CALL_WAIT_MS } from '../jobs';
-import { writeRouterMemo } from '../router-memo';
+import { clearRouterMemo, writeRouterMemo } from '../router-memo';
+import { legacyFree } from '../fee-test-utils';
 import { readPaidRecords, type MediaTransport } from '../paid';
 import { acceptsFor, type AccountOfferSpec, type OfferSpec } from '../decision';
 import { personalSettingsAt } from '../settings';
@@ -998,6 +999,27 @@ describe('a query answered with a map this account lacks', () => {
     expect(result.envelope).toMatchObject({ status: 'spec', id: REPLACEMENT.id });
     expect(result.summary).toMatch(/^This fal account doesn't have what this job needs/);
     expect(session.opened).toEqual([]);
+  });
+
+  it('on a cold first call asks the free route once, then the paid route, as before', async () => {
+    await clearRouterMemo(dir, 'task-absent', ROUTER);
+    await settings([FAL_ACCOUNT]);
+    await signedIn(FAL_ACCOUNT, { missingTools: ['run_model'] });
+    const answer = read<{ decision: { id: string } }>('wire-lookup-spec-account.json');
+    const { fetchImpl, reasked } = network(undefined, await reaskOffering(), {
+      ...answer,
+      settingsHash: await hashNow(),
+    });
+    const seen: string[] = [];
+    const result = await runRequestTool(
+      { query: 'a photo of a lighthouse at dusk' },
+      deps(legacyFree(fetchImpl, seen), account({})),
+    );
+    // The query tries the free route once; the re-ask then goes straight to the
+    // paid route, since the router is known to predate routed tasks.
+    expect(seen).toEqual(['free']);
+    expect(reasked).toMatchObject([{ refused: answer.decision.id }]);
+    expect(result.envelope).toMatchObject({ status: 'spec', id: REPLACEMENT.id });
   });
 });
 

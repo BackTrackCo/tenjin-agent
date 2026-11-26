@@ -70,6 +70,29 @@ const FEE_REQUIRED = {
   },
 };
 
+/**
+ * A ROUTER THAT PREDATES ROUTED TASKS, in front of `inner`: its free route
+ * refuses a routing form with `fee_required`, as the live router does, and
+ * everything else is `inner`'s. `seen` gets one entry per refused form, so a
+ * cold first call can be shown to try the free route once, then the paid one.
+ */
+export function legacyFree(inner: typeof fetch, seen: string[] = []): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).pathname === ROUTER_PATH) {
+      const form = (await request
+        .clone()
+        .json()
+        .catch(() => ({}))) as Record<string, unknown>;
+      if (form.packet !== undefined || form.query !== undefined || form.refused !== undefined) {
+        seen.push('free');
+        return json(FEE_REQUIRED, 200);
+      }
+    }
+    return inner(input, init);
+  }) as typeof fetch;
+}
+
 export class FakeRouter {
   readonly channels = new Map<string, Channel>();
   deposits = 0;
