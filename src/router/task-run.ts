@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { mask } from '../lib/redact';
 import { canonicalHash, inputProblems, validateResultBody } from '../lib/request-schema';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
@@ -10,6 +10,7 @@ import {
   MAX_INPUT_BYTES,
   unmetRequires,
   type DecisionDeps,
+  type TaskRow,
   type SpecOutcome,
   type ToolSpec,
 } from './decision';
@@ -100,6 +101,8 @@ interface TaskCall {
   input: Record<string, unknown>;
   offer?: string;
   choice?: string;
+  /** The offer is an open-Bazaar row's: no task schema to check the input against. */
+  listing?: TaskRow;
 }
 
 /**
@@ -126,20 +129,25 @@ export async function runTaskForm(
 ): Promise<RequestToolResult | undefined | typeof LEGACY_ROUTER> {
   const { dataDir } = deps.ctx;
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  const keptOffer = offered !== undefined ? await readTaskOffer(dataDir, offered) : null;
+  const options = keptOffer?.choices?.options;
   let task = args.task?.trim();
-  let offer: string | undefined;
+  const offer = keptOffer !== null ? offered : undefined;
   if (task === undefined) {
-    // AN ID THAT NAMES AN OFFER OF TASKS runs its lead task, or the one named.
-    if (offered === undefined || args.query !== undefined || args.choice !== undefined) {
-      return undefined;
-    }
+    // AN ID THAT NAMES AN OFFER OF TASKS runs its lead task, the option a
+    // choice names, or every option for `all`.
+    if (offered === undefined || args.query !== undefined || keptOffer === null) return undefined;
     if ((await readKeptSpec(dataDir, offered)) !== null) return undefined;
-    const kept = await readTaskOffer(dataDir, offered);
-    if (kept === null) return undefined;
-    task = kept.tasks[0]!.task;
-    offer = offered;
-  } else if (offered !== undefined && (await readTaskOffer(dataDir, offered)) !== null) {
-    offer = offered;
+    if (args.choice === 'all') {
+      if (options === undefined) return undefined;
+      task = options[0]!.task;
+    } else if (args.choice !== undefined) {
+      const picked = options?.find(({ key }) => key === args.choice);
+      if (picked === undefined) return undefined;
+      task = picked.task;
+    } else {
+      task = keptOffer.tasks[0]!.task;
+    }
   }
   if (task.length === 0 || task.length > 200) {
     return fail('needs_input', '`task` takes a task id from request({browse}) or an offer.');
@@ -152,18 +160,37 @@ export async function runTaskForm(
       { nextStep: 'Call request({task, input}) with the task and its inputs.' },
     );
   }
-  if (args.count !== undefined || args.choice === 'all') {
+  const { count } = args;
+  if (count !== undefined && (!Number.isInteger(count) || count < 2 || count > 5)) {
+    return fail('needs_input', 'count is a whole number of takes from 2 to 5; nothing was sent.');
+  }
+  if (count !== undefined && args.choice !== undefined) {
     return fail(
       'needs_input',
-      'Several runs of a task at once (`count`, or `choice: "all"`) are not supported by this version of tenjin-cli, so nothing was sent or paid.',
-      { nextStep: 'Run the task once, or one choice at a time.' },
+      'count runs several takes of one task, so it does not go with a choice; nothing was sent.',
+    );
+  }
+  if (args.choice === 'all' && (options === undefined || offer === undefined)) {
+    return fail(
+      'needs_input',
+      '`choice: "all"` runs every choice an offer lists, so it goes with that offer\'s id; nothing was sent.',
+      { nextStep: 'Ask with request({query}) for an offer that lists choices.' },
     );
   }
   if (mask(task) !== task) {
     return fail('native', 'the task id carries a credential-shaped value, so nothing was sent');
   }
+  // AN OPEN-BAZAAR LISTING has no task of its own: its row names the offer row
+  // that holds it, and the run sends that back. Its price is the row's.
+  const row = keptOffer?.tasks.find((r) => r.task === task && r.offer !== undefined);
+  const bazaar =
+    row !== undefined && row.offer !== undefined
+      ? { offer: row.offer, task: bazaarTask(row) }
+      : undefined;
   const settings = await resolveContextSettings(deps.ctx);
-  const read = await readTask(task, deps, env, settings);
+  let read: { task: Task } | { legacy: true } | { refused: RequestToolResult };
+  if (bazaar !== undefined && bazaar.task !== null) read = { task: bazaar.task };
+  else read = await readTask(task, deps, env, settings);
   if ('legacy' in read) return LEGACY_ROUTER;
   if ('refused' in read) return read.refused;
   if (args.input === undefined) return showTask(read.task);
@@ -177,11 +204,32 @@ export async function runTaskForm(
   const { openLookupFooter } = await import('./progress');
   const footer = await openLookupFooter(dataDir, offer !== undefined ? { id: offer } : {});
   await footer.routing();
+  if (args.choice === 'all' || count !== undefined) {
+    return runTaskSet(
+      {
+        task,
+        label: read.task.label,
+        input: args.input,
+        ...(offer !== undefined ? { offer } : {}),
+        ...(count !== undefined ? { count } : {}),
+        ...(args.choice === 'all' && options !== undefined
+          ? { options: options.map(({ key, task: t }) => ({ key, task: t })) }
+          : {}),
+      },
+      deps,
+      env,
+      footer,
+    );
+  }
   return runTask(
     {
       task,
       input: args.input,
-      ...(offer !== undefined ? { offer } : {}),
+      ...(bazaar !== undefined && bazaar.task !== null
+        ? { offer: bazaar.offer, listing: row! }
+        : offer !== undefined
+          ? { offer }
+          : {}),
       ...(args.choice !== undefined ? { choice: args.choice } : {}),
     },
     deps,
@@ -190,6 +238,37 @@ export async function runTaskForm(
     undefined,
     read.task,
   );
+}
+
+/**
+ * THE TASK AN OPEN-BAZAAR ROW STANDS FOR. A listing has no task read and no
+ * input schema of its own: the router's row gives its price, and the listing's
+ * own spec arrives with the run and checks the input before anything is paid.
+ * The caps are the row's price with the router's usual 10% headroom, and the
+ * routing fee is 15% of the price. Null when the price cannot be read.
+ */
+function bazaarTask(row: TaskRow): Task | null {
+  let price: bigint;
+  try {
+    price = BigInt(parseUsdToAtomic(row.price.replace(/^\$/, '')));
+  } catch {
+    return null;
+  }
+  const max = price + (price + 9n) / 10n;
+  const fee = (price * 15n + 99n) / 100n;
+  return {
+    id: row.task,
+    label: row.label,
+    does: row.does,
+    input: { type: 'object' },
+    price: {
+      expectedAtomic: price.toString(),
+      maxAtomic: max.toString(),
+      feeAtomic: fee.toString(),
+    },
+    free: false,
+    kind: 'listing',
+  };
 }
 
 /** The deps a call to the router is made with. */
@@ -303,8 +382,14 @@ export function showTaskOffer(offer: TaskOffer, note: string | undefined): Reque
     does: row.does,
     price: row.price,
   }));
+  const picks = offer.choices;
   const lines = [
     ...rows.map((row) => `${row.label} (task ${row.task}, ${row.price}): ${row.does}`),
+    ...(picks !== undefined
+      ? [
+          `Choices (${picks.group}): ${picks.options.map((o) => `${o.key} = ${o.label}, ${o.strength}`).join('; ')}. Run one with request({id: ${JSON.stringify(offer.id)}, choice: "<key>", input}), or all of them for ${usd(BigInt(picks.all.totalAtomic))} with choice: "all".`,
+        ]
+      : []),
     `Next: ${offer.hint}`,
   ];
   return {
@@ -315,6 +400,7 @@ export function showTaskOffer(offer: TaskOffer, note: string | undefined): Reque
       id: offer.id,
       need: offer.need,
       tasks: rows,
+      ...(picks !== undefined ? { choices: picks } : {}),
       nextStep: offer.hint,
       cost: costLines(0n),
       ...(note !== undefined ? { note } : {}),
@@ -384,7 +470,7 @@ export async function runTask(
   }
   // A WRONG INPUT COSTS ONE MORE CALL, NOT A RUN: every problem, then the task's
   // inputs, with nothing sent to the router's paid route or paid.
-  const problems = inputProblems(task.input, call.input);
+  const problems = call.listing !== undefined ? [] : inputProblems(task.input, call.input);
   if (problems === undefined) {
     await footer.done('failed');
     return fail(
@@ -441,6 +527,7 @@ export async function runTask(
             label: task.label,
             input: call.input,
             ...(call.offer !== undefined ? { offer: call.offer } : {}),
+            ...(call.listing !== undefined ? { listing: call.listing } : {}),
           },
         },
         deps,
@@ -534,6 +621,13 @@ export async function runTask(
       await footer.done('native');
       return noRun(served.code, served.reason, task.label);
     }
+    if (served.action === 'run_set') {
+      await footer.done('failed');
+      return fail(
+        'failed',
+        'The router answered a set of runs for one run, so nothing was paid to a provider.',
+      );
+    }
     if (served.run !== run || served.task !== call.task) {
       await footer.done('failed');
       return fail(
@@ -582,6 +676,18 @@ function noRun(code: string, reason: string, label: string): RequestToolResult {
     over_caps: {
       status: 'needs_input',
       step: 'The price moved above what was approved. Call request again for a fresh quote.',
+    },
+    unknown_choice: {
+      status: 'needs_input',
+      step: 'Read the offer again with request({query}) for its choices, and pick one of them.',
+    },
+    count_over_max: {
+      status: 'needs_input',
+      step: 'That task allows fewer takes at once. Call again with a smaller count.',
+    },
+    offer_expired: {
+      status: 'needs_input',
+      step: 'The offer is gone. Ask again with request({query}) for a fresh one.',
     },
     unknown_task: {
       status: 'needs_input',
@@ -1062,7 +1168,13 @@ async function maybePaidResult(
  * automatic limits. Its slots are the quote's: the fee's, then the provider's.
  */
 export async function runTaskQuoted(
-  call: { task: string; label: string; input: Record<string, unknown>; offer?: string },
+  call: {
+    task: string;
+    label: string;
+    input: Record<string, unknown>;
+    offer?: string;
+    listing?: TaskRow;
+  },
   slots: PlanSlot[],
   deps: RequestToolDeps,
   env: TaskEnv,
@@ -1073,11 +1185,13 @@ export async function runTaskQuoted(
       task: call.task,
       input: call.input,
       ...(call.offer !== undefined ? { offer: call.offer } : {}),
+      ...(call.listing !== undefined ? { listing: call.listing } : {}),
     },
     deps,
     env,
     footer,
     slots,
+    call.listing !== undefined ? (bazaarTask(call.listing) ?? undefined) : undefined,
   );
 }
 
@@ -1158,4 +1272,282 @@ export async function retryTask(
     return shown;
   }
   return attempt.result;
+}
+
+/** The members of a set, with their own quoted numbers. */
+interface Member {
+  key?: string;
+  task: Task;
+}
+
+/**
+ * A SET OF RUNS: every option of a compare group (`choice: "all"`), or takes of
+ * one task (`count`). One quote holds the sum of the Tenjin fees and each
+ * provider's allowed maximum, and meets the limits as one plan. The router
+ * serves one answer with a call per member and the sum of their fees; each
+ * member is held to one provider payment under a claim of its own, with its
+ * own slot. A member that fails does not stop the others, and the receipt
+ * lists every payment.
+ */
+export async function runTaskSet(
+  call: {
+    task: string;
+    label: string;
+    input: Record<string, unknown>;
+    offer?: string;
+    count?: number;
+    options?: { key: string; task: string }[];
+  },
+  deps: RequestToolDeps,
+  env: TaskEnv,
+  footer: LookupFooter,
+  approved?: PlanSlot[],
+): Promise<RequestToolResult> {
+  const { dataDir } = deps.ctx;
+  const settings = await resolveContextSettings(deps.ctx);
+  const members: Member[] = [];
+  const wanted =
+    call.options !== undefined
+      ? call.options
+      : Array.from({ length: call.count ?? 0 }, () => ({ key: undefined, task: call.task }));
+  for (const option of wanted) {
+    const read = await readTask(option.task, deps, env, settings);
+    if ('legacy' in read || 'refused' in read) {
+      await footer.done('failed');
+      return 'refused' in read
+        ? read.refused
+        : fail('failed', 'This router does not run tasks, so nothing was sent or paid.');
+    }
+    if (read.task.free) {
+      await footer.done('needs_input');
+      return fail(
+        'needs_input',
+        `${read.task.label} is a free tool, which this form does not run.`,
+      );
+    }
+    const problems = inputProblems(read.task.input, call.input);
+    if (problems === undefined || problems.length > 0) {
+      await footer.done('needs_input');
+      return fail(
+        'needs_input',
+        `The input does not fit ${read.task.label}: ${(problems ?? ['its schema cannot be checked']).join('; ')}.`,
+        { nextStep: 'Fix the input and call again; nothing was sent or paid.' },
+      );
+    }
+    members.push({ ...(option.key !== undefined ? { key: option.key } : {}), task: read.task });
+  }
+  const fees = members.map(({ task }) => BigInt(task.price.feeAtomic));
+  const maxes = members.map(({ task }) => BigInt(task.price.maxAtomic));
+  const expected = members.reduce((sum, { task }) => sum + BigInt(task.price.expectedAtomic), 0n);
+  const feeTotal = fees.reduce((sum, fee) => sum + fee, 0n);
+  const sellerCap = maxes.reduce((most, max) => (max > most ? max : most), 0n);
+  const label =
+    call.options !== undefined
+      ? `${members.length} choices of ${call.label}`
+      : `${members.length} takes of ${call.label}`;
+  let slots: PlanSlot[];
+  if (approved !== undefined) {
+    slots = approved;
+  } else {
+    const creator = new URL(settings.baseUrl).host;
+    const payments = [
+      { amountAtomic: feeTotal, creator },
+      ...maxes.map((amountAtomic) => ({ amountAtomic, creator })),
+    ];
+    const admission = await admitPlan(payments, {
+      dataDir,
+      policy: settings.policy,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
+    if (!('admitted' in admission)) {
+      const stop = await planStop(
+        admission,
+        {
+          what: label,
+          sentence: `${label} cost about ${usd(feeTotal + expected)} in all (${usd(expected)} for the providers and ${usd(feeTotal)} for Tenjin's routing fees), and at most ${usd(feeTotal + maxes.reduce((a, b) => a + b, 0n))}.`,
+          payments,
+          call: {
+            kind: 'task_set',
+            task: call.task,
+            label: call.label,
+            input: call.input,
+            ...(call.offer !== undefined ? { offer: call.offer } : {}),
+            ...(call.count !== undefined ? { count: call.count } : {}),
+            ...(call.options !== undefined ? { options: call.options } : {}),
+          },
+        },
+        deps,
+      );
+      await footer.done(stop.status);
+      return fail(stop.status, stop.reason, stop.extras);
+    }
+    slots = admission.admitted;
+  }
+  if (slots.length !== members.length + 1) {
+    await footer.done('failed');
+    return fail('failed', 'The quote holds the wrong number of payments, so nothing was paid.');
+  }
+  const decisionDeps = await decisionDepsOf(deps, env, settings);
+  const reportDeps: ReportDeps = {
+    ctx: deps.ctx,
+    baseUrl: settings.baseUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
+  };
+  const run = randomUUID();
+  const route = deps.route?.(settings.baseUrl, feeTotal);
+  const asked = await requestRunOnce(
+    {
+      task: call.task,
+      run,
+      caps: { fee: feeTotal, seller: sellerCap },
+      ...(call.offer !== undefined ? { offer: call.offer } : {}),
+      ...(call.options !== undefined ? { choice: 'all' } : { count: call.count! }),
+    },
+    { ...decisionDeps, ...(route !== undefined ? { route } : {}) },
+  );
+  if (asked.status === 'skipped') {
+    await footer.done('native');
+    const lasting = unpaidSentence(asked.why, 'agent', asked.quotedAtomic);
+    return fail(
+      'native',
+      `${lasting ?? 'Tenjin could not pay the routing fee in time for this set of runs.'} Nothing was routed and no provider was paid.`,
+      {
+        nextStep:
+          lasting !== null
+            ? 'Tell the user this once, and use your own tools for now.'
+            : 'Use your own tools for this one.',
+      },
+    );
+  }
+  if (asked.status === 'failed') {
+    await footer.done('failed');
+    return fail('failed', asked.reason, {
+      ...(asked.errorCode !== undefined ? { errorCode: asked.errorCode } : {}),
+    });
+  }
+  const served = asked.decision.decision;
+  const settingsHash = asked.decision.settingsHash;
+  if (served.action === 'native' || served.action === 'needs_input') {
+    await footer.done(served.action);
+    return fail(served.action, served.reason ?? 'The router did not run this task.', {
+      diagnostics: served.diagnostics,
+    });
+  }
+  if (served.action === 'no_run') {
+    await footer.done('native');
+    return noRun(served.code, served.reason, call.label);
+  }
+  if (served.action !== 'run_set' || served.run !== run || served.calls.length > members.length) {
+    await footer.done('failed');
+    return fail(
+      'failed',
+      'The router answered something other than the set asked for, so nothing was paid to a provider.',
+    );
+  }
+  const feePaid =
+    BigInt(served.routingFeeAtomic) === 0n && asked.resent === true
+      ? feeTotal
+      : BigInt(served.routingFeeAtomic);
+  const results: { key?: string; label: string; result: RequestToolResult; maybePaid: boolean }[] =
+    [];
+  for (const [index, member] of served.calls.entries()) {
+    const slot = slots[index + 1]!;
+    const tried = members[index]!;
+    const one: RunDecision = {
+      action: 'run',
+      run,
+      task: call.task,
+      expiresAt: served.expiresAt,
+      routingFeeAtomic: '0',
+      spec: member.spec,
+      ...(member.convert !== undefined ? { convert: member.convert } : {}),
+      ...(member.output !== undefined ? { output: member.output } : {}),
+    };
+    const attempt = await attemptSellers(
+      {
+        answer: one,
+        task: tried.task,
+        input: call.input,
+        slot,
+        claim: `${run}~${index}`,
+        feePaid: 0n,
+        attemptNumber: index + 1,
+        ...(settingsHash !== undefined ? { settingsHash } : {}),
+      },
+      deps,
+      footer,
+      reportDeps,
+    );
+    results.push({
+      ...(member.key !== undefined ? { key: member.key } : {}),
+      label: member.label,
+      result: attempt.result,
+      maybePaid: attempt.maybePaid,
+    });
+  }
+  const done = results.filter(({ result }) => !result.isError).length;
+  const maybe = results.some(({ maybePaid }) => maybePaid);
+  const payments = results.map(({ result }) => {
+    const receipt = result.envelope['receipt'] as { provider?: unknown } | undefined;
+    return receipt?.provider ?? null;
+  });
+  const status = done === results.length ? 'fulfilled' : done > 0 ? 'partial' : 'failed';
+  const lines = results.map(
+    ({ label: name, result }) => `${name}: ${result.isError ? 'not fulfilled' : 'fulfilled'}`,
+  );
+  await footer.done(status === 'fulfilled' ? 'fulfilled' : 'failed');
+  return {
+    isError: status === 'failed',
+    summary: `${done} of ${results.length} runs fulfilled, Tenjin fees ${usd(feePaid)} in all.\n${lines.join('\n')}`,
+    envelope: {
+      status,
+      task: call.task,
+      run,
+      receipt: {
+        routingFee: { amount: usd(feePaid), payee: 'Tenjin', paid: feePaid > 0n },
+        providers: payments,
+      },
+      results: results.map(({ key, label: name, result, maybePaid }, index) => ({
+        ...(key !== undefined ? { key } : {}),
+        service: name,
+        status: result.envelope['status'],
+        ...(result.envelope['output'] !== undefined ? { output: result.envelope['output'] } : {}),
+        ...(result.envelope['fullResultPath'] !== undefined
+          ? { fullResultPath: result.envelope['fullResultPath'] }
+          : {}),
+        ...(result.envelope['reason'] !== undefined ? { reason: result.envelope['reason'] } : {}),
+        ...(maybePaid ? { possiblyPaid: true } : {}),
+        payment: payments[index],
+      })),
+      ...(maybe
+        ? {
+            possiblyPaid: true,
+            nextStep:
+              'A provider payment may have left and no result came back. Tell the user, and check `tenjin payments` before running this again.',
+          }
+        : {}),
+      cost: [`routing fees ${toMoney(feePaid.toString()).usd} USD`],
+      providerContentUntrusted: true,
+    },
+  };
+}
+
+/** The quote a person said yes to for a set, run: its slots are the quote's,
+ *  the fees' sum first, then each member's provider. */
+export async function runTaskSetQuoted(
+  call: {
+    task: string;
+    label: string;
+    input: Record<string, unknown>;
+    offer?: string;
+    count?: number;
+    options?: { key: string; task: string }[];
+  },
+  slots: PlanSlot[],
+  deps: RequestToolDeps,
+  env: TaskEnv,
+  footer: LookupFooter,
+): Promise<RequestToolResult> {
+  return runTaskSet(call, deps, env, footer, slots);
 }

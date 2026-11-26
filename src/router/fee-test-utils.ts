@@ -9,7 +9,7 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { ROUTE_PAID_PATH } from './decision';
+import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import { CHANNEL_DEPOSIT_ATOMIC, LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
@@ -53,6 +53,22 @@ interface Channel {
 
 /** The `warm` answer, as a router with the form sends it. */
 export const WARM = { schemaVersion: 1, routerVersion: 'test', warm: true };
+
+/** What the router answered a routing form on its free route before routed tasks. */
+const FEE_REQUIRED = {
+  schemaVersion: 1,
+  routerVersion: 'test',
+  decision: {
+    action: 'native',
+    reason: 'This route no longer routes.',
+    diagnostics: {
+      reasonCode: 'fee_required',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Update tenjin-cli.',
+    },
+  },
+};
 
 export class FakeRouter {
   readonly channels = new Map<string, Channel>();
@@ -159,6 +175,18 @@ export class FakeRouter {
     const refusesWarm = warm && this.opts.warm === false;
     // The fee off (development): the paid route answers with no 402.
     if (url.pathname !== (this.opts.path ?? ROUTE_PAID_PATH) || this.opts.paid === false) {
+      // THE LIVE ROUTER'S FREE ROUTE, as it answered before routed tasks: a
+      // routing form (a hook's packet, a query) is refused `native` with
+      // `fee_required`, and a task client then sends it to the paid route.
+      if (!warm && url.pathname === ROUTER_PATH && this.opts.paid !== false) {
+        const form = (await request
+          .clone()
+          .json()
+          .catch(() => ({}))) as Record<string, unknown>;
+        if (form.packet !== undefined || form.query !== undefined || form.refused !== undefined) {
+          return json(FEE_REQUIRED, 200);
+        }
+      }
       if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
       return json(warm ? WARM : this.body, 200);
     }

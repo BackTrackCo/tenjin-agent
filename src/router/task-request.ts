@@ -165,6 +165,7 @@ export async function requestRun(
     offer?: string;
     host?: string;
     choice?: string;
+    count?: number;
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<RunResponse>> {

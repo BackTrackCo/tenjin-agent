@@ -48,7 +48,26 @@ export type QuotedCall =
   | { kind: 'call'; call: ProviderCall }
   /** A routed task's run: the Tenjin fee and the provider's allowed maximum,
    *  quoted together before either is paid. Nothing was sent to the router. */
-  | { kind: 'task'; task: string; label: string; input: Record<string, unknown>; offer?: string }
+  | {
+      kind: 'task';
+      task: string;
+      label: string;
+      input: Record<string, unknown>;
+      offer?: string;
+      /** The open-Bazaar row this run is for, which has no task read. */
+      listing?: { task: string; label: string; does: string; price: string; offer?: string };
+    }
+  /** A set of runs: every option of a compare group, or takes of one task,
+   *  quoted together (the fees' sum and each provider's maximum). */
+  | {
+      kind: 'task_set';
+      task: string;
+      label: string;
+      input: Record<string, unknown>;
+      offer?: string;
+      count?: number;
+      options?: { key: string; task: string }[];
+    }
   /** A second attempt at the provider under a run already paid for, which a
    *  person said yes to after the first attempt's reply was lost. */
   | {
@@ -90,6 +109,28 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     label: z.string().min(1).max(120),
     input: Input,
     offer: z.string().min(1).max(64).optional(),
+    listing: z
+      .strictObject({
+        task: z.string().min(1).max(200),
+        label: z.string().min(1).max(120),
+        does: z.string().min(1).max(500),
+        price: z.string().min(1).max(32),
+        offer: z.string().min(1).max(64).optional(),
+      })
+      .optional(),
+  }),
+  z.strictObject({
+    kind: z.literal('task_set'),
+    task: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
+    input: Input,
+    offer: z.string().min(1).max(64).optional(),
+    count: z.number().int().min(2).max(5).optional(),
+    options: z
+      .array(z.strictObject({ key: z.string().min(1).max(32), task: z.string().min(1).max(200) }))
+      .min(2)
+      .max(4)
+      .optional(),
   }),
   z.strictObject({
     kind: z.literal('task_retry'),
@@ -276,6 +317,7 @@ export function quotedHashes(call: QuotedCall): (string | undefined)[] {
       return [call.call.settingsHash];
     // A run's rules are checked against the answer it is served.
     case 'task':
+    case 'task_set':
     case 'task_retry':
       return [];
   }

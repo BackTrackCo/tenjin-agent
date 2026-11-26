@@ -1237,6 +1237,15 @@ function fromRecorded(
 export type SwapDecision =
   | { handback: string }
   | {
+      /** A free offer of tasks whose bound input runs as a task, in the native
+       *  call's place: the same checks and one quote as any run. */
+      offer: Extract<HookDecision, { action: 'offer' }>;
+      taskBound: { task: string; input: Record<string, unknown> };
+      tool: 'WebSearch' | 'WebFetch';
+      claim: () => Promise<boolean>;
+      unmark: () => Promise<void>;
+    }
+  | {
       offer: OfferDecision;
       /** The offer id and complete input the router built, run unchanged. */
       bound: Bound;
@@ -1319,9 +1328,36 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
     return { handback: why };
   };
   if (!isOffer(outcome)) return back('no paid lookup fits');
-  // A TASK OFFER'S BOUND INPUT starts a run, which a native call is not
-  // replaced by yet: the offer's line is shown and the native call runs.
-  if (outcome.action === 'offer') return back('no input to run in place');
+  const claimFor = (terms: OfferedTerms) => async () => {
+    if (!(await claimRedirect(deps.dataDir, session, undefined, target, now()))) return false;
+    await Promise.all(
+      targets
+        .filter((t) => t !== target)
+        .map((t) => claimRedirect(deps.dataDir, session, undefined, t, now())),
+    );
+    await markOffered(deps.dataDir, session, toolUseId, terms, now());
+    return true;
+  };
+  const now = () => deps.now?.() ?? Date.now();
+  // A TASK OFFER'S BOUND INPUT runs as a task in the native call's place: the
+  // offer is kept (the run joins it), and the run meets the same plan, limits
+  // and claim as any run. An offer with picks, or with no bound input, is
+  // the user's or the agent's to choose, so the native call runs.
+  if (outcome.action === 'offer') {
+    const taskBound = outcome.bound;
+    if (taskBound === undefined || outcome.choices !== undefined) {
+      return back('no input to run in place');
+    }
+    await storeTaskOffer(deps.dataDir, outcome, kept.answer?.settingsHash);
+    await footer.close(outcome);
+    return {
+      offer: outcome,
+      taskBound,
+      tool,
+      claim: claimFor({ ...offeredTerms(outcome), swap: true as const }),
+      unmark: () => markHandedBack(deps.dataDir, session, toolUseId, now()),
+    };
+  }
   const { bound } = outcome;
   const spec = bound === undefined ? undefined : outcome.specs?.find(({ id }) => id === bound.id);
   // NOTHING TO RUN AS IT STANDS: no `bound` (automatic use off at the router,
@@ -1342,23 +1378,13 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   // Kept like a shown offer's: the spec `request({id, input})` runs, with the
   // settings hash its answer echoed.
   await footer.close(outcome);
-  const now = () => deps.now?.() ?? Date.now();
   const terms = { ...offeredTerms(outcome), swap: true as const };
   return {
     offer: outcome,
     bound,
     spec,
     tool,
-    claim: async () => {
-      if (!(await claimRedirect(deps.dataDir, session, undefined, target, now()))) return false;
-      await Promise.all(
-        targets
-          .filter((t) => t !== target)
-          .map((t) => claimRedirect(deps.dataDir, session, undefined, t, now())),
-      );
-      await markOffered(deps.dataDir, session, toolUseId, terms, now());
-      return true;
-    },
+    claim: claimFor(terms),
     unmark: () => markHandedBack(deps.dataDir, session, toolUseId, now()),
   };
 }

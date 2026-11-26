@@ -116,6 +116,7 @@ import {
   runTask,
   runTaskForm,
   runTaskQuoted,
+  runTaskSetQuoted,
   showTaskOffer,
   type TaskEnv,
 } from './task-run';
@@ -459,7 +460,7 @@ export async function runApproveTool(
     dataDir,
     call.kind === 'spec' || call.kind === 'count' || call.kind === 'choices'
       ? { id: call.id }
-      : call.kind === 'task' && call.offer !== undefined
+      : (call.kind === 'task' || call.kind === 'task_set') && call.offer !== undefined
         ? { id: call.offer }
         : {},
   );
@@ -508,7 +509,7 @@ function quoteFor(
     slot.amountAtomic > dearest.amountAtomic ? slot : dearest,
   );
   const priceAtomic = one.amountAtomic;
-  if (call.kind === 'task' || call.kind === 'task_retry')
+  if (call.kind === 'task' || call.kind === 'task_set' || call.kind === 'task_retry')
     return { label: call.label, provider: call.label, priceAtomic };
   if (call.kind === 'call')
     return { label: call.call.label, provider: call.call.provider, priceAtomic };
@@ -535,6 +536,8 @@ async function runQuoted(
   switch (call.kind) {
     case 'task':
       return runTaskQuoted(call, slots, call_, env, footer);
+    case 'task_set':
+      return runTaskSetQuoted(call, slots, call_, env, footer);
     case 'task_retry':
       return retryTask(call, slots, call_, footer, reportDeps);
     case 'spec':

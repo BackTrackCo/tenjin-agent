@@ -697,8 +697,28 @@ export const TaskRowSchema = z.object({
   label: z.string().min(1).max(120),
   does: z.string().min(1).max(500),
   price: z.string().min(1).max(32),
+  /** An open-Bazaar listing has no task of its own: its row names the offer row
+   *  that holds it, and a run sends that back as `offer`. */
+  offer: z.string().min(8).max(64).optional(),
 });
 export type TaskRow = z.infer<typeof TaskRowSchema>;
+
+export const TaskOfferChoicesSchema = z.object({
+  group: z.string().min(1).max(40),
+  default: z.string().min(1).max(32),
+  options: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(32),
+        label: z.string().min(1).max(60),
+        strength: z.string().min(1).max(120),
+        task: z.string().min(1).max(200),
+      }),
+    )
+    .min(2)
+    .max(4),
+  all: z.object({ totalAtomic: z.string().regex(/^\d{1,18}$/) }),
+});
 
 const TaskOfferSchema = z
   .object({
@@ -707,6 +727,9 @@ const TaskOfferSchema = z
     need: z.string().min(1).max(64),
     tasks: z.array(TaskRowSchema).min(1).max(8),
     hint: z.string().min(1).max(2_000),
+    /** Services a person picks among, as one compare group: each option is a
+     *  task, and `all` runs every one side by side. */
+    choices: TaskOfferChoicesSchema.optional(),
     bound: z
       .object({
         task: z.string().min(1).max(200),

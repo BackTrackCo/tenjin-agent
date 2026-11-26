@@ -86,6 +86,32 @@ export const RunDecisionSchema = z.object({
 });
 export type RunDecision = z.infer<typeof RunDecisionSchema>;
 
+/**
+ * A RUN OF SEVERAL CALLS: every member of a compare group (`choice: "all"`) or
+ * takes of one call (`count`). One answer, one spec per call; the routing fee
+ * is the sum of each call's.
+ */
+export const RunSetDecisionSchema = z.object({
+  action: z.literal('run_set'),
+  run: z.string().min(8).max(64),
+  task: z.string().min(1).max(200),
+  expiresAt: z.string().max(40),
+  routingFeeAtomic: Digits,
+  calls: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(32).optional(),
+        label: z.string().min(1).max(120),
+        spec: ToolSpecSchema,
+        convert: ConvertSchema.optional(),
+        output: z.record(z.string(), z.unknown()).optional(),
+      }),
+    )
+    .min(1)
+    .max(5),
+});
+export type RunSetDecision = z.infer<typeof RunSetDecisionSchema>;
+
 /** A run no answer was served for, at $0: a stable code and a plain reason. */
 const NoRunSchema = z.object({
   action: z.literal('no_run'),
@@ -97,6 +123,7 @@ export type NoRun = z.infer<typeof NoRunSchema>;
 export const RunResponseSchema = envelope(
   z.discriminatedUnion('action', [
     RunDecisionSchema,
+    RunSetDecisionSchema,
     NoRunSchema,
     RefusedSchema.extend({ action: z.literal('native') }),
     RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -133,6 +160,7 @@ export function buildRunBody(request: {
   offer?: string;
   host?: string;
   choice?: string;
+  count?: number;
   bazaar: boolean;
   harness?: Harness;
   improve?: boolean;
@@ -146,6 +174,7 @@ export function buildRunBody(request: {
     ...(request.offer !== undefined ? { offer: request.offer } : {}),
     ...(request.host !== undefined ? { host: request.host } : {}),
     ...(request.choice !== undefined ? { choice: request.choice } : {}),
+    ...(request.count !== undefined ? { count: request.count } : {}),
     accepts: acceptsFor(request.bazaar, request.settings !== undefined, true),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
     ...(request.improve === true ? { improve: true } : {}),
