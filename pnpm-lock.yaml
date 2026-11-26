@@ -163,7 +163,6 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  zod@<4.6.6: ^4.6.7
   ws@>=8.0.0 <8.21.0: ^8.21.0
   fast-uri@>=3.0.0 <3.1.8: ^3.1.8
   esbuild@>=0.27.3 <0.28.1: ^0.28.1
@@ -207,17 +206,17 @@ importers:
         specifier: ^22.20.5
         version: 22.20.5
       '@x402/core':
-        specifier: 2.30.0
-        version: 2.30.0
+        specifier: 2.32.0
+        version: 2.32.0
       '@x402/evm':
-        specifier: 2.30.0
-        version: 2.30.0(typescript@6.0.3)
+        specifier: 2.32.0
+        version: 2.32.0(typescript@6.0.3)
       '@x402/extensions':
-        specifier: 2.30.0
-        version: 2.30.0(typescript@6.0.3)
+        specifier: 2.32.0
+        version: 2.32.0(typescript@6.0.3)
       '@x402/fetch':
-        specifier: 2.30.0
-        version: 2.30.0
+        specifier: 2.32.0
+        version: 2.32.0
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -322,13 +321,13 @@ packages:
     peerDependencies:
       '@anthropic-ai/sdk': '>=0.93.0'
       '@modelcontextprotocol/sdk': ^1.29.0
-      zod: ^4.6.7
+      zod: ^4.0.0
 
   '@anthropic-ai/sdk@1.7.0':
     resolution: {integrity: sha512-Z+0c1iHQozlt4ymMHapPXEXfFnSbPEWGnSKbkavt+qeyaMQ3Sd6QNxfQj7vyhHYqiqYadC9shrXub8ISKf7xjQ==}
     hasBin: true
     peerDependencies:
-      zod: ^4.6.7
+      zod: ^3.25.0 || ^4.0.0
     peerDependenciesMeta:
       zod:
         optional: true
@@ -684,7 +683,7 @@ packages:
     engines: {node: '>=18'}
     peerDependencies:
       '@cfworker/json-schema': ^4.1.1
-      zod: ^4.6.7
+      zod: ^3.25 || ^4.0
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
@@ -1131,23 +1130,23 @@ packages:
   '@vitest/spy@5.1.1':
     resolution: {integrity: sha512-6K8C6alQG1/Yc8/ZI22iJS7JEsxPdVzqtqDq+/xM4Z0mGVykemMVjLhqMy/q6/IHYG3kKD8hKSwRen/ZdyI9vQ==}
 
-  '@x402/core@2.30.0':
-    resolution: {integrity: sha512-gvMxCum2QlNI6jI/3NL1jdrmOgtX9sWEWxSIOmeI67/5ndOJvYOtP7JZLSO8o8af+O+A+Vhhjza1NCda0yVppg==}
+  '@x402/core@2.32.0':
+    resolution: {integrity: sha512-HyS8vbaR3XP79EIATKGMt8eL0Ql46yrfVDrtv1Inmlx4qJl4NU61cJmTh/pSGOCJIeb7ETNhWR/GQ4XsWZcQIA==}
 
-  '@x402/evm@2.30.0':
-    resolution: {integrity: sha512-/iaEB820OPJb1JkUqaCTq90FwjbmBB/rAFaH7ZAL2AmcesSVPO/FjdHD2wmXqBzXkEnPG9f6m1SuNpCtVlA9LQ==}
+  '@x402/evm@2.32.0':
+    resolution: {integrity: sha512-dgsBYsUGs2Qem2NVV5QkhpyWJ4dssigE4LJ662LKcN1+9PKxBbX2Q5l2dpzkmHmXXzUoyapG5yBkYhMkckRZ7Q==}
 
-  '@x402/extensions@2.30.0':
-    resolution: {integrity: sha512-Lqu8hYkFAIhzarWa8V1272tyolFAW7WjHrxQ7we5P0fEZ8oMXOq1hna2X0FXQetZoOFzBDwSWBBMsrqE8ZzvcQ==}
+  '@x402/extensions@2.32.0':
+    resolution: {integrity: sha512-bvhqNqCjmULkjCpjM1fJvDfoL8tzp1IFcMTXN7QJTwqM22ucNe8B4UefKeQOCpjJ3tuIEbp8k9A0fR0CiYtjrQ==}
 
-  '@x402/fetch@2.30.0':
-    resolution: {integrity: sha512-rEC8CHQN5ZFn2W9b1mZ8ZvRyEw9Zkc5LuuVXo1CBU9w3PCtQO3c7+ChS7Ht9MvF66JTicK3ja0KgUF+fpChvNA==}
+  '@x402/fetch@2.32.0':
+    resolution: {integrity: sha512-MxDqmBxQz6I5NWUVu90cQ1XRZayAi8oDpGllDwrwihxfAHloE7eqXkNuFC80IRE3BbMwj8h65aBEaOaiq3EBUQ==}
 
   abitype@1.2.3:
     resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
     peerDependencies:
       typescript: '>=5.0.4'
-      zod: ^4.6.7
+      zod: ^3.22.0 || ^4.0.0
     peerDependenciesMeta:
       typescript:
         optional: true
@@ -1158,7 +1157,7 @@ packages:
     resolution: {integrity: sha512-fk6Te+bojIFrMvMZrnOO+SxCB+RUksTGOzq/60ZRvs1L+BVzvi2bqt9L3W/17ZLdZsyM1FuYf65P5nlmoiH1Bg==}
     peerDependencies:
       typescript: '>=5.0.4'
-      zod: ^4.6.7
+      zod: ^3.22.0 || ^4.0.0
     peerDependenciesMeta:
       typescript:
         optional: true
@@ -2260,7 +2259,7 @@ packages:
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
     peerDependencies:
-      zod: ^4.6.7
+      zod: ^3.25.28 || ^4
 
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
@@ -3001,13 +3000,13 @@ snapshots:
 
   '@vitest/spy@5.1.1': {}
 
-  '@x402/core@2.30.0':
+  '@x402/core@2.32.0':
     dependencies:
       zod: 4.6.7
 
-  '@x402/evm@2.30.0(typescript@6.0.3)':
+  '@x402/evm@2.32.0(typescript@6.0.3)':
     dependencies:
-      '@x402/core': 2.30.0
+      '@x402/core': 2.32.0
       viem: 2.58.4(typescript@6.0.3)(zod@4.6.7)
       zod: 4.6.7
     transitivePeerDependencies:
@@ -3016,12 +3015,12 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@x402/extensions@2.30.0(typescript@6.0.3)':
+  '@x402/extensions@2.32.0(typescript@6.0.3)':
     dependencies:
       '@noble/curves': 1.9.7
       '@scure/base': 1.2.6
       '@signinwithethereum/siwe': 4.2.1(viem@2.58.4(typescript@6.0.3)(zod@4.6.7))
-      '@x402/core': 2.30.0
+      '@x402/core': 2.32.0
       ajv: 8.20.0
       jose: 5.10.0
       tweetnacl: 1.0.3
@@ -3034,9 +3033,9 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@x402/fetch@2.30.0':
+  '@x402/fetch@2.32.0':
     dependencies:
-      '@x402/core': 2.30.0
+      '@x402/core': 2.32.0
 
   abitype@1.2.3(typescript@6.0.3)(zod@4.6.7):
     optionalDependencies:
