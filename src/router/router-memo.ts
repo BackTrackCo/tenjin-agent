@@ -25,13 +25,17 @@ import { PRIVATE, writePrivate } from './store-files';
  *   402 or 429 (an older server answers 400), so it has no `warm` form. For
  *   {@link WARM_ABSENT_MS} a deposit rides the next paid call, as it did
  *   before the form existed. A 402, 429, 5xx or no answer backs off instead.
+ * - `task-absent`: the free route answered an offer request from a task
+ *   client with `fee_required`, so the router predates routed tasks. For
+ *   {@link TASK_ABSENT_MS} every offer goes to the paid route as it did before
+ *   the free route took offers, with no free request first.
  *
  * A memo is a file written atomically and read with the clock: one older than
  * its window, or dated in the future, reads as absent, so nothing cleans up
  * after it. An unreadable file reads as absent too: the cost of a lost memo is
  * one more call to the router.
  */
-export type RouterMemoKind = 'unreachable' | 'topping-up' | 'warm-absent';
+export type RouterMemoKind = 'unreachable' | 'topping-up' | 'warm-absent' | 'task-absent';
 
 export interface RouterMemo {
   /** When it was written, in epoch ms. */
@@ -51,6 +55,9 @@ export const TOPPING_UP_MEMO_MS = 35_000;
 /** How long a router without the `warm` form gets deposits on the next paid
  *  call instead, before the top-up tries `warm` again. */
 export const WARM_ABSENT_MS = 60 * 60_000;
+/** How long offers skip the free route of a router that predates routed
+ *  tasks, before it is asked again (a promoted release takes effect then). */
+export const TASK_ABSENT_MS = 10 * 60_000;
 
 /** `scope` gives each wallet a memo of its own, under the same origin. */
 function memoPath(dataDir: string, kind: RouterMemoKind, baseUrl: string, scope?: string): string {

@@ -70,6 +70,7 @@
     "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",
+    "@jmespath-community/jmespath": "1.5.1",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "^22.20.5",
     "@x402/core": "2.30.0",

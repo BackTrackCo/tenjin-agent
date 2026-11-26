@@ -200,6 +200,9 @@ importers:
       '@eslint/js':
         specifier: ^10
         version: 10.0.1(eslint@10.15.0)
+      '@jmespath-community/jmespath':
+        specifier: 1.5.1
+        version: 1.5.1
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
@@ -644,6 +647,11 @@ packages:
 
   '@isaacs/nonrecursive-glob-match@1.1.0':
     resolution: {integrity: sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==}
+
+  '@jmespath-community/jmespath@1.5.1':
+    resolution: {integrity: sha512-SbVXPW3UeH1UKeXEt2zdENTX5iutM4ny4nLZC88YGeuQCA7IjJ7i7CHlW6izcR7iYdfVZW/iDld8iN8Gx1Girw==}
+    engines: {node: '>=20.19.0'}
+    hasBin: true
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -2596,6 +2604,8 @@ snapshots:
   '@humanwhocodes/retry@0.4.3': {}
 
   '@isaacs/nonrecursive-glob-match@1.1.0': {}
+
+  '@jmespath-community/jmespath@1.5.1': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

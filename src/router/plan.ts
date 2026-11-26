@@ -45,7 +45,19 @@ export type QuotedCall =
       keys: string[];
       input: Record<string, unknown>;
     }
-  | { kind: 'call'; call: ProviderCall };
+  | { kind: 'call'; call: ProviderCall }
+  /** A routed task's run: the Tenjin fee and the provider's allowed maximum,
+   *  quoted together before either is paid. Nothing was sent to the router. */
+  | { kind: 'task'; task: string; label: string; input: Record<string, unknown>; offer?: string }
+  /** A second attempt at the provider under a run already paid for, which a
+   *  person said yes to after the first attempt's reply was lost. */
+  | {
+      kind: 'task_retry';
+      run: string;
+      task: string;
+      label: string;
+      input: Record<string, unknown>;
+    };
 
 const Input = z.record(z.string(), z.unknown());
 const Digits = z.string().regex(/^\d+$/);
@@ -70,6 +82,20 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     kept: KeptChoicesSchema,
     specs: z.array(KeptSpecSchema).min(2).max(4),
     keys: z.array(z.string().min(1).max(64)).min(1).max(4),
+    input: Input,
+  }),
+  z.strictObject({
+    kind: z.literal('task'),
+    task: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
+    input: Input,
+    offer: z.string().min(1).max(64).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal('task_retry'),
+    run: z.string().min(8).max(64),
+    task: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
     input: Input,
   }),
   z.strictObject({
@@ -248,5 +274,9 @@ export function quotedHashes(call: QuotedCall): (string | undefined)[] {
       return call.specs.map((spec) => spec.settingsHash);
     case 'call':
       return [call.call.settingsHash];
+    // A run's rules are checked against the answer it is served.
+    case 'task':
+    case 'task_retry':
+      return [];
   }
 }

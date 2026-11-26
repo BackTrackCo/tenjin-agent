@@ -175,6 +175,25 @@ export function specText(id: string, spec: ToolSpec | AccountSpec, account?: str
   return lines.join('\n');
 }
 
+/**
+ * A TASK'S INPUTS AS LINES, the way a spec lists its own: each field with its
+ * type, whether it is required, its description and the values it allows.
+ * Empty for a task that takes none.
+ */
+export function inputLines(schema: Json): string[] {
+  const properties = record(schema.properties);
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const names = Object.keys(properties);
+  const ordered = [
+    ...names.filter((name) => required.has(name)),
+    ...names.filter((name) => !required.has(name)),
+  ];
+  const budget = { left: NESTED_LINES };
+  return ordered.flatMap((name) =>
+    fieldLines(name, record(properties[name]), required.has(name), budget),
+  );
+}
+
 /** The agent's input with the pinned fields over it: a pin always wins. */
 export function mergedInput(spec: Pick<ToolSpec, 'pinned'>, input: Json): Json {
   return { ...input, ...spec.pinned };

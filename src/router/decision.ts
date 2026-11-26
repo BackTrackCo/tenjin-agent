@@ -93,7 +93,7 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
  * its price and the contract together, so a caller cannot approve one offer and
  * receive another.
  */
-const IdSchema = z
+export const IdSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{8,64}$/)
   .describe(
@@ -103,7 +103,7 @@ const IdSchema = z
   );
 
 /** Every non-execute answer carries these, beside the action they explain. */
-const RefusedSchema = z.object({
+export const RefusedSchema = z.object({
   reason: z.string().max(2_000).optional(),
   diagnostics: DiagnosticsSchema,
 });
@@ -681,6 +681,50 @@ function checkExecute(
     issue('an account lead is an offer', ['delivery']);
 }
 
+/**
+ * A FREE OFFER FOR A TASK CLIENT (`accepts: ["task"]`): the need the router
+ * picked and the tasks that serve it, lead first, with the line to follow. It
+ * carries no seller, URL, payee or spec, and it charges nothing. `bound` is an
+ * input the router bound from the turn, which starts a run at once. The hint
+ * names the call to make; it names no id, since the run call takes the task.
+ */
+export const TaskRowSchema = z.object({
+  task: z.string().min(1).max(200),
+  label: z.string().min(1).max(120),
+  does: z.string().min(1).max(500),
+  price: z.string().min(1).max(32),
+});
+export type TaskRow = z.infer<typeof TaskRowSchema>;
+
+const TaskOfferSchema = z
+  .object({
+    action: z.literal('offer'),
+    id: IdSchema,
+    need: z.string().min(1).max(64),
+    tasks: z.array(TaskRowSchema).min(1).max(8),
+    hint: z.string().min(1).max(2_000),
+    bound: z
+      .object({
+        task: z.string().min(1).max(200),
+        input: z
+          .record(z.string(), z.unknown())
+          .refine(
+            (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= MAX_INPUT_BYTES,
+            `bound input must serialize to at most ${MAX_INPUT_BYTES} bytes`,
+          ),
+      })
+      .optional(),
+  })
+  .superRefine((decision, ctx) => {
+    if (/[\p{Cc}\p{Cf}]/u.test(decision.hint)) {
+      ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint is one plain line' });
+    }
+    if (!decision.hint.includes('request({')) {
+      ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint names the call to make' });
+    }
+  });
+export type TaskOffer = z.infer<typeof TaskOfferSchema>;
+
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
     .object({
@@ -717,6 +761,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
     .superRefine(checkHint)
     .superRefine(checkExecute),
   DiscoveredSchema,
+  TaskOfferSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -743,11 +788,12 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     })
     .superRefine(checkHint),
   DiscoveredSchema,
+  TaskOfferSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
 
-function envelope<T extends z.ZodTypeAny>(decision: T) {
+export function envelope<T extends z.ZodTypeAny>(decision: T) {
   return z.object({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
@@ -767,8 +813,8 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
   });
 }
 
-const HookResponseSchema = envelope(HookDecisionSchema);
-const ToolResponseSchema = envelope(ToolDecisionSchema);
+export const HookResponseSchema = envelope(HookDecisionSchema);
+export const ToolResponseSchema = envelope(ToolDecisionSchema);
 
 /**
  * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
@@ -1045,6 +1091,14 @@ export const CLIENT_ACCEPTS: readonly string[] = [
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
 export const FREE_QUERY_ACCEPT = 'free-query';
+/**
+ * THE TOKEN OF A CLIENT THAT RUNS ROUTED TASKS: it reads a task for free, takes
+ * its offers from the free route, and runs a task through a paid run whose
+ * answer is the only place a seller shows. Only the task calls send it
+ * (`acceptsFor`'s `task`); a call that falls back to today's paid flow never
+ * does, so a server that predates it sees the request it always saw.
+ */
+export const TASK_ACCEPT = 'task';
 
 /** Every feature this build has, which a `requires` list is read against:
  *  `bazaar` included, which it runs whether or not it asks for one. */
@@ -1054,6 +1108,7 @@ const CLIENT_FEATURES: ReadonlySet<string> = new Set([
   FREE_QUERY_ACCEPT,
   SETTINGS_ACCEPT,
   MCP_ACCEPT,
+  TASK_ACCEPT,
 ]);
 
 /** The features a `requires` list names that this build lacks; none when it
@@ -1070,11 +1125,12 @@ export function unmetRequires(requires: readonly string[] | undefined): string[]
  *  spec whose call is an MCP tool call on that account, the `execute` that
  *  offers one with no `endpoint`, `connectable` on the identities read, and
  *  the `{refused}` re-ask ({@link requestRefused}). */
-export function acceptsFor(bazaar: boolean, settings = false): string[] {
+export function acceptsFor(bazaar: boolean, settings = false, task = false): string[] {
   return [
     ...CLIENT_ACCEPTS,
     ...(bazaar ? [BAZAAR_ACCEPT] : []),
     ...(settings ? [SETTINGS_ACCEPT, MCP_ACCEPT] : []),
+    ...(task ? [TASK_ACCEPT] : []),
   ];
 }
 
@@ -1285,6 +1341,14 @@ export interface DecisionDeps {
   /** The payer, inside `tenjin mcp`: it sends the call and pays the routing
    *  fee with the stock x402 client. Absent, the call goes unpaid. */
   route?: DecisionRoute;
+  /**
+   * A TASK CLIENT'S OFFER: the call goes to the free route ({@link ROUTER_PATH})
+   * as a plain request, with `task` in `accepts`. No payer, no wallet, no turn
+   * on the channel, no 402 read. A router that predates routed tasks answers it
+   * `native` with `fee_required` ({@link isFeeRequired}), and the caller then
+   * sends the same call without `free`, which is today's call exactly.
+   */
+  free?: boolean;
   /** `router.improve`: the person turned on "Help improve routing", so the
    *  call says `improve: true`. Off by default. */
   improve?: boolean;
@@ -1419,7 +1483,8 @@ export async function requestDecision(
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
+  const free = deps.free === true;
+  const url = new URL(free ? ROUTER_PATH : ROUTE_PAID_PATH, deps.baseUrl).toString();
   const timeoutMs = deps.timeoutMs ?? deps.ctx.flags.timeout;
   const options: HttpRequestOptions = {
     method: 'POST',
@@ -1429,7 +1494,7 @@ export async function requestDecision(
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined, free),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
             budgetMs: Math.min(5_000, Math.max(0, timeoutMs)),
@@ -1439,16 +1504,31 @@ export async function requestDecision(
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined, free),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
             ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
+  const sender = free ? {} : deps;
   return kind === 'hook'
-    ? sendPaid(url, options, HookResponseSchema, deps)
-    : sendPaid(url, options, ToolResponseSchema, deps);
+    ? sendPaid(url, options, HookResponseSchema, sender)
+    : sendPaid(url, options, ToolResponseSchema, sender);
+}
+
+/**
+ * THE ANSWER OF A ROUTER THAT PREDATES ROUTED TASKS to an offer request on the
+ * free route: `native` with the reason code `fee_required`, which says the
+ * form belongs on the paid route. A task client then sends the same call there
+ * without `task`, as it always did.
+ */
+export function isFeeRequired(decision: { action: string } | undefined): boolean {
+  return (
+    decision?.action === 'native' &&
+    (decision as { diagnostics?: { reasonCode?: string } }).diagnostics?.reasonCode ===
+      'fee_required'
+  );
 }
 
 /**
@@ -1460,7 +1540,8 @@ export async function requestRefused(
   refused: string,
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<ToolResponse>> {
-  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
+  const free = deps.free === true;
+  const url = new URL(free ? ROUTER_PATH : ROUTE_PAID_PATH, deps.baseUrl).toString();
   return sendPaid(
     url,
     {
@@ -1469,14 +1550,14 @@ export async function requestRefused(
       blockRedirects: true,
       jsonBody: buildRefusedBody({
         refused,
-        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined, free),
         harness: deps.harness ?? 'claude',
         ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     },
     ToolResponseSchema,
-    deps,
+    free ? {} : deps,
   );
 }
 
@@ -1701,7 +1782,7 @@ export async function requestForget(
   }
 }
 
-function readDecision<T extends z.ZodTypeAny>(
+export function readDecision<T extends z.ZodTypeAny>(
   response: HttpResult,
   schema: T,
 ): DecisionOutcome<z.infer<T>> {
@@ -1752,7 +1833,7 @@ function readOffer<R extends HookResponse | ToolResponse>(
 
 /** `{ error: { code, message } }`, the envelope every Tenjin route answers a
  *  refusal with. Anything else reads as no code rather than as a guess. */
-function errorOf(body: unknown): { code: string; message: string } | null {
+export function errorOf(body: unknown): { code: string; message: string } | null {
   if (body === null || typeof body !== 'object') return null;
   const error = (body as { error?: unknown }).error;
   if (error === null || typeof error !== 'object') return null;

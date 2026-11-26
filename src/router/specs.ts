@@ -318,6 +318,60 @@ export async function readChoices(dataDir: string, id: string): Promise<KeptChoi
   }
 }
 
+/**
+ * A SIDECAR FILE BESIDE AN ID'S SPEC, for a kind of record of its own: the
+ * routed-task offers, task reads and runs (`task-store.ts`). One file per id
+ * and suffix, written 0600 and read back through a schema with O_NOFOLLOW,
+ * expired with the specs. The spec's own file is untouched, so a release that
+ * reads specs strictly never meets a field it does not know.
+ */
+export async function writeSidecar(
+  dataDir: string,
+  id: string,
+  suffix: string,
+  value: unknown,
+): Promise<boolean> {
+  try {
+    await writeFileAtomic(
+      join(dataDir, SPECS_DIR, `${digest(id)}.${suffix}.json`),
+      JSON.stringify(value),
+      {
+        mode: 0o600,
+        dirMode: 0o700,
+      },
+    );
+  } catch {
+    return false;
+  }
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
+  return true;
+}
+
+/** The sidecar kept for this id and suffix, parsed by `schema`, or null:
+ *  none, expired, over its bound, damaged or not ours. Never throws. */
+export async function readSidecar<T>(
+  dataDir: string,
+  id: string,
+  suffix: string,
+  schema: z.ZodType<T>,
+): Promise<T | null> {
+  const file = await open(
+    join(dataDir, SPECS_DIR, `${digest(id)}.${suffix}.json`),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  ).catch(() => undefined);
+  if (file === undefined) return null;
+  try {
+    const stat = await file.stat();
+    if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
+    const parsed = schema.safeParse(JSON.parse(await file.readFile('utf8')));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
 function labelPath(dataDir: string, id: string): string {
   return join(dataDir, SPECS_DIR, `${digest(id)}.label.json`);
 }
@@ -410,6 +464,29 @@ export async function claimSpecPayment(
   }
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
   if (file === undefined) return { state: 'running' };
+  try {
+    const parsed = PaymentSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    return parsed.success ? parsed.data : { state: 'running' };
+  } catch {
+    return { state: 'running' };
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+/**
+ * WHAT A CLAIM HOLDS, READ AND NEVER MADE: null when nothing is claimed under
+ * the id, else what {@link claimSpecPayment} would have returned for it. A
+ * routed task's run is run again from its stored answer only while no seller
+ * payment may have left under it.
+ */
+export async function peekSpecPayment(dataDir: string, id: string): Promise<EarlierPayment | null> {
+  const file = await open(
+    paymentPath(dataDir, id),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  ).catch((err: NodeJS.ErrnoException) => (err.code === 'ENOENT' ? null : undefined));
+  if (file === null) return null;
+  if (file === undefined) return { state: 'unrecorded' };
   try {
     const parsed = PaymentSchema.safeParse(JSON.parse(await file.readFile('utf8')));
     return parsed.success ? parsed.data : { state: 'running' };
