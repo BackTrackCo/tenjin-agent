@@ -58,6 +58,11 @@ const wallet = privateKeyToAccount(KEY);
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-fee-'));
+  // These tests are about today's paid flow: the router predates routed tasks.
+  await writeRouterMemo(dir, 'task-absent', 'https://router.test', {
+    now: Date.now(),
+    ttlMs: 10 ** 12,
+  });
   await mkdir(join(dir, '.git'));
   // What `tenjin install` writes, so the fixture's offer clears the spend vet
   // and a prompt carries no Help improve routing question.

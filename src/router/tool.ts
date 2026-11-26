@@ -60,7 +60,6 @@ import {
   MAX_INPUT_BYTES,
   reportSpecOutcome,
   requestBrowse,
-  requestDecision,
   requestToolSpec,
   type BrowseRow,
   type DecisionOutcome,
@@ -109,6 +108,17 @@ import {
 } from './paid';
 import { routerSettings, type RouterSettings } from './settings';
 import { markTaken } from './untaken';
+import { requestOffer } from './task-request';
+import { storeTaskOffer } from './task-store';
+import {
+  LEGACY_ROUTER,
+  retryTask,
+  runTask,
+  runTaskForm,
+  runTaskQuoted,
+  showTaskOffer,
+  type TaskEnv,
+} from './task-run';
 import type { Harness } from './names';
 import {
   answerState,
@@ -174,6 +184,9 @@ import {
  */
 
 export interface RequestToolArgs {
+  /** A routed task by its id: alone, what it takes, returns and costs, free;
+   *  with `input`, one run of it. */
+  task?: string;
   /** The task to route, or the query for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
@@ -442,9 +455,19 @@ export async function runApproveTool(
     baseUrl: settings.baseUrl,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
+  const footer = await openLookupFooter(
+    dataDir,
+    call.kind === 'spec' || call.kind === 'count' || call.kind === 'choices'
+      ? { id: call.id }
+      : call.kind === 'task' && call.offer !== undefined
+        ? { id: call.offer }
+        : {},
+  );
   await footer.routing();
-  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings);
+  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings, {
+    sent: here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined,
+    improve: here.settings.improve.value,
+  });
   // A SHORT WALLET'S QUOTE STAYS OPEN: funded, the same quote runs on the
   // person's next yes, with no new quote to ask for. Its offers' claims go
   // with it, or the rerun would find each one paid.
@@ -485,6 +508,8 @@ function quoteFor(
     slot.amountAtomic > dearest.amountAtomic ? slot : dearest,
   );
   const priceAtomic = one.amountAtomic;
+  if (call.kind === 'task' || call.kind === 'task_retry')
+    return { label: call.label, provider: call.label, priceAtomic };
   if (call.kind === 'call')
     return { label: call.call.label, provider: call.call.provider, priceAtomic };
   if (call.kind !== 'choices')
@@ -505,8 +530,13 @@ async function runQuoted(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   settings: ResolvedSettings,
+  env: TaskEnv,
 ): Promise<RequestToolResult> {
   switch (call.kind) {
+    case 'task':
+      return runTaskQuoted(call, slots, call_, env, footer);
+    case 'task_retry':
+      return retryTask(call, slots, call_, footer, reportDeps);
     case 'spec':
       return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
     case 'count':
@@ -564,6 +594,7 @@ async function requestTool(
     return settingsFail(UNREADABLE);
   }
   const sent = here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined;
+  const taskEnv: TaskEnv = { sent, improve: here.settings.improve.value };
   // AN ACCOUNT THE USER NAMED (plan 37): its own tools, never a lookup.
   if (args.source !== undefined) {
     const others = (['query', 'id', 'choice', 'browse', 'count', 'job'] as const).filter(
@@ -607,6 +638,18 @@ async function requestTool(
   // A call naming an offer's id takes it, whatever it asks: that offer was not
   // ignored, so nothing reports it so (`untaken.ts`).
   if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
+  // A ROUTED TASK: `{task}` reads it, `{task, input}` runs it, and an id that
+  // names an offer of tasks runs the offer's lead (`task-run.ts`).
+  const taskTurn = await runTaskForm(args, deps, taskEnv);
+  if (taskTurn === LEGACY_ROUTER) {
+    // A router that predates routed tasks: the old read of the same id, which
+    // it answers with a spec to run by its own id.
+    const legacy: RequestToolArgs = { ...args, tool: args.task! };
+    delete legacy.task;
+    delete legacy.input;
+    return requestTool(legacy, deps);
+  }
+  if (taskTurn !== undefined) return taskTurn;
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
@@ -800,13 +843,17 @@ async function requestTool(
   // ON THE PAID ROUTE the payer pays the routing fee with the stock x402
   // client. A call it cannot pay is answered here at once: nothing was
   // routed, and the agent uses its own tools.
+  // A QUERY'S OFFER IS ASKED FOR FREE, with no payer; a router that predates
+  // routed tasks answers `fee_required`, and the same query then goes to the
+  // paid route as it always did (`requestOffer`).
   const fresh =
     args.tool !== undefined
       ? await requestToolSpec(args.tool.trim(), decisionDeps, query)
-      : await requestDecision(
+      : await requestOffer(
           'tool',
           { query, ...(id !== undefined ? { id } : {}) },
           { ...decisionDeps, route: deps.route?.(settings.baseUrl) },
+          (deps.now ?? Date.now)(),
         );
   if (fresh.status === 'skipped') {
     await footer.done('native');
@@ -834,6 +881,23 @@ async function requestTool(
     });
   }
   const { decision, note, settingsHash } = fresh.decision;
+
+  // AN OFFER OF TASKS, free: kept by its id, so `request({id, input})` runs its
+  // lead task, and shown with the router's line. An input the router bound
+  // from the query starts the run at once.
+  if (decision.action === 'offer') {
+    await storeTaskOffer(deps.ctx.dataDir, decision, settingsHash);
+    if (decision.bound !== undefined) {
+      return runTask(
+        { task: decision.bound.task, input: decision.bound.input, offer: decision.id },
+        deps,
+        taskEnv,
+        footer,
+      );
+    }
+    await footer.done('task offered');
+    return showTaskOffer(decision, note);
+  }
 
   if (args.tool !== undefined) {
     if (
@@ -984,7 +1048,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      'Browse with request({browse}), inspect with request({tool}), or run a free tool with request({tool, query}).',
+      'Browse with request({browse}), read a task with request({task}), run it with request({task, input}), or run a free tool with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);

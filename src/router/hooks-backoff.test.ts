@@ -36,6 +36,8 @@ beforeEach(async () => {
     JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
   clock = 1_800_000_000_000;
+  // These tests are about today's paid flow: the router predates routed tasks.
+  await writeRouterMemo(dir, 'task-absent', BASE, { now: clock, ttlMs: 10 ** 12 });
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -147,7 +149,9 @@ describe('the routing legs back off a router they cannot reach', () => {
     await writeRouterMemo(dir, 'unreachable', BASE, { now: clock - 120_000, ttlMs: 60_000 });
     await runHookKind('prompt', prompt(), deps(r.fetchImpl));
     expect(r.state.calls).toBe(1);
-    expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
+    expect(
+      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('task-absent')),
+    ).toEqual([]);
   });
 
   it('does not start it on the call running out of its own time', async () => {
@@ -275,7 +279,9 @@ describe('the routing legs back off a router they cannot reach', () => {
     await runHookKind('prompt', prompt(), deps(paidErrs, p));
     expect(seen).toEqual([ROUTE_PAID_PATH]);
     // The skip came after an answer, so the router is reachable: the memo goes.
-    expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
+    expect(
+      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('task-absent')),
+    ).toEqual([]);
   });
 
   it('does not start it from a paid call queued behind another until its budget ran out', async () => {
@@ -318,7 +324,9 @@ describe('router-memo', () => {
 
   it('reads an unreadable file as absent', async () => {
     await writeRouterMemo(dir, 'unreachable', BASE, { now: clock, ttlMs: 60_000 });
-    const [name] = await readdir(join(dir, 'router-memo'));
+    const [name] = (await readdir(join(dir, 'router-memo'))).filter((n) =>
+      n.startsWith('unreachable'),
+    );
     await writeFile(join(dir, 'router-memo', name as string), 'not json');
     expect(await memo()).toBeNull();
   });

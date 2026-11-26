@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { writeRouterMemo } from './router-memo';
 
 /** When armed, every provider `tenjin mcp` resolves has its `getSigner` counted,
  *  so a test can prove the request tool's provider is not unlocked separately. */
@@ -62,6 +63,15 @@ function envelopeOf(called: Record<string, unknown>): unknown {
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-mcp-'));
+  // These tests are about today's paid flow: each router here predates routed tasks.
+  for (const origin of [
+    'https://tenjin.sh',
+    'https://router.test',
+    'https://env.example.test',
+    'https://file.example.test',
+  ]) {
+    await writeRouterMemo(dir, 'task-absent', origin, { now: Date.now(), ttlMs: 10 ** 12 });
+  }
   // Its own git root: `router.*` resolves from here, never from the suite's cwd.
   await mkdir(join(dir, '.git'));
   // Asked Help improve routing already, so a prompt carries only its own answer.
@@ -1249,10 +1259,10 @@ describe('what the tool tells the model to send', () => {
       expect(schema.properties.query.description).toContain('a task no line offered');
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
-      expect(schema.properties.id?.description).toContain("returns that service's spec");
+      expect(schema.properties.id?.description).toContain("returns that task's inputs");
       expect(request.description).toContain('fill them and call `{id, input}` once');
       expect(request.description).toContain('returns the full spec');
-      expect(request.description).toContain("`{id}` alone returns the service's spec");
+      expect(request.description).toContain("`{id}` alone returns the task's inputs");
       // A projected result says where the rest of the response went.
       expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');

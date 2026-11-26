@@ -19,9 +19,10 @@ import {
   type Sealed,
 } from './context';
 import { storeAccountOffer, storeChoices, storeLabel, storeSpecs } from './specs';
+import { requestOffer } from './task-request';
+import { storeTaskOffer } from './task-store';
 import {
   isAccountSpec,
-  requestDecision,
   REQUIRES_UNMET,
   ROUTE_PAID_PATH,
   type AccountOfferSpec,
@@ -744,6 +745,9 @@ async function vetOffer<T extends OfferDecision>(
   deadline: number,
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
+  // AN OFFER OF TASKS IS FREE: no seller to pay, no wallet to open, nothing for
+  // the spend policy to check. Its run is quoted and checked when it is made.
+  if (isTaskOffer(offer)) return { offer };
   // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend policy
   // or the wallet to check, and it is offered alone. One whose call this
   // account was found to lack when it was connected is left out, rather than
@@ -772,6 +776,7 @@ async function vetOffer<T extends OfferDecision>(
  * is a field, never the line's prose: an offer with no specs names none.
  */
 function listedPrices(offer: OfferDecision): bigint[] {
+  if (offer.action === 'offer') return [];
   return (offer.specs ?? [])
     .filter((spec) => spec.id !== offer.id)
     .flatMap((spec) => (isAccountSpec(spec) ? [] : [BigInt(spec.priceAtomic)]));
@@ -983,11 +988,25 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
  * shows them in the same place, under the same rules; only one the balance
  * pays meets the spend check.
  */
-type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
+type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' | 'offer' }>;
 
 function isOffer(decision: HookDecision | null): decision is OfferDecision {
-  return decision?.action === 'execute' || decision?.action === 'discovered';
+  return (
+    decision?.action === 'execute' ||
+    decision?.action === 'discovered' ||
+    decision?.action === 'offer'
+  );
 }
+
+/**
+ * A FREE OFFER OF TASKS (`offer`): the need's tasks and the line to follow,
+ * with no seller, no URL, no price to pay and no wallet to check. It is shown
+ * wherever an offer is, but nothing about it meets the spend policy: only the
+ * run it leads to does, when the agent makes it.
+ */
+const isTaskOffer = (
+  decision: HookDecision | null,
+): decision is Extract<HookDecision, { action: 'offer' }> => decision?.action === 'offer';
 
 /**
  * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (plan 37): no
@@ -1015,6 +1034,9 @@ function termsOf(offer: OfferDecision): {
   providerPriceAtomic: string;
   endpoint?: string;
 } {
+  if (offer.action === 'offer') {
+    return { provider: offer.tasks[0]!.label, providerPriceAtomic: '0' };
+  }
   if (offer.action === 'execute') return offer;
   const { candidate } = offer;
   return {
@@ -1297,6 +1319,9 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
     return { handback: why };
   };
   if (!isOffer(outcome)) return back('no paid lookup fits');
+  // A TASK OFFER'S BOUND INPUT starts a run, which a native call is not
+  // replaced by yet: the offer's line is shown and the native call runs.
+  if (outcome.action === 'offer') return back('no input to run in place');
   const { bound } = outcome;
   const spec = bound === undefined ? undefined : outcome.specs?.find(({ id }) => id === bound.id);
   // NOTHING TO RUN AS IT STANDS: no `bound` (automatic use off at the router,
@@ -1462,12 +1487,16 @@ function restSentence(rest: Record<string, unknown>): string {
 function offeredTerms(offer: OfferDecision): OfferedTerms {
   const label =
     (offer.action === 'execute' ? offer.label : undefined) ??
-    offer.specs?.find((spec) => spec.id === offer.id)?.label;
+    (offer.action === 'offer'
+      ? offer.tasks[0]!.label
+      : offer.specs?.find((spec) => spec.id === offer.id)?.label);
   return {
     offerId: offer.id,
     ...(label !== undefined ? { label } : {}),
     // An account's call costs the balance nothing: no price to show.
-    ...(isAccountOffer(offer) ? {} : { priceAtomic: termsOf(offer).providerPriceAtomic }),
+    ...(isAccountOffer(offer) || isTaskOffer(offer)
+      ? {}
+      : { priceAtomic: termsOf(offer).providerPriceAtomic }),
   };
 }
 
@@ -1844,7 +1873,9 @@ async function openFooter(
         // Each with the settings hash its answer echoed: what the check before
         // every call holds the offer to.
         const lead = accountLeadOf(decision);
-        if (lead !== undefined) {
+        if (decision.action === 'offer') {
+          await storeTaskOffer(deps.dataDir, decision, settingsHash);
+        } else if (lead !== undefined) {
           await storeAccountOffer(deps.dataDir, lead, settingsHash);
         } else {
           const specs: readonly AnyOfferSpec[] = decision.specs ?? [];
@@ -1873,7 +1904,7 @@ async function openFooter(
 function offeredIds(offer: OfferDecision): string[] {
   return [
     offer.id,
-    ...(offer.specs ?? []).map((spec) => spec.id),
+    ...(offer.action === 'offer' ? [] : (offer.specs ?? [])).map((spec) => spec.id),
     ...(offer.action === 'discovered' ? (offer.choices?.options ?? []).map((o) => o.id) : []),
   ];
 }
@@ -1908,6 +1939,7 @@ async function sweepUntaken(
  *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
   if (isAccountOffer(decision)) return `account lookup offered (${decision.provider})`;
+  if (isTaskOffer(decision)) return `task offered (${termsOf(decision).provider})`;
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
     // `fee unpaid: <reason>` fits the record's 40 characters for every reason.
@@ -1955,7 +1987,10 @@ async function decide(
     return null;
   }
   const route = deps.route?.(baseUrl);
-  const outcome = await requestDecision(
+  // AN OFFER IS ASKED FOR FREE, with no payer: a router that predates routed
+  // tasks answers `fee_required`, and the same call then goes to the paid
+  // route as it always did (`requestOffer`).
+  const outcome = await requestOffer(
     'hook',
     { packet, sessionId },
     {
@@ -1971,6 +2006,7 @@ async function decide(
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== undefined ? { route } : {}),
     },
+    now,
   );
   for (const { id, missing } of outcome.status === 'decided' ? (outcome.skipped ?? []) : []) {
     warn(

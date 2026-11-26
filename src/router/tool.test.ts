@@ -30,6 +30,7 @@ import { bindDecision, claimRedirect, noteSession, renderProgress } from './prog
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { TERMS_CHANGED_SENTENCE } from './terms-notice';
+import { TASK_ABSENT_MS, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -54,6 +55,13 @@ beforeEach(async () => {
     join(dir, 'config.json'),
     JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
+  // THESE TESTS ARE ABOUT TODAY'S PAID FLOW: the router is one that predates
+  // routed tasks, so its offers go to the paid route (`task-tool.test.ts` covers
+  // the free offer and the `fee_required` fall back itself).
+  await writeRouterMemo(dir, 'task-absent', 'https://tenjin.sh', {
+    now: Date.now(),
+    ttlMs: TASK_ABSENT_MS,
+  });
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
