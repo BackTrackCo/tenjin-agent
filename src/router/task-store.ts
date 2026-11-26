@@ -29,7 +29,7 @@ import { RunDecisionSchema, TaskSchema, type Task } from './task-wire';
 const OfferSchema = z.object({
   id: z.string().min(1).max(64),
   need: z.string().min(1).max(64),
-  tasks: z.array(TaskRowSchema).min(1).max(8),
+  tasks: z.array(TaskRowSchema).min(1).max(16),
   hint: z.string().min(1).max(2_000),
   choices: TaskOfferChoices.optional(),
   bound: z.object({ task: z.string(), input: z.record(z.string(), z.unknown()) }).optional(),

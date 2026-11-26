@@ -386,7 +386,15 @@ export function showTaskOffer(offer: TaskOffer, note: string | undefined): Reque
   }));
   const picks = offer.choices;
   const lines = [
-    ...rows.map((row) => `${row.label} (task ${row.task}, ${row.price}): ${row.does}`),
+    ...rows.map(
+      (row) =>
+        `${row.label} (task ${row.task}, ${row.price}): ${row.does.length > 140 ? `${row.does.slice(0, 139)}…` : row.does}`,
+    ),
+    ...(rows.length > 1
+      ? [
+          `To run a task other than the first, call request({task: "<task id>", id: ${JSON.stringify(offer.id)}, input}); its input is checked against that task's own inputs, which request({task: "<task id>"}) shows.`,
+        ]
+      : []),
     ...(picks !== undefined
       ? [
           `Choices (${picks.group}): ${picks.options.map((o) => `${o.key} = ${o.label}, ${o.strength}`).join('; ')}. Run one with request({id: ${JSON.stringify(offer.id)}, choice: "<key>", input}), or all of them for ${usd(BigInt(picks.all.totalAtomic))} with choice: "all".`,

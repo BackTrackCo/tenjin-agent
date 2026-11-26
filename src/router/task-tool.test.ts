@@ -214,6 +214,8 @@ class Stub {
       noRun?: string;
       /** The lead has no conversion and no output shape, as a listing's. */
       plain?: boolean;
+      /** Other tasks of an offer, by id, each with its own read. */
+      tasksById?: Record<string, Record<string, unknown>>;
     },
     private readonly sellers: SellerScript[],
   ) {}
@@ -233,7 +235,11 @@ class Stub {
       });
     if (url === `${ROUTER}${ROUTER_PATH}`) {
       if (body?.task !== undefined) {
-        return json({ schemaVersion: 1, routerVersion: 'v', task: TASK });
+        return json({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          task: this.answer.tasksById?.[String(body.task)] ?? TASK,
+        });
       }
       if (this.answer.free === 'fee_required') {
         return json({
@@ -1361,5 +1367,73 @@ describe('a legacy paid call is unchanged', () => {
       result: JSON.stringify(BODY_A),
     });
     expect(result.summary).toBe('Fulfilled by seller-a.example.test · provider price 0.005 USD');
+  });
+});
+
+describe('an offer of the whole need', () => {
+  const rows = Array.from({ length: 16 }, (_, i) => ({
+    task: i === 0 ? TASK_ID : `other-task-${i}`,
+    label: `Task ${i}`,
+    does: `does the number ${i} job on posts ${'and more words '.repeat(i % 3)}`,
+    price: '$0.005',
+  }));
+  const OTHER = {
+    ...TASK,
+    id: 'other-task-5',
+    label: 'Task 5',
+    input: {
+      type: 'object',
+      properties: { handle: { type: 'string', minLength: 1 } },
+      required: ['handle'],
+      additionalProperties: false,
+    },
+  };
+
+  it('lists sixteen rows, each with its label, price and what it does, and no provider', async () => {
+    const stub = new Stub({ lead: lead().lead, offerExtra: { tasks: rows } }, []);
+    const offered = await runRequestTool({ query: 'search X' }, deps(stub));
+    expect(offered.envelope.status).toBe('offer');
+    expect((offered.envelope.tasks as unknown[]).length).toBe(16);
+    for (const row of rows)
+      expect(offered.summary).toContain(`${row.label} (task ${row.task}, $0.005)`);
+    expect(offered.summary).toContain('To run a task other than the first');
+    for (const name of NAMES) expect(textOf(offered)).not.toContain(name);
+    // The line a person's agent reads stays small.
+    expect(offered.summary.length).toBeLessThan(4_000);
+  });
+
+  it('cuts an offer of more than sixteen rows to sixteen and keeps the answer', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ ...rows[i % 16]!, task: `t-${i}` }));
+    const stub = new Stub({ lead: lead().lead, offerExtra: { tasks: many } }, []);
+    const offered = await runRequestTool({ query: 'search X' }, deps(stub));
+    expect(offered.envelope.status).toBe('offer');
+    expect((offered.envelope.tasks as unknown[]).length).toBe(16);
+  });
+
+  it('runs a task other than the lead, checking the input against that task', async () => {
+    const stub = new Stub(
+      {
+        lead: {
+          spec: sellerSpec(SELLER_A, PAYEE_A, 'other'),
+          convert: { input: '{query: handle}', output: CONVERT_A.output },
+        },
+        offerExtra: { tasks: rows },
+        tasksById: { 'other-task-5': OTHER },
+      },
+      [A],
+    );
+    const d = deps(stub);
+    const offered = await runRequestTool({ query: 'search X' }, d);
+    const id = offered.envelope.id as string;
+    // The lead's input is not this task's: nothing is sent to the paid route.
+    const wrong = await runRequestTool({ task: 'other-task-5', id, input: INPUT }, d);
+    expect(wrong.envelope.status).toBe('needs_input');
+    expect(stub.paidRouteRequests()).toBe(0);
+    const ran = await runRequestTool({ task: 'other-task-5', id, input: { handle: 'ana' } }, d);
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(stub.calls.find((c) => c.url.endsWith(ROUTE_PAID_PATH))!.body).toMatchObject({
+      task: 'other-task-5',
+      offer: id,
+    });
   });
 });

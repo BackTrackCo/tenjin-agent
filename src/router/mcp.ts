@@ -536,7 +536,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .describe(
             "A task's id, from `browse` or an offer. Alone, it returns the task's inputs, an " +
               'example, its output shape and its price, with nothing paid. With `input`, it runs ' +
-              'the task: the fee is paid when the run is routed, then the provider.',
+              'the task: the fee is paid when the run is routed, then the provider. An offer ' +
+              "may list several tasks: send the one you want here, with the offer's `id`, and " +
+              'its input is checked against that task.',
           ),
         count: z
           .number()

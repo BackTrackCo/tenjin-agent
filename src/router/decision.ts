@@ -725,7 +725,12 @@ const TaskOfferSchema = z
     action: z.literal('offer'),
     id: IdSchema,
     need: z.string().min(1).max(64),
-    tasks: z.array(TaskRowSchema).min(1).max(8),
+    // Every task of the need, lead first: up to 16. A longer list is cut here,
+    // never refused, so the whole answer stays usable.
+    tasks: z
+      .array(TaskRowSchema)
+      .min(1)
+      .transform((rows) => rows.slice(0, 16)),
     hint: z.string().min(1).max(2_000),
     /** Services a person picks among, as one compare group: each option is a
      *  task, and `all` runs every one side by side. */
