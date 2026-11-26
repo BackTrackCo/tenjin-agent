@@ -29,6 +29,7 @@ import {
   type KeptSpec,
 } from './specs';
 import type { WireSettings } from './settings-wire';
+import type { TaskJobInfo } from './job-store';
 import { requestRunOnce, requestTaskRead } from './task-request';
 import {
   readRun,
@@ -527,6 +528,7 @@ export async function runTask(
             label: task.label,
             input: call.input,
             ...(call.offer !== undefined ? { offer: call.offer } : {}),
+            ...(call.choice !== undefined ? { choice: call.choice } : {}),
             ...(call.listing !== undefined ? { listing: call.listing } : {}),
           },
         },
@@ -743,7 +745,9 @@ interface Attempt {
 }
 
 /** The text with the provider's URL, host and name taken out. */
-function scrub(text: string, spec: ToolSpec): string {
+type Named = { provider: string; request: { url: string } };
+
+function scrub(text: string, spec: Named): string {
   let out = text;
   const names = new Set<string>();
   try {
@@ -765,7 +769,7 @@ function scrub(text: string, spec: ToolSpec): string {
 }
 
 /** A result with every place the provider could be named taken out. */
-function scrubbed(result: RequestToolResult, spec: ToolSpec): RequestToolResult {
+function scrubbed(result: RequestToolResult, spec: Named): RequestToolResult {
   const envelope: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(result.envelope)) {
     if (key === 'supplier' || key === 'request') continue;
@@ -918,7 +922,27 @@ async function attemptOne(
     at.attemptNumber !== undefined
       ? { n: at.attemptNumber, claim: at.claim, report: true }
       : undefined;
-  const paid = await paySpec(prepared.prepared, { slot: at.slot }, deps, footer, reportDeps, take);
+  const jobInfo: TaskJobInfo | undefined =
+    seller.convert !== undefined
+      ? {
+          run: answer.run,
+          task: task.id,
+          service: label,
+          convert: seller.convert.output,
+          ...(answer.output !== undefined ? { shape: answer.output } : {}),
+          feeAtomic: at.feePaid.toString(),
+          payTo: spec.payTo,
+        }
+      : undefined;
+  const paid = await paySpec(
+    prepared.prepared,
+    { slot: at.slot },
+    deps,
+    footer,
+    reportDeps,
+    take,
+    jobInfo,
+  );
   const outcome: Omit<SpecOutcome, 'id' | 'ms'> | null = paid.outcome;
   const nothingSigned = !paid.left.signed && paid.left.amountAtomic === 0n;
   if (
@@ -1015,53 +1039,136 @@ async function finish(
       },
     };
   }
+  // A JOB THAT FINISHED INSIDE THIS CALL was converted where its take ended
+  // (`finishTake`), with the same receipt: it is the result as it stands.
+  if (result.envelope['job'] !== undefined) {
+    return { ...base, maybePaid: false, ...tx, result: scrubbed(result, spec) };
+  }
   const key = at.attemptNumber !== undefined ? at.claim : answer.run;
+  const delivered = await taskDelivery(
+    {
+      run: answer.run,
+      task: task.id,
+      service: label,
+      convert: seller.convert.output,
+      ...(answer.output !== undefined ? { shape: answer.output } : {}),
+      feeAtomic: at.feePaid.toString(),
+      payTo: spec.payTo,
+    },
+    result,
+    { provider: spec.provider, url: spec.request.url },
+    { paidAtomic: money.amountAtomic, ...(txHash !== undefined ? { txHash } : {}) },
+    deps,
+    key,
+  );
+  return { ...base, maybePaid: false, ...tx, result: delivered };
+}
+
+/**
+ * A PAID BODY, AS THE TASK'S RESULT: converted to the task's output and
+ * checked against its shape, with the whole body saved and the receipt beside
+ * it. A run and a resumed job end the same way. A body that will not convert,
+ * or that missed its success rule, is `unverified`: paid, with no output.
+ */
+export async function taskDelivery(
+  info: TaskJobInfo,
+  result: RequestToolResult,
+  source: { provider: string; url: string },
+  money: { paidAtomic: bigint; txHash?: string },
+  deps: RequestToolDeps,
+  key: string,
+): Promise<RequestToolResult> {
+  const named: Named = { provider: source.provider, request: { url: source.url } };
+  const bodyText =
+    typeof result.envelope['result'] === 'string' ? (result.envelope['result'] as string) : '';
+  const feePaid = BigInt(info.feeAtomic);
+  const receipt = receiptOf(feePaid, info.payTo, {
+    state: 'paid',
+    amountAtomic: money.paidAtomic,
+    ...(money.txHash !== undefined ? { txHash: money.txHash } : {}),
+  });
+  const cost = costOf(feePaid, money.paidAtomic, false);
+  const summaryLine = `${info.service} · Tenjin fee ${usd(feePaid)} · provider ${usd(money.paidAtomic)}`;
+  const envelopeBase = { task: info.task, run: info.run, service: info.service };
   const fullResultPath =
     bodyText.length > 0 ? await storeFullResult(deps.ctx.dataDir, key, bodyText) : null;
   const pathField = fullResultPath !== null ? { fullResultPath } : {};
-  const converted = convertBody(bodyText, seller.convert, answer.output);
+  const converted = convertBody(bodyText, info.convert, info.shape);
   if (result.isError || !converted.ok) {
     const why = !converted.ok
       ? converted.problem
       : String(result.envelope['resultCaveat'] ?? 'the result missed its success rule');
     return {
-      ...base,
-      maybePaid: false,
-      ...tx,
-      result: {
-        isError: true,
-        summary: scrub(`Unverified result from ${summaryLine}`, spec),
-        envelope: {
-          status: 'unverified',
-          ...envelopeBase,
-          resultCaveat: scrub(
-            `The provider was paid, and ${why}. No output was built from it.`,
-            spec,
-          ),
-          ...pathField,
-          receipt,
-          cost,
-          providerContentUntrusted: true,
-        },
-      },
-    };
-  }
-  return {
-    ...base,
-    maybePaid: false,
-    ...tx,
-    result: {
-      isError: false,
-      summary: `Fulfilled by ${summaryLine}`,
+      isError: true,
+      summary: scrub(`Unverified result from ${summaryLine}`, named),
       envelope: {
-        status: 'fulfilled',
+        status: 'unverified',
         ...envelopeBase,
-        output: converted.output,
+        resultCaveat: scrub(
+          `The provider was paid, and ${why}. No output was built from it.`,
+          named,
+        ),
         ...pathField,
         receipt,
         cost,
         providerContentUntrusted: true,
       },
+    };
+  }
+  return {
+    isError: false,
+    summary: `Fulfilled by ${summaryLine}`,
+    envelope: {
+      status: 'fulfilled',
+      ...envelopeBase,
+      output: converted.output,
+      ...pathField,
+      receipt,
+      cost,
+      providerContentUntrusted: true,
+    },
+  };
+}
+
+/** A finished task job read again from its record: the kept output, with the
+ *  receipt, and nothing polled or paid. */
+export function taskEndedResult(
+  info: TaskJobInfo,
+  take: {
+    amountAtomic: string;
+    result?: string | undefined;
+    txHash?: string | undefined;
+    resultUnverified?: boolean | undefined;
+    resultCaveat?: string | undefined;
+  },
+  how: string,
+): RequestToolResult {
+  const paid = BigInt(take.amountAtomic);
+  const feePaid = BigInt(info.feeAtomic);
+  let output: unknown;
+  try {
+    output = take.result !== undefined ? (JSON.parse(take.result) as unknown) : undefined;
+  } catch {
+    output = undefined;
+  }
+  const unverified = take.resultUnverified === true || output === undefined;
+  return {
+    isError: unverified,
+    summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${info.service} · Tenjin fee ${usd(feePaid)} · provider ${usd(paid)} (${how})`,
+    envelope: {
+      status: unverified ? 'unverified' : 'fulfilled',
+      task: info.task,
+      run: info.run,
+      service: info.service,
+      ...(unverified ? {} : { output }),
+      receipt: receiptOf(feePaid, info.payTo, {
+        state: 'paid',
+        amountAtomic: paid,
+        ...(take.txHash !== undefined ? { txHash: take.txHash } : {}),
+      }),
+      cost: costOf(feePaid, paid, false),
+      ...(unverified && take.resultCaveat !== undefined ? { resultCaveat: take.resultCaveat } : {}),
+      providerContentUntrusted: true,
     },
   };
 }
@@ -1070,7 +1177,7 @@ async function finish(
  *  `{text}` first, then the output conversion, then the shape check. */
 function convertBody(
   bodyText: string,
-  convert: Convert,
+  expression: string,
   shape: Record<string, unknown> | undefined,
 ): { ok: true; output: unknown } | { ok: false; problem: string } {
   let body: unknown;
@@ -1081,7 +1188,7 @@ function convertBody(
   }
   let output: unknown;
   try {
-    output = convertWith(convert.output, body);
+    output = convertWith(expression, body);
   } catch (err) {
     return {
       ok: false,
@@ -1176,6 +1283,7 @@ export async function runTaskQuoted(
     label: string;
     input: Record<string, unknown>;
     offer?: string;
+    choice?: string;
     listing?: TaskRow;
   },
   slots: PlanSlot[],
@@ -1188,6 +1296,7 @@ export async function runTaskQuoted(
       task: call.task,
       input: call.input,
       ...(call.offer !== undefined ? { offer: call.offer } : {}),
+      ...(call.choice !== undefined ? { choice: call.choice } : {}),
       ...(call.listing !== undefined ? { listing: call.listing } : {}),
     },
     deps,

@@ -40,6 +40,17 @@ const Authorization = z.strictObject({
   asset: z.string().max(200).optional(),
 });
 
+const TaskJobSchema = z.strictObject({
+  run: z.string().min(8).max(64),
+  task: z.string().min(1).max(200),
+  service: z.string().min(1).max(120),
+  convert: z.string().min(1).max(2_000),
+  shape: z.record(z.string(), z.unknown()).optional(),
+  feeAtomic: z.string().regex(/^\d+$/),
+  payTo: z.string().min(1).max(200),
+});
+export type TaskJobInfo = z.infer<typeof TaskJobSchema>;
+
 const TakeSchema = z.strictObject({
   version: z.literal(1),
   offerId: z.string().min(1).max(200),
@@ -69,6 +80,9 @@ const TakeSchema = z.strictObject({
     }),
     resultSchema: z.record(z.string(), z.unknown()).optional(),
     outputSchema: z.record(z.string(), z.unknown()).optional(),
+    /** A routed task's job: what turns the finished body into the task's
+     *  output and its receipt, so a resumed job ends as a direct run does. */
+    task: TaskJobSchema.optional(),
   }),
   submittedAt: Iso,
   expiresAt: Iso,

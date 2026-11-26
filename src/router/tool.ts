@@ -114,6 +114,8 @@ import {
   LEGACY_ROUTER,
   retryTask,
   runTask,
+  taskDelivery,
+  taskEndedResult,
   runTaskForm,
   runTaskQuoted,
   runTaskSetQuoted,
@@ -140,6 +142,7 @@ import {
   readTakes,
   writeTake,
   type JobTake,
+  type TaskJobInfo,
 } from './job-store';
 
 /**
@@ -1391,6 +1394,7 @@ export async function paySpec(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   take?: TakeOf,
+  task?: TaskJobInfo,
 ): Promise<Awaited<ReturnType<typeof payAndDeliver>>> {
   const { id, spec, merged, sentInput, built } = prepared;
   const startedAt = Date.now();
@@ -1419,6 +1423,7 @@ export async function paySpec(
       ...(spec.maxBytes !== undefined ? { maxBytes: spec.maxBytes } : {}),
       ...(spec.settingsHash !== undefined ? { settingsHash: spec.settingsHash } : {}),
       ...(deps.via !== undefined ? { via: deps.via } : {}),
+      ...(task !== undefined ? { task } : {}),
     },
     admission,
     deps,
@@ -1508,6 +1513,8 @@ export interface ProviderCall {
   /** The spec's promised fields: the result is cut to them, and the whole
    *  body is saved under the offer's id. */
   project?: { id: string; schema: Record<string, unknown> };
+  /** A routed task's conversion, kept with a job so its resume ends as a run does. */
+  task?: TaskJobInfo;
   /** The spec's job: how this call is finished when the seller answers
    *  before its result is ready, and which take of which offer it is. */
   job?: CallJob;
@@ -2275,6 +2282,7 @@ async function startJob(
       },
       ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
       ...(call.project !== undefined ? { outputSchema: call.project.schema } : {}),
+      ...(call.task !== undefined ? { task: call.task } : {}),
     },
     submittedAt: new Date(submit.submittedAt).toISOString(),
     expiresAt: new Date(submit.submittedAt + job.spec.keepH * 3_600_000).toISOString(),
@@ -2464,10 +2472,28 @@ async function finishTake(
         result: unsavedResult(take, call, opts.kept, delivered.unsaved),
       };
     }
+    // A ROUTED TASK'S JOB ENDS AS A DIRECT RUN DOES: the finished body is
+    // converted to the task's output and checked, with the receipt beside it.
+    const taskJob = take.call.task;
+    const shapedResult =
+      taskJob !== undefined
+        ? await taskDelivery(
+            taskJob,
+            delivered.result,
+            { provider: take.call.provider, url: take.call.url },
+            { paidAtomic: providerAtomic, ...(tx !== undefined ? { txHash: tx } : {}) },
+            deps,
+            take.offerId,
+          )
+        : delivered.result;
     const ended = await end({
       state: 'done',
       savedFiles: delivered.savedFiles.slice(0, 16),
-      result: keptResult(delivered.result.envelope.result),
+      result: keptResult(
+        taskJob !== undefined && shapedResult.envelope['output'] !== undefined
+          ? JSON.stringify(shapedResult.envelope['output'])
+          : delivered.result.envelope.result,
+      ),
       ...(unverified ? { resultUnverified: true } : {}),
       ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
     });
@@ -2478,7 +2504,7 @@ async function finishTake(
       await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps));
     }
     return {
-      result: withJob(delivered.result, take.offerId),
+      result: withJob(shapedResult, take.offerId),
       outcome: delivered.outcome,
     };
   }
@@ -2663,6 +2689,9 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
     opts.raced === true
       ? 'another call finished this job first; nothing more was paid'
       : 'already finished; nothing was polled or paid';
+  if (take.state === 'done' && take.call.task !== undefined) {
+    return withJob(taskEndedResult(take.call.task, take, how), take.offerId);
+  }
   if (take.state === 'done') {
     // Unverified as it was delivered: see `deliverResult`.
     const unverified = take.resultUnverified === true;

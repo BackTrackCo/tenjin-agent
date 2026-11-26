@@ -54,6 +54,8 @@ export type QuotedCall =
       label: string;
       input: Record<string, unknown>;
       offer?: string;
+      /** The compare key a person picked: what is approved is what runs. */
+      choice?: string;
       /** The open-Bazaar row this run is for, which has no task read. */
       listing?: { task: string; label: string; does: string; price: string; offer?: string };
     }
@@ -109,6 +111,7 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     label: z.string().min(1).max(120),
     input: Input,
     offer: z.string().min(1).max(64).optional(),
+    choice: z.string().min(1).max(32).optional(),
     listing: z
       .strictObject({
         task: z.string().min(1).max(200),
