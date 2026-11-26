@@ -2424,7 +2424,7 @@ async function finishTake(
     endTake(dataDir, take.offerId, take.take, ending).catch(() => undefined);
   // AN ENDING ANOTHER CALL RECORDED FIRST stands, and is this call's answer.
   const lostTo = async (ended: JobTake): Promise<TakeEnding> => {
-    const result = endedResult(ended, { raced: true });
+    const result = await endedResultOf(ended, deps.ctx.dataDir, { raced: true });
     const status = result.envelope.status as 'fulfilled' | 'unverified' | 'failed';
     await footer.done(status, shown);
     return { result, outcome: { status } };
@@ -2486,16 +2486,38 @@ async function finishTake(
             take.offerId,
           )
         : delivered.result;
+    // THE TASK'S VERDICT IS KEPT WITH THE TAKE, and its whole output in the
+    // results folder: a later read parses that file, never the cut preview,
+    // and never reads a rejected body as checked output.
+    const taskOutput = shapedResult.envelope['output'];
+    const taskUnverified =
+      taskJob !== undefined && shapedResult.envelope['status'] === 'unverified';
+    const outputPath =
+      taskJob !== undefined && taskOutput !== undefined
+        ? await storeFullResult(
+            dataDir,
+            `${take.offerId}#${take.take}:output`,
+            JSON.stringify(taskOutput),
+          )
+        : null;
+    const rawPath = shapedResult.envelope['fullResultPath'];
+    const taskCaveat = shapedResult.envelope['resultCaveat'];
     const ended = await end({
       state: 'done',
       savedFiles: delivered.savedFiles.slice(0, 16),
       result: keptResult(
-        taskJob !== undefined && shapedResult.envelope['output'] !== undefined
-          ? JSON.stringify(shapedResult.envelope['output'])
+        taskJob !== undefined && taskOutput !== undefined
+          ? JSON.stringify(taskOutput)
           : delivered.result.envelope.result,
       ),
-      ...(unverified ? { resultUnverified: true } : {}),
-      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
+      ...(unverified || taskUnverified ? { resultUnverified: true } : {}),
+      ...(caveat !== undefined
+        ? { resultCaveat: caveat.slice(0, 1_000) }
+        : typeof taskCaveat === 'string'
+          ? { resultCaveat: taskCaveat.slice(0, 1_000) }
+          : {}),
+      ...(outputPath !== null ? { outputPath } : {}),
+      ...(taskJob !== undefined && typeof rawPath === 'string' ? { rawPath } : {}),
     });
     if (ended?.won === false) return lostTo(ended.take);
     // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
@@ -2682,6 +2704,21 @@ export function unsavedWords(
 
 /** A take that had already ended when its job was resumed, from its record;
  *  `raced`, one another call ended while this one was polling it. */
+async function endedResultOf(
+  take: JobTake,
+  dataDir: string,
+  opts: { raced?: boolean } = {},
+): Promise<RequestToolResult> {
+  if (take.state === 'done' && take.call.task !== undefined) {
+    const how =
+      opts.raced === true
+        ? 'another call finished this job first; nothing more was paid'
+        : 'already finished; nothing was polled or paid';
+    return withJob(await taskEndedResult(take.call.task, take, how), take.offerId);
+  }
+  return endedResult(take, opts);
+}
+
 function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestToolResult {
   const cost = costLines(BigInt(take.amountAtomic));
   const supplier = supplierOf(take.call.url);
@@ -2689,9 +2726,6 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
     opts.raced === true
       ? 'another call finished this job first; nothing more was paid'
       : 'already finished; nothing was polled or paid';
-  if (take.state === 'done' && take.call.task !== undefined) {
-    return withJob(taskEndedResult(take.call.task, take, how), take.offerId);
-  }
   if (take.state === 'done') {
     // Unverified as it was delivered: see `deliverResult`.
     const unverified = take.resultUnverified === true;
@@ -2769,7 +2803,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
   const ended = await Promise.all(
     takes.map(async (take) => {
       if (take.state !== 'running') {
-        return { take, result: endedResult(take), outcome: null };
+        return { take, result: await endedResultOf(take, dataDir), outcome: null };
       }
       const waited = startedAt + MAX_CALL_WAIT_MS;
       const deadline = Math.min(

@@ -114,6 +114,11 @@ const TakeSchema = z.strictObject({
   resultUnverified: z.boolean().optional(),
   /** Why, as the agent was told. */
   resultCaveat: z.string().max(1_000).optional(),
+  /** A routed task's whole converted output, in the results folder: what a
+   *  later read parses, never the cut `result` above. */
+  outputPath: z.string().max(4_096).optional(),
+  /** The provider's whole body, in the results folder. */
+  rawPath: z.string().max(4_096).optional(),
   /** Why a take failed, or why it stopped. */
   reason: z.string().max(1_000).optional(),
   /** The seller's own words for it, bounded and redacted. Untrusted text. */

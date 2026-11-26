@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { mask } from '../lib/redact';
 import { canonicalHash, inputProblems, validateResultBody } from '../lib/request-schema';
@@ -1130,26 +1131,36 @@ export async function taskDelivery(
 
 /** A finished task job read again from its record: the kept output, with the
  *  receipt, and nothing polled or paid. */
-export function taskEndedResult(
+export async function taskEndedResult(
   info: TaskJobInfo,
   take: {
     amountAtomic: string;
-    result?: string | undefined;
     txHash?: string | undefined;
     resultUnverified?: boolean | undefined;
     resultCaveat?: string | undefined;
+    outputPath?: string | undefined;
+    rawPath?: string | undefined;
   },
   how: string,
-): RequestToolResult {
+): Promise<RequestToolResult> {
   const paid = BigInt(take.amountAtomic);
   const feePaid = BigInt(info.feeAtomic);
+  // THE SAVED VERDICT STANDS: what was saved as unverified is never read as
+  // checked output, and the output is read from its whole file, never from the
+  // cut preview the take keeps for display.
+  const unverified = take.resultUnverified === true;
   let output: unknown;
-  try {
-    output = take.result !== undefined ? (JSON.parse(take.result) as unknown) : undefined;
-  } catch {
-    output = undefined;
+  let kept = false;
+  if (!unverified && take.outputPath !== undefined) {
+    try {
+      output = JSON.parse(await readFile(take.outputPath, 'utf8')) as unknown;
+      kept = true;
+    } catch {
+      kept = false;
+    }
   }
-  const unverified = take.resultUnverified === true || output === undefined;
+  const where = take.rawPath !== undefined ? { fullResultPath: take.rawPath } : {};
+  const gone = !unverified && !kept;
   return {
     isError: unverified,
     summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${info.service} · Tenjin fee ${usd(feePaid)} · provider ${usd(paid)} (${how})`,
@@ -1158,7 +1169,13 @@ export function taskEndedResult(
       task: info.task,
       run: info.run,
       service: info.service,
-      ...(unverified ? {} : { output }),
+      ...(kept ? { output } : {}),
+      ...where,
+      ...(gone
+        ? {
+            note: 'The task output file is no longer kept on this machine; the provider body is at fullResultPath while it lasts.',
+          }
+        : {}),
       receipt: receiptOf(feePaid, info.payTo, {
         state: 'paid',
         amountAtomic: paid,
@@ -1596,20 +1613,31 @@ export async function runTaskSet(
       maybePaid: attempt.maybePaid,
     });
   }
-  const done = results.filter(({ result }) => !result.isError).length;
+  const said = (result: RequestToolResult) => String(result.envelope['status']);
+  const done = results.filter(({ result }) => said(result) === 'fulfilled').length;
+  const running = results.filter(({ result }) => said(result) === 'running').length;
   const maybe = results.some(({ maybePaid }) => maybePaid);
   const payments = results.map(({ result }) => {
     const receipt = result.envelope['receipt'] as { provider?: unknown } | undefined;
     return receipt?.provider ?? null;
   });
-  const status = done === results.length ? 'fulfilled' : done > 0 ? 'partial' : 'failed';
-  const lines = results.map(
-    ({ label: name, result }) => `${name}: ${result.isError ? 'not fulfilled' : 'fulfilled'}`,
-  );
+  const status =
+    done === results.length
+      ? 'fulfilled'
+      : running > 0
+        ? 'running'
+        : done > 0
+          ? 'partial'
+          : 'failed';
+  const lines = results.map(({ label: name, result }) => `${name}: ${said(result)}`);
   await footer.done(status === 'fulfilled' ? 'fulfilled' : 'failed');
+  // A MEMBER KEEPS EVERYTHING A SINGLE RUN WOULD HAND BACK: its output or
+  // result, its saved files, its job and next step, its reason. Only what the
+  // set says once (the receipt's fee, the cost) is left to the set.
+  const SET_ONLY = new Set(['status', 'task', 'run', 'service', 'receipt', 'cost']);
   return {
     isError: status === 'failed',
-    summary: `${done} of ${results.length} runs fulfilled, Tenjin fees ${usd(feePaid)} in all.\n${lines.join('\n')}`,
+    summary: `${done} of ${results.length} runs fulfilled${running > 0 ? `, ${running} still running` : ''}, Tenjin fees ${usd(feePaid)} in all.\n${lines.join('\n')}`,
     envelope: {
       status,
       task: call.task,
@@ -1622,11 +1650,11 @@ export async function runTaskSet(
         ...(key !== undefined ? { key } : {}),
         service: name,
         status: result.envelope['status'],
-        ...(result.envelope['output'] !== undefined ? { output: result.envelope['output'] } : {}),
-        ...(result.envelope['fullResultPath'] !== undefined
-          ? { fullResultPath: result.envelope['fullResultPath'] }
-          : {}),
-        ...(result.envelope['reason'] !== undefined ? { reason: result.envelope['reason'] } : {}),
+        ...Object.fromEntries(
+          Object.entries(result.envelope).filter(
+            ([field]) => !SET_ONLY.has(field) && field !== 'providerContentUntrusted',
+          ),
+        ),
         ...(maybePaid ? { possiblyPaid: true } : {}),
         payment: payments[index],
       })),
@@ -1636,7 +1664,12 @@ export async function runTaskSet(
             nextStep:
               'A provider payment may have left and no result came back. Tell the user, and check `tenjin payments` before running this again.',
           }
-        : {}),
+        : running > 0
+          ? {
+              nextStep:
+                'A member is still running: call request({job}) with its job id for its result. Nothing more is paid.',
+            }
+          : {}),
       cost: [`routing fees ${toMoney(feePaid.toString()).usd} USD`],
       providerContentUntrusted: true,
     },

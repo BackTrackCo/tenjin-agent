@@ -18,6 +18,7 @@ import {
 import { runApproveTool, runRequestTool, type RequestToolDeps } from './tool';
 import { runRequestCommand } from './task-command';
 import { checkTaskAnswer, requestRefusedOffer } from './task-request';
+import { storeSpecs } from './specs';
 import { CliError } from '../lib/errors';
 import { storeTaskRead } from './task-store';
 import { readRouterMemo } from './router-memo';
@@ -189,6 +190,9 @@ interface SellerScript {
   dropsReply?: boolean;
   /** The status of the paid answer (a job's submit answers 202). */
   status?: number;
+  /** Bytes sent as is in place of the JSON body (a file). */
+  raw?: Uint8Array;
+  contentType?: string;
 }
 
 /** A router and its providers, on one fetch, with every call recorded. */
@@ -339,6 +343,12 @@ class Stub {
     }
     this.signatures.set(url, (this.signatures.get(url) ?? 0) + 1);
     if (seller.dropsReply === true) throw new TypeError('fetch failed');
+    if (seller.raw !== undefined) {
+      return new Response(seller.raw, {
+        status: seller.status ?? 200,
+        headers: { 'content-type': seller.contentType ?? 'application/octet-stream' },
+      });
+    }
     return json(seller.body, seller.status ?? 200);
   }) as typeof fetch;
 
@@ -1081,5 +1091,275 @@ describe('a paid job never loses its result', () => {
     const result = await runRequestTool({ task: TASK_ID, input: INPUT }, d);
     expect(result.envelope).toMatchObject({ status: 'fulfilled', output: EXPECTED_OUTPUT });
     expect(stub.signatures.get(SELLER_A)).toBe(1);
+  });
+});
+
+describe('every ending of a paid run keeps the result or the means to collect it', () => {
+  const JOB = {
+    pollUrl: { field: 'statusUrl' },
+    pollMethod: 'GET',
+    running: { field: 'status', values: ['running'] },
+    everyS: 1,
+    maxWaitS: 30,
+    keepH: 1,
+  };
+  const SUBMITTED = { status: 'running', statusUrl: 'https://seller-a.example.test/jobs/1' };
+  const jobbed = () => ({
+    lead: { spec: { ...sellerSpec(SELLER_A, PAYEE_A, 'glim-like'), job: JOB }, convert: CONVERT_A },
+  });
+  const MANY = {
+    tweets: Array.from({ length: 80 }, (_, i) => ({
+      url: `https://posts.example.test/ana/${i}`,
+      text: `an invented post number ${i} with some words to make it long enough`,
+      author: { username: 'ana' },
+      public_metrics: { like_count: i, retweet_count: 1, reply_count: 0 },
+    })),
+    next_cursor: 'c9',
+  };
+
+  function jobDeps(stub: Stub, answers: unknown[]) {
+    let clock = Date.now();
+    const pollTransport = (async () => {
+      const next = answers.length > 1 ? answers.shift() : answers[0];
+      return {
+        status: 200,
+        header: () => undefined,
+        body: (async function* () {
+          yield new TextEncoder().encode(JSON.stringify(next));
+        })(),
+        discard: () => undefined,
+      };
+    }) as never;
+    return deps(stub, {
+      pollTransport,
+      now: () => clock,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+    });
+  }
+
+  /** What a result must carry to be collected. */
+  const means = (envelope: Record<string, unknown>) =>
+    ['output', 'result', 'job', 'savedFiles', 'fullResultPath'].filter(
+      (key) => envelope[key] !== undefined,
+    );
+
+  it('a set member with no conversion keeps its result, and a running one its job', async () => {
+    const plain = [{ key: 'a', spec: sellerSpec(SELLER_A, PAYEE_A, 'glim-like') }];
+    const stub = new Stub({ lead: lead().lead, set: plain }, [A]);
+    const result = await runRequestTool({ task: TASK_ID, count: 2, input: INPUT }, deps(stub));
+    const members = result.envelope.results as Record<string, unknown>[];
+    expect(members).toHaveLength(2);
+    for (const member of members) {
+      expect(member.status).toBe('fulfilled');
+      expect(member.result).toBe(JSON.stringify(BODY_A));
+    }
+    expect(stub.signatures.get(SELLER_A)).toBe(2);
+  });
+
+  it('a set member whose job is still running keeps its job id and next step', async () => {
+    const running = [
+      { key: 'a', spec: { ...sellerSpec(SELLER_A, PAYEE_A, 'glim-like'), job: JOB } },
+    ];
+    const stub = new Stub({ lead: lead().lead, set: running }, [
+      { ...A, status: 202, body: SUBMITTED },
+    ]);
+    const result = await runRequestTool(
+      { task: TASK_ID, count: 2, input: INPUT },
+      jobDeps(stub, [{ status: 'running' }]),
+    );
+    expect(result.envelope.status).toBe('running');
+    const members = result.envelope.results as Record<string, unknown>[];
+    for (const member of members) {
+      expect(member.status).toBe('running');
+      expect(member.job).toBeDefined();
+      expect(member.nextStep).toBeDefined();
+    }
+  });
+
+  it('a finished job whose conversion failed stays unverified on a later read', async () => {
+    const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+    const d = jobDeps(stub, [{ status: 'done', junk: true }]);
+    const first = await runRequestTool({ task: TASK_ID, input: INPUT }, d);
+    expect(first.envelope.status).toBe('unverified');
+    const run = String(first.envelope.job);
+    const again = await runRequestTool({ job: run }, d);
+    expect(again.envelope.status).toBe('unverified');
+    expect(again.envelope.output).toBeUndefined();
+    expect(again.envelope.resultCaveat).toBeDefined();
+    expect(again.envelope.fullResultPath).toBeDefined();
+    expect(stub.signatures.get(SELLER_A)).toBe(1);
+  });
+
+  it('a finished job with a long output returns all of it on a later read', async () => {
+    const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+    const d = jobDeps(stub, [{ status: 'done', ...MANY }]);
+    const first = await runRequestTool({ task: TASK_ID, input: INPUT }, d);
+    expect(first.envelope.status).toBe('fulfilled');
+    expect(JSON.stringify(first.envelope.output).length).toBeGreaterThan(8_000);
+    const again = await runRequestTool({ job: String(first.envelope.job) }, d);
+    expect(again.envelope.status).toBe('fulfilled');
+    expect(again.envelope.output).toEqual(first.envelope.output);
+    expect(stub.signatures.get(SELLER_A)).toBe(1);
+  });
+
+  const ENDINGS: {
+    name: string;
+    run: () => Promise<{ envelope: Record<string, unknown>; stub: Stub }>;
+    status: string;
+    carries: string[];
+  }[] = [
+    {
+      name: 'a converted run',
+      status: 'fulfilled',
+      carries: ['output', 'fullResultPath'],
+      run: async () => {
+        const stub = new Stub({ lead: lead().lead }, [A]);
+        return {
+          stub,
+          envelope: (await runRequestTool({ task: TASK_ID, input: INPUT }, deps(stub))).envelope,
+        };
+      },
+    },
+    {
+      name: 'a run with no conversion',
+      status: 'fulfilled',
+      carries: ['result'],
+      run: async () => {
+        const stub = new Stub(
+          { lead: { spec: sellerSpec(SELLER_A, PAYEE_A, 'plain') }, plain: true },
+          [A],
+        );
+        return {
+          stub,
+          envelope: (await runRequestTool({ task: TASK_ID, input: INPUT }, deps(stub))).envelope,
+        };
+      },
+    },
+    {
+      name: 'a conversion that fails',
+      status: 'unverified',
+      carries: ['fullResultPath'],
+      run: async () => {
+        const stub = new Stub({ lead: lead().lead }, [{ ...A, body: { nothing: 'useful' } }]);
+        return {
+          stub,
+          envelope: (await runRequestTool({ task: TASK_ID, input: INPUT }, deps(stub))).envelope,
+        };
+      },
+    },
+    {
+      name: 'a running job',
+      status: 'running',
+      carries: ['job'],
+      run: async () => {
+        const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+        return {
+          stub,
+          envelope: (
+            await runRequestTool(
+              { task: TASK_ID, input: INPUT },
+              jobDeps(stub, [{ status: 'running' }]),
+            )
+          ).envelope,
+        };
+      },
+    },
+    {
+      name: 'a job read later, converted',
+      status: 'fulfilled',
+      carries: ['output', 'fullResultPath'],
+      run: async () => {
+        const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+        const first = await runRequestTool(
+          { task: TASK_ID, input: INPUT },
+          jobDeps(stub, [{ status: 'running' }]),
+        );
+        const later = await runRequestTool(
+          { job: String(first.envelope.job) },
+          jobDeps(stub, [{ status: 'done', ...BODY_A }]),
+        );
+        return { stub, envelope: later.envelope };
+      },
+    },
+    {
+      name: 'a job read later, over the preview limit',
+      status: 'fulfilled',
+      carries: ['output'],
+      run: async () => {
+        const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+        const first = await runRequestTool(
+          { task: TASK_ID, input: INPUT },
+          jobDeps(stub, [{ status: 'done', ...MANY }]),
+        );
+        const later = await runRequestTool(
+          { job: String(first.envelope.job) },
+          jobDeps(stub, [{ status: 'done', ...MANY }]),
+        );
+        return { stub, envelope: later.envelope };
+      },
+    },
+    {
+      name: 'a file result with no conversion',
+      status: 'fulfilled',
+      carries: ['savedFiles'],
+      run: async () => {
+        const media = { ...sellerSpec(SELLER_A, PAYEE_A, 'media'), output: 'media' };
+        const stub = new Stub({ lead: { spec: media }, plain: true }, [
+          {
+            ...A,
+            body: { files: [] },
+            raw: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+            contentType: 'image/png',
+          },
+        ]);
+        return {
+          stub,
+          envelope: (await runRequestTool({ task: TASK_ID, input: INPUT }, deps(stub))).envelope,
+        };
+      },
+    },
+  ];
+
+  it.each(ENDINGS)(
+    '$name: status, the means to collect it, and no second payment',
+    async (ending) => {
+      const { stub, envelope } = await ending.run();
+      expect(envelope.status).toBe(ending.status);
+      for (const key of ending.carries) expect(envelope[key], key).toBeDefined();
+      expect(means(envelope).length).toBeGreaterThan(0);
+      expect(stub.signatures.get(SELLER_A) ?? 0).toBeLessThanOrEqual(1);
+    },
+  );
+});
+
+describe('a legacy paid call is unchanged', () => {
+  it('returns the envelope it always did, with no task fields', async () => {
+    const legacy = {
+      id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d55',
+      ...sellerSpec(SELLER_A, PAYEE_A, 'legacy'),
+    };
+    await storeSpecs(dir, [legacy as never]);
+    const stub = new Stub({ lead: lead().lead }, [A]);
+    const result = await runRequestTool({ id: legacy.id, input: INPUT }, deps(stub));
+    expect(Object.keys(result.envelope).sort()).toEqual(
+      [
+        'cost',
+        'label',
+        'parameters',
+        'providerContentUntrusted',
+        'result',
+        'status',
+        'supplier',
+      ].sort(),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      supplier: 'seller-a.example.test',
+      cost: ['provider price 0.005 USD'],
+      result: JSON.stringify(BODY_A),
+    });
+    expect(result.summary).toBe('Fulfilled by seller-a.example.test · provider price 0.005 USD');
   });
 });
