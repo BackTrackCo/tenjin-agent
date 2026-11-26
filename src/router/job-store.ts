@@ -133,6 +133,40 @@ export function takePath(dataDir: string, offerId: string, take: number): string
 }
 
 /**
+ * A TASK JOB'S PAID RESULT, KEPT FOR THE LIFE OF ITS TAKE. The converted output
+ * and the provider's body sit beside the take's record, and `pruneJobs` removes
+ * each with the take that names it, never before: the results folder's own
+ * 24-hour cleanup cannot take them while the take can be read. Bound: one
+ * output and one body per take, so at most two files per live take (a take
+ * lives at most 48 hours), each no larger than the 4 MB a result is checked at.
+ */
+export function takeFilePath(
+  dataDir: string,
+  offerId: string,
+  take: number,
+  kind: 'output' | 'raw',
+): string {
+  return join(jobsDir(dataDir), `${sha256Hex(offerId)}.${take}.${kind}.json`);
+}
+
+/** Keep one of a take's result files; the path, or null when it could not be written. */
+export async function writeTakeFile(
+  dataDir: string,
+  offerId: string,
+  take: number,
+  kind: 'output' | 'raw',
+  text: string,
+): Promise<string | null> {
+  const path = takeFilePath(dataDir, offerId, take, kind);
+  try {
+    await writePrivate(path, text);
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Write a take. Throws: a job that cannot be recorded before its first poll is
  * one no later process can finish, and the caller says so.
  */
@@ -221,6 +255,16 @@ export async function endTake(
  *  Housekeeping only: never throws. */
 export async function pruneJobs(dataDir: string, now: number): Promise<void> {
   await sweep(jobsDir(dataDir), async (name, path) => {
+    // A task job's result files go with the take that names them.
+    const kept = /^([0-9a-f]{64}\.\d)\.(output|raw)\.json$/.exec(name);
+    if (kept !== null) {
+      const record = TakeSchema.safeParse(
+        await readJsonFile(join(jobsDir(dataDir), `${kept[1]}.json`), MAX_RECORD_BYTES).catch(
+          () => null,
+        ),
+      );
+      return !record.success || Date.parse(record.data.expiresAt) < now;
+    }
     if (!/^[0-9a-f]{64}\.\d\.json$/.test(name)) return false;
     const parsed = TakeSchema.safeParse(await readJsonFile(path, MAX_RECORD_BYTES));
     if (parsed.success) return Date.parse(parsed.data.expiresAt) < now;

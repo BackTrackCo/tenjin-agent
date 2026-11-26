@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testWalletProvider, buildPaymentRequired } from '../lib/read-test-utils';
 import { httpRequest } from '../lib/http';
 import { resolveSpendAuthorizer } from '../lib/wallet';
@@ -18,7 +18,8 @@ import {
 import { runApproveTool, runRequestTool, type RequestToolDeps } from './tool';
 import { runRequestCommand } from './task-command';
 import { checkTaskAnswer, requestRefusedOffer } from './task-request';
-import { storeSpecs } from './specs';
+import { storeFullResult, storeSpecs } from './specs';
+import { pruneJobs } from './job-store';
 import { CliError } from '../lib/errors';
 import { storeTaskRead } from './task-store';
 import { readRouterMemo } from './router-memo';
@@ -1435,5 +1436,104 @@ describe('an offer of the whole need', () => {
       task: 'other-task-5',
       offer: id,
     });
+  });
+});
+
+describe('a paid job read after the results folder was cleaned', () => {
+  const JOB48 = {
+    pollUrl: { field: 'statusUrl' },
+    pollMethod: 'GET',
+    running: { field: 'status', values: ['running'] },
+    everyS: 1,
+    maxWaitS: 30,
+    keepH: 48,
+  };
+  const SUBMITTED = { status: 'running', statusUrl: 'https://seller-a.example.test/jobs/1' };
+  const HOUR = 3_600_000;
+
+  function finishing(stub: Stub) {
+    let clock = Date.now();
+    const pollTransport = (async () => ({
+      status: 200,
+      header: () => undefined,
+      body: (async function* () {
+        yield new TextEncoder().encode(JSON.stringify({ status: 'done', ...BODY_A }));
+      })(),
+      discard: () => undefined,
+    })) as never;
+    return deps(stub, {
+      pollTransport,
+      now: () => clock,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+    });
+  }
+
+  const jobbed = () => ({
+    lead: {
+      spec: { ...sellerSpec(SELLER_A, PAYEE_A, 'glim-like'), job: JOB48 },
+      convert: CONVERT_A,
+    },
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A day and a half on: another saved result runs the results folder's own cleanup. */
+  async function afterCleanup(first: { envelope: Record<string, unknown> }) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 30 * HOUR);
+    await storeFullResult(dir, 'something-else', 'x');
+    const raw = String(first.envelope.fullResultPath);
+    await vi.waitFor(async () => {
+      await expect(stat(raw)).rejects.toThrow();
+    });
+  }
+
+  it('still returns the whole output, while the job record can be read', async () => {
+    const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+    const d = finishing(stub);
+    const first = await runRequestTool({ task: TASK_ID, input: INPUT }, d);
+    expect(first.envelope.status).toBe('fulfilled');
+    await afterCleanup(first);
+    const later = await runRequestTool({ job: String(first.envelope.job) }, d);
+    expect(later.envelope.status).toBe('fulfilled');
+    expect(later.envelope.output).toEqual(EXPECTED_OUTPUT);
+    // The body kept with the job is a path that exists.
+    await expect(stat(String(later.envelope.fullResultPath))).resolves.toBeDefined();
+    expect(stub.signatures.get(SELLER_A)).toBe(1);
+  });
+
+  it('says plainly when every copy is gone, and names no path that does not exist', async () => {
+    const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+    const d = finishing(stub);
+    const first = await runRequestTool({ task: TASK_ID, input: INPUT }, d);
+    await afterCleanup(first);
+    for (const file of await readdir(join(dir, 'jobs'))) {
+      if (/\.(output|raw)\.json$/.test(file)) await rm(join(dir, 'jobs', file));
+    }
+    const later = await runRequestTool({ job: String(first.envelope.job) }, d);
+    expect(later.envelope.status).toBe('failed');
+    expect(later.envelope.output).toBeUndefined();
+    expect(later.envelope.fullResultPath).toBeUndefined();
+    expect(String(later.envelope.reason)).toContain('no longer holds the result');
+  });
+
+  it("removes a job's result files with its record, and not before", async () => {
+    const stub = new Stub(jobbed(), [{ ...A, status: 202, body: SUBMITTED }]);
+    const first = await runRequestTool({ task: TASK_ID, input: INPUT }, finishing(stub));
+    const kept = async () =>
+      (await readdir(join(dir, 'jobs'))).filter((file) => /\.(output|raw)\.json$/.test(file));
+    expect(await kept()).toHaveLength(2);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 30 * HOUR);
+    await pruneJobs(dir, Date.now());
+    expect(await kept()).toHaveLength(2);
+    vi.setSystemTime(Date.now() + 30 * HOUR);
+    await pruneJobs(dir, Date.now());
+    await vi.waitFor(async () => expect(await kept()).toHaveLength(0));
+    expect(first.envelope.status).toBe('fulfilled');
   });
 });

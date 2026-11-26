@@ -141,6 +141,7 @@ import {
   readTake,
   readTakes,
   writeTake,
+  writeTakeFile,
   type JobTake,
   type TaskJobInfo,
 } from './job-store';
@@ -2492,15 +2493,23 @@ async function finishTake(
     const taskOutput = shapedResult.envelope['output'];
     const taskUnverified =
       taskJob !== undefined && shapedResult.envelope['status'] === 'unverified';
+    // Both files live as long as the take does (`job-store.ts`), not as long
+    // as the results folder keeps a file.
     const outputPath =
       taskJob !== undefined && taskOutput !== undefined
-        ? await storeFullResult(
+        ? await writeTakeFile(
             dataDir,
-            `${take.offerId}#${take.take}:output`,
+            take.offerId,
+            take.take,
+            'output',
             JSON.stringify(taskOutput),
           )
         : null;
-    const rawPath = shapedResult.envelope['fullResultPath'];
+    const rawBody = delivered.result.envelope['result'];
+    const rawPath =
+      taskJob !== undefined && typeof rawBody === 'string' && rawBody.length > 0
+        ? await writeTakeFile(dataDir, take.offerId, take.take, 'raw', rawBody)
+        : null;
     const taskCaveat = shapedResult.envelope['resultCaveat'];
     const ended = await end({
       state: 'done',
@@ -2517,7 +2526,7 @@ async function finishTake(
           ? { resultCaveat: taskCaveat.slice(0, 1_000) }
           : {}),
       ...(outputPath !== null ? { outputPath } : {}),
-      ...(taskJob !== undefined && typeof rawPath === 'string' ? { rawPath } : {}),
+      ...(rawPath !== null ? { rawPath } : {}),
     });
     if (ended?.won === false) return lostTo(ended.take);
     // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended

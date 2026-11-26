@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { mask } from '../lib/redact';
 import { canonicalHash, inputProblems, validateResultBody } from '../lib/request-schema';
@@ -1167,21 +1167,34 @@ export async function taskEndedResult(
       kept = false;
     }
   }
-  const where = take.rawPath !== undefined ? { fullResultPath: take.rawPath } : {};
+  // A PATH IS NAMED ONLY WHILE ITS FILE EXISTS.
+  const rawKept =
+    take.rawPath !== undefined &&
+    (await stat(take.rawPath).then(
+      () => true,
+      () => false,
+    ));
+  const where = rawKept ? { fullResultPath: take.rawPath } : {};
   const gone = !unverified && !kept;
+  // A result nothing can return is not fulfilled: it says so plainly.
+  const lost = gone;
+  const status = unverified ? 'unverified' : lost ? 'failed' : 'fulfilled';
   return {
-    isError: unverified,
-    summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${info.service} · Tenjin fee ${usd(feePaid)} · provider ${usd(paid)} (${how})`,
+    isError: unverified || lost,
+    summary: `${status === 'fulfilled' ? 'Fulfilled by' : status === 'failed' ? 'Result lost from' : 'Unverified result from'} ${info.service} · Tenjin fee ${usd(feePaid)} · provider ${usd(paid)} (${how})`,
     envelope: {
-      status: unverified ? 'unverified' : 'fulfilled',
+      status,
       task: info.task,
       run: info.run,
       service: info.service,
       ...(kept ? { output } : {}),
       ...where,
-      ...(gone
+      ...(lost
         ? {
-            note: 'The task output file is no longer kept on this machine; the provider body is at fullResultPath while it lasts.',
+            reason:
+              'The provider was paid, but this machine no longer holds the result (its file was removed). Nothing more was paid.',
+            nextStep:
+              'Check `tenjin payments`. A new run pays the Tenjin fee and the provider again.',
           }
         : {}),
       receipt: receiptOf(feePaid, info.payTo, {
