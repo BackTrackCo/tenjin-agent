@@ -965,7 +965,10 @@ async function finish(
     run: answer.run,
     service: label,
   };
-  if (result.isError && result.envelope['status'] !== 'unverified') {
+  const said = result.envelope['status'];
+  // ANYTHING THAT IS NOT A DELIVERY, a routine stop (`needs_approval`) included,
+  // which carries no body to convert.
+  if (said !== 'fulfilled' && said !== 'unverified') {
     // Nothing came back and nothing was signed (or a stop of another kind).
     const state = money.amountAtomic > 0n ? ('paid' as const) : ('not_paid' as const);
     const shown = scrubbed(result, spec);

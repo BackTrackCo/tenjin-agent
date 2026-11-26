@@ -17,7 +17,7 @@ import {
 } from './decision';
 import { runApproveTool, runRequestTool, type RequestToolDeps } from './tool';
 import { runRequestCommand } from './task-command';
-import { checkTaskAnswer } from './task-request';
+import { checkTaskAnswer, requestRefusedOffer } from './task-request';
 import { CliError } from '../lib/errors';
 import { storeTaskRead } from './task-store';
 import { readRouterMemo } from './router-memo';
@@ -38,7 +38,9 @@ const TASK_ID = 'x-post-search';
 const INPUT = { query: 'x402 min_faves:5' };
 
 let dir: string;
+let allowlist: string[] = [];
 beforeEach(async () => {
+  allowlist = [];
   dir = await mkdtemp(join(tmpdir(), 'router-task-'));
   await mkdir(join(dir, '.git'));
   await writeFile(
@@ -198,6 +200,14 @@ class Stub {
       lead: { spec: Record<string, unknown>; convert?: unknown };
       fallback?: { spec: Record<string, unknown>; convert?: unknown };
       free?: 'offer' | 'fee_required';
+      /** Fields added to the free route's offer (choices, rows, bound). */
+      offerExtra?: Record<string, unknown>;
+      /** The members a `choice: "all"` or `count` run is served as. */
+      set?: { key?: string; spec: Record<string, unknown>; convert?: unknown }[];
+      /** The router refuses the run, at $0, with this code. */
+      noRun?: string;
+      /** The lead has no conversion and no output shape, as a listing's. */
+      plain?: boolean;
     },
     private readonly sellers: SellerScript[],
   ) {}
@@ -245,11 +255,49 @@ class Stub {
           need: 'x post search',
           tasks: [{ task: TASK_ID, label: 'X post search', does: TASK.does, price: '$0.0058' }],
           hint: `Call request(${JSON.stringify({ task: TASK_ID, input: { query: '<query>' } })}) alone and wait for its result.`,
+          ...this.answer.offerExtra,
         },
       });
     }
     if (url === `${ROUTER}${ROUTE_PAID_PATH}`) {
       const run = String(body?.run);
+      if (this.answer.noRun !== undefined) {
+        return json({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'no_run',
+            code: this.answer.noRun,
+            reason: 'The router will not run it.',
+          },
+        });
+      }
+      if (this.answer.set !== undefined && (body?.choice === 'all' || body?.count !== undefined)) {
+        const members =
+          body?.count !== undefined
+            ? Array.from({ length: Number(body.count) }, () => this.answer.set![0]!)
+            : this.answer.set;
+        this.feePayments += 1;
+        this.runs.set(run, { fee: String(750 * members.length), settled: true });
+        return json({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'run_set',
+            run,
+            task: String(body?.task ?? TASK_ID),
+            expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+            routingFeeAtomic: String(750 * members.length),
+            calls: members.map((m, i) => ({
+              ...(m.key !== undefined ? { key: m.key } : {}),
+              label: `member ${i}`,
+              spec: m.spec,
+              ...(m.convert !== undefined ? { convert: m.convert } : {}),
+              output: SHAPE,
+            })),
+          },
+        });
+      }
       const known = this.runs.get(run);
       const fee = known?.settled === true ? '0' : '750';
       if (known === undefined || !known.settled) this.feePayments += 1;
@@ -260,12 +308,12 @@ class Stub {
         decision: {
           action: 'run',
           run,
-          task: TASK_ID,
+          task: String(body?.task ?? TASK_ID),
           expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
           routingFeeAtomic: fee,
           spec: this.answer.lead.spec,
           ...(this.answer.lead.convert !== undefined ? { convert: this.answer.lead.convert } : {}),
-          output: SHAPE,
+          ...(this.answer.plain === true ? {} : { output: SHAPE }),
           ...(this.answer.fallback !== undefined
             ? {
                 fallback: {
@@ -306,11 +354,24 @@ function deps(
   route?: (send: DecisionRoute['send']) => DecisionRoute['send'],
 ): RequestToolDeps & { routed: { sent: number; limits: (bigint | undefined)[] } } {
   const routed = { sent: 0, limits: [] as (bigint | undefined)[] };
-  const authorizer = resolveSpendAuthorizer(ctx(), {
+  const open = resolveSpendAuthorizer(ctx(), {
     maxAutoSpendAtomic: 250_000n,
     sessionBudgetAtomic: 5_000_000n,
     allowlistCreators: [],
   } as never);
+  // A person's creator allowlist refuses every host it does not name.
+  const authorizer =
+    allowlist.length === 0
+      ? open
+      : {
+          ...open,
+          authorize: async (req: Parameters<typeof open.authorize>[0]) => ({
+            ...(await open.authorize(req)),
+            decision: 'deny' as const,
+            reason: 'not_allowlisted' as const,
+            message: 'the creator is not on the allowlist',
+          }),
+        };
   return {
     ctx: ctx(),
     cwd: dir,
@@ -721,5 +782,200 @@ describe('tenjin doctor, the routed-task answer', () => {
       status: 'warn',
       checked: false,
     });
+  });
+});
+
+const OPTIONS = {
+  group: 'x search',
+  default: 'a',
+  options: [
+    { key: 'a', label: 'Option A', strength: 'broad', task: TASK_ID },
+    { key: 'b', label: 'Option B', strength: 'cheap', task: TASK_ID },
+  ],
+  all: { totalAtomic: '11500' },
+};
+const SET = [
+  { key: 'a', spec: sellerSpec(SELLER_A, PAYEE_A, 'glim-like'), convert: CONVERT_A },
+  { key: 'b', spec: sellerSpec(SELLER_B, PAYEE_B, 'api-like', '1500', '1650'), convert: CONVERT_B },
+];
+
+describe('a set of runs', () => {
+  it('runs every choice as one quote and one fee, each provider paid once, each payment on the receipt', async () => {
+    const stub = new Stub({ lead: lead().lead, offerExtra: { choices: OPTIONS }, set: SET }, [
+      A,
+      B,
+    ]);
+    const d = deps(stub);
+    const offered = await runRequestTool({ query: 'search X' }, d);
+    expect(offered.summary).toContain('Choices (x search)');
+    const result = await runRequestTool(
+      { id: offered.envelope.id as string, choice: 'all', input: INPUT },
+      d,
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      receipt: { routingFee: { amount: '$0.0015' } },
+    });
+    const members = result.envelope.results as { output: unknown; payment: { state: string } }[];
+    expect(members.map((m) => m.output)).toEqual([EXPECTED_OUTPUT, EXPECTED_OUTPUT]);
+    expect(members.map((m) => m.payment.state)).toEqual(['paid', 'paid']);
+    expect(stub.feePayments).toBe(1);
+    expect(stub.signatures.get(SELLER_A)).toBe(1);
+    expect(stub.signatures.get(SELLER_B)).toBe(1);
+    const run = stub.calls.find((c) => c.url.endsWith(ROUTE_PAID_PATH))!;
+    expect(run.body).toMatchObject({ choice: 'all', caps: { fee: '1500', seller: '5500' } });
+    expect(JSON.stringify(run.body)).not.toContain('min_faves');
+    for (const name of NAMES) expect(textOf(result)).not.toContain(name);
+    expect(d.routed.limits.at(-1)).toBe(1500n);
+  });
+
+  it('holds a set over the limits as one quote with the fees summed, and signs nothing before the yes', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '4000', sessionBudget: '5000000' }),
+    );
+    const stub = new Stub({ lead: lead().lead, set: [SET[0]!] }, [A]);
+    const d = deps(stub, { approves: true });
+    const stopped = await runRequestTool({ task: TASK_ID, count: 2, input: INPUT }, d);
+    expect(stopped.envelope).toMatchObject({ status: 'needs_approval' });
+    // Two fees ($0.0015) and two provider maximums ($0.011).
+    expect((stopped.envelope.quote as { total: string }).total).toBe('$0.0125');
+    expect(stub.paidRouteRequests()).toBe(0);
+    expect(stub.providerRequests()).toBe(0);
+    const quote = stopped.envelope.quote as { id: string; total: string; what: string };
+    const ran = await runApproveTool({ quote: quote.id, total: quote.total, what: quote.what }, d);
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    // Two takes: two claims, so two provider payments, one fee.
+    expect(stub.signatures.get(SELLER_A)).toBe(2);
+    expect(stub.feePayments).toBe(1);
+  });
+
+  it('pays a member once even when its reply is lost, and the others still run', async () => {
+    const stub = new Stub({ lead: lead().lead, offerExtra: { choices: OPTIONS }, set: SET }, [
+      { ...A, dropsReply: true },
+      B,
+    ]);
+    const d = deps(stub);
+    await runRequestTool({ query: 'search X' }, d);
+    const result = await runRequestTool(
+      { task: TASK_ID, id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01', choice: 'all', input: INPUT },
+      d,
+    );
+    expect(result.envelope).toMatchObject({ status: 'partial', possiblyPaid: true });
+    expect(stub.signatures.get(SELLER_A)).toBe(1);
+    expect(stub.signatures.get(SELLER_B)).toBe(1);
+  });
+
+  it.each(['unknown_choice', 'count_over_max', 'offer_expired'])(
+    'says %s plainly and pays nothing',
+    async (code) => {
+      const stub = new Stub({ lead: lead().lead, noRun: code }, [A]);
+      const result = await runRequestTool({ task: TASK_ID, count: 2, input: INPUT }, deps(stub));
+      expect(result.envelope).toMatchObject({ status: 'needs_input' });
+      expect(result.summary).toContain('Nothing was paid');
+      expect(stub.signatures.size).toBe(0);
+    },
+  );
+});
+
+describe('offer picks and open-Bazaar rows', () => {
+  it('runs the option a choice names, sending its key and task', async () => {
+    const stub = new Stub({ lead: lead().lead, offerExtra: { choices: OPTIONS } }, [A]);
+    const d = deps(stub);
+    const offered = await runRequestTool({ query: 'search X' }, d);
+    const ran = await runRequestTool(
+      { id: offered.envelope.id as string, choice: 'b', input: INPUT },
+      d,
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(stub.calls.find((c) => c.url.endsWith(ROUTE_PAID_PATH))!.body).toMatchObject({
+      task: TASK_ID,
+      choice: 'b',
+    });
+  });
+
+  it('runs a listing row through the same checkout, with its offer row sent back and no provider named', async () => {
+    const row = {
+      task: 'listing-1',
+      label: 'A listed search',
+      does: 'finds things',
+      price: '$0.005',
+      offer: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d77',
+    };
+    const stub = new Stub(
+      {
+        lead: { spec: sellerSpec(SELLER_A, PAYEE_A, 'listing') },
+        plain: true,
+        offerExtra: { tasks: [row] },
+      },
+      [A],
+    );
+    const d = deps(stub);
+    const offered = await runRequestTool({ query: 'search X' }, d);
+    for (const name of NAMES) expect(textOf(offered)).not.toContain(name);
+    const ran = await runRequestTool(
+      { task: 'listing-1', id: offered.envelope.id as string, input: { query: 'x402' } },
+      d,
+    );
+    expect(ran.envelope).toMatchObject({
+      status: 'fulfilled',
+      receipt: { routingFee: { paid: true } },
+    });
+    const run = stub.calls.find((c) => c.url.endsWith(ROUTE_PAID_PATH))!;
+    expect(run.body).toMatchObject({ task: 'listing-1', offer: row.offer });
+    // The caps are the row's price with the router's headroom, and the fee 15%.
+    expect(run.body).toMatchObject({ caps: { fee: '750', seller: '5500' } });
+    for (const name of NAMES) expect(textOf(ran)).not.toContain(name);
+  });
+});
+
+describe('the re-ask after an account refuses', () => {
+  it('asks the free route first and falls back to the paid route for a router that predates tasks', async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      urls.push(String(input));
+      const body = JSON.parse(String(init?.body)) as { accepts: string[] };
+      const reason = String(input).endsWith(ROUTER_PATH) ? 'fee_required' : 'native_sufficient';
+      void body;
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            reason: 'no',
+            diagnostics: { reasonCode: reason, stage: 'capability', missing: [], nextAction: 'x' },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const answer = await requestRefusedOffer(
+      '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01',
+      { ctx: ctx(), baseUrl: ROUTER, fetchImpl },
+      Date.now(),
+    );
+    expect(urls).toEqual([`${ROUTER}${ROUTER_PATH}`, `${ROUTER}${ROUTE_PAID_PATH}`]);
+    expect(answer.status).toBe('decided');
+    await requestRefusedOffer(
+      '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01',
+      { ctx: ctx(), baseUrl: ROUTER, fetchImpl },
+      Date.now(),
+    );
+    expect(urls.slice(2)).toEqual([`${ROUTER}${ROUTE_PAID_PATH}`]);
+  });
+});
+
+describe("the person's creator allowlist", () => {
+  it('refuses a provider it does not name at signing: the fee is paid, the provider is not', async () => {
+    allowlist = ['tenjin.sh'];
+    const stub = new Stub({ lead: lead().lead }, [A]);
+    const result = await runRequestTool({ task: TASK_ID, input: INPUT }, deps(stub));
+    expect(result.envelope.status).toBe('needs_approval');
+    expect(result.envelope).toMatchObject({
+      receipt: { routingFee: { paid: true }, provider: { state: 'not_paid' } },
+    });
+    expect(stub.signatures.size).toBe(0);
+    expect(stub.feePayments).toBe(1);
   });
 });
