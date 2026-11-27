@@ -1,0 +1,117 @@
+import type { PaymentRequirements } from '@x402/core/types';
+import { saveSweepListings, sweepRegistries } from '../lib/bazaar';
+import { formatUsdDisplay } from '../lib/money';
+import { sanitizeForTerminal } from '../lib/output';
+import { resolveContextSettings } from '../lib/settings';
+import { isCanonicalUsdc } from '../lib/x402-pay';
+import { CliError } from '../lib/errors';
+import { mask } from '../lib/redact';
+import type { CommandContext, CommandResult } from '../context';
+
+/**
+ * `tenjin discover [query]`: list or search the configured x402 discovery
+ * registries. Free and keyless, with no wallet touched or payment authorized.
+ * Complements the router's curated `request({browse})` tool list with the
+ * configured registries. No provider task is called; only this explicit
+ * command starts the search.
+ *
+ * Registry listings are settlement-derived and unvetted, and every string in
+ * them is other people's content: rendered sanitized, never followed. MCP-type
+ * listings are counted but not shown, because `tenjin pay` cannot speak to
+ * them; nothing here implies this CLI can pay everything a registry lists.
+ */
+
+/** Terminal rows; the machine envelope carries every swept resource. */
+const HUMAN_ROWS = 20;
+
+export interface DiscoverArgs {
+  query?: string;
+}
+
+export async function runDiscover(args: DiscoverArgs, ctx: CommandContext): Promise<CommandResult> {
+  const settings = await resolveContextSettings(ctx);
+  const query = args.query?.trim() ?? '';
+  // The rule `request({browse})` follows: a query the mask would change is not
+  // sent to anyone, masked or otherwise.
+  if (mask(query) !== query)
+    throw new CliError(
+      'REFUSED',
+      'The query carries a credential-shaped value, so nothing was sent.',
+      { fix: 'Search again with a few plain words for the need.' },
+    );
+  const sweep = await sweepRegistries(settings.bazaarRegistries, {
+    timeoutMs: ctx.flags.timeout,
+    ...(query ? { query } : {}),
+  });
+
+  // The sweep doubles as pay-time evidence: `tenjin pay` verifies a foreign 402
+  // against these stored listings, because a live per-URL registry lookup is not
+  // reliable (see lib/bazaar). Best-effort: a store write failure loses cache,
+  // never the sweep output.
+  try {
+    await saveSweepListings(ctx.dataDir, sweep.resources);
+  } catch {
+    // nothing: the sweep result still stands on its own
+  }
+
+  const resources = sweep.resources.map((r) => ({
+    url: r.url,
+    registry: r.registry,
+    ...(r.description !== undefined ? { description: r.description } : {}),
+    ...(r.serviceName !== undefined ? { serviceName: r.serviceName } : {}),
+    ...(r.extensions !== undefined ? { extensions: r.extensions } : {}),
+    ...(r.lastUpdated !== undefined ? { lastUpdated: r.lastUpdated } : {}),
+    accepts: r.accepts.map((a) => ({
+      scheme: a.scheme,
+      network: a.network,
+      asset: a.asset,
+      amount: a.amount,
+      payTo: a.payTo,
+    })),
+  }));
+
+  const data = {
+    registries: settings.bazaarRegistries,
+    ...(args.query !== undefined ? { query: args.query } : {}),
+    resources,
+    skippedNonHttp: sweep.skippedNonHttp,
+    // A registry that did not answer makes this sweep PARTIAL; saying so is what
+    // keeps "not listed here" from reading as "not listed anywhere".
+    errors: sweep.errors,
+  };
+
+  const humanLines = sweep.resources
+    .slice(0, HUMAN_ROWS)
+    .map((r) => `${sanitizeForTerminal(r.url)} ${priceTag(r.accepts)}${describe(r.description)}`);
+  if (sweep.resources.length > HUMAN_ROWS) {
+    humanLines.push(`… ${sweep.resources.length - HUMAN_ROWS} more in --json`);
+  }
+  if (sweep.resources.length === 0) {
+    humanLines.push(
+      sweep.errors.length > 0
+        ? 'Discovery is incomplete; no HTTP resources to show.'
+        : 'No registry HTTP resources matched.',
+    );
+  }
+  for (const err of sweep.errors) {
+    humanLines.push(`(${sanitizeForTerminal(err.registry)}: ${sanitizeForTerminal(err.message)})`);
+  }
+  return { data, humanLines };
+}
+
+function priceTag(accepts: PaymentRequirements[]): string {
+  const first = accepts.find((a) => a.scheme === 'exact' && isCanonicalUsdc(a)) ?? accepts[0];
+  if (first === undefined) return '(no price advertised)';
+  try {
+    if (!isCanonicalUsdc(first)) throw new Error('not a supported dollar asset');
+    return `(${formatUsdDisplay(first.amount)} USD on ${first.network})`;
+  } catch {
+    return `(${sanitizeForTerminal(first.amount)} atomic ${sanitizeForTerminal(first.asset)} on ${sanitizeForTerminal(first.network)})`;
+  }
+}
+
+function describe(description: string | undefined): string {
+  if (description === undefined || description.length === 0) return '';
+  const clean = sanitizeForTerminal(description);
+  return ` — ${clean.length > 100 ? `${clean.slice(0, 100)}…` : clean}`;
+}
