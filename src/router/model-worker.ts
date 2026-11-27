@@ -1,3 +1,4 @@
+import { BackgroundWork } from './model-worker-background';
 import { WorkerInbox } from './model-worker-inbox';
 import {
   completedMessageSse,
@@ -923,6 +924,10 @@ async function runQualifiedWorker(
     );
   });
   let result: string | undefined;
+  // What the child has running in the background, and whether it ever had (see BackgroundWork).
+  const background = new BackgroundWork();
+  let backgroundRan = false;
+  let afterBackground: NodeJS.Timeout | undefined;
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
   // Auto and bypass workers never wait on a person; the sandbox still applies.
@@ -1452,6 +1457,17 @@ async function runQualifiedWorker(
     }
     let activityReady = false;
     for await (const message of worker) {
+      if (message.type !== 'system') clearTimeout(afterBackground);
+      if (background.observe(message)) {
+        // Its last background command ended after a report: the notice of that end starts one
+        // more turn, which the run waits for, but not for ever if none comes.
+        if (!background.busy && result !== undefined) {
+          clearTimeout(afterBackground);
+          afterBackground = setTimeout(() => options.inbox?.closeIfEmpty(), BACKGROUND_TURN_MS);
+          afterBackground.unref();
+        }
+      }
+      if (background.busy) backgroundRan = true;
       if (message.type === 'assistant') diagnostics.mark('firstActivity');
       if (message.type === 'system' && message.subtype === 'init') {
         diagnostics.mark('childReady');
@@ -1495,11 +1511,21 @@ async function runQualifiedWorker(
         diagnostics.mark('resultMessage');
         diagnostics.stop(message);
         session?.assert(message.session_id);
-        if (message.subtype !== 'success') throw workerResultError(message);
+        if (message.subtype !== 'success') {
+          // A later report that failed, after one that succeeded while a command ran in the
+          // background, is that command's end, not a failure of the worker: the last report
+          // that succeeded is the result.
+          if (result !== undefined && backgroundRan && !controller.signal.aborted) {
+            if (!background.busy) options.inbox?.closeIfEmpty();
+            continue;
+          }
+          throw workerResultError(message);
+        }
         result = message.result;
         // Reported with nothing waiting: the input closes and the worker ends. A message
-        // queued meanwhile is sent first, and its turn reports again.
-        options.inbox?.closeIfEmpty();
+        // queued meanwhile is sent first, and its turn reports again. The input stays open
+        // while a background command runs: its end starts another turn, which reports last.
+        if (!background.busy) options.inbox?.closeIfEmpty();
       }
     }
     if (proxyFailure) throw proxyFailure.error;
@@ -1507,8 +1533,18 @@ async function runQualifiedWorker(
     if (Buffer.byteLength(result, 'utf8') > MODEL_NATIVE_TEXT_BYTES)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
   } catch (error) {
-    executionFailure = proxyFailure ?? { error };
+    // The child ended after a report that succeeded, with a command still running in the
+    // background: its end, with the result of its last report, not a failure of the worker.
+    const childEnded =
+      !proxyFailure &&
+      result !== undefined &&
+      backgroundRan &&
+      workerStop(error) === undefined &&
+      !controller.signal.aborted &&
+      !options.signal.aborted;
+    if (!childEnded) executionFailure = proxyFailure ?? { error };
   } finally {
+    clearTimeout(afterBackground);
     authorizePrompt(false);
     // Seal, not close: what was queued and never read is the caller's to report.
     options.inbox?.seal();
@@ -1562,6 +1598,9 @@ async function runQualifiedWorker(
   if (executionFailure) throw executionFailure.error;
   return redactAll(result!);
 }
+
+/** How long a run waits for the turn a background command's end starts, before it closes. */
+const BACKGROUND_TURN_MS = 30_000;
 
 /** Native local settings and MCP config of repositories nested in a worker root: closed. */
 const NESTED_PRIVATE = ['.claude/settings.local.json', '.mcp.json'];

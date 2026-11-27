@@ -386,6 +386,114 @@ it('ends at the last turn that its messages caused', async () => {
   expect(seen.map((m) => m.text).slice(1)).toEqual(['first', 'second']);
 });
 
+/**
+ * A fake Claude Code whose shell command runs in the background: it reports a result, goes on
+ * once `ended` opens, and reports again. `inputClosed` says whether the worker closed its input.
+ */
+function backgroundWorker(second: Record<string, unknown>, options: { restart?: boolean } = {}) {
+  const state = { reported: false, inputClosed: false };
+  let ended!: () => void;
+  const gate = new Promise<void>((resolve) => (ended = resolve));
+  vi.mocked(query).mockImplementation(
+    (call) =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          const pump = (async () => {
+            for await (const message of call.prompt as AsyncIterable<unknown>) void message;
+            state.inputClosed = true;
+          })();
+          yield {
+            type: 'system',
+            subtype: 'init',
+            permissionMode: 'default',
+            cwd: '/repo',
+            session_id: 'sess',
+          };
+          yield {
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 'task-1', task_type: 'local_bash', description: 'sleep 40' }],
+          };
+          yield { type: 'result', session_id: 'sess', subtype: 'success', result: 'interim' };
+          state.reported = true;
+          await gate;
+          yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] };
+          if (options.restart !== false) yield { type: 'assistant', session_id: 'sess' };
+          if (options.restart !== false) yield { type: 'result', session_id: 'sess', ...second };
+          await pump;
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  return { state, ended };
+}
+
+// Issue 583: a follow-up whose worker started `sleep 40; echo first-done` in the background
+// reported an interim result, and the run ended as unknown with no result. The result of a run
+// is its last report, so the run stays open until the child has no background work.
+it('keeps the worker open while a background command runs, and returns the last report', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const inbox = new WorkerInbox();
+  const worker = backgroundWorker({ subtype: 'success', result: 'final' });
+  const run = runModelWorker(job, { ...options(), inbox });
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  // Nothing closes the input while the command runs: its end starts the next turn.
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  expect(worker.state.inputClosed).toBe(false);
+  expect(inbox.push('one more thing')).toBe('delivered');
+  worker.ended();
+  await expect(run).resolves.toBe('final');
+  expect(worker.state.inputClosed).toBe(true);
+});
+
+it('ends with the last good report when the child ends after it with a command still in the background', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const worker = backgroundWorker({ subtype: 'error_during_execution' });
+  const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  worker.ended();
+  await expect(run).resolves.toBe('interim');
+});
+
+it('still fails on an error report when no command ran in the background', async () => {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+          yield { type: 'result', subtype: 'success', result: 'first' };
+          yield { type: 'result', subtype: 'error_during_execution' };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  await expect(runModelWorker(job, options())).rejects.toBeInstanceOf(Error);
+});
+
+it('closes the worker when no turn follows the end of its background command', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const { WorkerInbox } = await import('./model-worker-inbox');
+    const worker = backgroundWorker({ subtype: 'success', result: 'unused' }, { restart: false });
+    const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+    run.catch(() => undefined);
+    await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+    worker.ended();
+    // The command ended and no assistant message follows: the worker waits, then closes.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(worker.state.inputClosed).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(worker.state.inputClosed).toBe(true);
+    await expect(run).resolves.toBe('interim');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 function authenticationQuery(account: Promise<unknown>) {
   let started!: (value: Promise<IteratorResult<unknown>>) => void;
   const pendingPrompt = new Promise<Promise<IteratorResult<unknown>>>((resolve) => {
