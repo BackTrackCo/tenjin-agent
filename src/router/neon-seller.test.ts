@@ -275,3 +275,46 @@ it('refuses a seller whose name resolves to a private address, before anything i
   expect(transport).not.toHaveBeenCalled();
   expect(signed).toHaveLength(0);
 });
+
+// Failure caught by review: nothing held the seller's live quote to the room the job has left, so
+// removing the bound left every test green. A quote above the room signs nothing and sends nothing.
+it('signs nothing when the seller quotes more than the room the job has left', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+  const account = privateKeyToAccount(generatePrivateKey());
+  const signed: unknown[] = [];
+  const { fetchImpl, paid } = seller('7321');
+  const batch = new BatchSeller({
+    dataDir: dir,
+    terms: TERMS,
+    provider: {
+      getSigner: async () => ({
+        address: account.address,
+        signTypedData: async (message: never) => {
+          signed.push(message);
+          return account.signTypedData(message);
+        },
+      }),
+    } as never,
+    admit: async () => undefined,
+    requestKey: 'call-1',
+    fetchImpl,
+  });
+  // The stub's 402 quotes 42,521; the room is 40,000.
+  await expect(batch.post('{}', new AbortController().signal, 40_000n)).rejects.toThrow();
+  expect(signed).toHaveLength(0);
+  expect(paid).toHaveLength(0);
+  expect(batch.transmitted).toBe(false);
+  // The same quote at exactly the room goes through.
+  const fits = new BatchSeller({
+    dataDir: dir,
+    terms: TERMS,
+    provider: { getSigner: async () => account } as never,
+    admit: async () => undefined,
+    requestKey: 'call-2',
+    fetchImpl: seller('7321').fetchImpl,
+  });
+  await expect(fits.post('{}', new AbortController().signal, 42_521n)).resolves.toMatchObject({
+    status: 200,
+    ceilingAtomic: 42521n,
+  });
+});
