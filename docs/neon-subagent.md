@@ -1,19 +1,21 @@
 # Gemini 4 Neon subagents
 
-- **What it is.** A Claude Code subagent that runs on Google's Gemini 4 Neon, for writing jobs: documentation, release notes, essays, edits to prose. You start it by asking for it by name. Tenjin never offers it on its own, and it is off until you turn it on.
-- **Who sees what.** BlockRun, which sells the model and takes each payment, and Google, whose model reads the request. They get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. Nothing is masked except the job's own tokens and your wallet key and passphrase. Tenjin's router receives nothing and charges no routing fee. The worker has no web search.
-- **Cost.** Each model call is one payment from your wallet to BlockRun, at Google's list price ($3 in, $15 out per million tokens, $0.15 cached) plus BlockRun's 5% and a $0.002 least charge. A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. A turn can write at most 8,192 tokens (BlockRun prices a call at the whole output you allow, whatever the model writes, so one turn reserves up to about $0.13 plus its input). A call that fails after you paid is not repeated.
-- **On.** `tenjin config neon on`, with `--repository <path>` to limit it to directories and `--max-job <USD>` for a lower ceiling.
-- **Off.** `tenjin config neon off`. `tenjin config neon` shows the state.
+- **What it is.** A Claude Code subagent that runs on Gemini 4 Neon, for writing jobs: documentation, release notes, essays, edits to prose. It starts only when you, or a skill you run, ask for it. Tenjin never offers it and never routes to it on its own.
+- **No setting.** There is nothing to turn on or off. The DeepSeek subagent setting, on or off, does not start it, stop it or change it: that setting only decides whether Tenjin offers to route held subagent calls.
+- **Who sees what.** The provider of the service the Tenjin router names for the job receives the prompt the parent writes, the `CLAUDE.md` files its agent type loads (none for `Explore`) and anything the worker reads with its tools, except your wallet and job-secret values. Each provider handles what it receives under its own terms. Tenjin's router receives none of it and charges no routing fee. The worker has no web search. Each job's provider is on record in `tenjin payments`, which lists who each call paid.
+- **Cost.** Each model call is one payment from your wallet to that provider, at the price the Tenjin router lists for the service, within your per-call limit ($1 by default), your daily budget and the job's ceiling. A job costs up to your per-call limit, or the lower `--max-job` ceiling you name. A turn can write up to 16,000 tokens, thinking included, and is cut down to what the ceiling and your budget leave. A call that fails after you paid is not repeated.
+- **The payment channel.** The provider takes payment through a channel that holds up to $0.50 of your money while a job runs. When the job ends, Tenjin asks for what is left and it returns to your wallet. If that fails, `tenjin refund` asks again, and where the provider does not answer it starts the channel's timed withdrawal on chain, which costs a little gas and waits at least 900 seconds.
 
 ## Start a worker
 
-Ask your agent to use a Neon subagent for the job. The agent calls the `subagent` tool with a `neon` assignment: a `prompt`, an optional `description` and an optional `subagent_type`. There is no offer to accept and no routing: the call starts the worker. Without your Neon consent the call refuses and says so, and nothing is sent or paid.
+Ask your agent to use a Neon subagent for the job. The agent calls the `subagent` tool with a `neon` assignment: a `prompt`, an optional `description`, an optional `subagent_type` and an optional `effort` (`none`, `minimal`, `low`, `medium` or `high`, `low` when none is given). There is no offer to accept and no routing: the call starts the worker, and the Tenjin router is asked once, free, which provider serves the job. If that lookup fails, the job fails and nothing is sent or paid.
 
-The worker is the same Claude Code subagent as the DeepSeek worker: the same sandbox, permission mode, result and `SendMessage` follow-ups. It is not available on native Windows. A worker has no effort setting.
+A revision goes back to the same writer through its `worker_handle`, with its history. If the job's ceiling has no room for another call, the answer is `needs_approval` with what one more ceiling would cost, and nothing is sent until you approve it.
+
+The worker is a normal Claude Code subagent of the type the call names: the same tools, `CLAUDE.md` files, sandbox, permission mode, result and `SendMessage` follow-ups as a native subagent of that type. It is not available on native Windows.
 
 ## What Tenjin keeps
 
-Each job leaves a record next to the job store (`model-jobs/<id>.neon.json`): the task class (`writing`), each call's tokens, `max_tokens`, quoted and settled amounts, and the job's wall time. It stays on your machine.
+Each job leaves a record next to the job store (`model-jobs/<id>.neon.json`): the task class (`writing`), each call's tokens, `max_tokens`, quoted and settled amounts, and the job's wall time. A second record, `neon-channels.json`, keeps the provider terms each channel was paid under, so a refund reaches the same channel. Both stay on your machine.
 
 See also [DeepSeek subagents](./subagents.md), which describes the sandbox, permissions and `~/.claude` access both workers share.
