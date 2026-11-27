@@ -473,10 +473,11 @@ async function runStress(
 }
 
 // The control for the harness: against a lock that is skipped on 2% of the rounds, the log
-// detector MUST report overlaps. The run goes on until the workers broke the lock 25 times, and
-// a detector that sees none of 25 breaks has proved nothing about a real lock. Each break is
-// an overlap with probability well above a half while the others contend, so missing all 25 by
-// luck is far below one in a million.
+// detector MUST report overlaps. The run goes on until the workers broke the lock 10 times (a
+// slow runner reached 23 of 25 inside the time cap), and a detector that sees none of 10 breaks
+// has proved nothing about a real lock. Local runs reported an overlap for every break (47 of 47),
+// so missing all ten by luck is far below one in a thousand even if only half of the breaks met
+// another holder.
 const primitives = [''].concat(
   process.platform !== 'linux' && process.platform !== 'win32' && loadSqlite() ? ['sqlite'] : [],
 );

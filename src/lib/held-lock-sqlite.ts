@@ -6,7 +6,7 @@ import type { Attempt } from './held-lock';
 /**
  * THE LINUX HALF OF A HELD LOCK. Node's standard library has no file lock the system releases
  * when its process ends, except through `node:sqlite`: an exclusive SQLite transaction on a
- * dedicated, never-written, never-deleted-while-held file. SQLite takes a POSIX byte-range lock
+ * dedicated, never-written file that only its holder deletes (see `discardHeldLock`). SQLite takes a POSIX byte-range lock
  * on it, which the kernel drops when the holder's process ends (a crash, SIGKILL, a container
  * restart) and which holds across pid namespaces. Nothing is taken over, no pid is read.
  *
