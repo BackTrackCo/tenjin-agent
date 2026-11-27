@@ -107,7 +107,7 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and acknowledge the Privacy Policy (https://tenjin.sh/privacy).',
+  'Use of Tenjin is subject to the Terms (https://tenjin.sh/terms) and Privacy Policy (https://tenjin.sh/privacy).',
 ];
 
 /**
