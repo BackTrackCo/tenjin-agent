@@ -318,3 +318,32 @@ it('signs nothing when the seller quotes more than the room the job has left', a
     ceilingAtomic: 42521n,
   });
 });
+
+// Failure caught by review: the bound on a refund reached only signing, so a seller that did not
+// answer held a finished job's result behind its refund. The signal now reaches the request.
+it('ends a refund whose seller never answers when its signal aborts', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+  const account = privateKeyToAccount(generatePrivateKey());
+  const seen: (AbortSignal | undefined)[] = [];
+  const hanging: typeof fetch = (_input, init) =>
+    new Promise((_resolve, reject) => {
+      seen.push(init?.signal ?? undefined);
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  const batch = new BatchSeller({
+    dataDir: dir,
+    terms: TERMS,
+    provider: { getSigner: async () => account } as never,
+    admit: async () => undefined,
+    fetchImpl: hanging,
+  });
+  const stop = new AbortController();
+  const refund = batch.refund(stop.signal).then(
+    () => 'answered',
+    (error: unknown) => String(error),
+  );
+  await vi.waitFor(() => expect(seen).toHaveLength(1));
+  expect(seen[0]).toBeDefined();
+  stop.abort();
+  expect(await refund).toContain('aborted');
+});

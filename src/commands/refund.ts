@@ -6,6 +6,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { BatchSeller } from '../router/neon-seller';
 import { NeonRefunds, type ChannelEntry, type WithdrawChain } from '../router/neon-refund';
 import { withdrawChain } from '../router/neon-withdraw';
+import { ModelJobStore } from '../router/model-job';
 import { chainReader } from '../router/routing-payer';
 
 const dollars = (atomic: string) => `$${toMoney(atomic).usd}`;
@@ -47,6 +48,8 @@ export async function runRefund(
     deps.refunds ??
     new NeonRefunds({
       dataDir: ctx.dataDir,
+      // A channel a Neon job in another session still pays from is left alone.
+      live: (jobId) => new ModelJobStore(ctx.dataDir).runnerLive(jobId),
       payer: (terms) =>
         new BatchSeller({
           dataDir: ctx.dataDir,

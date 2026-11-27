@@ -500,6 +500,39 @@ it('asks the seller for the channel remainder when a run ends, and keeps a faile
 
 // Failure caught: a refund that looked the provider up again after the catalog row changed would
 // go to another payee, and a failed lookup would strand the money. It uses the saved terms.
+// Failure caught by review: the job's result waited for its channel refund, with no bound. The end
+// of a run now gives the refund a short signal, and a refund that does not finish in it stays on
+// record while the result is delivered.
+it('delivers a run result even when the channel refund never answers', async () => {
+  const { ctx, repo, data } = await fixture();
+  const stop = new AbortController();
+  const hanging = new NeonTransport({
+    dataDir: ctx.dataDir,
+    ctx,
+    provider: {} as never,
+    authorizer: {} as never,
+    closeSignal: () => stop.signal,
+    batch: () =>
+      ({
+        post: async () => batchAnswer(),
+        refund: () => new Promise(() => undefined),
+        transmitted: false,
+      }) as never,
+  });
+  const sent = job(repo);
+  const run = hanging.withInferenceRun(sent.id, signal(), (t) =>
+    t.messages(sent, MESSAGES, signal()),
+  );
+  await vi.waitFor(async () => expect(await readNeonRecord(data, sent.id)).not.toBeNull());
+  stop.abort();
+  await expect(run).resolves.toMatchObject({ stop_reason: 'end_turn' });
+  const refunds = await new NeonRefunds({
+    dataDir: data,
+    payer: () => ({ refund: async () => ({}) }),
+  }).entries();
+  expect(refunds[0]).toMatchObject({ state: 'failed' });
+});
+
 it('refunds after the provider row changes, from the terms the job was paid under, with no lookup', async () => {
   const { ctx, repo, data } = await fixture();
   const refundsAt: NeonTerms[] = [];

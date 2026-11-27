@@ -45,6 +45,12 @@ import { neonHost, neonTermsSchema, type NeonTerms } from './neon-terms';
 import { NeonRefunds } from './neon-refund';
 import type { PinnedFetchOptions } from './pinned-fetch';
 
+/**
+ * How long a run's end waits for the channel refund before it delivers the result. A refund that
+ * does not finish stays on record as failed, for `tenjin refund`.
+ */
+export const NEON_CLOSE_MS = 15_000;
+
 /** The task class every Neon job is recorded under: the worker takes writing jobs. */
 export const NEON_TASK_CLASS = 'writing';
 /** Calls kept in one job's record: a job has no turn limit, its ceiling is the bound. */
@@ -190,6 +196,8 @@ export type NeonTransportOptions = {
   batch?: (terms: NeonTerms, admit: (amountAtomic: bigint) => Promise<void>) => BatchLike;
   /** Whether a job's runner is alive. Production reads the job store's runner lock. */
   liveJob?: (jobId: string) => Promise<boolean>;
+  /** The bound on the channel refund at a run's end. Production gives it a few seconds. */
+  closeSignal?: () => AbortSignal;
   /** The network seam of the payer. Production leaves it unset. */
   fetchImpl?: typeof fetch;
   /** Where a provider request may go, and how it connects (test seams). */
@@ -266,7 +274,9 @@ export class NeonTransport {
       this.touched = new Set();
       // THE JOB'S END: what the channel still holds comes back to the wallet now, so nothing
       // waits at the seller between jobs. A refund that fails stays on record for `tenjin refund`.
-      await this.refunds.settle(ended, new AbortController().signal).catch(() => undefined);
+      await this.refunds
+        .settle(ended, (this.options.closeSignal ?? (() => AbortSignal.timeout(NEON_CLOSE_MS)))())
+        .catch(() => undefined);
       mark?.('refundClosed');
     }
   }

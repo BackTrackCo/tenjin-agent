@@ -87,5 +87,7 @@ it('refuses a saved config for another wallet, and falls back to the live 402 on
     fetchImpl: fetchImpl as never,
   });
   expect(fetchImpl).toHaveBeenCalledTimes(1);
+  // The probe of an older record is bounded: a seller that never answers cannot hold it.
+  expect((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].signal).toBeDefined();
   expect(live.config.withdrawDelay).toBe(1200);
 });

@@ -76,6 +76,8 @@ export const withdrawAbi = [
 
 /** The SDK's own channel salt: the scheme this build pays with never sets another. */
 const SALT: Hex = `0x${'0'.repeat(64)}`;
+/** How long the probe of an older record waits for the seller's 402. */
+const PROBE_TIMEOUT_MS = 15_000;
 /** A withdrawal step is one contract call: far under this, so an odd estimate is refused. */
 const WITHDRAW_GAS_CAP = 400_000n;
 
@@ -106,7 +108,10 @@ export async function channelConfigOf(
     receiverAuthorizer = saved.receiverAuthorizer;
     withdrawDelay = saved.withdrawDelay;
   } else {
-    const probe = await (deps.fetchImpl ?? pinnedFetch())(terms.url, { method: 'GET' });
+    const probe = await (deps.fetchImpl ?? pinnedFetch())(terms.url, {
+      method: 'GET',
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
     const header = probe.headers.get('PAYMENT-REQUIRED');
     if (probe.status !== 402 || !header)
       throw new Error('The seller did not answer with its payment terms');

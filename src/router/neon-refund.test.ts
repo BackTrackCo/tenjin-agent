@@ -116,3 +116,70 @@ it('hands the saved channel config to every withdrawal step, with no call to the
   });
   expect((await refunds.entries())[0]!.channel).toEqual(config);
 });
+
+// Failure caught by review: `tenjin refund` skipped the live-job check that a job's end makes, so
+// it could refund, and on a failed refund start the on-chain withdrawal of, a channel that a Neon
+// job in another session still pays from.
+it('leaves a channel alone while a job in another session still runs on it, and takes it once that job is gone', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  let live = true;
+  let refunded = 0;
+  let touchedChain = 0;
+  const refunds = new NeonRefunds({
+    dataDir: dir,
+    payer: () => ({
+      refund: async () => {
+        refunded += 1;
+        throw new Error('seller offline');
+      },
+    }),
+    live: async () => live,
+  });
+  await refunds.open('job-a', TERMS);
+  const chain = {
+    channel: async () => {
+      touchedChain += 1;
+      throw new Error('should not be read');
+    },
+    initiate: async () => '0xinit',
+    finalize: async () => '0xfinal',
+  };
+  const waiting = await refunds.retry(chain);
+  expect(refunded).toBe(0);
+  expect(touchedChain).toBe(0);
+  expect(waiting[0]).toMatchObject({
+    state: 'open',
+    note: expect.stringContaining('still pays from this channel'),
+  });
+  // Its job ended (or its runner is gone): the same call now asks the seller.
+  live = false;
+  await refunds.retry({
+    ...chain,
+    channel: async () => {
+      throw new Error('chain read');
+    },
+  });
+  expect(refunded).toBe(1);
+});
+
+// Failure caught by review: a slow seller held a finished job's result behind its refund, and the
+// refund that gave up was lost. A refund that is cut off is recorded as failed, for `tenjin refund`.
+it('ends the job-end refund when its signal aborts, even if the payer ignores it, and keeps it on record', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const refunds = new NeonRefunds({
+    dataDir: dir,
+    payer: () => ({ refund: () => new Promise(() => undefined) }),
+  });
+  await refunds.open('job-a', TERMS);
+  const stop = new AbortController();
+  const done = refunds.settle(['job-a'], stop.signal);
+  stop.abort();
+  const [entry] = await done;
+  expect(entry).toMatchObject({ state: 'failed', note: expect.stringContaining('took too long') });
+  // `tenjin refund` asks again, and a seller that answers now is refunded.
+  const again = new NeonRefunds({
+    dataDir: dir,
+    payer: () => ({ refund: async () => ({ success: true, amount: '700' }) }),
+  });
+  expect((await again.retry())[0]).toMatchObject({ state: 'refunded', refundedAtomic: '700' });
+});

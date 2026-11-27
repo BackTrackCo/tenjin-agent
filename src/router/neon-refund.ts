@@ -62,12 +62,31 @@ export type RefundResult =
 /** Words the SDK uses when there is nothing to take back. */
 const NOTHING = /no remaining balance|requires an existing channel record/i;
 
-/** One cooperative refund, read as a result. It never throws. */
-export async function cooperativeRefund(payer: {
-  refund(signal: AbortSignal): Promise<unknown>;
-}): Promise<RefundResult> {
+/** How long one cooperative refund may take at most, whatever else bounds it. */
+export const REFUND_TIMEOUT_MS = 60_000;
+
+/**
+ * One cooperative refund, read as a result. It never throws. `signal` bounds it from outside (the
+ * job's end gives it a few seconds): it reaches the seller's request, and where a payer ignores it
+ * the wait still ends, with a refund that failed and stays on record for `tenjin refund`.
+ */
+export async function cooperativeRefund(
+  payer: { refund(signal: AbortSignal): Promise<unknown> },
+  signal?: AbortSignal,
+): Promise<RefundResult> {
+  const bound = AbortSignal.any([
+    AbortSignal.timeout(REFUND_TIMEOUT_MS),
+    ...(signal ? [signal] : []),
+  ]);
+  const ended = new Promise<never>((_, reject) => {
+    const stop = () =>
+      reject(new Error('The refund took too long and was left for `tenjin refund`'));
+    if (bound.aborted) stop();
+    else bound.addEventListener('abort', stop, { once: true });
+  });
+  ended.catch(() => undefined);
   try {
-    const settled = (await payer.refund(AbortSignal.timeout(60_000))) as {
+    const settled = (await Promise.race([payer.refund(bound), ended])) as {
       success?: boolean;
       transaction?: string;
       amount?: string;
@@ -228,7 +247,7 @@ export class NeonRefunds {
    * both see the other alive. A job with no live runner does not count. Never throws: a refund
    * that fails stays on record as `failed`, for `tenjin refund`.
    */
-  async settle(jobIds: readonly string[], _signal: AbortSignal): Promise<ChannelEntry[]> {
+  async settle(jobIds: readonly string[], signal: AbortSignal): Promise<ChannelEntry[]> {
     const ids = new Set(jobIds);
     const due: ChannelEntry[] = [];
     await this.change(async (channels) => {
@@ -257,10 +276,23 @@ export class NeonRefunds {
     for (const entry of due)
       await this.record(
         entry.key,
-        await cooperativeRefund(this.options.payer(entry.terms)),
+        await cooperativeRefund(this.options.payer(entry.terms), signal),
         entry.epoch,
       );
     return this.entries();
+  }
+
+  /** Whether a job that has not ended still pays from this channel: its runner is alive. */
+  private async inUse(entry: ChannelEntry): Promise<boolean> {
+    for (const id of entry.jobIds) {
+      if (entry.ended.includes(id)) continue;
+      try {
+        if (await (this.options.live?.(id) ?? Promise.resolve(false))) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -272,6 +304,21 @@ export class NeonRefunds {
     for (const entry of await this.entries()) {
       if (entry.state === 'refunded' || entry.state === 'empty' || entry.state === 'withdrawn')
         continue;
+      // The same rule as a job's end: a channel a live job in another session pays from is left
+      // alone, whether for a refund or for a withdrawal that would pull its money out from under it.
+      if (await this.inUse(entry)) {
+        await this.change((channels) =>
+          channels.map((c) =>
+            c.key === entry.key
+              ? {
+                  ...c,
+                  note: 'A Neon job still pays from this channel. Run `tenjin refund` again when it ends.',
+                }
+              : c,
+          ),
+        );
+        continue;
+      }
       if (entry.state !== 'withdrawal_started') {
         const result = await cooperativeRefund(this.options.payer(entry.terms));
         await this.record(entry.key, result, entry.epoch);
@@ -283,12 +330,12 @@ export class NeonRefunds {
   }
 
   private async withdraw(entry: ChannelEntry, chain: WithdrawChain) {
-    const seen = await chain.channel(entry.terms, entry.channel);
     const set = (patch: Partial<ChannelEntry>) =>
       this.change((channels) =>
         channels.map((c) => (c.key === entry.key ? { ...c, ...patch, at: this.now() } : c)),
       );
     try {
+      const seen = await chain.channel(entry.terms, entry.channel);
       if (seen.pendingAtomic > 0n && seen.initiatedAt > 0) {
         if (seen.nowS < seen.initiatedAt + seen.delayS) {
           await set({

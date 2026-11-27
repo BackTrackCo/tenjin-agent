@@ -198,15 +198,23 @@ export class BatchSeller {
   transmitted = false;
   constructor(private options: BatchSellerOptions) {}
 
-  /** The fetch every request to the seller goes through. */
-  private fetcher(): typeof fetch {
-    return (
+  /**
+   * The fetch every request to the seller goes through. With a `signal`, every request it makes
+   * is bounded by it: the SDK's refund calls `fetch` with none of its own.
+   */
+  private fetcher(signal?: AbortSignal): typeof fetch {
+    const base =
       this.options.fetchImpl ??
       pinnedFetch({
         ...(this.options.destination ? { destination: this.options.destination } : {}),
         ...(this.options.pinnedTransport ? { transport: this.options.pinnedTransport } : {}),
-      })
-    );
+      });
+    if (!signal) return base;
+    return ((input, init) =>
+      base(input, {
+        ...init,
+        signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+      })) as typeof fetch;
   }
 
   private async scheme(
@@ -341,6 +349,6 @@ export class BatchSeller {
    */
   async refund(signal: AbortSignal) {
     const { scheme } = await this.scheme(signal, { sum: 0n });
-    return scheme.refund(this.options.terms.url, { fetch: this.fetcher() });
+    return scheme.refund(this.options.terms.url, { fetch: this.fetcher(signal) });
   }
 }
