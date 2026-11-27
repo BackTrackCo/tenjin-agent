@@ -209,6 +209,7 @@ try {
       contents: `
         export { qualifiedModelWorker } from '../../src/router/model-worker';
         export { registerModelTool } from '../../src/router/model-mcp';
+        export { ModelJobStore } from '../../src/router/model-job';
       `,
       resolveDir: import.meta.dirname,
       loader: 'ts',
@@ -220,7 +221,9 @@ try {
     format: 'esm',
     target: 'node22',
   });
-  const { qualifiedModelWorker, registerModelTool } = await import(pathToFileURL(bundle).href);
+  const { qualifiedModelWorker, registerModelTool, ModelJobStore } = await import(
+    pathToFileURL(bundle).href
+  );
   const originalPath = process.env.Path;
   const fixtureExe = join(workspace, 'claude.exe');
   await writeFile(fixtureExe, 'Inert qualification data.');
@@ -250,7 +253,12 @@ try {
   await server.connect(host);
   await client.connect(caller);
   const first = await capture('accepted', 'step-1');
-  assert.equal(first.action, 'offer', JSON.stringify(first));
+  // A call that stayed native names why in the job store's no-offer record: shown with the failure.
+  assert.equal(
+    first.action,
+    'offer',
+    JSON.stringify({ first, noOffers: await new ModelJobStore(dataDir).noOffers() }),
+  );
   console.log('Tenjin recorded the first offer');
   try {
     await waitForChild(0);
