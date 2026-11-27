@@ -341,6 +341,22 @@ export class ModelJobStore {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     return holdLock(path);
   }
+  /**
+   * Whether a job's runner is alive: its runner lock is held, in this process or another. One
+   * attempt that takes the lock for an instant when it is free, so a runner that crashed, or that
+   * never started, reads as not alive. Throws where the store cannot answer.
+   */
+  async runnerLive(id: string): Promise<boolean> {
+    const path = this.runnerPath(id);
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    try {
+      (await holdLock(path, { timeoutMs: 0 }))();
+      return false;
+    } catch (error) {
+      if (error instanceof LockTimeoutError) return true;
+      throw error;
+    }
+  }
   /** Once, on disk. The offer is accepted from any turn of its session. */
   async accept(id: string, session: string): Promise<ModelJob | null> {
     return this.locked(async () => {

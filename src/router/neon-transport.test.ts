@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
-import type { ModelJob } from './model-job';
+import { ModelJobStore, type ModelJob } from './model-job';
 import {
   ModelCallFailed,
   retryableModelCall,
@@ -467,6 +467,104 @@ it('keeps a seller and payee that differ in separate channel records', async () 
   const entries = await refunds.entries();
   expect(entries).toHaveLength(2);
   expect(entries.find((e) => e.terms.payTo === TERMS.payTo)!.jobIds).toEqual(['job-a', 'job-c']);
+});
+
+const JOB_B = '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12';
+
+// Failure caught: the end of one job emptied a channel that another Neon job of the same payer,
+// seller and payee was still paying on, so that job's next call met an empty channel. The last
+// job to end does the refund, and a job whose runner is gone never holds one back.
+it('sends no refund when the first of two jobs on one channel ends, and one when the second ends', async () => {
+  const { ctx, repo, data } = await fixture();
+  const store = new ModelJobStore(data);
+  const a = job(repo);
+  const b = job(repo, '1000000', TERMS, JOB_B);
+  // Both runners are alive: each holds its job's runner lock, as an accepted job does.
+  const lockA = await store.holdRunner(a.id);
+  const lockB = await store.holdRunner(b.id);
+  const first = withBatch(ctx, async () => batchAnswer());
+  const second = withBatch(ctx, async () => batchAnswer());
+  const secondRun = second.transport.withInferenceRun(b.id, signal(), async (t) => {
+    await t.messages(b, MESSAGES, signal());
+    // Job A ends while B still runs on the same channel.
+    await first.transport.withInferenceRun(a.id, signal(), (t2) =>
+      t2.messages(a, MESSAGES, signal()),
+    );
+    expect(first.batch.refund).not.toHaveBeenCalled();
+  });
+  await secondRun;
+  lockA();
+  // B was the last to end: its end sent the one refund, and A's end sent none.
+  expect(first.batch.refund).not.toHaveBeenCalled();
+  expect(second.batch.refund).toHaveBeenCalledTimes(1);
+  lockB();
+  const entries = await new NeonRefunds({ dataDir: data, payer: () => first.batch }).entries();
+  expect(entries).toMatchObject([
+    { state: 'refunded', ended: expect.arrayContaining([a.id, b.id]) },
+  ]);
+});
+
+it('refunds at the second end even while the first job runner still holds its lock', async () => {
+  const { ctx, repo, data } = await fixture();
+  const store = new ModelJobStore(data);
+  const a = job(repo);
+  const b = job(repo, '1000000', TERMS, JOB_B);
+  const lockA = await store.holdRunner(a.id);
+  const lockB = await store.holdRunner(b.id);
+  const one = withBatch(ctx, async () => batchAnswer());
+  const two = withBatch(ctx, async () => batchAnswer());
+  // A sends and ends while B runs (B has sent too, so the channel has two jobs on it).
+  await two.transport.messages(b, MESSAGES, signal());
+  await one.transport.withInferenceRun(a.id, signal(), (t) => t.messages(a, MESSAGES, signal()));
+  expect(one.batch.refund).not.toHaveBeenCalled();
+  // Both end together: A's lock is not yet released (the store releases it after the run), but A
+  // is marked ended, so B's end sees no other job and refunds.
+  await two.transport.withInferenceRun(b.id, signal(), (t) => t.messages(b, MESSAGES, signal()));
+  expect(two.batch.refund).toHaveBeenCalledTimes(1);
+  lockA();
+  lockB();
+});
+
+it('does not let a stale job record hold a refund back', async () => {
+  const { ctx, repo, data } = await fixture();
+  const store = new ModelJobStore(data);
+  const stale = '8f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a13';
+  const crashed = '9f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a14';
+  // One job opened the channel and never ran again, and one took its runner lock and died.
+  const refunds = new NeonRefunds({ dataDir: data, payer: () => ({ refund: async () => ({}) }) });
+  await refunds.open(stale, TERMS);
+  await refunds.open(crashed, TERMS);
+  (await store.holdRunner(crashed))();
+  expect(await store.runnerLive(stale)).toBe(false);
+  expect(await store.runnerLive(crashed)).toBe(false);
+  const a = job(repo);
+  const lockA = await store.holdRunner(a.id);
+  expect(await store.runnerLive(a.id)).toBe(true);
+  const live = withBatch(ctx, async () => batchAnswer());
+  await live.transport.withInferenceRun(a.id, signal(), (t) => t.messages(a, MESSAGES, signal()));
+  expect(live.batch.refund).toHaveBeenCalledTimes(1);
+  lockA();
+});
+
+it('waits with the refund where the store cannot say whether another job runs', async () => {
+  const { ctx, repo, data } = await fixture();
+  const a = job(repo);
+  const refunds = new NeonRefunds({ dataDir: data, payer: () => ({ refund: async () => ({}) }) });
+  await refunds.open(JOB_B, TERMS);
+  const unsure = new NeonTransport({
+    dataDir: data,
+    ctx,
+    provider: {} as never,
+    authorizer: {} as never,
+    liveJob: async () => {
+      throw new Error('the store cannot say');
+    },
+    batch: () =>
+      ({ post: async () => batchAnswer(), refund: vi.fn(), transmitted: false }) as never,
+  });
+  await unsure.withInferenceRun(a.id, signal(), (t) => t.messages(a, MESSAGES, signal()));
+  // Not refunded, not lost: the channel stays open for `tenjin refund`.
+  expect((await refunds.entries())[0]).toMatchObject({ state: 'open' });
 });
 
 it('starts the timed withdrawal when the seller does not answer, and finishes it after the delay', async () => {

@@ -17,6 +17,8 @@ const entrySchema = z.object({
   key: z.string(),
   terms: neonTermsSchema,
   jobIds: z.array(z.string()).max(200),
+  /** Jobs whose run has ended since they last sent a call: they no longer use the channel. */
+  ended: z.array(z.string()).max(200).default([]),
   state: z.enum(['open', 'refunded', 'empty', 'failed', 'withdrawal_started', 'withdrawn']),
   at: z.number(),
   /** The last refusal or failure, in words, for the person. */
@@ -97,6 +99,12 @@ export type NeonRefundsOptions = {
   dataDir: string;
   /** The payer of one seller's saved terms. It deposits nothing. */
   payer: (terms: NeonTerms) => { refund(signal: AbortSignal): Promise<unknown> };
+  /**
+   * Whether a job's runner is alive (the job store's runner lock). A job with no live runner
+   * never holds a channel back, so a crashed job cannot block a refund for ever. Where this
+   * throws, the job counts as live: the refund waits, and `tenjin refund` still returns it.
+   */
+  live?: (jobId: string) => Promise<boolean>;
   now?: () => number;
 };
 
@@ -112,10 +120,12 @@ export class NeonRefunds {
     );
     return parsed.success ? parsed.data.channels : [];
   }
-  private async change(update: (channels: ChannelEntry[]) => ChannelEntry[]) {
+  private async change(
+    update: (channels: ChannelEntry[]) => ChannelEntry[] | Promise<ChannelEntry[]>,
+  ) {
     const path = journalPath(this.options.dataDir);
     await modelLock(`${path}.lock`, async () => {
-      const channels = update(await this.entries());
+      const channels = await update(await this.entries());
       await writePrivate(path, JSON.stringify({ version: 1, channels }));
     });
   }
@@ -128,7 +138,7 @@ export class NeonRefunds {
       if (!known)
         return [
           ...channels,
-          { key, terms, jobIds: [jobId], state: 'open' as const, at: this.now() },
+          { key, terms, jobIds: [jobId], ended: [], state: 'open' as const, at: this.now() },
         ];
       return channels.map((entry) =>
         entry.key !== key
@@ -137,6 +147,8 @@ export class NeonRefunds {
               ...entry,
               // The terms the money went under stay the ones a refund uses.
               jobIds: [...new Set([...entry.jobIds, jobId])].slice(-200),
+              // It sends again, so it uses the channel again.
+              ended: entry.ended.filter((id) => id !== jobId),
               state: entry.state === 'withdrawal_started' ? entry.state : ('open' as const),
               at: this.now(),
             },
@@ -166,16 +178,39 @@ export class NeonRefunds {
   }
 
   /**
-   * THE END OF A RUN: each channel the run's jobs paid on is asked for its remainder once. Never
-   * throws: a refund that fails stays on record as `failed`, for `tenjin refund`.
+   * THE END OF A RUN: the jobs that ended are marked, and each channel they paid on is asked for
+   * its remainder ONLY IF no other job of it still runs. The last job to end does the refund: one
+   * that ends while another job uses the channel leaves the remainder to that one. The marks and
+   * the count are read and written under the journal's lock, so two jobs ending together cannot
+   * both see the other alive. A job with no live runner does not count. Never throws: a refund
+   * that fails stays on record as `failed`, for `tenjin refund`.
    */
   async settle(jobIds: readonly string[], _signal: AbortSignal): Promise<ChannelEntry[]> {
     const ids = new Set(jobIds);
-    const due = (await this.entries()).filter(
-      (entry) =>
-        entry.jobIds.some((id) => ids.has(id)) &&
-        (entry.state === 'open' || entry.state === 'failed'),
-    );
+    const due: ChannelEntry[] = [];
+    await this.change(async (channels) => {
+      const next: ChannelEntry[] = [];
+      for (const entry of channels) {
+        if (!entry.jobIds.some((id) => ids.has(id))) {
+          next.push(entry);
+          continue;
+        }
+        const ended = [...new Set([...entry.ended, ...entry.jobIds.filter((id) => ids.has(id))])];
+        let blocked = false;
+        for (const id of entry.jobIds) {
+          if (ended.includes(id)) continue;
+          try {
+            if (await (this.options.live?.(id) ?? Promise.resolve(false))) blocked = true;
+          } catch {
+            blocked = true;
+          }
+        }
+        const updated = { ...entry, ended: ended.slice(-200) };
+        next.push(updated);
+        if (!blocked && (entry.state === 'open' || entry.state === 'failed')) due.push(updated);
+      }
+      return next;
+    });
     for (const entry of due)
       await this.record(entry.key, await cooperativeRefund(this.options.payer(entry.terms)));
     return this.entries();

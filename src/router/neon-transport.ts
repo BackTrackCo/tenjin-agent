@@ -9,7 +9,7 @@ import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { admitPlan } from '../lib/spend-plan';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
-import { modelLock, type ModelJob } from './model-job';
+import { modelLock, ModelJobStore, type ModelJob } from './model-job';
 import { modelSettings, NEON_ROUTER_ORIGIN } from './model-settings';
 import { ModelCallFailed, ModelWorkerStopped } from './model-worker-control';
 import { appendPaidRecord, recordedSent } from './paid';
@@ -161,6 +161,8 @@ export type NeonTransportOptions = {
   readContract?: ChainRead;
   /** The batch-settlement payer for a seller's saved terms. A test replaces it. */
   batch?: (terms: NeonTerms, admit: (amountAtomic: bigint) => Promise<void>) => BatchLike;
+  /** Whether a job's runner is alive. Production reads the job store's runner lock. */
+  liveJob?: (jobId: string) => Promise<boolean>;
   /** The network seam of the payer. Production leaves it unset. */
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -194,10 +196,14 @@ export class NeonTransport {
   /** The last paid reply's raw text, kept for the dev probe's failure summary. */
   lastRaw = '';
   private refunds: NeonRefunds;
+  private store: ModelJobStore | undefined;
   constructor(private options: NeonTransportOptions) {
     this.refunds = new NeonRefunds({
       dataDir: options.dataDir,
       payer: (terms) => this.batchPayer(terms, async () => refusedDeposit()),
+      live:
+        options.liveJob ??
+        ((jobId) => (this.store ??= new ModelJobStore(options.dataDir)).runnerLive(jobId)),
       ...(options.now ? { now: options.now } : {}),
     });
   }
