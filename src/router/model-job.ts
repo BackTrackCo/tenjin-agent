@@ -101,7 +101,8 @@ export async function sweepModelRecords(dataDir: string, now = Date.now()): Prom
   };
   // A lock file is never aged out by its mtime: an unwritten file's never changes, so a lock
   // that guards live state would be deleted. The store-wide locks and the pace locks (no job id
-  // in the name) stay; a job's own lock files go with the job, only through `discardHeldLock`.
+  // in the name) stay; a job's own lock files go with the job, only through `discardHeldLock`,
+  // which keeps every Linux lock file.
   const old = async (name: string, path: string) =>
     isHeldLockName(name) ? false : idle(name, path);
   for (const store of ['model-jobs', 'model-conversations']) {

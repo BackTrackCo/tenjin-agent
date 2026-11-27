@@ -10,8 +10,9 @@ import { loadSqlite, sqliteAttempt } from '../held-lock-sqlite';
  * interleaving can hide it. With STRESS_BROKEN set (a probability), that share of the rounds
  * skips the lock: the control that proves the detector sees a broken lock. STRESS_PRIMITIVE=sqlite
  * takes the Linux primitive on any platform that has node:sqlite. STRESS_DISCARD (a probability)
- * makes that share of the rounds end with a cleanup that deletes the lock file while it holds the
- * lock, as the job sweep does: a lock file that goes and comes back must never let two in.
+ * makes that share of the rounds end with the job sweep's cleanup: on macOS it deletes the lock
+ * file while it holds the lock, and a lock file that goes and comes back must never let two in;
+ * on Linux it must delete nothing.
  * STRESS_HOLD_MS (default 1) is how long a worker stays between its `E` and its `X`.
  */
 const [lock, log] = process.argv.slice(2) as [string, string];

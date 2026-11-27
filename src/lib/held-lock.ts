@@ -26,8 +26,8 @@ import { LockTimeoutError } from './lock';
  *
  * Callers pass the lock path WITHOUT the suffix and never branch on the platform. A held lock
  * file is never opened, read or deleted by anything else in a process that may hold it: on
- * Windows a second open fails, and on every platform a sweep may remove a lock file only through
- * {@link discardHeldLock}.
+ * Windows a second open fails. A sweep may remove a lock file only through
+ * {@link discardHeldLock}, which never removes a Linux (SQLite) lock file.
  */
 
 /** The platform or filesystem cannot lock. */
@@ -58,10 +58,14 @@ export interface HeldLockOptions {
   signal?: AbortSignal;
 }
 
-/** One acquisition: `tryOnce` is one attempt, and `abandon` cleans up after a failed wait. */
+/**
+ * One acquisition: `tryOnce` is one attempt, and `abandon` cleans up after a failed wait.
+ * `deletable` says whether a cleanup may delete the primitive's file at all.
+ */
 export interface Attempt {
   tryOnce(): (() => void) | null;
   abandon(): void;
+  readonly deletable: boolean;
 }
 export type AttemptFactory = (heldPath: string) => Attempt;
 
@@ -153,6 +157,9 @@ export function openAttempt(file: string, deps: OpenDeps): Attempt {
     abandon() {
       // Nothing is held between attempts.
     },
+    // The holder's own descriptor is compared with the path, and both files are alive at that
+    // moment, so they cannot share an inode number: a lock on a deleted file is always seen.
+    deletable: true,
   };
 }
 
@@ -271,22 +278,31 @@ export async function withHeldLock<T>(
 }
 
 /**
- * Removes a lock file no one holds, for the job sweep. macOS and Linux probe, unlink while
- * holding and then release (an opener that resolved the old file notices its inode changed and
- * starts over); Windows probes, closes and then unlinks, ignoring a lost race. On macOS and Linux
- * the file goes only while this call holds the lock, so no other process holds a lock on the file
- * that is deleted; on Windows the lock is dropped just before the unlink, and an opener that slipped
- * in keeps a valid lock on a file that stays. A lock that is held is left alone. True when the lock is gone afterwards. `make` is the
- * primitive; only tests pass another.
+ * Removes a lock file no one holds, for the job sweep, except a Linux (SQLite) lock file, which
+ * is never removed: this returns false for it. macOS probes, unlinks while holding and then
+ * closes (an opener that resolved the old file sees its own descriptor's inode differ from the
+ * path's, and starts over); Windows probes, closes and then unlinks, and an opener that slipped
+ * in keeps a valid lock on a file that stays, because Windows deletes no file a holder has open. A lock
+ * that is held is left alone. True when the lock is gone afterwards. `make` is the primitive;
+ * only tests pass another.
+ *
+ * Why Linux keeps its lock files: a SQLite connection cannot show which file it has open, so a
+ * taker can compare only the path's inode number before its open with the number after it holds
+ * the lock. If the file was deleted in between and another took its place, ext4 can give a later
+ * replacement the freed number back. The taker then holds a deleted file while another process
+ * holds the one the path names: two holders, with no way to see it from the path. If no code
+ * deletes a lock file, that cannot happen. The cost is a few empty files for each job.
  */
 export async function discardHeldLock(
   lockPath: string,
   make: AttemptFactory = factory,
 ): Promise<boolean> {
   const held = `${lockPath}.held`;
+  const attempt = make(held);
+  if (!attempt.deletable) return false;
   let release: () => void;
   try {
-    release = await holdLockWith(make, lockPath, { timeoutMs: 0 });
+    release = await holdLockWith(() => attempt, lockPath, { timeoutMs: 0 });
   } catch (error) {
     if (error instanceof LockTimeoutError) return false;
     throw error;

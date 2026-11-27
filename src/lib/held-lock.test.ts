@@ -3,11 +3,13 @@ import {
   constants,
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -45,6 +47,7 @@ import {
   child,
   forgetter,
   holder as startHolder,
+  discardElsewhere,
   killChildren,
   probe,
 } from './held-lock-test/child';
@@ -92,8 +95,10 @@ describe('held lock, every platform', () => {
   it('discards an idle lock file and leaves a held one', async () => {
     const lock = join(tmp, 'discard');
     (await holdLock(lock))();
-    expect(await discardHeldLock(lock)).toBe(true);
-    expect(existsSync(heldPath(lock))).toBe(false);
+    // Linux keeps lock files (see `discardHeldLock`).
+    const linux = process.platform === 'linux';
+    expect(await discardHeldLock(lock)).toBe(!linux);
+    expect(existsSync(heldPath(lock))).toBe(linux);
     const held = await startHolder(lock);
     expect(await discardHeldLock(lock)).toBe(false);
     expect(existsSync(heldPath(lock))).toBe(true);
@@ -107,7 +112,7 @@ describe('held lock, every platform', () => {
     writeFileSync(drop, '');
     await sweepHeldLocks(tmp, async (name) => name === 'drop.held');
     expect(existsSync(keep)).toBe(true);
-    expect(existsSync(drop)).toBe(false);
+    expect(existsSync(drop)).toBe(process.platform === 'linux');
   });
 
   it('rejects a zero-wait probe while this process holds it', async () => {
@@ -259,7 +264,7 @@ describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
   () => {
     const sqliteMake: AttemptFactory = (path) => sqliteAttempt(path, loadSqlite()!);
 
-    it('a cleanup deletes the lock file only while it holds the lock', async () => {
+    it('a cleanup never deletes the lock file, held or idle', async () => {
       const lock = join(tmp, 'sq-discard');
       const held = await startHolder(lock, 'sqlite');
       expect(await discardHeldLock(lock, sqliteMake)).toBe(false);
@@ -267,12 +272,54 @@ describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
       expect(existsSync(heldPath(lock))).toBe(true);
       expect(await probe(lock, 'sqlite')).toBe('held');
       await held.release();
-      expect(await discardHeldLock(lock, sqliteMake)).toBe(true);
-      expect(existsSync(heldPath(lock))).toBe(false);
-      // A lock taken afterwards is on a new file, and it excludes.
+      expect(await discardHeldLock(lock, sqliteMake)).toBe(false);
+      await sweepHeldLocks(tmp, async () => true, 50_000, sqliteMake);
+      expect(existsSync(heldPath(lock))).toBe(true);
       const again = await startHolder(lock, 'sqlite');
       expect(await probe(lock, 'sqlite')).toBe('held');
       await again.release();
+    });
+
+    // A connection cannot show which file it has open, so a taker compares only the path's inode
+    // number before its open with the number once it holds. Here the sweep of another process
+    // runs at two steps of a taker: before its open and before its lock. ext4 gives a new file the
+    // number a deleted one freed; a hard link and a rename stand in for that here, and act only
+    // when a sweep deleted the file. The path then goes a, b, a while the taker sits on b: the
+    // taker holds a deleted file and the path's file is free, so two could hold at once.
+    it('a sweep in another process never makes a taker hold a deleted file', async () => {
+      const lock = join(tmp, 'sq-reuse');
+      const file = heldPath(lock);
+      (await holdLockWith(sqliteMake, lock))();
+      const real = loadSqlite()!;
+      let opened = false;
+      const swept: boolean[] = [];
+      const sweptAround = {
+        ...real,
+        DatabaseSync: class extends real.DatabaseSync {
+          constructor(path: string) {
+            if (opened) {
+              super(path);
+              return;
+            }
+            opened = true;
+            // The taker has read the inode (a). Keep a alive so its number can come back.
+            linkSync(path, `${path}.a`);
+            swept.push(discardElsewhere(lock, 'sqlite'));
+            if (!existsSync(path)) writeFileSync(path, ''); // the next taker's file, b
+            super(path);
+            swept.push(discardElsewhere(lock, 'sqlite'));
+            // The next file gets the freed number a back.
+            if (!existsSync(path)) renameSync(`${path}.a`, path);
+            else unlinkSync(`${path}.a`);
+          }
+        },
+      } as Sqlite;
+      const release = await holdLockWith((path) => sqliteAttempt(path, sweptAround), lock);
+      const other = await probe(lock, 'sqlite');
+      release();
+      expect(other).toBe('held');
+      expect(swept).toEqual([false, false]);
+      expect(existsSync(file)).toBe(true);
     });
 
     it('the housekeeping of a holder process leaves its own lock in place', async () => {
@@ -287,8 +334,8 @@ describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
     });
 
     // The taker reads the file's inode before it opens it. Read after the open, a file deleted
-    // and replaced in between would pass the check for a connection on the deleted file: two
-    // holders, one on each file.
+    // (by something outside Tenjin) and replaced in between would pass the check for a connection
+    // on the deleted file: two holders, one on each file.
     it('does not hold a deleted file when a replacement appears while it opens', async () => {
       const lock = join(tmp, 'sq-replaced');
       const real = loadSqlite()!;
@@ -301,7 +348,7 @@ describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
             super(path);
             if (replaced) return;
             replaced = true;
-            // Another process's cleanup deleting the file and a taker creating its replacement.
+            // Something outside Tenjin deleting the file, and a taker creating its replacement.
             unlinkSync(path);
             new real.DatabaseSync(path).close();
           }

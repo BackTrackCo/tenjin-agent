@@ -6,9 +6,10 @@ import type { Attempt } from './held-lock';
 /**
  * THE LINUX HALF OF A HELD LOCK. Node's standard library has no file lock the system releases
  * when its process ends, except through `node:sqlite`: an exclusive SQLite transaction on a
- * dedicated, never-written file that only its holder deletes (see `discardHeldLock`). SQLite takes a POSIX byte-range lock
- * on it, which the kernel drops when the holder's process ends (a crash, SIGKILL, a container
- * restart) and which holds across pid namespaces. Nothing is taken over, no pid is read.
+ * dedicated, never-written, never-deleted file (see `discardHeldLock`). SQLite takes a POSIX
+ * byte-range lock on it, which the kernel drops when the holder's process ends (a crash, SIGKILL,
+ * a container restart) and which holds across pid namespaces. Nothing is taken over, no pid is
+ * read.
  *
  * FILE RULES. Nothing but this module opens, reads or writes the lock file in a process that may
  * hold it: closing ANY other descriptor of the file drops the process's POSIX locks. SQLite's own
@@ -75,15 +76,17 @@ const INODE_RETRIES = 5;
 /**
  * One acquisition: one connection, `BEGIN EXCLUSIVE` retried on it, `ROLLBACK` and close to release.
  *
- * The lock is only worth something on the file the path names now. A cleanup deletes a lock
- * file only while it holds the lock (see `discardHeldLock`), so a taker follows two rules:
+ * Tenjin never deletes this file (see `discardHeldLock`): a connection cannot show which file it
+ * has open, so no check can make a deletion safe. The two inode reads below only catch a file
+ * that something outside Tenjin removed and that came back with another inode number:
  *
- * 1. It reads the file's inode BEFORE it opens the file, and creates the file first when there
- *    is none. A path read after the open could already name a replacement file, whose inode would
- *    then pass the next check for a connection that sits on the deleted one.
+ * 1. The taker reads the file's inode BEFORE it opens the file, and creates the file first when
+ *    there is none. Read after the open, the path could already name a replacement.
  * 2. Once it holds the lock it reads the path again. Another inode (or none) means the file it
- *    holds is gone, so it lets go and starts over. A file it holds cannot be deleted under it,
- *    so a match stays true for as long as it holds.
+ *    holds is gone, so it lets go and starts over.
+ *
+ * A replacement that got the old inode number back (ext4 reuses a freed number at once) passes
+ * both reads, which is why nothing in Tenjin deletes a lock file on Linux.
  */
 export function sqliteAttempt(file: string, sqlite: Sqlite): Attempt {
   let db: DatabaseSync | undefined;
@@ -119,7 +122,7 @@ export function sqliteAttempt(file: string, sqlite: Sqlite): Attempt {
         }
         db = open();
       } catch (error) {
-        // A cleanup deleted the file between the open and the chmod: start over.
+        // The file was removed between the open and the chmod: start over.
         if (hasCode(error, 'ENOENT')) return 'again';
         throw error;
       }
@@ -174,5 +177,6 @@ export function sqliteAttempt(file: string, sqlite: Sqlite): Attempt {
       return null;
     },
     abandon: close,
+    deletable: false,
   };
 }

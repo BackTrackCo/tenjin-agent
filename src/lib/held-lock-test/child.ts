@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -6,20 +6,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const dir = fileURLToPath(new URL('.', import.meta.url));
 const children = new Set<ChildProcess>();
 
+const helperArgs = (file: string, args: string[]) => [
+  '--experimental-strip-types',
+  '--no-warnings',
+  '--import',
+  pathToFileURL(join(dir, 'register.mjs')).href,
+  join(dir, file),
+  ...args,
+];
+
 /** A child that runs a helper from this folder, with the lines it prints. */
 export function child(file: string, ...args: string[]) {
-  const proc = spawn(
-    process.execPath,
-    [
-      '--experimental-strip-types',
-      '--no-warnings',
-      '--import',
-      pathToFileURL(join(dir, 'register.mjs')).href,
-      join(dir, file),
-      ...args,
-    ],
-    { stdio: ['pipe', 'pipe', 'inherit'] },
-  );
+  const proc = spawn(process.execPath, helperArgs(file, args), {
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
   children.add(proc);
   let text = '';
   const waiters: Array<() => void> = [];
@@ -80,6 +80,20 @@ export async function probe(
   const probing = child('holder.ts', lockPath, 'probe', ...(primitive ? [primitive] : []));
   await probing.exited;
   return (await probing.line('').catch(() => '')) || 'error';
+}
+
+/**
+ * The job sweep's cleanup of `lockPath`, run in another process while this one waits: what a
+ * sweep in another Tenjin process does between two steps of a taker here. True when it deleted.
+ */
+export function discardElsewhere(lockPath: string, primitive?: 'sqlite'): boolean {
+  const run = spawnSync(
+    process.execPath,
+    helperArgs('holder.ts', [lockPath, 'discard', ...(primitive ? [primitive] : [])]),
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], timeout: 20_000 },
+  );
+  if (run.status !== 0) throw new Error(`discard child failed: ${run.status} ${run.stdout}`);
+  return run.stdout.trim() === 'true';
 }
 
 export function killChildren() {
