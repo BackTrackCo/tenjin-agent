@@ -6,7 +6,6 @@ import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import { canonicalHash } from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
-import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { admitPlan } from '../lib/spend-plan';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import { modelLock, ModelJobStore, type ModelJob } from './model-job';
@@ -45,6 +44,7 @@ import {
 } from './neon-chat';
 import { neonHost, neonTermsSchema, type NeonTerms } from './neon-terms';
 import { NeonRefunds } from './neon-refund';
+import { neonLimits, neonRoom } from './neon-room';
 import type { PinnedFetchOptions } from './pinned-fetch';
 
 /**
@@ -156,6 +156,18 @@ export async function neonRoomLeftAtomic(
   if (!record) return ceiling;
   const left = ceiling + BigInt(record.grantedAtomic) - BigInt(record.spentAtomic);
   return left > 0n ? left : 0n;
+}
+
+/** What a job has left of its budget and of what the person approved for it that nothing used. */
+export async function neonJobRoom(
+  dataDir: string,
+  job: Pick<ModelJob, 'id' | 'capAtomic'>,
+  maxJobAtomic: bigint,
+): Promise<{ jobLeftAtomic: bigint; approvedLeftAtomic: bigint }> {
+  const record = await readNeonRecord(dataDir, job.id);
+  const jobLeftAtomic = await neonRoomLeftAtomic(dataDir, job, maxJobAtomic);
+  const approved = record ? BigInt(record.grantedAtomic) - BigInt(record.approvedSpentAtomic) : 0n;
+  return { jobLeftAtomic, approvedLeftAtomic: approved > 0n ? approved : 0n };
 }
 
 /**
@@ -482,18 +494,6 @@ export class NeonTransport {
     });
   }
 
-  /** What the rolling day's budget has left, or null with no budget. */
-  private async dayRoom(
-    policy: Awaited<ReturnType<typeof resolveContextSettings>>['policy'],
-  ): Promise<bigint | null> {
-    if (policy.sessionBudgetAtomic === null) return null;
-    const ledger = await readSpendSummary(this.options.dataDir, {
-      ...(this.options.now ? { now: this.options.now } : {}),
-    });
-    const spent = ledger === null ? 0n : spentOf(ledger);
-    return policy.sessionBudgetAtomic > spent ? policy.sessionBudgetAtomic - spent : 0n;
-  }
-
   private async send(
     job: ModelJob,
     messages: Record<string, unknown>,
@@ -512,29 +512,23 @@ export class NeonTransport {
     const current = await modelSettings(dataDir, job.root, 'neon');
     if (!current) throw nothingSigned('Neon is not available here', { cause: 'budget' });
     const record = await this.load(job);
-    // The job's ceiling, and the room the person approved beyond it.
-    const cap =
+    // THE ROOM OF ONE TURN, by the one rule the handoff asks about before a worker starts (see
+    // neon-room.ts): the least of what one channel holds, the job's budget and the per-call limit
+    // or day's budget, which the job's unused approval lifts. The output cap is stepped down to
+    // fit it, never refused above the floor.
+    const settings = await resolveContextSettings(ctx);
+    const limits = await neonLimits(ctx, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC, this.options.now);
+    const jobLeft =
       (current.maxJobAtomic < BigInt(job.capAtomic)
         ? current.maxJobAtomic
-        : BigInt(job.capAtomic)) + BigInt(record.grantedAtomic);
-    const remaining = cap - BigInt(record.spentAtomic);
-    const settings = await resolveContextSettings(ctx);
-    const day = await this.dayRoom(settings.policy);
-    // THE ROOM OF ONE TURN: what is left of the job's ceiling, of the rolling day's budget, and of
-    // what one channel may hold. The output cap is stepped down to fit it, never refused above
-    // the floor.
-    let room =
-      remaining < NEON_CHANNEL_DEPOSIT_CAP_ATOMIC ? remaining : NEON_CHANNEL_DEPOSIT_CAP_ATOMIC;
-    // A call the person's own limits pay (the per-call limit and the day's budget) is fitted to
-    // them before anything is sent. What the person approved (`approve`) is theirs to spend past
-    // either limit, as the tool payer's approved call is, and once: it pays one payment as an
-    // approved payment, and the next call goes back to the limits.
+        : BigInt(job.capAtomic)) +
+      BigInt(record.grantedAtomic) -
+      BigInt(record.spentAtomic);
     const approvedLeft = BigInt(record.grantedAtomic) - BigInt(record.approvedSpentAtomic);
-    const perCall = settings.policy.maxAutoSpendAtomic;
-    const normalCap = day !== null && day < perCall ? day : perCall;
-    const callCap = approvedLeft > normalCap ? approvedLeft : normalCap;
-    if (callCap < room) room = callCap;
-    const needsApproval = room > normalCap;
+    const { room, approved: needsApproval } = neonRoom(limits, {
+      jobLeftAtomic: jobLeft,
+      approvedLeftAtomic: approvedLeft,
+    });
     const asked =
       typeof messages.max_tokens === 'number' && Number.isInteger(messages.max_tokens)
         ? messages.max_tokens

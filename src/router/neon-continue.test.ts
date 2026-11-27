@@ -160,7 +160,14 @@ it('asks about a revision with no room left, and offers it on the same worker on
   // The yes grows the same job's ceiling, and the revision is then offered on the same worker,
   // with the same handle and its history, and no routing fee.
   expect(
-    await runNeonApprove({ quote: id, total: '$1', what: quote.what }, { dataDir: dir }),
+    await runNeonApprove(
+      {
+        quote: id,
+        total: (asked as unknown as { quote: { total: string } }).quote.total,
+        what: quote.what,
+      },
+      { dataDir: dir },
+    ),
   ).toMatchObject({ ok: true });
   const offered = await f.model.capture(
     f.session,
@@ -223,7 +230,14 @@ it('asks about a call that measured more than the job has, with a grant that cov
     300_000n,
   );
   expect(
-    await runNeonApprove({ quote: quote.id, total: '$1', what: quote.what }, { dataDir: dir }),
+    await runNeonApprove(
+      {
+        quote: quote.id,
+        total: (asked as unknown as { quote: { total: string } }).quote.total,
+        what: quote.what,
+      },
+      { dataDir: dir },
+    ),
   ).toMatchObject({ ok: true });
   expect(
     await f.model.capture(
@@ -234,6 +248,86 @@ it('asks about a call that measured more than the job has, with a grant that cov
       'SendMessage',
     ),
   ).toMatchObject({ action: 'offer', continuation: true, worker_handle: f.conversation.handle });
+});
+
+// Failure caught by review (the example, with its exact numbers): the grant filled the job's
+// missing budget and not the approval the call itself needs. With a 0.02 limit, 0.13 granted and
+// spent by a voucher the seller charged at 0.06, a revision of 0.15 got a 0.06 grant, and was
+// accepted after the yes and then closed the writer with no answer.
+it('sizes the grant of a revision against the job budget and the unused approval together', async () => {
+  const f = await fixture('60000', { maxAutoSpend: '20000' }, [], '20000');
+  const recordPath = neonRecordPath(dir, f.initial.id);
+  const kept = JSON.parse(await readFile(recordPath, 'utf8'));
+  await writeFile(
+    recordPath,
+    JSON.stringify({
+      ...kept,
+      grantedAtomic: '130000',
+      approvedSpentAtomic: '130000',
+      needAtomic: '150000',
+    }),
+  );
+  const asked = await f.model.capture(
+    f.session,
+    'rev-1',
+    revision(f.conversation.handle),
+    undefined,
+    'SendMessage',
+  );
+  expect(asked).toMatchObject({ status: 'needs_approval', started: false });
+  const quote = (await readQuote(dir, (asked as unknown as { quote: { id: string } }).quote.id))!;
+  // 0.09 is left in the job and nothing of the approval: the grant is the whole 0.15.
+  expect((quote.call as { ceilingAtomic: string }).ceilingAtomic).toBe('150000');
+  expect(
+    await runNeonApprove(
+      {
+        quote: quote.id,
+        total: (asked as unknown as { quote: { total: string } }).quote.total,
+        what: quote.what,
+      },
+      { dataDir: dir },
+    ),
+  ).toMatchObject({ ok: true });
+  // After the yes both the job and the approval cover the call: it is offered, not asked again.
+  expect(
+    await f.model.capture(
+      f.session,
+      'rev-2',
+      revision(f.conversation.handle),
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({ action: 'offer', continuation: true });
+});
+
+// A call that still does not fit after an approval asks again, on the same worker, and an approval
+// never covers more than its own quote.
+it('asks again, keeping the worker, when a call measured more than an earlier approval covered', async () => {
+  const f = await fixture('0', { maxAutoSpend: '100000' }, [], '100000');
+  const recordPath = neonRecordPath(dir, f.initial.id);
+  const kept = JSON.parse(await readFile(recordPath, 'utf8'));
+  // 300,000 was approved and nothing of it is spent; the call measured 480,000.
+  await writeFile(
+    recordPath,
+    JSON.stringify({
+      ...kept,
+      grantedAtomic: '300000',
+      approvedSpentAtomic: '0',
+      needAtomic: '480000',
+    }),
+  );
+  const asked = await f.model.capture(
+    f.session,
+    'rev-1',
+    revision(f.conversation.handle),
+    undefined,
+    'SendMessage',
+  );
+  expect(asked).toMatchObject({ status: 'needs_approval', started: false });
+  const quote = (await readQuote(dir, (asked as unknown as { quote: { id: string } }).quote.id))!;
+  // The job has 400,000 and the approval 300,000: the call needs 480,000 of each.
+  expect((quote.call as { ceilingAtomic: string }).ceilingAtomic).toBe('180000');
+  expect(quote.call).toMatchObject({ handle: f.conversation.handle });
 });
 
 it('offers a revision the job still has room for with no question, whatever the DeepSeek setting is', async () => {

@@ -32,7 +32,8 @@ import { registerModelTool } from './model-mcp';
 import { ModelJobStore } from './model-job';
 import { modelConsent } from './model-settings';
 import { isNeonRevisionQuote, runNeonApprove } from './neon-approve';
-import { readNeonRecord } from './neon-transport';
+import { freshNeonRecord, neonRecordPath, readNeonRecord } from './neon-transport';
+import { ModelWorkerStopped } from './model-worker-control';
 import { readQuote } from '../lib/spend-quotes';
 import type { NeonTerms } from './neon-terms';
 import type { ModelSession } from './model-handoff';
@@ -232,6 +233,52 @@ it('names the Neon worker, never DeepSeek, in the result and in the follow-up it
   expect(sent.message).toContain('when your turn ends');
   expect(sent.message).toContain('do not wait for it or poll');
   await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(2));
+});
+
+// Failure caught by review: a first request that measured larger than the door's estimate stopped
+// the worker, which fenced its conversation and answered with neither a quote nor a way on. The
+// unpaid call keeps its worker (idle, with its history), the answer is the quote for the shortfall,
+// and after the yes a short message to the same handle sends the call that did not fit.
+it('keeps the worker and asks again when the real first request measured more than there is room for', async () => {
+  const { call, session, repo, dir: folder } = await doorWithDir({}, { maxAutoSpend: '200000' });
+  vi.mocked(getSessionInfo).mockImplementation((async (id: string) => ({
+    sessionId: id,
+    cwd: repo,
+  })) as never);
+  worker.run.mockImplementationOnce(async (job: { id: string }) => {
+    // What the transport leaves where a request did not fit: its measured need, and nothing sent.
+    const path = neonRecordPath(folder, job.id);
+    await mkdir(join(folder, 'model-jobs'), { recursive: true });
+    await writeFile(path, JSON.stringify({ ...freshNeonRecord(job.id, 1), needAtomic: '300000' }));
+    throw new ModelWorkerStopped({ kind: 'harness_limit', reason: 'budget_guard' });
+  });
+  const asked = await call(request);
+  expect(asked).toMatchObject({
+    status: 'needs_approval',
+    started: false,
+    instruction: expect.stringContaining('approve({quote: "q_'),
+    worker_handle: expect.stringMatching(/^tenjin-worker-/),
+  });
+  expect(asked.status).not.toBe('stopped');
+  const quote = (await readQuote(folder, asked.quote.id))!;
+  expect(
+    await runNeonApprove(
+      { quote: quote.id, total: asked.quote.total, what: quote.what },
+      { dataDir: folder },
+    ),
+  ).toMatchObject({ ok: true });
+  // The same worker goes on: its conversation was left idle, not fenced.
+  worker.run.mockResolvedValue('Written.');
+  session.turnId = 'after-yes';
+  const sent = await call({
+    capture: {
+      session_id: session.sessionId,
+      tool_use_id: 'go-on',
+      tool: 'SendMessage',
+      input: { to: asked.worker_handle, message: 'go on' },
+    },
+  });
+  expect(sent).toMatchObject({ action: 'continued', worker_handle: asked.worker_handle });
 });
 
 it('saves the effort the door was given and refuses one it does not know', async () => {

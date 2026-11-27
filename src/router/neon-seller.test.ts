@@ -439,9 +439,17 @@ describe('what the seller sees before a payment exists', () => {
     function setup(budget: bigint | null, approved = 1_000_000n) {
       const left = { value: approved };
       const restored: bigint[] = [];
+      // A barrier on the decision itself: it opens when two payments have asked for the approval,
+      // and the payment that won is held at the seller until then, so the second asked while the
+      // first was still pending and not yet charged.
+      let asking = 0;
+      let bothAsked!: () => void;
+      const bothHaveAsked = new Promise<void>((resolve) => (bothAsked = resolve));
       const approval = () => ({
         leftAtomic: left.value,
         consume: async (amount: bigint) => {
+          asking += 1;
+          if (asking === 2) bothAsked();
           if (amount > left.value) return false;
           left.value -= amount;
           return true;
@@ -475,7 +483,7 @@ describe('what the seller sees before a payment exists', () => {
           .then(() => ({ outcome: 'paid', paid: paid.length }))
           .catch(() => ({ outcome: 'refused', paid: paid.length }));
       };
-      return { left, restored, call };
+      return { left, restored, call, bothHaveAsked };
     }
 
     it('passes the per-call limit once, and the next call goes back to the limit', async () => {
@@ -504,12 +512,10 @@ describe('what the seller sees before a payment exists', () => {
     it('spends one approval once when two calls run together', async () => {
       account = await payer();
       const t = setup(30_000n, CEILING);
-      // Neither call is answered until both asked.
-      let release!: () => void;
-      const hold = new Promise<void>((resolve) => (release = resolve));
-      const running = Promise.all([t.call('one', true, hold), t.call('two', true, hold)]);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      release();
+      const running = Promise.all([
+        t.call('one', true, t.bothHaveAsked),
+        t.call('two', true, t.bothHaveAsked),
+      ]);
       const outcomes = await running;
       expect(outcomes.filter(({ outcome }) => outcome === 'paid')).toHaveLength(1);
       expect(outcomes.reduce((sum, { paid }) => sum + paid, 0)).toBe(1);

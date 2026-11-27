@@ -2,8 +2,11 @@ import { toMoney } from '../lib/money';
 import { createQuote, quoteClosed, readQuote, useQuote, type Quote } from '../lib/spend-quotes';
 import type { ModelJob } from './model-job';
 import { approveCall } from './plan';
-import { grantNeonRoom, markNeonAwaiting } from './neon-transport';
-import { neonHost, type NeonTerms } from './neon-terms';
+import { modelSettings } from './model-settings';
+import { NEON_CHANNEL_DEPOSIT_CAP_ATOMIC } from './neon-seller';
+import { neonLimits, neonShortfall } from './neon-room';
+import { grantNeonRoom, markNeonAwaiting, neonJobRoom, readNeonRecord } from './neon-transport';
+import { neonHost, neonTermsSchema, type NeonTerms } from './neon-terms';
 
 /**
  * A REVISION PAST THE JOB CEILING IS ASKED ABOUT, NOT REFUSED. A Neon job shares one ceiling
@@ -45,11 +48,13 @@ export async function neonRevisionApproval(
   terms: NeonTerms,
   ceilingAtomic: bigint,
   leftAtomic: bigint,
+  why?: string,
+  after?: string,
 ) {
   const what = `one more ceiling of ${usd(ceilingAtomic)} for revisions of the ${terms.label} writing job`;
   const quote = await createQuote(dataDir, {
     what,
-    sentence: `This revision has no room left in its job ceiling (${usd(leftAtomic)} left), so another ceiling of ${usd(ceilingAtomic)} would be paid to ${neonHost(terms)} as the writer's calls need it.`,
+    sentence: `This revision has no room left (${why ?? `the job ceiling has ${usd(leftAtomic)} left`}), so another ceiling of ${usd(ceilingAtomic)} would be paid to ${neonHost(terms)} as the writer's calls need it.`,
     payments: [{ amountAtomic: ceilingAtomic, creator: neonHost(terms) }],
     call: { kind: KIND, jobId: original.id, handle, ceilingAtomic: ceilingAtomic.toString() },
   });
@@ -58,7 +63,7 @@ export async function neonRevisionApproval(
     action: 'refused' as const,
     started: false,
     reason: `needs_approval: ${quote.sentence} Nothing was sent and nothing was paid.`,
-    instruction: `Call ${approveCall(quote)}: it asks the user and runs only on their yes. On the yes, send the same revision again to the same worker handle; its history stays. Do not start a new worker for it.`,
+    instruction: `Call ${approveCall(quote)}: it asks the user and runs only on their yes. ${after ?? 'On the yes, send the same revision again to the same worker handle; its history stays.'} Do not start a new worker for it.`,
     quote: {
       id: quote.id,
       what: quote.what,
@@ -155,4 +160,41 @@ export async function runNeonApprove(
         ? `Approved: the writing job has ${usd(BigInt(call.ceilingAtomic))} more room. Run the draft by calling subagent({offer_id: ${JSON.stringify(call.jobId)}}).`
         : `Approved: the writing job has ${usd(BigInt(call.ceilingAtomic))} more room. Send the revision again to worker ${call.handle}.`,
   };
+}
+
+/**
+ * A CALL THAT DID NOT FIT WHEN ITS REAL REQUEST WAS MEASURED (a first draft larger than the
+ * door's estimate, or a revision that grew): the transport sent nothing and kept what the request
+ * needs. The answer is the same quote the handoff gives, for the shortfall against every limit,
+ * and the worker stays: the unanswered call did not end its conversation, so the yes and a short
+ * message go on with the same history. Null where nothing was measured or nothing is missing.
+ */
+export async function neonMissApproval(
+  dataDir: string,
+  job: Pick<ModelJob, 'id' | 'capAtomic' | 'root' | 'decision'>,
+  handle: string,
+) {
+  const terms = neonTermsSchema.safeParse(job.decision.neonTerms);
+  if (!terms.success) return null;
+  const record = await readNeonRecord(dataDir, job.id);
+  if (record?.needAtomic === undefined) return null;
+  const settings = await modelSettings(dataDir, job.root, 'neon');
+  if (!settings) return null;
+  const room = await neonJobRoom(dataDir, job, settings.maxJobAtomic);
+  const shortfall = neonShortfall(
+    BigInt(record.needAtomic),
+    await neonLimits({ dataDir }, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC),
+    room,
+  );
+  if (!shortfall || 'impossible' in shortfall) return null;
+  return neonRevisionApproval(
+    dataDir,
+    job,
+    handle,
+    terms.data,
+    shortfall.grantAtomic,
+    room.jobLeftAtomic,
+    shortfall.why,
+    'On the yes, send the worker a short message (for example "go on") to the same worker handle: its history stays, and the call that did not fit is sent then.',
+  );
 }

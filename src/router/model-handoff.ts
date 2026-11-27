@@ -44,16 +44,10 @@ import {
   type NeonEffort,
 } from './neon-chat';
 import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
-import { toMoney } from '../lib/money';
-import { resolveContextSettings } from '../lib/settings';
-import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { NEON_CHANNEL_DEPOSIT_CAP_ATOMIC } from './neon-seller';
 import { neonFirstCallApproval, neonRevisionApproval } from './neon-approve';
-import {
-  neonFirstCallNeedAtomic,
-  neonNextCallNeedAtomic,
-  neonRoomLeftAtomic,
-} from './neon-transport';
+import { neonFirstCallNeedAtomic, neonJobRoom, neonNextCallNeedAtomic } from './neon-transport';
+import { neonLimits, neonShortfall } from './neon-room';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -465,35 +459,21 @@ export class ModelHandoff {
       );
     if (settings.maxJobAtomic < neonMinimumJobAtomic(terms))
       return refuse('The job ceiling has no room for one Neon call. Raise the per-call limit.');
-    // A DRAFT THE JOB CEILING CANNOT CARRY IS ASKED ABOUT, NOT SENT: its first call is sized from
-    // the draft and the row's price rule, against the person's per-call limit, before any request
-    // to the seller. Where one approved ceiling can carry it, the answer is the quote and the
-    // `approve` call, with the job kept; where none can (more than one channel deposit holds), it
-    // is refused with the reason. Either way nothing of the draft is sent.
+    // A DRAFT THE LIMITS CANNOT CARRY IS ASKED ABOUT, NOT SENT. Its first call is sized from the
+    // draft and the row's price rule, and met against the per-call limit, the job's ceiling and
+    // the day's budget by the one rule the transport also uses (neon-room.ts). Where a grant can
+    // carry it, the answer is the quote and the `approve` call, and the queued job does not run
+    // before that yes; where none can (more than one channel deposit holds), it is refused.
     const need = neonFirstCallNeedAtomic(terms, Buffer.byteLength(input.prompt));
-    if (need > NEON_CHANNEL_DEPOSIT_CAP_ATOMIC)
+    const shortfall = neonShortfall(
+      need,
+      await neonLimits({ dataDir: this.options.dataDir }, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC),
+      { jobLeftAtomic: settings.maxJobAtomic, approvedLeftAtomic: 0n },
+    );
+    if (shortfall && 'impossible' in shortfall)
       return refuse(
         'This draft is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent and nothing was charged. Send a shorter draft.',
       );
-    // The same two limits the tool payer asks about: the per-call limit (which is the job's
-    // ceiling) and what the rolling day's budget has left.
-    const policy = (
-      await resolveContextSettings({ dataDir: this.options.dataDir, flags: {} } as never)
-    ).policy;
-    const spent = await readSpendSummary(this.options.dataDir);
-    const dayLeft =
-      policy.sessionBudgetAtomic === null
-        ? null
-        : policy.sessionBudgetAtomic > (spent === null ? 0n : spentOf(spent))
-          ? policy.sessionBudgetAtomic - (spent === null ? 0n : spentOf(spent))
-          : 0n;
-    const usd = (atomic: bigint) => `$${toMoney(atomic.toString()).usd}`;
-    const over =
-      need > settings.maxJobAtomic
-        ? `more than the ${usd(settings.maxJobAtomic)} this machine pays for one call without asking`
-        : dayLeft !== null && need > dayLeft
-          ? `more than today's automatic budget has left (${usd(dayLeft)})`
-          : null;
     const native = {
       prompt: input.prompt,
       ...(input.description !== undefined ? { description: input.description } : {}),
@@ -523,15 +503,15 @@ export class ModelHandoff {
       },
       capAtomic: settings.maxJobAtomic.toString(),
     });
-    if (over)
+    if (shortfall)
       return neonFirstCallApproval(
         this.options.dataDir,
         job,
         workerHandleFor(job.id),
         terms,
+        shortfall.grantAtomic,
         need,
-        need,
-        over,
+        shortfall.why,
       );
     return {
       action: 'offer',
@@ -595,25 +575,30 @@ export class ModelHandoff {
     if (provider === 'neon') {
       const terms = neonTermsSchema.safeParse(original.decision.neonTerms);
       if (!terms.success) return continuationRefusal('Original Neon seller terms are unavailable');
-      const left = await neonRoomLeftAtomic(dataDir, original, settings.maxJobAtomic);
+      const room = await neonJobRoom(dataDir, original, settings.maxJobAtomic);
       const need = await neonNextCallNeedAtomic(dataDir, original, terms.data);
       const needed =
         need > neonMinimumJobAtomic(terms.data) ? need : neonMinimumJobAtomic(terms.data);
-      if (left < needed) {
-        // The grant is at least one ceiling, and enough for what the next call measured it needs.
-        if (needed > NEON_CHANNEL_DEPOSIT_CAP_ATOMIC)
-          return continuationRefusal(
-            'The next call is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent.',
-          );
+      // The same rule as the transport's, over the job's budget and its unused approval alike.
+      const shortfall = neonShortfall(
+        needed,
+        await neonLimits({ dataDir }, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC),
+        room,
+      );
+      if (shortfall && 'impossible' in shortfall)
+        return continuationRefusal(
+          'The next call is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent.',
+        );
+      if (shortfall)
         return neonRevisionApproval(
           dataDir,
           original,
           handle,
           terms.data,
-          needed - left > settings.maxJobAtomic ? needed - left : settings.maxJobAtomic,
-          left,
+          shortfall.grantAtomic,
+          room.jobLeftAtomic,
+          shortfall.why,
         );
-      }
     }
     await prepareClaudeWorkerSession(
       { resume: conversation.sdkSessionId, onSession: async () => {} },

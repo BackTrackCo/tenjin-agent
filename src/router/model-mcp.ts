@@ -7,6 +7,7 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
 import { NEON_EFFORTS } from './neon-chat';
+import { neonMissApproval } from './neon-approve';
 import { neonAwaitingApproval } from './neon-transport';
 import { approveCall } from './plan';
 import { quoteClosed, readQuote } from '../lib/spend-quotes';
@@ -1357,15 +1358,40 @@ export function registerModelTool(
                   await writeWorkerPhases(options.dataDir, job.id, acceptedAt, endMarks);
                   return answer(envelope);
                 } catch (error) {
-                  const state = abort.signal.aborted ? 'cancelled' : 'unknown';
+                  // A Neon call that did not fit its measured request was sent nowhere and paid for
+                  // nothing: the worker stays (idle, with its history) and the answer is the quote.
+                  const miss =
+                    provider === 'neon' && !abort.signal.aborted && activeConversation
+                      ? await neonMissApproval(
+                          options.dataDir,
+                          job,
+                          activeConversation.handle,
+                        ).catch(() => null)
+                      : null;
+                  const state = abort.signal.aborted ? 'cancelled' : miss ? 'completed' : 'unknown';
                   if (activeConversation)
                     await model.conversations
-                      .finish(activeConversation.handle, activeConversation.owner, job.id, state)
+                      .finish(
+                        activeConversation.handle,
+                        activeConversation.owner,
+                        job.id,
+                        state,
+                        miss
+                          ? 'Waiting for the approval of more room. Nothing was sent.'
+                          : undefined,
+                      )
                       .catch(() => false);
                   const spend = await transport
                     .summary(executionJob)
                     .catch(() => ({ accounting: 'unknown' }));
                   activity?.finish(state, 'reservedAtomic' in spend ? spend : undefined);
+                  if (miss && activeConversation) {
+                    const asked = { ...miss, worker_handle: activeConversation.handle };
+                    await model.store
+                      .finish(job.id, 'completed', offered ? JSON.stringify(asked) : undefined)
+                      .catch(() => undefined);
+                    return answer({ ...asked, spend });
+                  }
                   // What the stopped worker already did, so a retry starts from it.
                   const partial = partialHandback(activity?.snapshot());
                   const stop = workerStop(error);
