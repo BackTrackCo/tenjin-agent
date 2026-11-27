@@ -71,7 +71,6 @@ import {
   SPEND_QUESTION,
   spendChoiceQuestion,
   spendOptions,
-  FEE_APPROVAL,
 } from './spend-question';
 import { recordTermsTold } from './terms-notice';
 import { shQuote } from './plugin-files';
@@ -1223,14 +1222,13 @@ export interface QuestionStep {
 /**
  * The one question install asks, before anything is written: the defaults, or
  * your own limits. It is asked only when the file names neither limit. The
- * question names the routing fee and its deposits too, and either answer
- * approves it. Cancelling at any step writes nothing.
+ * question names the routing fee and its deposits too. Cancelling at any step writes nothing.
  */
 export async function approveLimits(
   deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`,
+    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return { ...ROUTER_DEFAULTS };
