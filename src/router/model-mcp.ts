@@ -1366,9 +1366,11 @@ export function registerModelTool(
                   // nothing: the worker stays (idle, with its history) and the answer is the quote.
                   const miss =
                     provider === 'neon' && !abort.signal.aborted && activeConversation
-                      ? await neonMissApproval(
+                      ? // The run measured on the job it ran as (the original job, for a resumed
+                        // worker); the continuation's own offer keeps the answer below.
+                        await neonMissApproval(
                           options.dataDir,
-                          job,
+                          executionJob,
                           activeConversation.handle,
                         ).catch(() => null)
                       : null;

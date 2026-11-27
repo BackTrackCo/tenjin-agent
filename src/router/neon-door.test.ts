@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -289,6 +289,61 @@ it('keeps the worker and asks again when the real first request measured more th
     },
   });
   expect(sent).toMatchObject({ action: 'continued', worker_handle: asked.worker_handle });
+});
+
+// Failure caught by review: a resumed run measures its unpaid shortfall on the ORIGINAL job (the
+// worker runs as it), but the recovery looked for it on the continuation's own offer, found
+// nothing, and the writer was closed with its conversation fenced. The quote is found on the job
+// the run measured, and the continuation's offer keeps the answer for replay.
+it('keeps the same worker and asks for the quote when a resumed run measures an unpaid shortfall', async () => {
+  const { call, session, repo, dir: folder } = await doorWithDir({}, { maxAutoSpend: '200000' });
+  vi.mocked(getSessionInfo).mockImplementation((async (id: string) => ({
+    sessionId: id,
+    cwd: repo,
+  })) as never);
+  worker.run.mockResolvedValueOnce('The release notes are written.');
+  const first = await call(request);
+  expect(first.status).toBe('completed');
+  // The follow-up's run: the worker runs as the original job, and measures a call that did not fit.
+  // The warm start of a follow-up may run it a second time: each run measures the same shortfall.
+  worker.run.mockImplementation(async (job: { id: string }) => {
+    // The worker is a stub here, so the first job left no record; the run makes it as the
+    // transport does.
+    const path = neonRecordPath(folder, job.id);
+    await mkdir(join(folder, 'model-jobs'), { recursive: true });
+    await writeFile(path, JSON.stringify({ ...freshNeonRecord(job.id, 1), needAtomic: '480000' }));
+    throw new ModelWorkerStopped({ kind: 'harness_limit', reason: 'budget_guard' });
+  });
+  session.turnId = 'followup-turn';
+  const sent = await call({
+    capture: {
+      session_id: session.sessionId,
+      tool_use_id: 'followup',
+      tool: 'SendMessage',
+      input: { to: first.worker_handle, message: 'Make it longer.' },
+    },
+  });
+  expect(sent).toMatchObject({ action: 'continued', worker_handle: first.worker_handle });
+  await vi.waitFor(() => expect(worker.run.mock.calls.length).toBeGreaterThanOrEqual(2));
+  // The follow-up's own offer holds the stored answer of that run.
+  const jobsDir = join(folder, 'model-jobs');
+  const continuation = await vi.waitFor(async () => {
+    for (const name of await readdir(jobsDir)) {
+      if (!/^[0-9a-f-]{36}\.json$/.test(name)) continue;
+      const job = JSON.parse(await readFile(join(jobsDir, name), 'utf8'));
+      if (job.decision?.workerHandle === first.worker_handle && job.state === 'completed')
+        return job as { id: string };
+    }
+    throw new Error('The follow-up has not ended yet');
+  });
+  const replay = await call({ offer_id: continuation.id });
+  expect(replay).toMatchObject({
+    status: 'needs_approval',
+    worker_handle: first.worker_handle,
+    quote: { id: expect.stringMatching(/^q_/) },
+  });
+  expect(replay.status).not.toBe('stopped');
+  worker.run.mockReset();
 });
 
 it('saves the effort the door was given and refuses one it does not know', async () => {
