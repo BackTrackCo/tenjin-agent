@@ -264,29 +264,29 @@ it('keeps a retired entry while an authorization can still arrive or a job is li
     }),
     initiate: async () => '0x',
     finalize: async () => '0x',
-  } as never;
+  };
   const salts: string[] = [];
   salts.push((await refunds.open('job-1', TERMS)).salt!);
   await refunds.saveChannel(TERMS, config);
   // Retired with a deposit authorization that expires at 2,000,000.
   await refunds.retire(TERMS, 2_000_000);
   // The channel reads empty, but the authorization has not expired: kept, with its salt.
-  expect(await refunds.prune(empty)).toBe(0);
+  expect(await refunds.prune(empty as never)).toBe(0);
   clock = 2_000_001;
   // Expired, but a job of it is still live: kept.
-  expect(await refunds.prune(empty)).toBe(0);
+  expect(await refunds.prune(empty as never)).toBe(0);
   live = false;
   // A read that fails proves nothing: kept.
   const failing = { ...empty, channel: async () => Promise.reject(new Error('rpc down')) };
-  expect(await refunds.prune(failing)).toBe(0);
+  expect(await refunds.prune(failing as never)).toBe(0);
   expect((await refunds.entries()).filter((entry) => entry.retired)).toHaveLength(1);
   // Expired, empty, no pending withdrawal, no live job: pruned.
-  expect(await refunds.prune(empty)).toBe(1);
+  expect(await refunds.prune(empty as never)).toBe(1);
   expect(await refunds.entries()).toEqual([]);
   // The next channel never reuses an earlier identity, though no record of it is left.
   salts.push((await refunds.open('job-2', TERMS)).salt!);
   await refunds.retire(TERMS, 1);
-  await refunds.prune(empty);
+  await refunds.prune(empty as never);
   salts.push((await refunds.open('job-3', TERMS)).salt!);
   expect(new Set(salts).size).toBe(3);
   expect(salts.every((salt) => /^0x[0-9a-f]{64}$/.test(salt) && !/^0x0+$/.test(salt))).toBe(true);
