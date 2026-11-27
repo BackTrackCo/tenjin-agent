@@ -489,6 +489,43 @@ it('ends with the last good report when the child ends after it with a command s
   await expect(run).resolves.toBe('interim');
 });
 
+// Failure caught by review: the catch that lets a run end with its last good report swallowed the
+// size check on that report too, so a 300,000-byte final report after a background command came
+// back whole instead of failing as an oversized handback does.
+it('still fails an oversized final report after a command ran in the background', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const worker = backgroundWorker({ subtype: 'success', result: 'x'.repeat(300_000) });
+  const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+  const failed = run.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  worker.ended();
+  expect(String(await failed)).toMatch(/size limit/);
+});
+
+it('still fails a run with no report at all after a command ran in the background', async () => {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+          yield {
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 't', task_type: 'local_bash', description: 'sleep 1' }],
+          };
+          yield { type: 'result', subtype: 'success', result: '' };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  await expect(runModelWorker(job, options())).rejects.toThrow();
+});
+
 it('still fails on an error report when no command ran in the background', async () => {
   vi.mocked(query).mockImplementation(
     () =>

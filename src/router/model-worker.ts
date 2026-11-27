@@ -926,6 +926,8 @@ async function runQualifiedWorker(
   // What the child has running in the background, and whether it ever had (see BackgroundWork).
   const background = new BackgroundWork();
   let backgroundRan = false;
+  // The run's report is being checked, not read: an error from here is never the child's end.
+  let verifying = false;
   let afterBackground: NodeJS.Timeout | undefined;
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
@@ -1528,6 +1530,9 @@ async function runQualifiedWorker(
       }
     }
     if (proxyFailure) throw proxyFailure.error;
+    // From here the checks are the handback's own, never the child's end: a report that is empty
+    // or too big fails the run, whatever ran in the background.
+    verifying = true;
     if (!result) throw new Error('DeepSeek worker returned no completed result');
     if (Buffer.byteLength(result, 'utf8') > MODEL_NATIVE_TEXT_BYTES)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
@@ -1535,6 +1540,7 @@ async function runQualifiedWorker(
     // The child ended after a report that succeeded, with a command still running in the
     // background: its end, with the result of its last report, not a failure of the worker.
     const childEnded =
+      !verifying &&
       !proxyFailure &&
       result !== undefined &&
       backgroundRan &&
