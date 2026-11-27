@@ -16,6 +16,11 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+// No setting turns an offer on any more; this test drives the offer path with its own saved consent.
+vi.mock('./model-settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./model-settings')>()),
+  modelSettings: (await import('./saved-consent-test-utils')).savedModelSettings,
+}));
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -74,7 +79,7 @@ import { ModelWorkerStopped, WORKER_ENDS } from './model-worker-control';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { MODEL_WORKER_HANDLE_PREFIX, ModelConversationStore } from './model-conversations';
 import type { ModelJob } from './model-job';
-import { modelConsent } from './model-settings';
+import { modelConsent } from './saved-consent-test-utils';
 import { workerProgressPath } from './model-worker-progress';
 
 /** The transport's `route` as the handoff reads it: the router's answer and what the call authorized. */

@@ -138,14 +138,6 @@ export const register: Register = (on) => {
   );
   on('classic.UserPromptSubmit', async ($, e, next) => ((await inWorker($)) ? {} : next(e)));
   registerModelViewer(on);
-  on('tool.describe', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
-    const data = await tenjinDataDir($);
-    const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
-    if (router?.subagents !== true) return next(e);
-    return {
-      description: `${e.description}\n\nCopy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.`,
-    };
-  });
   on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
     // THE PLUGIN'S OWN AGENT IS NOT THE PARENT'S CALL. The host raises this mod's start of
     // the worker's viewer agent as an Agent call too (seen live: a no-offer record,
@@ -170,11 +162,10 @@ export const register: Register = (on) => {
     if (translated.unavailable) return unavailable();
     if (e.tool === 'SendMessage' && !owned) return next(e);
     try {
-      const data = await tenjinDataDir($);
-      const router = data
-        ? asRecord((await readJson($, `${data}/config.json`))?.router)
-        : undefined;
-      if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
+      // NO SETTING TURNS THE HOLD ON: a new call is never captured and runs natively. Only a
+      // follow-up addressed to a worker handle this plugin once issued reaches the CLI, which
+      // refuses it without a consent.
+      if (!owned || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
         return owned ? unavailable() : next(e);
       // A held call is never rewritten: the parent keeps it native by sending it
       // again unchanged, and that repeat runs here as it was reviewed. The model

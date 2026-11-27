@@ -44,12 +44,12 @@ export function asRecord(value: unknown): Json | undefined {
     : undefined;
 }
 
-export async function subagentsEnabled($: Dollar): Promise<boolean> {
-  if ((await $.env.get('TENJIN_MODEL_WORKER')) === '1') return false;
-  const dir = await tenjinDataDir($);
-  return (
-    dir !== null && asRecord((await readJson($, dir + '/config.json'))?.router)?.subagents === true
-  );
+/**
+ * No setting turns DeepSeek subagents on, so no worker's viewer ever starts. A saved
+ * `router.subagents` is not read.
+ */
+export async function subagentsEnabled(_$: Dollar): Promise<boolean> {
+  return false;
 }
 
 /**

@@ -134,9 +134,6 @@ try {
       Invoke-Checked 'node.exe' @($sdkProbe, $launcherPath, $claudePath[0].FullName, $worker.SID.Value, $workspacePath, $canaryPath, $tool)
     } catch { $failedProbes += $tool }
   }
-  try {
-    Invoke-Checked 'node.exe' @((Join-Path $PSScriptRoot 'qualify-offer.mjs'), $launcherPath, $claudePath[0].FullName, $workspacePath, $dataPath, $profilePath, $worker.SID.Value)
-  } catch { $failedProbes += 'production offer' }
   if ($failedProbes.Count -gt 0) { throw ('Windows probes failed: ' + ($failedProbes -join ', ')) }
 } finally {
   $password.Dispose()

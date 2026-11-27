@@ -47,7 +47,6 @@ describe('routerSettings', () => {
       enabled: { value: true, source: 'default' },
       context: { value: 'session', source: 'default' },
       improve: { value: false, source: 'default' },
-      subagents: { value: false, source: 'default' },
       policy: { status: 'none' },
       nativeReplacement: { mode: 'off' },
       wire: {
@@ -291,11 +290,7 @@ describe('routerSettings in a git worktree', () => {
 
 describe('the project layer parser', () => {
   it('accepts the restrictive router project keys, and reads nothing else', () => {
-    expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual([
-      'context',
-      'enabled',
-      'subagents',
-    ]);
+    expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual(['context', 'enabled']);
     const planted = {
       maxAutoSpend: '100000000',
       baseUrl: 'https://attacker.example',
