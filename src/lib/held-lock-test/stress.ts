@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { replay } from './replay';
 
 /**
  * Stress run: `stress.ts <ms> <none|kill|stop|both> [workers] [dir] [broken] [minBroken] [primitive]`. N workers take one lock in
@@ -112,30 +113,15 @@ while (performance.now() < end || (sumOf().broken < minBroken && performance.now
   }
 }
 if (process.platform !== 'win32') for (const child of children) child.kill('SIGCONT');
-for (const child of children) child.kill('SIGTERM');
+// A worker ends at SIGTERM only outside its entry (see `stress-worker.ts`). Windows has no such
+// signal and terminates the worker wherever it is, so there the end is logged as a kill.
+for (const child of children) {
+  if (process.platform === 'win32') appendFileSync(log, `K ${child.pid}\n`);
+  child.kill('SIGTERM');
+}
 await delay(1500);
 const sum = sumOf();
-// Replay the log: an enter while another holder is inside, and not killed, is an overlap.
-const inside = new Set<string>();
-const killed = new Set<string>();
-let overlaps = 0;
-let entries = 0;
-for (const line of readFileSync(log, 'utf8').split('\n')) {
-  const [kind, pid] = line.split(' ');
-  if (!pid) continue;
-  // A holder logs its own lines until the kill lands: once it is marked killed, none count.
-  if (kind === 'K') {
-    killed.add(pid);
-    inside.delete(pid);
-    continue;
-  }
-  if (killed.has(pid)) continue;
-  if (kind === 'E') {
-    entries++;
-    if (inside.size > 0) overlaps++;
-    inside.add(pid);
-  } else inside.delete(pid);
-}
+const { entries, overlaps } = replay(readFileSync(log, 'utf8'));
 process.stdout.write(
   `${JSON.stringify({ ...sum, rounds: entries, overlaps, kills, stops, chaos, ms })}\n`,
 );

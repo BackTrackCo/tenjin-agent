@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,6 +48,7 @@ import {
   killChildren,
   probe,
 } from './held-lock-test/child';
+import { replay } from './held-lock-test/replay';
 import { LockTimeoutError } from './lock';
 
 // A child process starts slowly on a loaded runner: its tests get more than the default 5 s.
@@ -496,6 +498,41 @@ it.each(primitives.map((primitive) => ({ primitive, name: primitive || 'platform
     console.warn(`lock stress control: ${JSON.stringify(result)}`);
   },
   90_000,
+);
+
+// A worker that the end of a run stopped between its `E` and its `X` left its entry open, and the
+// next worker to take the freed lock read as an overlap: one or two in a failing stress run,
+// every one after the parent's SIGTERM. The lock had let no two in.
+it.skipIf(!posix)(
+  'the stress detector reads no overlap when a worker is told to stop inside its entry',
+  async () => {
+    const dir = join(tmp, 'end');
+    mkdirSync(dir);
+    const lock = join(dir, 'lock');
+    const log = join(dir, 'log');
+    writeFileSync(log, '');
+    const logged = async (line: string) => {
+      while (!readFileSync(log, 'utf8').split('\n').includes(line)) await delay(10);
+    };
+    vi.stubEnv('STRESS_HOLD_MS', '2000');
+    const first = child('stress-worker.ts', lock, log);
+    vi.stubEnv('STRESS_HOLD_MS', '1');
+    try {
+      await logged(`E ${first.proc.pid}`);
+      first.proc.kill('SIGTERM');
+      await first.exited;
+      const next = child('stress-worker.ts', lock, log);
+      await logged(`X ${next.proc.pid}`);
+      next.proc.kill('SIGTERM');
+      await next.exited;
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const text = readFileSync(log, 'utf8');
+    expect(text.split('\n')).toContain(`X ${first.proc.pid}`);
+    expect(replay(text)).toMatchObject({ overlaps: 0 });
+    expect(replay(text).entries).toBeGreaterThanOrEqual(2);
+  },
 );
 
 const stress = process.env.TENJIN_LOCK_STRESS === '1';

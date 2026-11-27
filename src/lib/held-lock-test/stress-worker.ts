@@ -12,23 +12,37 @@ import { loadSqlite, sqliteAttempt } from '../held-lock-sqlite';
  * takes the Linux primitive on any platform that has node:sqlite. STRESS_DISCARD (a probability)
  * makes that share of the rounds end with a cleanup that deletes the lock file while it holds the
  * lock, as the job sweep does: a lock file that goes and comes back must never let two in.
+ * STRESS_HOLD_MS (default 1) is how long a worker stays between its `E` and its `X`.
  */
 const [lock, log] = process.argv.slice(2) as [string, string];
 const broken = Number(process.env.STRESS_BROKEN ?? 0);
 const counts = { pid: process.pid, rounds: 0, timeouts: 0, errors: 0, broken: 0 };
 const save = () => process.stdout.write(`${JSON.stringify(counts)}\n`);
 setInterval(save, 200).unref();
-process.on('SIGTERM', () => {
+const stop = () => {
   save();
   process.exit(0);
+};
+// The end of a run never falls between an `E` and its `X`: a worker that ended there would leave
+// its entry open in the log, and the next worker to take the freed lock would read as an
+// overlap. SIGTERM inside the entry ends the worker right after its `X`.
+let inside = false;
+let stopping = false;
+process.on('SIGTERM', () => {
+  if (inside) stopping = true;
+  else stop();
 });
 
+const hold = Number(process.env.STRESS_HOLD_MS ?? 1);
 const critical = async () => {
+  inside = true;
   appendFileSync(log, `E ${process.pid}\n`);
   // Long enough that a second holder arriving meanwhile is seen, even on one busy core.
-  await pause(1);
+  await pause(hold);
   appendFileSync(log, `X ${process.pid}\n`);
+  inside = false;
   counts.rounds++;
+  if (stopping) stop();
 };
 
 const options = { timeoutMs: 3000, retryMs: 1 };
