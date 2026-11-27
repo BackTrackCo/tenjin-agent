@@ -48,6 +48,8 @@ const SERVER_ANSWER = {
         location: 'body',
       },
       input: {
+        $comment:
+          "Only the daily catalog check reads this input and the spec's maxAmountAtomic, to probe the seller. A door calls with more (tools, tool messages, a longer input) and quotes from inference.price and the live 402, so a real call can quote above maxAmountAtomic.",
         type: 'object',
         properties: {
           model: {
@@ -136,7 +138,7 @@ it('reads the seller, payee, model, wire, scheme, usage dialect and price rule f
 // although the lookup was answered. The decision was thrown away whole because its hint, the
 // server's fixed line for an inference row, names no call and carries no id, as the hint of a
 // runnable service must. The parse now takes the server's own answer as it is.
-it("reads the server's whole answer for the Neon row, hint and jev included", async () => {
+it("reads the server's whole answer for the Neon row, hint, jev and the input's comment included", async () => {
   const terms = await lookupNeonTerms({
     ctx,
     baseUrl: 'https://router.example',
@@ -148,6 +150,7 @@ it("reads the server's whole answer for the Neon row, hint and jev included", as
     scheme: 'batch-settlement',
   });
   expect(ROW).toBe(NEON_ROW_ID);
+  expect(SERVER_ANSWER.decision.spec.input).toHaveProperty('$comment');
 });
 
 // Failure caught: a failed lookup must fail the job with nothing sent, never fall back to a
