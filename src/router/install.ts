@@ -107,7 +107,6 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
   'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and acknowledge the Privacy Policy (https://tenjin.sh/privacy).',
 ];
 

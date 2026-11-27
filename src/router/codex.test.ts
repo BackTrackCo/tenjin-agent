@@ -705,12 +705,7 @@ describe('Codex install, uninstall and doctor', () => {
           next: expect.stringContaining('`tenjin balance --wait` in the background'),
         },
       ],
-      disclosure: [
-        expect.stringContaining(
-          'task context and your wallet address are sent to Tenjin for routing',
-        ),
-        expect.stringContaining('https://tenjin.sh/privacy'),
-      ],
+      disclosure: [expect.stringContaining('https://tenjin.sh/privacy')],
     });
     // The subagent terms follow an opt-in only: a receipt's disclosure does not repeat them.
     expect(JSON.stringify(out.data)).not.toContain('with parent accept or veto');

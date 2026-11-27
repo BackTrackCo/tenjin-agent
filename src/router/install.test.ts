@@ -235,7 +235,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({}, humanCtx(), deps({ isInteractive: false }));
     expect(receipt(result)[0]).toContain('Tenjin is set up for Claude Code');
     const text = receipt(result).join('\n');
-    expect(text).toContain('task context and your wallet address are sent to Tenjin for routing');
+    expect(text).not.toContain('task context and your wallet address are sent to Tenjin');
     expect(text).toContain(
       'By using Tenjin, you agree to the Terms (https://tenjin.sh/terms) and acknowledge the Privacy Policy (https://tenjin.sh/privacy).',
     );
