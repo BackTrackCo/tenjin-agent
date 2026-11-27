@@ -788,15 +788,16 @@ export class NeonTransport {
     // reads; after the expiry it asks the token whether the authorization was used, and only an
     // authorization that never was releases this amount. Without one (the voucher spent a channel
     // that was already funded) nothing can prove it, and it stays counted until the window rolls.
-    if (signed?.onlyThroughDeposit)
+    const savedTerms = termsOfJob(job);
+    if (signed?.onlyThroughDeposit && savedTerms)
       await appendPaidRecord(this.options.dataDir, {
         version: 1,
         ts: new Date(this.now()).toISOString(),
         capabilityId: 'neon-worker',
-        provider: neonHost(termsOfJob(job) ?? ({ url: 'https://unknown' } as NeonTerms)),
-        label: 'Neon worker',
+        provider: neonHost(savedTerms),
+        label: `${savedTerms.label} worker`,
         source: 'tenjin',
-        url: termsOfJob(job)?.url ?? '',
+        url: savedTerms.url,
         sent: recordedSent(`neon worker job ${job.id} call ${n}`),
         amountAtomic: atRisk.toString(),
         settlement: 'unknown',
