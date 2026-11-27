@@ -458,6 +458,40 @@ describe('what the seller sees before a payment exists', () => {
     expect(await run('manual')).toEqual({ outcome: 'paid', paid: 1 });
   });
 
+  // The terms are the server's row, saved with the job: changing them changes where the request
+  // goes and whom the payment may name, with nothing of either written in the CLI.
+  it('sends to the url the row names, and pays only the payee it names', async () => {
+    const account = await payer();
+    const urls: string[] = [];
+    const inner = seller('7321');
+    const fetchImpl: typeof fetch = async (input, init) => {
+      urls.push(input instanceof Request ? input.url : String(input));
+      return inner.fetchImpl(input, init);
+    };
+    const moved = { ...TERMS, url: 'https://other-seller.example/v2/chat' };
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: moved,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      fetchImpl,
+    });
+    // The live 402 still names the old payee and the old resource: the new row's payee does not
+    // match it, so nothing is signed, and the request went to the new url.
+    await expect(batch.post(body, new AbortController().signal, 1_000_000n)).resolves.toBeDefined();
+    expect(urls[0]).toBe('https://other-seller.example/v2/chat');
+    const other = new BatchSeller({
+      dataDir: dir,
+      terms: { ...TERMS, payTo: '0x00000000000000000000000000000000DeaDBeef' },
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      fetchImpl: seller('7321').fetchImpl,
+    });
+    await expect(other.post(body, new AbortController().signal, 1_000_000n)).rejects.toBeInstanceOf(
+      PayeeMismatch,
+    );
+  });
+
   it('sends none of the prompt when the seller names another payee than the row', async () => {
     const account = await payer();
     const other = seller('7321', '0x00000000000000000000000000000000DeaDBeef');

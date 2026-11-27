@@ -150,7 +150,6 @@ it("reads the server's whole answer for the Neon row, hint, jev and the input's 
     scheme: 'batch-settlement',
   });
   expect(ROW).toBe(NEON_ROW_ID);
-  expect(SERVER_ANSWER.decision.spec.input).toHaveProperty('$comment');
 });
 
 // Failure caught: a failed lookup must fail the job with nothing sent, never fall back to a

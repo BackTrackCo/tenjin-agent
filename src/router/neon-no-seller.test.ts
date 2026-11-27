@@ -23,9 +23,11 @@ const files = [
 // up, which is not a seller's address or a price.
 it('names no seller, origin, payee or price outside the provider row', () => {
   for (const file of files) {
+    // The code only: a documentation link in a comment is no destination the CLI can pay.
     const text = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
       .split('\n')
-      .filter((line) => !line.includes("NEON_ROW_ID = '"))
+      .filter((line) => !line.includes("NEON_ROW_ID = '") && !/^\s*\/\//.test(line))
       .join('\n');
     expect(text, file).not.toMatch(/blockrun/i);
     expect(text, file).not.toMatch(/x402inference|nanogpt\.com/i);
