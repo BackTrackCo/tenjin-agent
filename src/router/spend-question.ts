@@ -95,7 +95,7 @@ export function spendOptions(install: string): SpendOption[] {
       recommended: false,
       ask: [
         'Daily budget shared across chats, in USD, or none for no limit',
-        'Ordinary-tool per-call limit in USD. DeepSeek inference uses its separate job ceiling. Zero blocks positive automatic payments.',
+        'Ordinary-tool per-call limit in USD. Zero blocks positive automatic payments.',
       ],
       command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,
     },

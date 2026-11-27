@@ -1,10 +1,7 @@
 # DeepSeek subagents
 
-- **What it is.** Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job. Claude keeps its own model and accepts or declines each offer. DeepSeek subagents are off by default.
+- **What it is.** DeepSeek subagents are off. An earlier version could offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job, and Claude accepted or declined each offer. No setting, setup question or command turns that on now. A setting an earlier version saved (`router.subagents` and its consent) stays in your config file, is ignored and costs nothing. The rest of this page describes how those offers worked.
 - **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. A web search runs inside the DeepSeek call; a page its WebFetch could not fetch goes to Exa.
-- **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked ($0.0081, 15% of an expected job spend of $0.054), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job's ceiling.
-- **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
-- **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.
 
 Ordinary implementation and scoped review can qualify; planning stays native. Repository instructions and model or privacy restrictions still apply. Nothing a worker reads or prints is masked: env files, secrets in a known token shape and credential command output go to Tenjin and DeepSeek as written. Before an offer, the task and parent context sent for routing are masked for known secrets, which is not a guarantee. See also the [privacy policy](https://tenjin.sh/privacy).
 
@@ -17,52 +14,14 @@ Ordinary implementation and scoped review can qualify; planning stays native. Re
 
 [Data and permissions](#data-and-permissions) has the full account, and [Charges and limits](#charges-and-limits) the fees and the per-job cap.
 
-## Setup and controls
-
-### Turn on and off
-
-```sh
-tenjin config subagents
-tenjin config subagents off
-tenjin config subagents on
-tenjin config subagents on --max-job 0.50
-tenjin config subagents on --repository /path/to/workspace /path/to/another
-```
-
-- **Fresh setup** asks whether to use a cheap model for eligible subagent jobs, in three lines that end with a link to this page. **Keep off** is the default. **Turn on** covers each session's qualified native workspace and then prints the scope, the cap and the short terms once.
-- **A scripted install** passes `tenjin install --yes --subagents on` to opt in or `--subagents off` to save off. The flag saves an answer wherever none is saved yet, on a fresh profile or an existing one. Running it again changes nothing: once an answer is saved, the `tenjin config subagents` commands change it, and the install receipt says so when the flag asked for something else.
-- **Existing users** keep their settings, including off choices. Updating, refreshing or adding another host does not turn DeepSeek subagents on. Only an explicit on does: the question, the `--subagents on` flag or `tenjin config subagents on`.
-- **`tenjin config subagents`** with no mode prints whether DeepSeek subagents are on, the scope and the cap in force. `tenjin status` has a `Subagents` row that says on or off and the scope.
-- **`tenjin config subagents off`** stops new jobs. Cancel a running worker to stop it (see [Cancel](#cancel)).
-- **A project** can turn DeepSeek subagents off for itself. It cannot grant consent or raise your money limits.
-
-The parent still accepts or declines each offer.
-
-### The two consent scopes
-
-There is one consent record, with one of two scopes. The command you run chooses the scope.
-
-- **Every workspace.** `tenjin config subagents on` writes the same consent the setup question writes: it covers each session's qualified native workspace, in any directory. Its scope row reads `Every workspace`. Opening another repository uses that session's own workspace; the folder where installation ran supplies no directory grant.
-- **Only the directories you name.** `tenjin config subagents on --repository <path>...` limits the consent to those directories and nothing else. A named directory includes its subfolders, so a nested repository or a linked worktree under it is covered. A session outside them gets no offer: not in the parent of a named directory, not in a sibling whose name starts the same, and not through a link under a named directory that points outside it, since real paths are compared. Its scope row reads `~/work and its subfolders`. Repeat the command for another directory to keep both, or name a containing workspace.
-
-A saved consent never gets wider without your own command:
-
-- A consent that names directories stays limited to them through updates.
-- Only an `on` with no `--repository` widens it, and its scope row says so: `Every workspace (was ~/work only)`.
-- An `on --repository` over a consent for every workspace narrows it, and its scope row says `(was every workspace)`.
-- On native Windows only the limited scope is allowed (see [Linux and Windows](#linux-and-windows)).
-
-Both scopes record the configured router origin and the recipients (Tenjin, DeepSeek and Exa). Each `on` prints the same short terms with a link to this page; `tenjin config subagents on --json` carries the full terms in `disclosure`. Each job freezes its qualified scope and rechecks it before tools, inference and continuation.
-
-Local GitHub origin names for the offer's directories and their direct child repositories accompany each offer so the parent can match GitHub tasks to paths. Names grant no filesystem permission or additional disclosure scope, and are read fresh at each offer.
+## Limits and hosts
 
 ### The cap for a job
 
 - A job's routing, inference, searches and page reads together cost up to the cap.
-- With no `--max-job`, the cap is your per-call spend limit as it stands at each offer ($1 unless you chose another). A changed limit changes the next offer, up or down, and lowers a running job's remaining cap at once.
-- `--max-job <USD>` names a lower ceiling. The cap is then the smaller of that ceiling and the limit, and a higher limit never lifts a ceiling you named. Each `on` sets the ceiling from its own flags, so running it without `--max-job` drops a ceiling named earlier.
+- The cap is your per-call spend limit as it stands at each offer ($1 unless you chose another). A changed limit changes the next offer, up or down, and lowers a running job's remaining cap at once.
 - Your daily budget applies on top.
-- Where the cap is not above $0.083866, the reserve of one 65,536-token call with no body, no job is offered. The cap must also leave room for the routing fee above that ($0.0081 an offer), so a cap just above $0.083866 gets no offer either, and the router is asked before that is known. `tenjin config subagents why` says so, and `tenjin config subagents on` refuses to turn DeepSeek subagents on under such a limit and names the command that raises it.
+- Where the cap is not above $0.083866, the reserve of one 65,536-token call with no body, no job is offered. The cap must also leave room for the routing fee above that ($0.0081 an offer), so a cap just above $0.083866 gets no offer either, and the router is asked before that is known.
 - A call held at one cap whose cap is lowered before its offer is made stays native.
 
 ### Linux and Windows
@@ -72,7 +31,7 @@ On Linux, DeepSeek workers use Claude Code’s native shell sandbox. Install the
 On native Windows a worker has no shell sandbox:
 
 - It uses the native Claude shell tools under a dedicated standard local Windows account. Git Bash and PowerShell have the access Windows grants to that account, including network access and files outside the selected repository.
-- Setup requires a separate opt-in that names the workspace with `--repository`. The limited scope is the only one native Windows allows, since the worker's account has access only to what you gave it. A bare `on` with the Windows worker flags is refused and says so.
+- The worker runs only in the directories its account was given, and it has no shell sandbox. No command sets that up in this version, so no worker starts on native Windows.
 - Keep the controller’s Tenjin data and sign-in credentials in its private profile. Only share workspaces and Claude configuration that you are comfortable exposing through the worker’s tool results.
 - Native tools and shell commands use the shared Claude profile and the account’s own Git and CLI credentials. Windows ACLs govern reads and writes by shell commands. Tenjin rechecks the worker grant. It masks nothing else in what the worker forwards. A Windows job has no GitHub setup, so it always removes GitHub token shapes, and your wallet key and passphrase are removed by value, as on every other platform.
 
@@ -173,7 +132,7 @@ On Linux and macOS:
 - A native subagent's own Agent (or legacy Task) call, at any depth of native agents, is judged and offered as the main conversation's is, with the session's context followed by that subagent's own conversation. That subagent accepts the offer or keeps it native. Its call stays native when the subagent's tools leave out `subagent`, when it or an agent above it may run in a permission mode of its own, or when it works in a folder of its own such as a worktree, since a worker runs in the session's mode and workspace.
 - A DeepSeek worker's own calls get no offer.
 - One exception: where no prompt was typed since Tenjin's process started (a resumed session woken by a notification), the first subagent call runs natively.
-- Saved consent covers its stated disclosure and inference scope; binding restrictions, repository risk judgment and normal tool asks still apply.
+- Binding restrictions, repository risk judgment and normal tool asks still apply.
 
 ### Accept
 
@@ -192,7 +151,6 @@ On Linux and macOS:
 ### Cancel
 
 - Cancel an offer or active worker with `subagent({cancel: offer_id})`, at any time, or interrupt the host.
-- Turning DeepSeek subagents off prevents new paid requests; cancel to drain active work.
 - Stopping the DeepSeek agent from Claude Code's agent list cancels its worker, as stopping a native subagent does. Leaving or closing its view, or Claude Code ending its turn, does not.
 
 ### When a worker stops by itself
@@ -229,10 +187,6 @@ These run natively:
 - Every agent a plugin provides (such as `codex:codex-rescue`), whatever its definition says, every built-in type other than `general-purpose` and `Explore`, and a definition in a folder above the job's root: their prompts are not yours or the project's to send to DeepSeek.
 - A definition whose frontmatter Tenjin cannot read exactly as Claude Code does (a quoted key such as `'tools': [Read]`, a bracketed list over several lines, a repeated key, an empty tool list), so a tool limit is never lost on the way to a worker.
 - A call that names its agent (`name`), resumes another agent or asks for isolation: a named call starts a teammate and returns at once, which the accept call cannot do.
-
-### Why a call got no offer
-
-`tenjin config subagents why` lists why recent subagent calls got no offer, newest first: the local time, the tool (with `from a subagent` when a native subagent made the call) and the reason in plain words, such as `The session was in plan mode`. `--json` adds the session id and the reason code, such as `input_filter:name`, `permission_mode:plan`, `caller_unqualified:tools`, `over_size_limit` with the byte count, `job_cap_too_low`, `job_cap_lowered`, `server_declined` with the router's code, or `kept_native`. The record holds no assignment text, is kept for 7 days in a file only your user can read, and is sent nowhere. It is written only while DeepSeek subagents are on.
 
 ### Write to a running worker
 
@@ -307,7 +261,7 @@ These run natively:
 - **Near the ceiling.** When what is left of a job's ceiling cannot reserve the offered cap, the call asks for the largest cap that still fits, never under 8,192 (the router takes any cap from 1), so a higher cap does not end a job sooner. A job is stopped for budget only when what is left cannot reserve the call's input plus 8,192 output tokens, and a call never reserves more than what is left. Under that, the rule below applies.
 - **The floor.** An 8,192-token call, the least a call steps down to, reserves at least $0.011613 before system, tools and history input. Jobs are offered only under a ceiling above the reserve of one 65,536-token call, $0.083866, and configuration refuses a ceiling not above that, since the routing fee is paid inside the cap, from the room the cap leaves; this necessary floor does not guarantee a larger prompt fits.
 - A continuing job must retain enough unspent ceiling, after actual spend and unresolved reservations, for each next call's full quote. Inference is refused if its quote exceeds the remaining ceiling; a routing fee may already be paid.
-- A job's cap is your per-call spend limit or a lower ceiling you named, so no inference deposit passes the per-call limit. The daily budget and creator allowlist still apply, and a per-call limit of zero stops jobs as it stops every automatic payment.
+- A job's cap is your per-call spend limit, so no inference deposit passes the per-call limit. The daily budget and creator allowlist still apply, and a per-call limit of zero stops jobs as it stops every automatic payment.
 - Other connected services retain their own permissions and billing. A worker cannot call Tenjin's paid-tool router or purchase tool itself; its page reads are the only tool calls Tenjin pays for on its behalf.
 
 ### Web searches and page reads

@@ -21,13 +21,6 @@ import { loadRawConfig } from '../lib/config';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { readAliveStamp } from './alive';
-import {
-  captureNewInstall,
-  reserveNewInstall,
-  finishNewInstall,
-  type InstallSubagentChoice,
-  type NewInstallSession,
-} from './new-install';
 import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
@@ -202,7 +195,6 @@ export interface RouterInstallArgs {
    * for an agent running the person's answer.
    */
   yes?: boolean;
-  subagents?: InstallSubagentChoice;
   /** Create no wallet, for CI and scripted machines. */
   noWallet?: boolean;
   /**
@@ -216,8 +208,6 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps, FundingDeps {
-  /** Shared by both host installers; the core action finalizes it after every host succeeds. */
-  newInstall?: NewInstallSession;
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -236,7 +226,6 @@ export interface RouterInstallDeps extends WalletDeps, FundingDeps {
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
-  promptSubagents?: () => Promise<InstallSubagentChoice | null>;
   /** The spend-limit selector; defaults to the clack list. */
   promptLimits?: (message: string) => Promise<LimitsChoice | null>;
   /** One amount question; defaults to the clack text input. */
@@ -381,7 +370,6 @@ export async function runRouterInstall(
   ctx: CommandContext,
   deps: RouterInstallDeps = {},
 ): Promise<CommandResult> {
-  const newInstall = deps.newInstall ?? (await captureNewInstall(ctx.dataDir));
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   if (!isAbsolute(home)) {
@@ -457,12 +445,6 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
-  if (args.refresh !== true)
-    await reserveNewInstall(
-      newInstall,
-      !legacy.present &&
-        (!newInstall.absent || !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))),
-    );
   // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
   // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
   // any version and would silence the settings install in every session,
@@ -661,8 +643,6 @@ export async function runRouterInstall(
     runtime: runtimeData(rt),
     launcher: rt?.launcher ?? null,
   };
-  newInstall.completed.push(plugin.state !== 'failed' && plugin.state !== 'deferred');
-  newInstall.continueWith ??= installCommand(args, command);
   const result: CommandResult = {
     data,
     humanLines: [
@@ -685,14 +665,7 @@ export async function runRouterInstall(
     ],
     humanTail: receiptTail(ctx, effective.policy, data.next),
   };
-  return deps.newInstall
-    ? result
-    : finishNewInstall(result, newInstall, ctx, {
-        ...(args.subagents !== undefined ? { choice: args.subagents } : {}),
-        yes: args.yes === true,
-        isInteractive: canPrompt,
-        ...(deps.promptSubagents ? { promptSubagents: deps.promptSubagents } : {}),
-      });
+  return result;
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
@@ -1215,7 +1188,7 @@ export function namedLimits(
 
 /** A pending install step, handled according to its next instructions. */
 export interface QuestionStep {
-  id: 'spend' | 'subagents' | 'fund';
+  id: 'spend' | 'fund';
   /** Prompt text for the terminal choice or agent explanation; follow `next`. */
   question: string;
   options: {

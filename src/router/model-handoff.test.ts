@@ -2,6 +2,11 @@ import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+// No setting turns an offer on any more; this test drives the offer path with its own saved consent.
+vi.mock('./model-settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./model-settings')>()),
+  modelSettings: (await import('./saved-consent-test-utils')).savedModelSettings,
+}));
 import { randomUUID } from 'node:crypto';
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
@@ -11,7 +16,6 @@ import {
   fitAdmission,
   ModelHandoff,
   modelOfferSchema,
-  MODEL_BRIEF_GUIDANCE,
   type ModelCaller,
   type ModelSession,
 } from './model-handoff';
@@ -23,7 +27,7 @@ import {
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
-import { modelConsent } from './model-settings';
+import { modelConsent } from './saved-consent-test-utils';
 import { RouteSkipped } from './decision';
 import { offeredOutputTokens, paidCallTimeoutMs } from './model-limits';
 import { advertisedCallLimit } from './model-pace';
@@ -347,14 +351,6 @@ it('names a withheld native directory in the offer beside its keep-native path a
       'To keep it native, send the original Agent call again unchanged',
     ),
   });
-});
-
-it('keeps native tool guidance aligned with the held-call brief', async () => {
-  const hook = await readFile(
-    new URL('../../hosts/claude/tenjin/hooks/register.tsx', import.meta.url),
-    'utf8',
-  );
-  expect(hook).toContain('\\n\\n' + MODEL_BRIEF_GUIDANCE + '`');
 });
 
 it('shows every explicit disclosure anchor and refuses a continuation whose native scope changes', async () => {

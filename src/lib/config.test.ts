@@ -85,7 +85,6 @@ describe('loadConfig', () => {
       enabled: false,
       context: 'session',
       improve: false,
-      subagents: false,
     });
     expect(cfg.install).toEqual({ routerProjects: [] });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
@@ -204,19 +203,13 @@ describe('parseOnOffFlag', () => {
 });
 
 describe('router block: the switch and the context', () => {
-  it('registers four dotted keys and no scalar', () => {
-    expect(ROUTER_CONFIG_KEYS).toEqual([
-      'router.enabled',
-      'router.context',
-      'router.improve',
-      'router.subagents',
-    ]);
+  it('registers three dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context', 'router.improve']);
     expect(CONFIG_KEYS as string[]).not.toContain('router');
     expect(CONFIG_DEFAULTS.router).toEqual({
       enabled: true,
       context: 'session',
       improve: false,
-      subagents: false,
     });
   });
 
@@ -225,7 +218,6 @@ describe('router block: the switch and the context', () => {
     expect((await loadConfig(dir)).router).toEqual({
       enabled: true,
       context: 'turn',
-      subagents: false,
       improve: false,
     });
     expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });

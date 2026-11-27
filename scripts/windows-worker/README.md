@@ -2,24 +2,17 @@
 
 Tenjin uses this launcher to run native Claude Code tools under a standard local Windows account. The shell runs with that account’s file and network permissions.
 
+No command sets the launcher up in this version: `tenjin config subagents` is gone, and a Windows grant an earlier version saved is ignored. Tenjin starts no worker on Windows until a later version brings one back.
+
 ## Setup
 
 1. Provision a standard local account for the worker and note its SID. Add a Generic credential named `Tenjin.WindowsWorker` in Windows Credential Manager under the controller’s sign-in. Enter `.\username` and the worker account’s password.
 2. Build the launcher and install it alongside a native Claude Code executable, version 2.1.325 or newer, in a trusted directory. The worker account needs read and execute access. Keep the executables and their containing paths protected against replacement by the worker account.
 3. Grant the worker account access to the intended workspace and prepare a shared Claude configuration directory with the settings and instructions to use. Keep controller credentials and Tenjin data in its private home. Start the parent Claude Code session with `CLAUDE_CONFIG_DIR` set to the shared directory. Its active `claude.exe` must be the executable used below.
-4. Enable the Windows worker for the repository from the controller account.
 
 For the parent session, supply Claude Code credentials through its own environment. A Claude Console API key or a subscription token created with `claude setup-token` can be used this way. Keep `.credentials.json`, keys and tokens out of the shared profile. Tenjin gives the worker its own scoped inference credential. [Claude Code authentication](https://code.claude.com/docs/en/authentication)
 
-```powershell
-tenjin config subagents on --repository "C:\src\project" --max-job 1 `
-  --windows-worker-sid "<worker SID>" `
-  --windows-launcher "C:\Program Files\Tenjin\tenjin-windows-worker.exe" `
-  --windows-claude "C:\Program Files\Tenjin\claude.exe" `
-  --windows-config-dir "C:\src\shared-claude" --accept-windows-shell-access
-```
-
-`tenjin config subagents off` revokes the worker grant. On each launch the worker checks its Windows access to the controller data and settings and refuses to start if it can read or change them. It also checks its ability to replace the launcher or Claude binary. A launch refusal can follow an already-paid routing fee.
+On each launch the worker checks its Windows access to the controller data and settings and refuses to start if it can read or change them. It also checks its ability to replace the launcher or Claude binary. A launch refusal can follow an already-paid routing fee.
 
 ## Launcher and qualification
 
@@ -42,8 +35,6 @@ For the process probe, run `node process-probe.mjs <absolute-launcher-path> <wor
 Build the optional test launcher with `go test -c -o tenjin-windows-worker-test.exe .` and give the fixture account execute access. The probe then also interrupts a real alternate-account launch while its suspended process is held before job assignment. It exercises both cooperative cancellation and controller death, verifies that the launcher survives to reap the suspended process, and checks that the worker executes no fixture code.
 
 For the real Claude Code SDK probe, run `node qualify.mjs <launcher.exe> <claude.exe> <worker-sid> <shared-workspace> <private-canary> <Bash|PowerShell>`. Put exactly `SYNTHETIC_TENJIN_PRIVATE_FIXTURE` with no newline in a parent-only file outside the shared workspace. Use Claude Code 2.1.325 or newer and the checkout's locked SDK. The fixture verifies that inference waits for acceptance, a native `PreToolUse` hook blocks a command, and the shell can read the workspace while Windows denies the private canary. The manual CI job provisions only disposable fixtures and runs both probes.
-
-The same workflow runs `qualify-offer.mjs` through the production Tenjin offer tool with a local fixture endpoint. It checks an accepted native Read and verifies that a veto or revoked Windows grant drains the worker without an inference request.
 
 An external hard kill of the launcher itself while Windows creates the suspended process falls outside cooperative cancellation. Microsoft documents creation-time job assignment with extended startup information for `CreateProcessW`. The [unprivileged alternate-account API](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw) documents the basic startup structure.
 

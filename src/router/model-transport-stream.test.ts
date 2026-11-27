@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
+// No setting turns an offer on any more; this test drives the offer path with its own saved consent.
+vi.mock('./model-settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./model-settings')>()),
+  modelSettings: (await import('./saved-consent-test-utils')).savedModelSettings,
+}));
 import { FakeRouter, payerDeps, BASE, TEST_POLICY } from './fee-test-utils';
 import { completedMessageSse } from './model-messages';
 import { ModelTransport } from './model-transport';

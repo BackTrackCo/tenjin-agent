@@ -44,12 +44,20 @@ export function asRecord(value: unknown): Json | undefined {
     : undefined;
 }
 
-export async function subagentsEnabled($: Dollar): Promise<boolean> {
-  if ((await $.env.get('TENJIN_MODEL_WORKER')) === '1') return false;
+const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * WHETHER THIS SESSION HAS A WORKER JOB: the CLI's job record for `jobId` names this session.
+ * No setting is read: a job's progress view depends on the job alone, so a worker started by
+ * hand shows as one an offer started does, and a session with no job shows nothing. The record
+ * is read, never written, and never inside a worker's own process.
+ */
+export async function sessionHasJob($: Dollar, jobId: string): Promise<boolean> {
+  if (!JOB_ID.test(jobId) || (await $.env.get('TENJIN_MODEL_WORKER')) === '1') return false;
   const dir = await tenjinDataDir($);
-  return (
-    dir !== null && asRecord((await readJson($, dir + '/config.json'))?.router)?.subagents === true
-  );
+  if (dir === null) return false;
+  const job = await readJson($, `${dir}/model-jobs/${jobId}.json`);
+  return job !== null && job.sessionId === (await $.session.id());
 }
 
 /**

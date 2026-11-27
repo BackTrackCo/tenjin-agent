@@ -26,7 +26,6 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
   const files = new Map<string, string>();
   const clock = mock.clock(on, { now: NOW });
   mock.env(on, { HOME: '/home/test', ...env });
-  files.set(DATA + '/config.json', JSON.stringify({ router: { subagents: true } }));
   const store = new Map<string, unknown>();
   const state = {
     cwd: '/repo',
@@ -50,6 +49,8 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
     reads: 0,
     aliasReads: 0,
     lists: 0,
+    /** The CLI's job record is read for each job id: `session` names its session, `false` has none. */
+    jobSession: SESSION as string | false,
     offer: OFFER,
     nativeProfile: 'Explore',
     inspectionBlocked: undefined as Promise<void> | undefined,
@@ -194,6 +195,11 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
           `${DATA}/progress/model-workers/${await sha256Hex(state.parentSessionId)}-${await sha256Hex(offer)}.json`
       )
         return { value: JSON.stringify(activity(offer)) };
+    // A worker job of this session is what shows the viewer, never a setting: the CLI's record
+    // of the job names its session. The test makes that record here, directly.
+    const job = /\/model-jobs\/([^/]+)\.json$/.exec(e.path);
+    if (job && e.path.startsWith(DATA + '/') && state.jobSession !== false)
+      return { value: JSON.stringify({ id: job[1], sessionId: state.jobSession }) };
     const text = files.get(e.path);
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
   });
@@ -336,8 +342,13 @@ function setup(_$: Engine, on: On, env: Record<string, string> = {}) {
   });
   return { files, clock, store, state };
 }
+/**
+ * A worker job of this session shown to the viewer, started as a follow-up to a worker the
+ * plugin already owns: no new Agent call is held now, so this is the call that still reaches
+ * the CLI. The stub answers it with an offer, as the CLI does for a job it made.
+ */
 const remember = ($: Engine, input: Record<string, unknown> = INPUT) =>
-  $.tool.call({ tool: 'Agent', ...input });
+  $.tool.call({ tool: 'Agent', resume: WORKER, ...input });
 /** What a held call was answered with: the refusal's text. */
 const heldAnswer = (answer: { deny?: string; result?: unknown }): unknown =>
   answer.deny ?? answer.result;
@@ -462,20 +473,25 @@ test('spawn failure preserves the original parent call and does not cancel work'
   expect(f.state.cancellations).toEqual([]);
 });
 
-test('a disabled feature never creates a native viewer', async ($, on) => {
-  const f = setup($, on);
-  f.files.set(DATA + '/config.json', JSON.stringify({ router: { subagents: false } }));
-  let work = 0;
-  f.state.work = async () => {
-    work++;
-    return { result: 'native unchanged' };
-  };
-  await remember($);
-  await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
-  expect(work).toBe(1);
-  expect(f.state.calls).toBe(0);
-  expect(f.state.inspections).toBe(0);
-});
+// A job's view depends on the job alone: the CLI's record of it, naming this session.
+for (const [what, jobSession] of [
+  ['no job record', false],
+  ["a job record of another session's", 'another-session'],
+] as const)
+  test(`a session with ${what} never creates a native viewer`, async ($, on) => {
+    const f = setup($, on);
+    f.state.jobSession = jobSession;
+    let work = 0;
+    f.state.work = async () => {
+      work++;
+      return { result: 'native unchanged' };
+    };
+    await remember($);
+    await $.tool.call({ tool: ACCEPT, offer_id: OFFER });
+    expect(work).toBe(1);
+    expect(f.state.calls).toBe(0);
+    expect(f.state.inspections).toBe(0);
+  });
 
 test('native type marking fails closed for a viewer metadata failure but leaves ordinary agents alone', async ($, on) => {
   const f = setup($, on);
@@ -920,23 +936,24 @@ test('unbound viewer IDs refuse while ordinary native resumes remain unchanged',
     spawnedBy: 'tenjin',
     status: 'running',
   });
-  const original = { resume: 'ordinary-native', prompt: 'Read one file' };
-  await translate($, 'Agent', original);
-  expect(f.state.captures.at(-1)?.input).toEqual(original);
-  const before = f.state.captures.length;
+  // An ordinary call is never held, so it never reaches the CLI.
+  await translate($, 'Agent', { resume: 'ordinary-native', prompt: 'Read one file' });
+  expect(f.state.captures).toEqual([]);
   expect(
     (await translate($, 'Agent', { resume: 'unbound-viewer', prompt: 'Continue' })).deny,
   ).toContain('Tenjin held this call and started nothing');
-  expect(f.state.captures.length).toBe(before);
-  expect(f.state.nativeCalls).toEqual([]);
+  expect(f.state.captures).toEqual([]);
+  // Only the ordinary resume ran natively; the viewer's id never did.
+  expect(f.state.nativeCalls).toMatchObject([{ resume: 'ordinary-native' }]);
 });
 
 test('initial assignments and existing durable worker handles avoid all alias and agent lookups', async ($, on) => {
   const f = setup($, on);
-  for (const input of [{ prompt: INPUT.prompt }, { resume: WORKER, prompt: INPUT.prompt }]) {
-    await translate($, 'Agent', input);
-    expect(f.state.captures.at(-1)?.input).toEqual(input);
-  }
+  await translate($, 'Agent', { prompt: INPUT.prompt });
+  expect(f.state.captures).toEqual([]);
+  const owned = { resume: WORKER, prompt: INPUT.prompt };
+  await translate($, 'Agent', owned);
+  expect(f.state.captures.at(-1)?.input).toEqual(owned);
   expect(f.state.lists).toBe(0);
   expect(f.state.aliasReads).toBe(0);
 });
@@ -2378,7 +2395,7 @@ test("the plugin's own activity read is told from the model's by who raised it, 
   expect(raisedByThisPlugin(undefined)).toBe(false);
 });
 
-for (const settled of ['kept native', 'cancelled', 'expired'] as const)
+for (const settled of ['cancelled', 'expired'] as const)
   test(
     'an offer that is ' +
       settled +
@@ -2405,15 +2422,10 @@ for (const settled of ['kept native', 'cancelled', 'expired'] as const)
       };
       // Open: the held call reads as the offer it is.
       expect(await offerRow()).toBe('⏺Agent(Read selected source) · Tenjin offered DeepSeek');
-      if (settled === 'kept native') {
-        // The veto is the same call again, with nothing said: the CLI lets it run native.
-        f.state.keepNative = true;
-        await remember($);
-        expect(f.state.nativeCalls).toHaveLength(1);
-      } else if (settled === 'cancelled') {
+      if (settled === 'cancelled') {
         await $.tool.call({ tool: ACCEPT, cancel: OFFER, tool_use_id: 'parent_cancel' });
       } else await f.clock.advance(15 * 60_000 + 1000);
-      // Kept native or expired: only the native call's own row is left for the task. A
+      // Expired: only the native call's own row is left for the task. A
       // cancelled offer keeps its row, which says so: the cancel call draws nothing.
       expect(await offerRow()).toBe(
         settled === 'cancelled'
@@ -2830,24 +2842,6 @@ test('two offers and two workers at once each keep their own row, viewer entry a
   expect(await heldRow($, 'held_b', INPUT2, second)).toBe(
     '⏺DeepSeek(Check the cancel path)  ⎿  Done (7 tool uses · 41.2k tokens · 6s · $0.039)',
   );
-});
-
-test('a repeat that keeps one of two identical offers native clears that offer’s row alone', async ($, on) => {
-  const f = setup($, on);
-  f.state.offer = OFFER;
-  const first = heldAnswer(await remember($));
-  f.state.offer = OFFER2;
-  const second = heldAnswer(await remember($));
-  const open = '⏺Agent(Read selected source) · Tenjin offered DeepSeek';
-  expect(await heldRow($, 'held_a', INPUT, first)).toBe(open);
-  expect(await heldRow($, 'held_b', INPUT, second)).toBe(open);
-  // The CLI keeps the repeat native and names the offer it settled: the older one.
-  f.state.keepNative = true;
-  f.state.offer = OFFER;
-  await remember($);
-  expect(f.state.nativeCalls).toHaveLength(1);
-  expect(await heldRow($, 'held_a', INPUT, first)).toBe('');
-  expect(await heldRow($, 'held_b', INPUT, second)).toBe(open);
 });
 
 test('an offer for a custom agent type draws its row and its viewer entry as a built-in one does', async ($, on) => {

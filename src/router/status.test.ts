@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -48,7 +48,6 @@ describe('status, the balance line', () => {
       '',
       'Balance $5.00',
       'Today $0.00 of $5.00 · up to $1.00 a call',
-      'Subagents Off',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);
@@ -79,17 +78,12 @@ describe('status, the balance line', () => {
       modelRoutingCredit: { remaining: { atomic: '47000' } },
     });
     // The inference credit is JSON only; the model fee keeps its own row.
-    expect(lines(result)).toContain('Subagents Off');
     expect(lines(result)).toContain('Model fee $0.047 set aside for model routing');
   });
 
-  // Review of 2120958a: the row only showed money set aside, so `tenjin status` never said
-  // whether DeepSeek subagents were on, nor where.
-  it('says whether DeepSeek subagents are on, and their scope', async () => {
-    const save = (router: Record<string, unknown>) =>
-      writeFile(join(dir, 'config.json'), JSON.stringify({ router }));
-    const row = async () =>
-      lines(await status(5_000_000n)).find((line) => line.startsWith('Subagents'));
+  // A person who turned DeepSeek subagents on with an earlier build keeps the saved setting
+  // in the file. Status no longer reads it and shows no row for it.
+  it('shows no Subagents row, with a saved setting or without', async () => {
     const consent = {
       version: 2,
       instructions: 'applicable',
@@ -97,15 +91,14 @@ describe('status, the balance line', () => {
       recipients: ['Tenjin', 'DeepSeek', 'Exa'],
       routerOrigin: 'https://tenjin.sh',
     };
-    await save({ subagents: true, subagentConsent: consent });
-    expect(await row()).toBe('Subagents On · every workspace');
-    const real = await realpath(dir);
-    await save({ subagents: true, subagentConsent: { ...consent, repositories: [real] } });
-    expect(await row()).toBe(`Subagents On · ${real} and its subfolders`);
-    await save({ subagents: true });
-    expect(await row()).toBe('Subagents On, but no consent is saved');
-    await save({ subagents: false, subagentConsent: consent });
-    expect(await row()).toBe('Subagents Off');
+    const before = lines(await status(5_000_000n));
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ router: { subagents: true, subagentConsent: consent } }),
+    );
+    const after = lines(await status(5_000_000n));
+    expect(after).toEqual(before);
+    expect(after.some((line) => line.startsWith('Subagents'))).toBe(false);
   });
 
   it('keeps lifetime routing spend in JSON without changing the terminal rows', async () => {
@@ -120,7 +113,6 @@ describe('status, the balance line', () => {
       '',
       'Balance $5.00',
       'Today $0.00 of $5.00 · up to $1.00 a call',
-      'Subagents Off',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);

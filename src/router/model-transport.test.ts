@@ -5,6 +5,11 @@ import { join } from 'node:path';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it, vi } from 'vitest';
+// No setting turns an offer on any more; this test drives the offer path with its own saved consent.
+vi.mock('./model-settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./model-settings')>()),
+  modelSettings: (await import('./saved-consent-test-utils')).savedModelSettings,
+}));
 import { holdLock } from '../lib/held-lock';
 import { SIWX_HEADER } from '../lib/siwx';
 import { readSpendSummary } from '../lib/spend-ledger';
