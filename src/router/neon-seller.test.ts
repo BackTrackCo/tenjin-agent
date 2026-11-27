@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
@@ -7,7 +7,17 @@ import { afterEach, expect, it } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { BatchSeller, recountX402inference, X402INFERENCE_CHAT_URL } from './neon-seller';
+import { BatchSeller, channelDirectory, PayeeMismatch, type SellerTerms } from './neon-seller';
+
+/** The row's terms for the seller stub below. */
+const PAYEE = '0x6Be3A763E0FAddAa2f2FCBbaFf60f1A91d49227A';
+const TERMS: SellerTerms = {
+  url: 'https://seller.example/chat',
+  payTo: PAYEE,
+  network: 'eip155:8453',
+  asset: USDC_ADDRESS,
+  scheme: 'batch-settlement',
+};
 
 let dir: string;
 afterEach(async () => {
@@ -15,7 +25,7 @@ afterEach(async () => {
 });
 
 /** The seller as a stub: a 402 for the unpaid request, then a reply that names its charge. */
-function seller(cost: string | undefined) {
+function seller(cost: string | undefined, payTo = PAYEE) {
   const paid: Headers[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const headers = new Request(input, init).headers;
@@ -27,7 +37,7 @@ function seller(cost: string | undefined) {
             x402Version: 2,
             error: 'payment required',
             resource: {
-              url: X402INFERENCE_CHAT_URL,
+              url: TERMS.url,
               description: '',
               mimeType: 'application/json',
             },
@@ -37,7 +47,7 @@ function seller(cost: string | undefined) {
                 network: 'eip155:8453',
                 amount: '42521',
                 asset: USDC_ADDRESS,
-                payTo: '0x6Be3A763E0FAddAa2f2FCBbaFf60f1A91d49227A',
+                payTo,
                 maxTimeoutSeconds: 330,
                 extra: {
                   name: 'USD Coin',
@@ -73,6 +83,7 @@ it('commits a batch call to the same ledger `tenjin status` and the next authori
   const { fetchImpl, paid } = seller('7321');
   const batch = new BatchSeller({
     dataDir: dir,
+    terms: TERMS,
     provider: { getSigner: async () => account } as never,
     admit: async () => undefined,
     authorizer,
@@ -100,6 +111,7 @@ it('counts a call whose voucher was sent but failed at its ceiling, and the next
   const { fetchImpl } = seller(undefined);
   const batch = new BatchSeller({
     dataDir: dir,
+    terms: TERMS,
     provider: { getSigner: async () => account } as never,
     admit: async () => undefined,
     authorizer,
@@ -109,12 +121,15 @@ it('counts a call whose voucher was sent but failed at its ceiling, and the next
   await batch.post('{}', new AbortController().signal, 1_000_000n);
   expect((await readSpendSummary(dir))?.committedAtomic).toBe('42521');
   // The authorizer that admits the next call reads the same window: 42,521 of 60,000 is spent.
-  const next = await authorizer.authorize({ amountAtomic: 42_521n, creator: 'x402inference.com' });
+  const next = await authorizer.authorize({ amountAtomic: 42_521n, creator: 'seller.example' });
   expect(next.decision).not.toBe('allow');
 });
 
-it('recounts earlier x402inference rows into the window once, and never twice', async () => {
+// Failure caught: a seller that names another payee in its live 402 than the row names would be
+// paid by the first voucher. Nothing is signed, and the failure says so.
+it('signs nothing and sends no voucher when the live 402 names another payee than the row', async () => {
   dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+  const account = privateKeyToAccount(generatePrivateKey());
   const authorizer = createLocalSpendAuthorizer({
     dir,
     policy: {
@@ -123,29 +138,94 @@ it('recounts earlier x402inference rows into the window once, and never twice', 
       allowlistCreators: [],
     },
   });
-  const row = (ts: string, provider: string, amountAtomic: string) =>
-    JSON.stringify({
-      version: 1,
-      ts,
-      capabilityId: 'neon-worker',
-      provider,
-      url: 'u',
-      sent: 's',
-      amountAtomic,
-      settlement: 'settled',
-      savedFiles: [],
-    });
-  await mkdir(join(dir, 'paid'), { recursive: true });
-  await writeFile(
-    join(dir, 'paid', 'ledger.jsonl'),
-    [
-      row('2026-11-23T08:00:00.000Z', 'x402inference.com', '1000'),
-      row('2026-11-23T08:30:00.000Z', 'blockrun.ai', '5000'),
-      row('2026-11-23T09:30:00.000Z', 'x402inference.com', '7000'),
-    ].join('\n') + '\n',
+  const signed: unknown[] = [];
+  const { fetchImpl, paid } = seller('7321', '0x00000000000000000000000000000000DeaDBeef');
+  const batch = new BatchSeller({
+    dataDir: dir,
+    terms: TERMS,
+    provider: {
+      getSigner: async () => ({
+        address: account.address,
+        signTypedData: async (message: never) => {
+          signed.push(message);
+          return account.signTypedData(message);
+        },
+      }),
+    } as never,
+    admit: async () => undefined,
+    authorizer,
+    requestKey: 'call-1',
+    fetchImpl,
+  });
+  await expect(batch.post('{}', new AbortController().signal, 1_000_000n)).rejects.toBeInstanceOf(
+    PayeeMismatch,
   );
-  const now = () => Date.parse('2026-11-23T10:00:00Z');
-  expect(await recountX402inference(dir, authorizer, now)).toEqual({ counted: 1, atomic: 1000n });
-  expect(await recountX402inference(dir, authorizer, now)).toEqual({ counted: 0, atomic: 0n });
-  expect((await readSpendSummary(dir, { now }))?.committedAtomic).toBe('1000');
+  expect(signed).toHaveLength(0);
+  expect(paid).toHaveLength(0);
+  expect(batch.transmitted).toBe(false);
+  // Nothing was committed or left reserved.
+  const summary = await readSpendSummary(dir);
+  expect(summary?.committedAtomic ?? '0').toBe('0');
+  expect(summary?.reservations ?? []).toEqual([]);
+});
+
+it('keeps each seller and payee in a channel store of its own', () => {
+  const here = channelDirectory('/data', TERMS);
+  expect(channelDirectory('/data', { ...TERMS, payTo: PAYEE.toLowerCase() })).toBe(here);
+  expect(
+    channelDirectory('/data', { ...TERMS, payTo: '0x00000000000000000000000000000000000000aa' }),
+  ).not.toBe(here);
+  expect(channelDirectory('/data', { ...TERMS, url: 'https://other.example/chat' })).not.toBe(here);
+});
+
+// Failure caught: the reservation was released and the charge recorded in two writes, so another
+// automatic payment could take the room between them, and a failed write after the release was
+// swallowed.
+it('replaces the reservation with the settled charge in one ledger update, and never swallows a failed write', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+  const account = privateKeyToAccount(generatePrivateKey());
+  const real = createLocalSpendAuthorizer({
+    dir,
+    policy: {
+      maxAutoSpendAtomic: 1_000_000n,
+      sessionBudgetAtomic: 5_000_000n,
+      allowlistCreators: [],
+    },
+  });
+  const calls: string[] = [];
+  const authorizer = {
+    ...real,
+    authorize: real.authorize,
+    release: async (id: string | undefined) => {
+      calls.push('release');
+      return real.release(id);
+    },
+    commit: async (...args: Parameters<typeof real.commit>) => {
+      calls.push('commit');
+      return real.commit(...args);
+    },
+  };
+  const { fetchImpl } = seller('7321');
+  const make = (auth: typeof authorizer) =>
+    new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      authorizer: auth,
+      requestKey: 'call-1',
+      fetchImpl,
+    });
+  await make(authorizer).post('{}', new AbortController().signal, 1_000_000n);
+  expect(calls).toEqual(['commit']);
+  // A ledger that cannot be written fails the call loudly: nothing is swallowed.
+  const broken = {
+    ...authorizer,
+    commit: async () => {
+      throw new Error('disk full');
+    },
+  };
+  await expect(make(broken).post('{}', new AbortController().signal, 1_000_000n)).rejects.toThrow(
+    'disk full',
+  );
 });

@@ -334,18 +334,25 @@ export class WorkerRepeatReminder {
 
 /**
  * WORKER_ENDS in the words of the job's provider. The Neon worker's model calls go to
- * BlockRun and are paid by this machine, not sent through Tenjin: "through Tenjin" and
- * DeepSeek's name would say what did not happen.
+ * the provider of its row and are paid by this machine, not sent through Tenjin: "through
+ * Tenjin" and DeepSeek's name would say what did not happen.
  */
 export function workerEndText(code: WorkerEnd, provider: 'deepseek' | 'neon'): string {
   const text: string = WORKER_ENDS[code];
   if (provider !== 'neon') return text;
-  return text
-    .replace('through Tenjin', 'to BlockRun')
-    .replace(
-      'Tenjin refused to pay for its next model call, and sent nothing for it.',
-      'Tenjin did not pay for its next model call, and sent nothing for it.',
-    )
-    .replace('DeepSeek could not take', 'BlockRun could not take')
-    .replace('DeepSeek refused', 'The model refused');
+  return (
+    text
+      .replace('through Tenjin', 'to its provider')
+      .replace(
+        'Tenjin refused to pay for its next model call, and sent nothing for it.',
+        'Tenjin did not pay for its next model call, and sent nothing for it.',
+      )
+      .replace('DeepSeek could not take', 'The provider could not take')
+      .replace('DeepSeek refused', 'The model refused')
+      // A call that spent its whole output on thought is charged and has no answer: it is said so.
+      .replace(
+        "It reached the model's output limit.",
+        'A model call spent its whole output limit on thought and wrote no answer. It was charged, it counts in the daily budget, and it is not sent again.',
+      )
+  );
 }

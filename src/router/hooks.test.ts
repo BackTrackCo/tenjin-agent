@@ -3918,3 +3918,69 @@ describe('an offer led by a connected account', () => {
     expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
 });
+
+// Failure caught: a hook that named or offered Neon would start paid writing jobs the person never
+// asked for. A Neon job starts only when the person, or a skill they run, asks for it, so no hook
+// output, and nothing a hook sends the router, ever names it, whatever the prompt and whatever an
+// older settings file still holds.
+describe('Neon is never named or offered by a hook', () => {
+  const writing = [
+    'Write the release notes for this version.',
+    'Draft an essay about prompt caching in about 300 words.',
+    'Improve the wording of the README introduction.',
+    'Use the Gemini 4 Neon writing worker for this.',
+  ];
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        ...ROUTER_POLICY,
+        router: {
+          subagents: true,
+          neon: true,
+          neonConsent: { version: 1, recipients: ['Old', 'Recipients'] },
+        },
+      }),
+    );
+  });
+
+  it.each(writing)('says nothing of Neon on the prompt %j', async (prompt) => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      now: () => 1_800_000_000_000,
+    });
+    // The prompt itself may name Neon (the last one does); only what the hook adds or sends
+    // beyond the prompt may not.
+    const added = JSON.stringify(out.response ?? null);
+    expect(added).not.toMatch(/neon|gemini/i);
+    expect(JSON.stringify(calls.map((c) => (c as { url: string }).url))).not.toMatch(/neon/i);
+  });
+
+  it('adds no Neon offer to a delegated writing task', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'Write the release notes.' } },
+    ]);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: {
+          description: 'write the notes',
+          prompt: 'Write the release notes for version 2.',
+          subagent_type: 'general-purpose',
+        },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(JSON.stringify(out.response ?? null)).not.toMatch(/neon|gemini/i);
+  });
+});

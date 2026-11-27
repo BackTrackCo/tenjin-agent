@@ -7,22 +7,22 @@ import type { CommandContext, CommandResult } from '../context';
 import { modelSettings } from '../router/model-settings';
 import type { ModelJob } from '../router/model-job';
 import { chainReader } from '../router/routing-payer';
-import { neonLabel, NEON_TURN_MAX_TOKENS } from '../router/neon-chat';
-import { neonSeller, recountX402inference } from '../router/neon-seller';
+import { NEON_TURN_MAX_TOKENS } from '../router/neon-chat';
+import { lookupNeonTerms } from '../router/neon-terms';
 import { NeonTransport, readNeonRecord } from '../router/neon-transport';
 
 export const NEON_PROBE_ENV = 'TENJIN_NEON_PROBE';
 
 /**
- * A DEV-ONLY DOOR for the Neon evaluation, hidden and off unless `TENJIN_NEON_PROBE=1`: it sends
- * one given request body through the Neon transport with the seller `TENJIN_NEON_SELLER` names,
- * and prints the reply, its usage and what the call was quoted and charged. It is the worker's
- * own payment code under the person's own limits and Neon consent, with no worker around it.
- * With `--refund` it asks the x402inference channel for the remainder back instead.
+ * A DEV-ONLY DOOR for the Neon evaluation, hidden and off unless `TENJIN_NEON_PROBE=1`: it reads
+ * the Neon provider row, sends one given request body through the Neon transport under those
+ * terms, and prints the reply, its usage and what the call was quoted and charged. It is the
+ * worker's own payment code under the person's own limits, with no worker around it. The
+ * channel's remainder comes back through `tenjin refund`.
  */
 export async function runNeonProbe(
   file: string | undefined,
-  flags: { refund?: boolean; recount?: boolean },
+  _flags: Record<string, never>,
   ctx: CommandContext,
 ): Promise<CommandResult> {
   if (process.env[NEON_PROBE_ENV] !== '1')
@@ -36,37 +36,12 @@ export async function runNeonProbe(
     authorizer: resolveSpendAuthorizer(ctx, settings.policy),
     readContract: chainReader(settings.rpcUrl),
   });
-  const seller = neonSeller();
-  if (flags.recount) {
-    const done = await recountX402inference(
-      ctx.dataDir,
-      resolveSpendAuthorizer(ctx, settings.policy),
-    );
-    return {
-      data: { counted: done.counted, atomic: done.atomic.toString() },
-      humanLines: [
-        `Counted ${done.counted} earlier x402inference calls (${done.atomic} atomic) in the daily window.`,
-      ],
-    };
-  }
+  const terms = await lookupNeonTerms({ ctx, baseUrl: settings.baseUrl });
   const abort = new AbortController();
-  if (flags.refund) {
-    if (seller !== 'x402inference')
-      throw new CliError('USAGE', 'Only the x402inference channel has a remainder to refund.');
-    const settled = await transport.refundChannel(abort.signal);
-    return {
-      data: { seller, refund: settled },
-      humanLines: [`Refund answered: ${JSON.stringify(settled)}`],
-    };
-  }
   if (file === undefined) throw new CliError('USAGE', 'Give the request body file.');
   const body = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  const consent = await modelSettings(ctx.dataDir, process.cwd(), 'neon');
-  if (!consent)
-    throw new CliError(
-      'USAGE',
-      'Neon is off here: run `tenjin config neon on` for this directory.',
-    );
+  const current = await modelSettings(ctx.dataDir, process.cwd(), 'neon');
+  if (!current) throw new CliError('USAGE', 'Tenjin is switched off here.');
   const job = {
     id: randomUUID(),
     sessionId: 'probe',
@@ -75,8 +50,8 @@ export async function runNeonProbe(
     root: process.cwd(),
     task: 'probe',
     native: {},
-    decision: { provider: 'neon', maxOutputTokens: NEON_TURN_MAX_TOKENS },
-    capAtomic: consent.maxJobAtomic.toString(),
+    decision: { provider: 'neon', neonTerms: terms, maxOutputTokens: NEON_TURN_MAX_TOKENS },
+    capAtomic: current.maxJobAtomic.toString(),
     state: 'running',
     expiresAt: Date.now() + 60_000,
   } as unknown as ModelJob;
@@ -87,7 +62,7 @@ export async function runNeonProbe(
   } catch (error) {
     failure = error;
   }
-  return summary(seller, job.id, ctx.dataDir, message, failure, transport.lastRaw);
+  return summary(terms.label, job.id, ctx.dataDir, message, failure, transport.lastRaw);
 }
 
 /** The seller's own notice in a reply, such as NanoGPT's reasoning-budget message. */
@@ -114,7 +89,7 @@ export async function summary(
   return {
     data: { seller, ok: message !== undefined, stop, message, call, ...(notice ? { notice } : {}) },
     humanLines: [
-      `seller ${seller}  model ${neonLabel(call?.model)}`,
+      `${seller}  model ${call?.model ?? ''}`,
       message ? `stop ${stop}  usage ${JSON.stringify(message.usage)}` : `failed ${stop}`,
       `ceiling ${call?.quotedAtomic}  charged ${call?.settledAtomic}  output ${call?.outputTokens}  reasoning ${call?.reasoningTokens ?? 0}  cached ${call?.cachedInputTokens}`,
       ...(notice ? [`seller notice ${notice}`] : []),

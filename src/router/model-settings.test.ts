@@ -162,3 +162,29 @@ it('does not turn legacy tier routing or a boolean into inference/data consent',
   await save(data, { subagents: true });
   expect(await modelSettings(data, repo)).toBeNull();
 });
+
+// A Neon job needs no consent and no switch, so what runs it is the router's own off switch and
+// the person's spend limits. An older build's `router.neon` and `router.neonConsent` stay in the
+// file, load without an error, and change nothing.
+it('runs a Neon job with no consent, under the per-call limit, and ignores the keys an older build wrote', async () => {
+  const old = { neon: true, neonConsent: { version: 1, recipients: ['BlockRun', 'Google'] } };
+  for (const router of [{}, old, { subagents: false }, { ...old, subagents: false }]) {
+    const { data, repo } = await fixture(router, { maxAutoSpend: '400000' });
+    expect(await modelSettings(data, repo, 'neon')).toEqual({
+      version: 1,
+      scope: 'native-workspace',
+      root: repo,
+      repositories: [repo],
+      maxJobAtomic: 400000n,
+      routerOrigin: 'tenjin:neon',
+      context: 'session',
+    });
+    // The DeepSeek job stays under its own consent and switch alone.
+    expect(await modelSettings(data, repo)).toBeNull();
+  }
+});
+
+it('stops a Neon job where the router is switched off', async () => {
+  const { data, repo } = await fixture({ enabled: false });
+  expect(await modelSettings(data, repo, 'neon')).toBeNull();
+});

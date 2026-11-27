@@ -6,7 +6,8 @@ import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
-import { neonLabel } from './neon-chat';
+import { NEON_EFFORTS } from './neon-chat';
+import { neonJobLabel, type NeonTerms } from './neon-terms';
 import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
@@ -161,10 +162,12 @@ export function registerModelTool(
     sessionEnded?: (sessionId: string) => void;
     transport: () => Promise<ModelTransport>;
     /**
-     * The Neon worker's transport, which pays BlockRun straight from the person's wallet.
+     * The Neon worker's transport, which pays the provider of the job's row straight from the person's wallet.
      * Absent where the host has none: the explicit Neon door then refuses.
      */
     neonTransport?: () => Promise<WorkerTransport>;
+    /** The Neon door's one free lookup of its provider row. */
+    neonTerms?: (signal?: AbortSignal) => Promise<NeonTerms>;
     /** This process was started inside a model worker. Default: read from the environment. */
     modelWorker?: boolean;
     /** `tenjin mcp`'s request executor, which pays for a Claude worker's web searches. */
@@ -314,6 +317,7 @@ export function registerModelTool(
       dataDir: options.dataDir,
       transport: await options.transport(),
       ...(options.neonTransport ? { neonTransport: options.neonTransport } : {}),
+      ...(options.neonTerms ? { neonTerms: options.neonTerms } : {}),
     }));
   // The capture request may finish while its worker warms. A separate operation in
   // the job window gives a veto, cancel, expiry or shutdown ownership of that child.
@@ -599,15 +603,15 @@ export function registerModelTool(
     // job's record, never a permission.
     reason: z.enum(['agent_stopped', 'session_ended']).optional(),
     offer_ids: z.array(z.string().uuid()).min(2).optional(),
-    // THE EXPLICIT DOOR to a Gemini 4 Neon worker, for writing jobs the person asked to run
-    // on it. No offer, no routing and no held Agent call: the person's own Neon consent is
-    // the gate, and without it the call refuses and names that step. The fields are the
+    // THE EXPLICIT DOOR to a Neon worker, for writing jobs the person, or a skill they run, asked
+    // for. No offer, no routing and no held Agent call, and no setting gates it. The fields are the
     // Agent call's own, so the same input can later come through the tool router.
     neon: z
       .object({
         prompt: z.string().min(1).max(200_000),
         description: z.string().max(500).optional(),
         subagent_type: z.string().min(1).max(200).optional(),
+        effort: z.enum(NEON_EFFORTS).optional(),
       })
       .optional(),
   };
@@ -703,8 +707,8 @@ export function registerModelTool(
           );
     };
   /**
-   * THE EXPLICIT DOOR TO A NEON WORKER, `subagent({neon: {prompt, ...}})`: the handoff makes the
-   * job's record where the person's Neon consent stands, and the accept below runs it as it
+   * THE EXPLICIT DOOR TO A NEON WORKER, `subagent({neon: {prompt, ...}})`: the handoff reads the provider
+   * row and makes the job's record, and the accept below runs it as it
    * runs any accepted offer (the same job store, sandbox, handback and follow-up path). It is
    * no capture: no Agent call was held, no router was asked and no offer waits to be judged.
    */
@@ -739,7 +743,7 @@ export function registerModelTool(
     {
       title: 'Tenjin subagent',
       description:
-        "Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. The offer carries consent and the parent routing policy. With neon, starts a Gemini 4 Neon writing worker the person asked for by name, with no offer: it needs the person's own Neon consent and refuses, naming that step, without it.",
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. The offer carries consent and the parent routing policy. With neon, start a Neon writing draft when the user or a skill they run requests it.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: subagentInput,
@@ -1293,7 +1297,7 @@ export function registerModelTool(
                       status: 'completed',
                       label:
                         provider === 'neon'
-                          ? neonLabel(job.decision.model)
+                          ? neonJobLabel(job.decision)
                           : 'DeepSeek V4.1 Flash 1017',
                       elapsedMs: Date.now() - started,
                       ...counts(),
@@ -1455,9 +1459,7 @@ export function registerModelTool(
                   status: 'started',
                   background: true,
                   label:
-                    provider === 'neon'
-                      ? neonLabel(job.decision.model)
-                      : 'DeepSeek V4.1 Flash 1017',
+                    provider === 'neon' ? neonJobLabel(job.decision) : 'DeepSeek V4.1 Flash 1017',
                   offer_id: job.id,
                   worker_handle: activeConversation.handle,
                   instruction: BACKGROUND_STARTED,

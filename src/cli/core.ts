@@ -8,7 +8,6 @@ import type { TargetKind } from '../router/settings-wire';
 import { SETUP, WALLET, collect, type Registration } from './registration';
 import { installOutput } from '../router/install-output';
 import type { SubagentConfigFlags } from '../commands/config-subagents';
-import type { NeonConfigFlags } from '../commands/config-neon';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -307,41 +306,15 @@ Examples:
         (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
       );
     });
-  addGlobalFlags(config.command('neon [mode]'))
-    .summary('show Gemini 4 Neon subagents, or turn them on or off')
-    .option(
-      '--repository <path...>',
-      'limit the consent to these directories and their subfolders; without it, on covers every workspace',
-    )
-    .option(
-      '--max-job <USD>',
-      'a lower ceiling per job than your per-call spend limit, which is the default cap',
-    )
-    .addHelpText(
-      'after',
-      configExamples(
-        ['neon', 'neon on', 'neon on --max-job 0.50', 'neon on --repository ~/notes', 'neon off'],
-        'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/neon-subagent.md',
-      ),
-    )
-    .action(async function (this: Command, mode: string | undefined, options: NeonConfigFlags) {
-      await runCommand('config neon', this, async (ctx) =>
-        (await import('../commands/config-neon')).runConfigNeon(mode, options, ctx),
-      );
-    });
   // A hidden dev door for the Neon evaluation; it refuses unless TENJIN_NEON_PROBE=1.
-  addGlobalFlags(config.command('neon-probe [file]', { hidden: true }))
-    .option('--refund', 'ask the x402inference channel for its remainder instead')
-    .option('--recount', 'count earlier uncounted x402inference calls in the daily window, once')
-    .action(async function (
-      this: Command,
-      file: string | undefined,
-      options: { refund?: boolean; recount?: boolean },
-    ) {
-      await runCommand('config neon-probe', this, async (ctx) =>
-        (await import('../commands/config-neon-probe')).runNeonProbe(file, options, ctx),
-      );
-    });
+  addGlobalFlags(config.command('neon-probe [file]', { hidden: true })).action(async function (
+    this: Command,
+    file: string | undefined,
+  ) {
+    await runCommand('config neon-probe', this, async (ctx) =>
+      (await import('../commands/config-neon-probe')).runNeonProbe(file, {}, ctx),
+    );
+  });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one value')
     .description("Print one setting's value as Tenjin uses it, defaults and environment included.")
@@ -537,6 +510,17 @@ Examples:
       await runCommand('wallet.reclaim-subagent-credit', this, async (ctx) => {
         const { runReclaimSubagentCredit } = await import('../commands/reclaim-subagent-credit');
         return runReclaimSubagentCredit(ctx);
+      });
+    });
+
+  leaf(WALLET, 'refund', 'get back what a Neon job left in its payment channel')
+    .description(
+      "Ask again for the money a Neon job left in its payment channel. Each channel is asked from the seller and payee its job was paid under, so a change in the catalog never moves a refund. A job's end already asks once. Where a seller does not answer, this starts the channel's timed withdrawal on chain, which costs a little gas and waits the channel's delay (900 seconds or more) before a second run finishes it.",
+    )
+    .action(async function (this: Command) {
+      await runCommand('wallet.refund', this, async (ctx) => {
+        const { runRefund } = await import('../commands/refund');
+        return runRefund(ctx);
       });
     });
 

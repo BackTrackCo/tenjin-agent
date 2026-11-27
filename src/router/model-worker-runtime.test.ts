@@ -245,25 +245,57 @@ it("computes a Neon job's scope under the Neon consent, as the door saved it", a
   expect(providers.length).toBeGreaterThan(0);
   expect(providers.every((provider) => provider === 'neon')).toBe(true);
 });
-it('starts a Neon worker lean (no MCP, five file tools, default output style) and a DeepSeek worker as before', async () => {
-  const settingsOf = async () => given(vi.mocked(query).mock.calls.at(-1)![0].options);
-  sdkResult({ subtype: 'success', result: 'done' }, '44444444-5555-4666-8777-888888888888');
-  const neon = { ...job, decision: { ...job.decision, provider: 'neon' } } as unknown as ModelJob;
-  await runModelWorker(neon, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'neon-')) });
-  const lean = await settingsOf();
-  expect(lean.tools).toEqual(['Read', 'Glob', 'Grep', 'Edit', 'Write']);
-  expect(lean.tools).not.toContain('Bash');
-  expect(lean.mcpServers).toEqual({});
-  expect(lean.strictMcpConfig).toBe(true);
-  // The person's CLAUDE.md files and settings still load.
-  expect(lean.settingSources).toEqual(['user', 'project', 'local']);
-  expect(lean.settings).toMatchObject({ outputStyle: 'default' });
-  sdkResult({ subtype: 'success', result: 'done' }, '55555555-6666-4777-8888-999999999999');
-  await runModelWorker(job, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'ds-')) });
-  const normal = await settingsOf();
-  expect(normal.tools).toBeUndefined();
-  expect(normal.strictMcpConfig).toBeUndefined();
-  expect(normal.settings).not.toHaveProperty('outputStyle');
+// Failure caught: a Neon job spent a whole turn's output reasoning about the person's own output
+// style, which a native subagent never applies. No worker child takes it, whichever provider pays
+// for it and whichever way its system prompt is built. A Neon worker is a normal native-agent
+// worker: it keeps the tools and MCP of its agent type, with no lean override.
+it("keeps the person's output style from every worker child, and starts a Neon worker as a normal one", async () => {
+  const optionsOf = async () => given(vi.mocked(query).mock.calls.at(-1)![0].options);
+  const runs: { provider: string; type: string | undefined }[] = [];
+  const byType = new Map<string, unknown>();
+  for (const [provider, subagent_type] of [
+    ['neon', undefined],
+    ['deepseek', undefined],
+    ['neon', 'Explore'],
+    ['deepseek', 'Explore'],
+  ] as const) {
+    sdkResult({ subtype: 'success', result: 'done' }, crypto.randomUUID());
+    // A type with its own prompt builds a custom system prompt; the rest use the preset.
+    if (subagent_type)
+      vi.mocked(readNativeAgentPrompt).mockResolvedValueOnce({
+        prompt: ['You are a file search specialist.'],
+        context: [],
+        withheldTools: [],
+        withheldInstructions: [],
+      });
+    const one = {
+      ...job,
+      native: { ...job.native, ...(subagent_type ? { subagent_type } : {}) },
+      decision: { ...job.decision, ...(provider === 'neon' ? { provider } : {}) },
+    } as unknown as ModelJob;
+    await runModelWorker(one, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'w-')) });
+    const sent = await optionsOf();
+    // The flag settings layer sits above the person's own settings files.
+    expect(sent.settings).toMatchObject({ outputStyle: 'default' });
+    expect(sent.settingSources).toEqual(['user', 'project', 'local']);
+    // No lean override for Neon: the tools and MCP are the agent type's own.
+    expect(sent.tools).toBeUndefined();
+    expect(sent.mcpServers).toBeUndefined();
+    expect(sent.strictMcpConfig).toBeUndefined();
+    runs.push({ provider, type: (sent.systemPrompt as { type?: string } | undefined)?.type });
+    byType.set(`${provider}:${subagent_type ?? ''}`, {
+      agent: sent.agent,
+      withheld: sent.disallowedTools,
+      settingSources: sent.settingSources,
+      prompt: sent.systemPrompt,
+    });
+  }
+  // A Neon worker of a type gets what a DeepSeek worker of that type gets: the same agent, the
+  // same withheld tools and the same instruction files, as a native subagent of it does.
+  for (const type of ['', 'Explore'])
+    expect(byType.get(`neon:${type}`)).toEqual(byType.get(`deepseek:${type}`));
+  // Both ways of building the system prompt were driven.
+  expect(new Set(runs.map((run) => run.type)).size).toBeGreaterThan(1);
 });
 function sdkResult(
   result: Record<string, unknown>,

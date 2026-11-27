@@ -1,33 +1,44 @@
-import { afterEach, expect, it, vi } from 'vitest';
-afterEach(() => vi.unstubAllEnvs());
+import { expect, it } from 'vitest';
 import {
   capturedRequest,
   chatBody,
   chatUsage,
-  hoistedForNeon,
-  inputSplit,
-  neonLabel,
-  neonModel,
-  messagesRequest,
-  NEON_BESIDE_RESULT_LABEL,
   fittingNeonTokens,
+  inputSplit,
   messageOf,
-  replyOfBody,
-  NEON_MINIMUM_JOB_ATOMIC,
-  NEON_MODEL,
+  neonMinimumJobAtomic,
   neonPeakQuoteAtomic,
+  NEON_DEFAULT_EFFORT,
   NEON_TURN_FLOOR_TOKENS,
   NEON_TURN_MAX_TOKENS,
   NeonNoText,
   NeonReplyInvalid,
+  replyOfBody,
   type ThoughtCarry,
 } from './neon-chat';
 import { completedMessageSse } from './model-messages';
+import type { NeonTerms } from './neon-terms';
+
+/** A row's terms as a test stub: $3.15 in and $15.75 out per million tokens, the nanogpt dialect. */
+const TERMS: NeonTerms = {
+  rowId: 'row-1',
+  label: 'Test Writer',
+  url: 'https://seller.example/chat',
+  payTo: '0x00000000000000000000000000000000000000aa',
+  network: 'eip155:8453',
+  asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  model: 'test/model',
+  wire: 'chat',
+  scheme: 'batch-settlement',
+  usage: 'nanogpt',
+  inputAtomicPerMillion: '3150000',
+  outputAtomicPerMillion: '15750000',
+  cacheReadAtomicPerMillion: '157500',
+};
 
 /**
- * A reply as BlockRun's chat completions would carry a tool call. The `extra_content` shape
- * is Google's own OpenAI-compatible one; BlockRun documents none, so this fixture is the
- * assumption the first live call checks.
+ * A reply as a chat completions seller would carry a tool call. The `extra_content` shape
+ * is Google's own OpenAI-compatible one.
  */
 const REPLY = {
   id: 'chatcmpl-1',
@@ -115,13 +126,13 @@ it('sends the tool call back with its thought signature, and the tool result as 
     },
     carry,
     NEON_TURN_MAX_TOKENS,
+    TERMS.model,
   );
   expect(body).toEqual({
-    model: NEON_MODEL,
+    model: TERMS.model,
     max_tokens: NEON_TURN_MAX_TOKENS,
-    stream: true,
-    stream_options: { include_usage: true },
-    reasoning_effort: 'low',
+    stream: false,
+    reasoning_effort: NEON_DEFAULT_EFFORT,
     messages: [
       { role: 'system', content: 'You write documentation.' },
       { role: 'user', content: 'Summarize the notes.' },
@@ -186,77 +197,29 @@ it('refuses a reply it cannot read, so the paid call is not repeated as if it we
   ).toThrow(NeonReplyInvalid);
 });
 
-it('caps a turn near need, and steps it down to what the job ceiling has left', () => {
-  // 16,384 output tokens would reserve about $0.26 whatever it writes; the cap is half that.
-  expect(NEON_TURN_MAX_TOKENS).toBe(8_192);
-  expect(neonPeakQuoteAtomic(0, 16_384)).toBeGreaterThan(250_000n);
-  expect(neonPeakQuoteAtomic(0, NEON_TURN_MAX_TOKENS)).toBe(129_024n);
+it('caps a turn at 16,000 tokens and steps it down to what the room has left, by the price rule of its row', () => {
+  expect(NEON_TURN_MAX_TOKENS).toBe(16_000);
+  // The quote follows the row's price rule: 16,000 output tokens at $15.75 per million.
+  expect(neonPeakQuoteAtomic(TERMS, 0, 16_000)).toBe(252_000n);
   // A side request that asks for 65,536 gets the cap.
-  expect(fittingNeonTokens(30_000, 65_536, 1_000_000n)).toBe(NEON_TURN_MAX_TOKENS);
+  expect(fittingNeonTokens(TERMS, 30_000, 65_536, 1_000_000n)).toBe(NEON_TURN_MAX_TOKENS);
   // Little left: the largest cap whose estimate fits, never below the floor.
-  const room = neonPeakQuoteAtomic(30_000, 4_000);
-  const fits = fittingNeonTokens(30_000, 65_536, room);
+  const room = neonPeakQuoteAtomic(TERMS, 30_000, 4_000);
+  const fits = fittingNeonTokens(TERMS, 30_000, 65_536, room);
   expect(fits).toBe(4_000);
-  expect(neonPeakQuoteAtomic(30_000, fits!)).toBeLessThanOrEqual(room);
+  expect(neonPeakQuoteAtomic(TERMS, 30_000, fits!)).toBeLessThanOrEqual(room);
   expect(
-    fittingNeonTokens(30_000, 65_536, neonPeakQuoteAtomic(30_000, NEON_TURN_FLOOR_TOKENS) - 1n),
+    fittingNeonTokens(
+      TERMS,
+      30_000,
+      65_536,
+      neonPeakQuoteAtomic(TERMS, 30_000, NEON_TURN_FLOOR_TOKENS) - 1n,
+    ),
   ).toBeNull();
-  expect(NEON_MINIMUM_JOB_ATOMIC).toBe(neonPeakQuoteAtomic(0, NEON_TURN_FLOOR_TOKENS));
-});
-
-// Failure caught: a non-streamed call that thinks and writes for two minutes got a 504 from
-// the gateway after BlockRun had quoted $0.27. The call is streamed, and the chunks fold into
-// the same reply a non-streamed call carries.
-it('folds a streamed reply with a split tool call, its signature and its usage into one reply', () => {
-  const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
-  const body =
-    frame({ choices: [{ index: 0, delta: { role: 'assistant', content: 'I will read ' } }] }) +
-    frame({ choices: [{ index: 0, delta: { content: 'the file.' } }] }) +
-    frame({
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call_abc',
-                type: 'function',
-                function: { name: 'Read', arguments: '{"file_path":' },
-                extra_content: { google: { thought_signature: 'SIG-1' } },
-              },
-            ],
-          },
-        },
-      ],
-    }) +
-    frame({
-      choices: [
-        {
-          index: 0,
-          finish_reason: 'tool_calls',
-          delta: { tool_calls: [{ index: 0, function: { arguments: '"/work/notes.md"}' } }] },
-        },
-      ],
-    }) +
-    frame({ choices: [], usage: REPLY.usage }) +
-    'data: [DONE]\n\n';
-  const carry: ThoughtCarry = {};
-  const message = messageOf(replyOfBody(body), carry);
-  expect(message).toMatchObject({
-    stop_reason: 'tool_use',
-    content: [
-      { type: 'text', text: 'I will read the file.' },
-      { type: 'tool_use', id: 'call_abc', name: 'Read', input: { file_path: '/work/notes.md' } },
-    ],
-    usage: { input_tokens: 200, output_tokens: 85, cache_read_input_tokens: 1000 },
-  });
-  expect(carry).toEqual({
-    call_abc: { extra_content: { google: { thought_signature: 'SIG-1' } } },
-  });
-  // A plain JSON body is still one reply; a stream that carries an error is not a reply.
-  expect(replyOfBody(JSON.stringify(REPLY))).toEqual(REPLY);
-  expect(() => replyOfBody(frame({ error: { message: 'upstream' } }))).toThrow(NeonReplyInvalid);
+  expect(neonMinimumJobAtomic(TERMS)).toBe(neonPeakQuoteAtomic(TERMS, 0, NEON_TURN_FLOOR_TOKENS));
+  // A cheaper row quotes less for the same turn.
+  const cheaper = { ...TERMS, outputAtomicPerMillion: '7875000', inputAtomicPerMillion: '1575000' };
+  expect(neonPeakQuoteAtomic(cheaper, 0, 16_000)).toBe(126_000n);
 });
 
 it('refuses a turn that spent its output cap and wrote nothing, so it is not sent again', () => {
@@ -273,29 +236,6 @@ it('refuses a turn that spent its output cap and wrote nothing, so it is not sen
       {},
     ).stop_reason,
   ).toBe('max_tokens');
-});
-
-it('folds content sent as parts and keeps the reasoning it does not hand the worker', () => {
-  const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
-  const reply = replyOfBody(
-    frame({ choices: [{ delta: { reasoning_content: 'thinking...' } }] }) +
-      frame({ choices: [{ delta: { content: [{ type: 'text', text: 'Hello' }] } }] }) +
-      frame({
-        choices: [{ finish_reason: 'stop', delta: {} }],
-        usage: {
-          prompt_tokens: 10,
-          completion_tokens: 40,
-          completion_tokens_details: { reasoning_tokens: 30 },
-        },
-      }),
-  ) as { choices: { message: Record<string, unknown> }[] };
-  expect(reply.choices[0]!.message).toMatchObject({
-    content: 'Hello',
-    reasoning_content: 'thinking...',
-  });
-  const message = messageOf(reply, {});
-  expect(message.content).toEqual([{ type: 'text', text: 'Hello' }]);
-  expect(chatUsage(reply)).toMatchObject({ outputTokens: 40, reasoningTokens: 30 });
 });
 
 it('gives Gemini plain text for a tool result, and says so when there is none', () => {
@@ -319,71 +259,18 @@ it('gives Gemini plain text for a tool result, and says so when there is none', 
     },
     {},
     1024,
+    TERMS.model,
   );
   expect(body.messages.slice(1)).toEqual([
     { role: 'tool', tool_call_id: 't1', content: '(no output)' },
     { role: 'tool', tool_call_id: 't2', content: 'Error: boom' },
   ]);
-  const shown = capturedRequest(chatBody({ system: 'You write.', messages: [] }, {}, 64));
+  const shown = capturedRequest(
+    chatBody({ system: 'You write.', messages: [] }, {}, 64, TERMS.model),
+  );
   expect(shown.messages).toEqual([{ role: 'system', content: { bytes: 12, approxTokens: 3 } }]);
 });
 
-// Failure caught by paid replays of a live run: a system message among the messages made Neon
-// spend its whole cap on hidden thought, and text beside a tool result made BlockRun lose the
-// result. The shape is run 6's second call.
-it('moves system messages and text beside a tool result into the system prompt', () => {
-  const body = {
-    model: 'deepseek-flash',
-    system: [
-      { type: 'text', text: 'You are a coding agent.', cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [
-      { role: 'user', content: [{ type: 'text', text: 'Read README.md, then write notes.' }] },
-      {
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'plan', signature: 'S' },
-          { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'README.md' } },
-        ],
-      },
-      {
-        role: 'user',
-        content: [
-          { type: 'tool_result', tool_use_id: 't1', content: 'README text' },
-          { type: 'text', text: 'Mind the style guide.' },
-        ],
-      },
-      { role: 'system', content: [{ type: 'text', text: 'Deferred tools are now available.' }] },
-      { role: 'user', content: 'Go on.' },
-    ],
-  };
-  const out = hoistedForNeon(body) as {
-    system: unknown[];
-    messages: { role: string; content: unknown[] }[];
-  };
-  expect(out.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
-  expect(out.messages.some((m) => m.role === 'system')).toBe(false);
-  // The tool result is alone in its message, and the thinking block survives.
-  expect(out.messages[2]!.content).toEqual([
-    { type: 'tool_result', tool_use_id: 't1', content: 'README text' },
-  ]);
-  expect(out.messages[1]!.content[0]).toMatchObject({ type: 'thinking', signature: 'S' });
-  // The real system prompt (with its cache control) first, the hoisted system text next, then
-  // the labelled text that came beside the result and the user text that followed it.
-  expect(out.system).toEqual([
-    { type: 'text', text: 'You are a coding agent.', cache_control: { type: 'ephemeral' } },
-    { type: 'text', text: 'Deferred tools are now available.' },
-    { type: 'text', text: NEON_BESIDE_RESULT_LABEL },
-    { type: 'text', text: 'Mind the style guide.' },
-    { type: 'text', text: 'Go on.' },
-  ]);
-  // A body with neither shape is left as it is, and a user message with no tool result keeps its text.
-  const plain = { messages: [{ role: 'user', content: 'Hi' }] };
-  expect(hoistedForNeon(plain)).toBe(plain);
-});
-
-// Gemini 4 caches implicitly: a request is cheap when it starts with the whole previous one.
-// The chat route therefore never moves anything into the system message, which opens the request.
 it('keeps the chat body a prefix of the next one when a system message and text beside a result arrive', () => {
   const first = {
     system: [{ type: 'text', text: 'You are a coding agent.' }],
@@ -415,8 +302,8 @@ it('keeps the chat body a prefix of the next one when a system message and text 
       { role: 'user', content: 'Go on.' },
     ],
   };
-  const short = chatBody(first, {}, 64);
-  const long = chatBody(longer, {}, 64);
+  const short = chatBody(first, {}, 64, TERMS.model);
+  const long = chatBody(longer, {}, 64, TERMS.model);
   // The system message is the real system prompt, the same bytes in both.
   expect(short.messages[0]).toEqual({ role: 'system', content: 'You are a coding agent.' });
   expect(long.messages[0]).toEqual(short.messages[0]);
@@ -441,11 +328,12 @@ it('keeps the chat body a prefix of the next one when a system message and text 
     },
     {},
     64,
+    TERMS.model,
   );
   expect(between.messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'user']);
 });
 
-it('reads NanoGPT cache hits that the standard usage fields leave at zero', () => {
+it('reads the nanogpt usage dialect: cache hits that the standard usage fields leave at zero', () => {
   // The shape of job 7e7ad935, call 2: billed at the cached rate, reported in a block of its own.
   const reply = {
     usage: {
@@ -461,61 +349,39 @@ it('reads NanoGPT cache hits that the standard usage fields leave at zero', () =
       readTokens: 6_544,
     },
   };
-  expect(chatUsage(reply)).toMatchObject({ inputTokens: 9_000, cachedInputTokens: 6_544 });
+  expect(chatUsage(reply, 'nanogpt')).toMatchObject({
+    inputTokens: 9_000,
+    cachedInputTokens: 6_544,
+  });
+  // Another dialect never reads that block.
+  expect(chatUsage(reply, 'standard').cachedInputTokens).toBe(0);
   // A standard field above zero wins, a miss reads as none, and the count never passes the prompt.
   expect(
-    chatUsage({
-      ...reply,
-      usage: { prompt_tokens: 9_000, prompt_tokens_details: { cached_tokens: 100 } },
-    }).cachedInputTokens,
+    chatUsage(
+      {
+        ...reply,
+        usage: { prompt_tokens: 9_000, prompt_tokens_details: { cached_tokens: 100 } },
+      },
+      'nanogpt',
+    ).cachedInputTokens,
   ).toBe(100);
   expect(
-    chatUsage({ ...reply, x_nanogpt_cache: { status: 'miss', readTokens: 6_544 } })
+    chatUsage({ ...reply, x_nanogpt_cache: { status: 'miss', readTokens: 6_544 } }, 'nanogpt')
       .cachedInputTokens,
   ).toBe(0);
-  expect(chatUsage({ ...reply, usage: { prompt_tokens: 5_000 } }).cachedInputTokens).toBe(5_000);
+  expect(
+    chatUsage({ ...reply, usage: { prompt_tokens: 5_000 } }, 'nanogpt').cachedInputTokens,
+  ).toBe(5_000);
 });
 
-it('reads the eval reasoning override on both routes, and keeps low as the default', () => {
-  const send = (env?: string) => {
-    if (env !== undefined) vi.stubEnv('TENJIN_NEON_REASONING_EFFORT', env);
-    return {
-      chat: chatBody({ messages: [] }, {}, 8192) as Record<string, unknown>,
-      messages: messagesRequest({ messages: [] }, 8192),
-    };
-  };
-  expect(send().chat.reasoning_effort).toBe('low');
-  expect(send().messages.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
-  const none = send('none');
-  expect(none.chat.reasoning_effort).toBe('none');
-  expect(none.messages.thinking).toEqual({ type: 'disabled' });
-  const high = send('high');
-  expect(high.chat.reasoning_effort).toBe('high');
-  expect(high.messages.thinking).toEqual({ type: 'enabled', budget_tokens: 7168 });
-  const omit = send('omit');
-  expect('reasoning_effort' in omit.chat).toBe(false);
-  expect('thinking' in omit.messages).toBe(false);
-  // A value it does not know is the default.
-  expect(send('wild').chat.reasoning_effort).toBe('low');
+it('sends the effort the door named, and low where none was named', () => {
+  expect(chatBody({ messages: [] }, {}, 64, TERMS.model).reasoning_effort).toBe('low');
+  expect(chatBody({ messages: [] }, {}, 64, TERMS.model, 'medium').reasoning_effort).toBe('medium');
 });
 
-it('lets the eval name one of four Gemini 4 models, falls back to Neon, and prices each as itself', () => {
-  expect(neonModel({})).toBe('google/gemini-4-neon');
-  expect(neonModel({ TENJIN_NEON_MODEL: 'google/gemini-4-hydrogen' })).toBe(
-    'google/gemini-4-hydrogen',
-  );
-  expect(neonModel({ TENJIN_NEON_MODEL: 'google/gemini-4-carbon' })).toBe('google/gemini-4-carbon');
-  for (const wild of ['gpt-6', 'google/gemini-3.8-flash', '', 'toString'])
-    expect(neonModel({ TENJIN_NEON_MODEL: wild })).toBe('google/gemini-4-neon');
-  // The label follows the model that ran, and an unknown one reads as the default.
-  expect(neonLabel('google/gemini-4-hydrogen')).toBe('Gemini 4 Hydrogen');
-  expect(neonLabel(undefined)).toBe('Gemini 4 Neon');
-  // The body names the model and the quote uses its prices: 2,048 output tokens, no input.
-  vi.stubEnv('TENJIN_NEON_MODEL', 'google/gemini-4-hydrogen');
-  expect(chatBody({ messages: [] }, {}, 64).model).toBe('google/gemini-4-hydrogen');
-  expect(messagesRequest({ messages: [] }, 64).model).toBe('google/gemini-4-hydrogen');
-  expect(neonPeakQuoteAtomic(0, 2_048)).toBe(16_128n);
-  expect(neonPeakQuoteAtomic(0, 2_048, 'google/gemini-4-neon')).toBe(32_256n);
+it('reads a plain JSON reply and refuses anything else', () => {
+  expect(replyOfBody(JSON.stringify(REPLY))).toEqual(REPLY);
+  expect(() => replyOfBody('data: {}')).toThrow(NeonReplyInvalid);
 });
 
 it('shares a call input total by the bytes of its system part, tools and messages', () => {

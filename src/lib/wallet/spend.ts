@@ -88,7 +88,15 @@ export interface SpendAuthorizer {
     /** What the counterparty reported actually taking, when it said so at all.
      *  Omitted means "assume it took what was authorized", the conservative
      *  reading every caller had before the router began waiving fees. */
-    opts?: { settledAtomic?: bigint; mode?: PaymentMode; nonce?: string },
+    opts?: {
+      settledAtomic?: bigint;
+      mode?: PaymentMode;
+      nonce?: string;
+      /** What counts against the budget, in place of the reservation's own amount: the
+       *  reservation is replaced by it in the same ledger update. For a payment whose
+       *  real charge is below the ceiling it reserved. */
+      exposureAtomic?: bigint;
+    },
   ): Promise<void>;
   /** Drop an unused reservation (a decline, a 409, or a failed payment). */
   release(reservationId: string | undefined): Promise<void>;
@@ -201,7 +209,12 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
     async commit(
       reservationId: string | undefined,
       amountAtomic: bigint,
-      opts: { settledAtomic?: bigint; mode?: PaymentMode; nonce?: string } = {},
+      opts: {
+        settledAtomic?: bigint;
+        mode?: PaymentMode;
+        nonce?: string;
+        exposureAtomic?: bigint;
+      } = {},
     ): Promise<void> {
       // Record transmitted exposure even if its reservation has expired.
       await withLedger(async (ledger) => {
@@ -210,7 +223,8 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
             ? ledger.reservations.find((r) => r.id === reservationId)
             : undefined;
         const exposure =
-          reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic;
+          opts.exposureAtomic ??
+          (reservation !== undefined ? BigInt(reservation.amountAtomic) : amountAtomic);
         // TWO NUMBERS, ON PURPOSE. The budget keeps counting what left; the
         // settled total records what was taken, and they differ whenever a
         // counterparty waives a fee against an authorization already sent.

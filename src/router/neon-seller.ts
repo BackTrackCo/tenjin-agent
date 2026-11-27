@@ -1,5 +1,5 @@
 import type { ChainRead } from './routing-payer';
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { x402Client } from '@x402/core/client';
 import { toClientEvmSigner } from '@x402/evm';
@@ -7,29 +7,50 @@ import { BatchSettlementEvmScheme } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import type { TypedDataDefinition } from 'viem';
-import { USDC_ADDRESS } from '../lib/usdc';
-import { readPaidRecords } from './paid';
-import { writePrivate } from './store-files';
+import { CliError } from '../lib/errors';
+import type { NeonTerms } from './neon-terms';
 import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { WalletProvider } from '../lib/wallet';
 
 /**
- * THE SECOND NEON SELLER, FOR THE EVALUATION ONLY: x402inference.com resells Gemini 4 Neon on an
- * OpenAI-compatible chat endpoint and takes the standard `batch-settlement` scheme on Base. One
- * deposit opens an escrow channel, each call signs a voucher up to its quoted ceiling, and the
- * call is charged only what it used, which the response names in `X-Request-Cost-Atomic`.
- * BlockRun stays the default seller.
+ * THE NEON WORKER'S PAYER for a seller whose row names the `batch-settlement` scheme: one deposit
+ * opens an escrow channel, each call signs a voucher up to its quoted ceiling, and the call is
+ * charged only what it used, which the response names in `X-Request-Cost-Atomic`. The seller,
+ * its URL and its payee are the job's saved terms ({@link NeonTerms}), never a constant here.
  */
-export const NEON_SELLER_ENV = 'TENJIN_NEON_SELLER';
-export type NeonSellerName = 'blockrun' | 'x402inference';
-export function neonSeller(env: NodeJS.ProcessEnv = process.env): NeonSellerName {
-  return env[NEON_SELLER_ENV] === 'x402inference' ? 'x402inference' : 'blockrun';
+/**
+ * The most one channel may hold, in atomic USDC: $0.50. A full 16,000-token turn is quoted at
+ * about $0.25 before its input, so the cap sits above the largest quote a turn can ask for,
+ * and no deposit takes the channel past it. What is left in it returns at the job's end.
+ */
+export const NEON_CHANNEL_DEPOSIT_CAP_ATOMIC = 500_000n;
+
+/** The terms a payer needs to pay and to refund one seller's channel. */
+export type SellerTerms = Pick<NeonTerms, 'url' | 'payTo' | 'network' | 'asset' | 'scheme'>;
+
+/** The live 402 named a payee other than the row's: nothing was signed. */
+export class PayeeMismatch extends CliError {
+  constructor(expected: string, offered: readonly string[]) {
+    super(
+      'REGISTRY_MISMATCH',
+      'The seller asks to be paid at an address other than its provider row names. Nothing was signed.',
+      { details: { expected, offered } },
+    );
+  }
 }
-export const X402INFERENCE_ORIGIN = 'https://x402inference.com';
-export const X402INFERENCE_CHAT_URL = `${X402INFERENCE_ORIGIN}/accountless/chat/completions`;
-/** The most one channel may hold, in atomic USDC: $0.25. No deposit takes it past this. */
-export const X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
-const BASE = 'eip155:8453';
+
+/** One seller's channel key: its origin and its payee. The payer, the wallet, comes after it. */
+export function channelKey(terms: Pick<NeonTerms, 'url' | 'payTo'>) {
+  return createHash('sha256')
+    .update(`${new URL(terms.url).origin}\n${terms.payTo.toLowerCase()}`)
+    .digest('hex')
+    .slice(0, 24);
+}
+
+/** Where one seller's channels are kept: by its URL and payee, then by payer. */
+export function channelDirectory(dataDir: string, terms: Pick<NeonTerms, 'url' | 'payTo'>) {
+  return join(dataDir, 'inference-channel', channelKey(terms));
+}
 
 export class ChannelDepositRefused extends Error {}
 
@@ -63,16 +84,22 @@ export class VoucherSpend {
     this.reservation = authorization.reservationId;
     this.held = true;
   }
-  /** After the call: the real charge, or the ceiling where it is not known and a voucher left. */
+  /**
+   * After the call: the real charge, or the ceiling where it is not known and a voucher left.
+   * The reservation is replaced by that amount in ONE ledger update, so no other automatic
+   * payment can take the room in between. A failed write is thrown, never swallowed: the
+   * reservation then stays, and the caller counts the call as uncertain.
+   */
   async settle(costAtomic: bigint | undefined, ceilingAtomic: bigint, transmitted: boolean) {
     if (!this.held) return;
     this.held = false;
     if (!transmitted) return this.authorizer.release(this.reservation);
-    // The reservation held the ceiling only to refuse a call over the limits. What counts is
-    // what left the channel: the real charge, or the ceiling where it is not known.
     const charged = costAtomic ?? ceilingAtomic;
-    await this.authorizer.release(this.reservation);
-    await this.authorizer.commit(undefined, charged, { mode: 'automatic' });
+    await this.authorizer.commit(this.reservation, charged, {
+      mode: 'automatic',
+      exposureAtomic: charged,
+      settledAtomic: charged,
+    });
   }
 }
 
@@ -87,7 +114,7 @@ export async function channelDeposit(
   deposits: { sum: bigint } = { sum: 0n },
 ): Promise<bigint> {
   const needed = BigInt(ctx.minimumDepositAmount);
-  const room = X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC - BigInt(ctx.currentBalance);
+  const room = NEON_CHANNEL_DEPOSIT_CAP_ATOMIC - BigInt(ctx.currentBalance);
   if (room <= 0n || room < needed)
     throw new ChannelDepositRefused('The channel is at its deposit cap');
   const max = ctx.maxDeposit === undefined ? room : BigInt(ctx.maxDeposit);
@@ -112,6 +139,8 @@ export type BatchAnswer = {
 
 export type BatchSellerOptions = {
   dataDir: string;
+  /** The seller's saved terms: where it posts, who it is paid to, in what asset. */
+  terms: SellerTerms;
   provider: WalletProvider;
   /** The person's own limits meet a deposit before it is signed: throws where it is over them. */
   admit: (amountAtomic: bigint) => Promise<void>;
@@ -126,8 +155,8 @@ export type BatchSellerOptions = {
 
 /**
  * THE BATCH-SETTLEMENT PAYER: the SDK's own scheme with a channel store of its own for this
- * seller, and a policy that signs only a Base USDC `batch-settlement` offer whose ceiling fits
- * the job's room, and only deposits that keep the channel at or under the cap.
+ * seller, and a policy that signs only an offer of the row's scheme, network, asset and payee whose
+ * ceiling fits the job's room, and only deposits that keep the channel at or under the cap.
  */
 export class BatchSeller {
   /** An authorization or voucher reached the seller: from here a failure is not proven unpaid. */
@@ -153,7 +182,7 @@ export class BatchSeller {
     const payer = signer.address.toLowerCase();
     const scheme = new BatchSettlementEvmScheme(clientSigner, {
       storage: new FileClientChannelStorage({
-        directory: join(this.options.dataDir, 'x402inference-channel', payer),
+        directory: join(channelDirectory(this.options.dataDir, this.options.terms), payer),
       }),
       depositStrategy: (ctx) => channelDeposit(ctx, this.options.admit, deposits),
     });
@@ -165,15 +194,24 @@ export class BatchSeller {
     const deposits = { sum: 0n };
     const { scheme } = await this.scheme(signal, deposits);
     let ceiling: bigint | undefined;
+    const { terms } = this.options;
+    // What the live 402 offered at another payee than the row names: nothing is signed for it.
+    let wrongPayees: string[] = [];
     const client = new x402Client()
       .register('eip155:*', scheme)
       .registerPolicy((_version, offers) => {
-        const fit = offers.filter(
+        const ours = offers.filter(
           (offer) =>
-            offer.scheme === 'batch-settlement' &&
-            offer.network === BASE &&
-            offer.asset.toLowerCase() === USDC_ADDRESS.toLowerCase() &&
-            BigInt(offer.amount) <= room,
+            offer.scheme === terms.scheme &&
+            offer.network === terms.network &&
+            offer.asset.toLowerCase() === terms.asset.toLowerCase(),
+        );
+        wrongPayees = ours
+          .filter((offer) => offer.payTo.toLowerCase() !== terms.payTo.toLowerCase())
+          .map((offer) => offer.payTo);
+        const fit = ours.filter(
+          (offer) =>
+            offer.payTo.toLowerCase() === terms.payTo.toLowerCase() && BigInt(offer.amount) <= room,
         );
         if (fit[0]) ceiling = BigInt(fit[0].amount);
         return fit;
@@ -181,8 +219,8 @@ export class BatchSeller {
     const spend = this.options.authorizer
       ? new VoucherSpend(
           this.options.authorizer,
-          new URL(X402INFERENCE_CHAT_URL).host,
-          this.options.requestKey ?? `x402inference:${Date.now()}`,
+          new URL(terms.url).host,
+          this.options.requestKey ?? `neon:${Date.now()}`,
         )
       : undefined;
     if (spend)
@@ -198,23 +236,24 @@ export class BatchSeller {
     };
     let response: Response;
     try {
-      response = await wrapFetchWithPayment(watched, client)(X402INFERENCE_CHAT_URL, {
+      response = await wrapFetchWithPayment(watched, client)(terms.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         body,
       });
     } catch (error) {
-      await spend?.settle(undefined, ceiling ?? room, this.transmitted).catch(() => undefined);
+      await spend?.settle(undefined, ceiling ?? room, this.transmitted);
+      // A payee that is not the row's is told apart from any other refusal to sign.
+      if (!this.transmitted && wrongPayees.length > 0 && ceiling === undefined)
+        throw new PayeeMismatch(terms.payTo, wrongPayees);
       throw error;
     }
     const cost = response.headers.get('x-request-cost-atomic');
-    await spend
-      ?.settle(
-        cost !== null && /^\d+$/.test(cost) ? BigInt(cost) : undefined,
-        ceiling ?? room,
-        this.transmitted,
-      )
-      .catch(() => undefined);
+    await spend?.settle(
+      cost !== null && /^\d+$/.test(cost) ? BigInt(cost) : undefined,
+      ceiling ?? room,
+      this.transmitted,
+    );
     return {
       status: response.status,
       text: await response.text(),
@@ -228,54 +267,10 @@ export class BatchSeller {
    * THE COOPERATIVE REFUND of the channel's remainder: the SDK signs a zero-charge refund
    * voucher and the seller returns what is left of the deposit. It is immediate where the
    * seller cooperates. Where it does not, the funds return only through the channel's own
-   * unilateral withdrawal after its delay (900 s for this seller), which needs gas and is not
-   * done here.
+   * timed on-chain withdrawal, which needs gas (`tenjin refund` runs it).
    */
   async refund(signal: AbortSignal) {
     const { scheme } = await this.scheme(signal, { sum: 0n });
-    return scheme.refund(X402INFERENCE_CHAT_URL, { fetch: this.options.fetchImpl ?? fetch });
+    return scheme.refund(this.options.terms.url, { fetch: this.options.fetchImpl ?? fetch });
   }
-}
-
-/**
- * The x402inference calls paid before vouchers were counted (alpha.105 to alpha.107) reached the
- * paid ledger but never the daily window. Rows dated before this instant are the ones missed;
- * a later row was counted when it was paid.
- */
-export const X402INFERENCE_UNCOUNTED_BEFORE = '2026-11-23T09:05:00Z';
-
-/**
- * ONE-TIME RECOUNT of those rows into the daily window, for a person who asks for it: each is
- * committed at its charge, and a marker file names the rows already counted, so running it
- * again counts nothing twice. Rows older than the window's own length are left out, as the
- * window has already let them go.
- */
-export async function recountX402inference(
-  dataDir: string,
-  authorizer: SpendAuthorizer,
-  now: () => number = Date.now,
-): Promise<{ counted: number; atomic: bigint }> {
-  const markerPath = join(dataDir, 'x402inference-recounted.json');
-  const done = new Set<string>(
-    (JSON.parse(await readFile(markerPath, 'utf8').catch(() => '[]')) as string[]) ?? [],
-  );
-  const cutoff = Date.parse(X402INFERENCE_UNCOUNTED_BEFORE);
-  let counted = 0;
-  let atomic = 0n;
-  for (const row of await readPaidRecords(dataDir)) {
-    const at = Date.parse(row.ts);
-    if (
-      row.provider !== new URL(X402INFERENCE_CHAT_URL).host ||
-      at >= cutoff ||
-      now() - at >= 86_400_000 ||
-      done.has(row.ts)
-    )
-      continue;
-    await authorizer.commit(undefined, BigInt(row.amountAtomic), { mode: 'automatic' });
-    done.add(row.ts);
-    counted += 1;
-    atomic += BigInt(row.amountAtomic);
-  }
-  await writePrivate(markerPath, JSON.stringify([...done]));
-  return { counted, atomic };
 }

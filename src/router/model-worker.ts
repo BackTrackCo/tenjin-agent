@@ -40,7 +40,6 @@ import {
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { markSessionServed } from './alive';
 import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
-import { neonProfile } from './neon-profile';
 import { CLAUDE_TENJIN_TOOLS } from './names';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
@@ -1053,8 +1052,6 @@ async function runQualifiedWorker(
         effort: 'high',
         abortController: controller,
         permissionMode,
-        // The Neon worker starts lean: no MCP, only the file tools.
-        ...(provider === 'neon' ? neonProfile().options : {}),
         ...session?.query,
         settingSources: ['user', 'project', 'local'],
         // The flag settings hold the bridge token and the job's GitHub env: written first to
@@ -1063,8 +1060,10 @@ async function runQualifiedWorker(
           // Auto memory is undeclared input outside this job's disclosure scope.
           // Native settings, instruction files and owned session history still load.
           autoMemoryEnabled: false,
-          // The Neon worker never takes the person's own output style.
-          ...(provider === 'neon' ? neonProfile().settings : {}),
+          // Above the person's own `outputStyle`: the flag layer outranks their settings files. A
+          // native subagent does not apply an output style, so no worker does either: one that
+          // read the person's style spent a whole turn's output reasoning about it.
+          outputStyle: 'default',
           // Above an `alwaysThinkingEnabled: false` in the person's own settings.
           alwaysThinkingEnabled: true,
           // The CLAUDE.md files a native subagent of this type starts without (all of them

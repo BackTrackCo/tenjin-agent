@@ -57,7 +57,12 @@ describe('main', () => {
     const config = buildProgram(captureIo().io, () => {}).commands.find(
       (command) => command.name() === 'config',
     );
-    const operations = config?.commands.map((command) => command.name()) ?? [];
+    // A hidden dev door is in no help, so it is not listed there.
+    const operations =
+      config
+        ?.createHelp()
+        .visibleCommands(config)
+        .map((command) => command.name()) ?? [];
     expect(operations).toEqual(
       expect.arrayContaining(['names', 'block', 'unblock', 'prefer', 'only', 'reset', 'speed']),
     );

@@ -1,49 +1,60 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
-import { CliError } from '../lib/errors';
-import type { runPay } from '../commands/pay';
 import type { ModelJob } from './model-job';
-import { modelSettings, neonConsent, modelConsent } from './model-settings';
 import {
   ModelCallFailed,
   retryableModelCall,
   withModelRetry,
   workerEndText,
 } from './model-worker-control';
-import { messagesRequest, NEON_TURN_MAX_TOKENS, neonRoute } from './neon-chat';
+import { NEON_TURN_MAX_TOKENS } from './neon-chat';
 import { NeonTransport, readNeonRecord } from './neon-transport';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
-import { neonMaxTokens } from './neon-chat';
 import {
   VoucherSpend,
   channelDeposit,
   ChannelDepositRefused,
-  X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC,
+  NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
+  PayeeMismatch,
 } from './neon-seller';
-import { ModelHandoff, NEON_CONSENT_REFUSAL } from './model-handoff';
-import type { ModelTransport } from './model-transport';
+import { NeonRefunds } from './neon-refund';
+import type { NeonTerms } from './neon-terms';
 
 let dir: string;
-// The tests below the Messages section drive the chat completions route, which the env keeps.
-beforeEach(() => {
-  vi.stubEnv('TENJIN_NEON_ROUTE', 'chat');
-});
 afterEach(async () => {
   vi.unstubAllEnvs();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-async function fixture(router: Record<string, unknown>, limits: Record<string, unknown> = {}) {
+/** A provider row's terms as the door saves them with a job: $3.15 in, $15.75 out per million. */
+const TERMS: NeonTerms = {
+  rowId: 'row-1',
+  label: 'Test Writer',
+  url: 'https://seller.example/chat',
+  payTo: '0x00000000000000000000000000000000000000aa',
+  network: 'eip155:8453',
+  asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  model: 'test/model',
+  wire: 'chat',
+  scheme: 'batch-settlement',
+  usage: 'nanogpt',
+  inputAtomicPerMillion: '3150000',
+  outputAtomicPerMillion: '15750000',
+  cacheReadAtomicPerMillion: '157500',
+};
+
+async function fixture(limits: Record<string, unknown> = {}) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'neon-')));
   const data = join(dir, 'data');
   const repo = join(dir, 'repo');
   await mkdir(data);
   await mkdir(join(repo, '.git'), { recursive: true });
-  await writeFile(join(data, 'config.json'), JSON.stringify({ ...limits, router }));
+  // No consent record and no Neon switch: a Neon job needs neither.
+  await writeFile(join(data, 'config.json'), JSON.stringify({ ...limits }));
   const ctx: CommandContext = {
     flags: { json: true, timeout: 30_000 } as CommandContext['flags'],
     dataDir: data,
@@ -52,15 +63,24 @@ async function fixture(router: Record<string, unknown>, limits: Record<string, u
   return { data, repo, ctx };
 }
 
-const job = (repo: string, capAtomic = '1000000'): ModelJob => ({
-  id: '6f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a11',
+const job = (
+  repo: string,
+  capAtomic = '1000000',
+  terms: NeonTerms | null = TERMS,
+  id = '6f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a11',
+): ModelJob => ({
+  id,
   sessionId: 's',
   turnId: 't',
   callId: 'c',
   root: repo,
   task: 'Write the release notes',
   native: { prompt: 'Write the release notes', subagent_type: 'general-purpose' },
-  decision: { provider: 'neon', maxOutputTokens: NEON_TURN_MAX_TOKENS },
+  decision: {
+    provider: 'neon',
+    ...(terms ? { neonTerms: terms } : {}),
+    maxOutputTokens: NEON_TURN_MAX_TOKENS,
+  },
   capAtomic,
   state: 'running',
   expiresAt: Date.now() + 60_000,
@@ -77,480 +97,6 @@ const REPLY = {
   usage: { prompt_tokens: 40, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 8 } },
 };
 
-/** A payer that answers like the CLI's: a result, or the failure it would throw. */
-function payer(answer: (args: Parameters<typeof runPay>[0]) => unknown | Promise<unknown>) {
-  return vi.fn(async (args: Parameters<typeof runPay>[0]) => {
-    const value = await answer(args);
-    if (value instanceof Error) throw value;
-    return { data: value } as Awaited<ReturnType<typeof runPay>>;
-  });
-}
-const streamed = `data: ${JSON.stringify({ choices: [{ delta: { content: 'Release notes.' }, finish_reason: 'stop' }] })}\n\ndata: ${JSON.stringify({ choices: [], usage: REPLY.usage })}\n\ndata: [DONE]\n\n`;
-const paidAnswer = (amount = '9000', tx: string | undefined = '0xabc') => ({
-  status: 200,
-  body: REPLY,
-  amountPaid: { atomic: amount },
-  ...(tx ? { settlementTxHash: tx } : {}),
-});
-
-function transport(
-  ctx: CommandContext,
-  pay: ReturnType<typeof payer>,
-  now: () => number = Date.now,
-) {
-  return new NeonTransport({
-    dataDir: ctx.dataDir,
-    ctx,
-    provider: {} as never,
-    authorizer: {} as never,
-    pay: pay as unknown as typeof runPay,
-    now,
-  });
-}
-
-const consented = { neon: true, neonConsent: neonConsent({}) };
-
-it('pays BlockRun at most the output cap per turn and records the job for the expected-spend prior', async () => {
-  const { ctx, repo, data } = await fixture(consented);
-  const pay = payer(() => paidAnswer());
-  let clock = 1_000;
-  const neon = transport(ctx, pay, () => (clock += 500));
-  const sent = job(repo);
-  const message = await neon.withInferenceRun(sent.id, new AbortController().signal, (t) =>
-    t.messages(sent, MESSAGES, new AbortController().signal),
-  );
-  expect(message).toMatchObject({ stop_reason: 'end_turn', content: [{ text: 'Release notes.' }] });
-  // The worker asked for 65,536 output tokens; the paid request carries the cap.
-  const request = JSON.parse(pay.mock.calls[0]![0].rawBody!);
-  expect(request.max_tokens).toBe(NEON_TURN_MAX_TOKENS);
-  expect(request.model).toBe('google/gemini-4-neon');
-  // Streamed, so a long turn is not cut by a gateway's idle limit.
-  expect(request.stream).toBe(true);
-  expect(request.reasoning_effort).toBe('low');
-  expect(pay.mock.calls[0]![0]).toMatchObject({
-    url: 'https://blockrun.ai/api/v1/chat/completions',
-    execution: 'router',
-    terms: { network: 'eip155:8453', maxAmountAtomic: '1000000' },
-  });
-  const record = await readNeonRecord(data, sent.id);
-  expect(record).toMatchObject({
-    taskClass: 'writing',
-    spentAtomic: '9000',
-    settledAtomic: '9000',
-    calls: [
-      {
-        n: 1,
-        inputTokens: 40,
-        cachedInputTokens: 8,
-        outputTokens: 12,
-        maxTokens: NEON_TURN_MAX_TOKENS,
-        quotedAtomic: '9000',
-        settledAtomic: '9000',
-        settlement: 'settled',
-      },
-    ],
-  });
-  expect(record!.wallMs).toBeGreaterThan(0);
-  expect(await neon.summary(sent)).toEqual({
-    reservedAtomic: '9000',
-    actualAtomic: '9000',
-    uncertain: [],
-  });
-});
-
-it('meets the job ceiling and the daily budget through the same plan the other paid calls meet', async () => {
-  const { ctx, repo } = await fixture(consented, { maxAutoSpend: '20000' });
-  // The payer asks the call's plan for a slot at the live price, before anything is signed.
-  const pay = payer(async (args) => {
-    try {
-      await args.admit!(50_000n);
-    } catch (error) {
-      return error;
-    }
-    return paidAnswer();
-  });
-  const neon = transport(ctx, pay);
-  const sent = job(repo, '10000');
-  const failure = await neon
-    .messages(sent, MESSAGES, new AbortController().signal)
-    .catch((error: unknown) => error);
-  expect(failure).toBeInstanceOf(ModelCallFailed);
-  // Over the person's limit: nothing was signed, so it is proven unpaid and ends the job.
-  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
-});
-
-it('never sends a turn the job ceiling cannot hold', async () => {
-  const { ctx, repo } = await fixture(consented);
-  const pay = payer(() => paidAnswer());
-  const neon = transport(ctx, pay);
-  // Room for less than the least call.
-  const failure = await neon
-    .messages(job(repo, '500'), MESSAGES, new AbortController().signal)
-    .catch((error: unknown) => error);
-  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
-  expect(pay).not.toHaveBeenCalled();
-});
-
-it('does not try a paid call again: a failure after the authorization left ends the job and stays counted', async () => {
-  const { ctx, repo, data } = await fixture(consented);
-  const pay = payer(
-    () =>
-      new CliError('PAYMENT_FAILED', 'The endpoint answered 502 on the paid request.', {
-        details: { status: 502, amountAtomic: '12345', settlement: 'unknown' },
-      }),
-  );
-  const neon = transport(ctx, pay);
-  const sent = job(repo);
-  const waits: number[] = [];
-  const failure = await withModelRetry(
-    () => neon.messages(sent, MESSAGES, new AbortController().signal),
-    new AbortController().signal,
-    () => undefined,
-    async (ms) => void waits.push(ms),
-  ).catch((error: unknown) => error);
-  expect(failure).toBeInstanceOf(ModelCallFailed);
-  const detail = (failure as ModelCallFailed).detail;
-  expect(detail.uncharged).toBeUndefined();
-  expect(retryableModelCall(failure)).toBe(false);
-  // One payment, no retry.
-  expect(pay).toHaveBeenCalledTimes(1);
-  expect(waits).toEqual([]);
-  // The amount at risk counts against the job, as uncertain.
-  const summary = await neon.summary(sent);
-  expect(summary).toMatchObject({ reservedAtomic: '12345', actualAtomic: '0' });
-  expect(summary.uncertain).toEqual(['call-1']);
-  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
-    ok: false,
-    settlement: 'unknown',
-    quotedAtomic: '12345',
-  });
-});
-
-it('tries a call again only when nothing was signed, as for any request that cost nothing', async () => {
-  const { ctx, repo } = await fixture(consented);
-  let attempts = 0;
-  const pay = payer(() =>
-    ++attempts === 1
-      ? new CliError('API_UNREACHABLE', 'blockrun answered 503.', { details: { status: 503 } })
-      : paidAnswer(),
-  );
-  const neon = transport(ctx, pay);
-  const message = await withModelRetry(
-    () => neon.messages(job(repo), MESSAGES, new AbortController().signal),
-    new AbortController().signal,
-    () => undefined,
-    async () => undefined,
-  );
-  expect(message).toMatchObject({ stop_reason: 'end_turn' });
-  expect(pay).toHaveBeenCalledTimes(2);
-});
-
-it('treats an error it cannot place as possibly charged', async () => {
-  const { ctx, repo } = await fixture(consented);
-  const pay = payer(() => new Error('socket hang up'));
-  const failure = await transport(ctx, pay)
-    .messages(job(repo), MESSAGES, new AbortController().signal)
-    .catch((error: unknown) => error);
-  expect(retryableModelCall(failure)).toBe(false);
-  expect((failure as ModelCallFailed).detail.uncharged).toBeUndefined();
-});
-
-it('keeps Neon consent apart from the DeepSeek consent', async () => {
-  const deepseek = {
-    subagents: true,
-    subagentConsent: modelConsent({ routerOrigin: 'https://tenjin.sh' }),
-  };
-  const only = await fixture(deepseek);
-  // DeepSeek subagents on grants nothing to Neon.
-  expect(await modelSettings(only.data, only.repo, 'neon')).toBeNull();
-  expect(await modelSettings(only.data, only.repo)).not.toBeNull();
-  await writeFile(
-    join(only.data, 'config.json'),
-    JSON.stringify({ router: { neon: true, neonConsent: neonConsent({}) } }),
-  );
-  // And Neon on grants nothing to DeepSeek.
-  expect(await modelSettings(only.data, only.repo, 'neon')).toMatchObject({
-    routerOrigin: 'https://blockrun.ai',
-  });
-  expect(await modelSettings(only.data, only.repo)).toBeNull();
-  expect(neonConsent({}).recipients).toEqual(['BlockRun', 'Google']);
-});
-
-it('refuses the explicit door without Neon consent, naming the consent step, and holds nothing', async () => {
-  const { data, repo } = await fixture({
-    subagents: true,
-    subagentConsent: modelConsent({ routerOrigin: 'https://tenjin.sh' }),
-  });
-  const handoff = new ModelHandoff({
-    dataDir: data,
-    transport: { origin: 'https://tenjin.sh' } as unknown as ModelTransport,
-  });
-  const answer = await handoff.neon(
-    { sessionId: 's', turnId: 't', cwd: repo, transcript: '', claudePermissionMode: 'default' },
-    { prompt: 'Write the changelog' },
-  );
-  expect(answer).toEqual({ action: 'refused', reason: NEON_CONSENT_REFUSAL, charged: false });
-  expect(NEON_CONSENT_REFUSAL).toContain('tenjin config neon on');
-  expect(await handoff.store.owned('00000000-0000-4000-8000-000000000000', 's')).toBeNull();
-  // No held call and no routing: the store has no job for the session at all.
-  expect(await handoff.store.unfinished()).toEqual([]);
-});
-
-it('reads a streamed reply that arrives as text, and words an end for BlockRun, not Tenjin', async () => {
-  const { ctx, repo } = await fixture(consented);
-  const pay = payer(() => ({
-    status: 200,
-    bodyText: streamed,
-    amountPaid: { atomic: '9000' },
-    settlementTxHash: '0xabc',
-  }));
-  const message = await transport(ctx, pay).messages(
-    job(repo),
-    MESSAGES,
-    new AbortController().signal,
-  );
-  expect(message).toMatchObject({
-    content: [{ text: 'Release notes.' }],
-    usage: { output_tokens: 12 },
-  });
-  expect(workerEndText('model_call_failed', 'neon')).toBe(
-    'Its model call to BlockRun returned no result; that call stays reserved until its receipt is read.',
-  );
-  expect(workerEndText('model_call_failed', 'deepseek')).toContain('through Tenjin');
-});
-
-it('records a streamed call with no receipt as charged at its quote, never as nothing spent', async () => {
-  const { ctx, repo, data } = await fixture(consented);
-  const pay = payer(() => ({ status: 200, bodyText: streamed, amountPaid: { atomic: '9000' } }));
-  const neon = transport(ctx, pay);
-  const sent = job(repo);
-  await neon.messages(sent, MESSAGES, new AbortController().signal);
-  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
-    settlement: 'settled',
-    settledAtomic: '9000',
-  });
-  expect(await neon.summary(sent)).toMatchObject({ reservedAtomic: '9000', actualAtomic: '9000' });
-});
-
-it('ends the job, with no second try, when a turn spends its cap and writes nothing', async () => {
-  const { ctx, repo } = await fixture(consented);
-  const empty = `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\ndata: [DONE]\n\n`;
-  const pay = payer(() => ({ status: 200, bodyText: empty, amountPaid: { atomic: '9000' } }));
-  const failure = await withModelRetry(
-    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
-    new AbortController().signal,
-    () => undefined,
-    async () => undefined,
-  ).catch((error: unknown) => error);
-  expect(failure).toMatchObject({ stop: { kind: 'provider_limit', reason: 'output_limit' } });
-  expect(pay).toHaveBeenCalledTimes(1);
-});
-
-it('does not try a quote above the job ceiling again: that is a budget end, not a transient failure', async () => {
-  const { ctx, repo } = await fixture(consented);
-  const pay = payer(
-    () => new CliError('REGISTRY_MISMATCH', 'The live 402 exceeds the terms.', { details: {} }),
-  );
-  const failure = await withModelRetry(
-    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
-    new AbortController().signal,
-    () => undefined,
-    async () => undefined,
-  ).catch((error: unknown) => error);
-  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
-  expect(pay).toHaveBeenCalledTimes(1);
-});
-
-it('keeps a call raw stream and request only when asked, and never the system prompt text', async () => {
-  const { ctx, repo, data } = await fixture(consented);
-  const pay = payer(() => ({ status: 200, bodyText: streamed, amountPaid: { atomic: '9000' } }));
-  const sent = job(repo);
-  await transport(ctx, pay).messages(
-    sent,
-    { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' },
-    new AbortController().signal,
-  );
-  const folder = join(data, 'model-jobs', `${sent.id}.neon-raw`);
-  await expect(readFile(join(folder, 'call-1.request.json'), 'utf8')).rejects.toThrow();
-  vi.stubEnv('TENJIN_NEON_CAPTURE', '1');
-  try {
-    await transport(ctx, pay).messages(
-      { ...sent, id: '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12' },
-      { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' },
-      new AbortController().signal,
-    );
-  } finally {
-    vi.unstubAllEnvs();
-  }
-  const kept = join(data, 'model-jobs', '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12.neon-raw');
-  expect(await readFile(join(kept, 'call-1.response.sse'), 'utf8')).toBe(streamed);
-  const request = await readFile(join(kept, 'call-1.request.json'), 'utf8');
-  expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
-  expect(JSON.parse(request).messages[0]).toMatchObject({ role: 'system', content: { bytes: 22 } });
-});
-
-// ---- The Messages route, which is the default ----
-const event = (type: string, body: Record<string, unknown>) =>
-  `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}\n\n`;
-const anthropicStream = (
-  blocks: string[],
-  stop = 'end_turn',
-  usage: Record<string, unknown> = {
-    input_tokens: 40,
-    cache_read_input_tokens: 8,
-    output_tokens: 12,
-  },
-) =>
-  event('message_start', {
-    message: {
-      id: 'msg_1',
-      type: 'message',
-      role: 'assistant',
-      content: [],
-      usage: { input_tokens: 40, output_tokens: 1 },
-    },
-  }) +
-  blocks.join('') +
-  event('message_delta', { delta: { stop_reason: stop, stop_sequence: null }, usage }) +
-  event('message_stop', {});
-const textBlock = (text: string, index = 0) =>
-  event('content_block_start', { index, content_block: { type: 'text', text: '' } }) +
-  event('content_block_delta', { index, delta: { type: 'text_delta', text } }) +
-  event('content_block_stop', { index });
-
-it('sends the worker request to /v1/messages with a thinking budget under the cap, and folds the reply', async () => {
-  vi.unstubAllEnvs();
-  const { ctx, repo, data } = await fixture(consented);
-  const thinking =
-    event('content_block_start', {
-      index: 0,
-      content_block: { type: 'thinking', thinking: '', signature: '' },
-    }) +
-    event('content_block_delta', {
-      index: 0,
-      delta: { type: 'thinking_delta', thinking: 'Let me see.' },
-    }) +
-    event('content_block_delta', {
-      index: 0,
-      delta: { type: 'signature_delta', signature: 'SIG-A' },
-    }) +
-    event('content_block_stop', { index: 0 });
-  const tool =
-    event('content_block_start', {
-      index: 2,
-      content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} },
-    }) +
-    event('content_block_delta', {
-      index: 2,
-      delta: { type: 'input_json_delta', partial_json: '{"file_path":' },
-    }) +
-    event('content_block_delta', {
-      index: 2,
-      delta: { type: 'input_json_delta', partial_json: '"/a.md"}' },
-    }) +
-    event('content_block_stop', { index: 2 });
-  const pay = payer(() => ({
-    status: 200,
-    bodyText: anthropicStream([thinking, textBlock('Reading.', 1), tool], 'tool_use'),
-    amountPaid: { atomic: '9000' },
-  }));
-  const sent = job(repo);
-  const message = await transport(ctx, pay).messages(
-    sent,
-    { ...MESSAGES, thinking: { type: 'enabled' }, system: 'Write.' },
-    new AbortController().signal,
-  );
-  const call = pay.mock.calls[0]![0];
-  expect(call.url).toBe('https://blockrun.ai/api/v1/messages');
-  expect(JSON.parse(call.rawBody!)).toMatchObject({
-    model: 'google/gemini-4-neon',
-    max_tokens: NEON_TURN_MAX_TOKENS,
-    stream: true,
-    thinking: { type: 'enabled', budget_tokens: 2048 },
-    system: 'Write.',
-  });
-  expect(message).toMatchObject({
-    stop_reason: 'tool_use',
-    model: 'deepseek-flash',
-    content: [
-      { type: 'thinking', thinking: 'Let me see.', signature: 'SIG-A' },
-      { type: 'text', text: 'Reading.' },
-      { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/a.md' } },
-    ],
-    usage: { input_tokens: 40, output_tokens: 12, cache_read_input_tokens: 8 },
-  });
-  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
-    inputTokens: 48,
-    cachedInputTokens: 8,
-    outputTokens: 12,
-    settlement: 'settled',
-  });
-});
-
-it('ends the job on a Messages turn that spent its cap on thought, and never sends it again', async () => {
-  vi.unstubAllEnvs();
-  const { ctx, repo } = await fixture(consented);
-  const thought =
-    event('content_block_start', {
-      index: 0,
-      content_block: { type: 'thinking', thinking: '', signature: '' },
-    }) + event('content_block_stop', { index: 0 });
-  const pay = payer(() => ({
-    status: 200,
-    bodyText: anthropicStream([thought], 'max_tokens'),
-    amountPaid: { atomic: '9000' },
-  }));
-  const failure = await withModelRetry(
-    () => transport(ctx, pay).messages(job(repo), MESSAGES, new AbortController().signal),
-    new AbortController().signal,
-    () => undefined,
-    async () => undefined,
-  ).catch((error: unknown) => error);
-  expect(failure).toMatchObject({ stop: { kind: 'provider_limit', reason: 'output_limit' } });
-  expect(pay).toHaveBeenCalledTimes(1);
-});
-
-it('keeps the chat route only on TENJIN_NEON_ROUTE=chat, and the capture for either route', async () => {
-  expect(neonRoute({})).toBe('messages');
-  expect(neonRoute({ TENJIN_NEON_ROUTE: 'chat' })).toBe('chat');
-  vi.unstubAllEnvs();
-  vi.stubEnv('TENJIN_NEON_CAPTURE', '1');
-  const { ctx, repo, data } = await fixture(consented);
-  const pay = payer(() => ({
-    status: 200,
-    bodyText: anthropicStream([textBlock('Done.')]),
-    amountPaid: { atomic: '9000' },
-  }));
-  const sent = job(repo);
-  await transport(ctx, pay).messages(
-    sent,
-    {
-      ...MESSAGES,
-      system: 'SECRET-SYSTEM-PROMPT',
-      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
-    },
-    new AbortController().signal,
-  );
-  const folder = join(data, 'model-jobs', `${sent.id}.neon-raw`);
-  expect(await readFile(join(folder, 'call-1.response.sse'), 'utf8')).toContain('text_delta');
-  const request = await readFile(join(folder, 'call-1.request.json'), 'utf8');
-  expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
-  expect(JSON.parse(request)).toMatchObject({ tools: { count: 1 }, system: { bytes: 22 } });
-});
-
-it('steps the thinking budget down with the cap, and drops it where the cap leaves no room', () => {
-  expect(messagesRequest({ messages: [] }, 8_192).thinking).toEqual({
-    type: 'enabled',
-    budget_tokens: 2_048,
-  });
-  expect(messagesRequest({ messages: [] }, 2_500).thinking).toEqual({
-    type: 'enabled',
-    budget_tokens: 1_476,
-  });
-  expect(messagesRequest({ messages: [] }, 2_000).thinking).toBeUndefined();
-});
-
-// ---- The x402inference seller (evaluation only) ----
 const batchAnswer = (
   over: Partial<{
     status: number;
@@ -567,6 +113,8 @@ const batchAnswer = (
   depositedAtomic: 0n,
   ...over,
 });
+
+/** A batch payer as a stub: what it posts, what it answers, and what its refund does. */
 function withBatch(
   ctx: CommandContext,
   post: (
@@ -575,99 +123,123 @@ function withBatch(
     room: bigint,
   ) => Promise<ReturnType<typeof batchAnswer>>,
   state: { transmitted: boolean } = { transmitted: false },
+  refund: () => Promise<unknown> = async () => ({ success: true, transaction: '0xrefund' }),
 ) {
-  const refund = vi.fn(async () => ({ success: true }));
+  const made: NeonTerms[] = [];
   const batch = {
     post: vi.fn(post),
-    refund,
+    refund: vi.fn(refund),
     get transmitted() {
       return state.transmitted;
     },
   };
   return {
     batch,
+    made,
     transport: new NeonTransport({
       dataDir: ctx.dataDir,
       ctx,
       provider: {} as never,
       authorizer: {} as never,
-      batch: () => batch as never,
+      batch: (terms) => {
+        made.push(terms);
+        return batch as never;
+      },
     }),
   };
 }
 
-it('sends chat completions to x402inference as a plain reply and records the real charge beside the ceiling', async () => {
-  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
-  const { ctx, repo, data } = await fixture(consented);
-  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+const signal = () => new AbortController().signal;
+
+it('posts chat completions to the row, and records the real charge beside the ceiling', async () => {
+  const { ctx, repo, data } = await fixture();
+  const { batch, made, transport: neon } = withBatch(ctx, async () => batchAnswer());
   const sent = job(repo);
-  await neon.messages(sent, MESSAGES, new AbortController().signal);
+  const message = await neon.messages(sent, MESSAGES, signal());
+  expect(message).toMatchObject({ stop_reason: 'end_turn', content: [{ text: 'Release notes.' }] });
   const [body, , room] = batch.post.mock.calls[0]!;
+  // The model and the seller are the job's saved terms, and the turn asks for the cap.
   expect(JSON.parse(body)).toMatchObject({
-    model: 'google/gemini-4-neon',
+    model: 'test/model',
     stream: false,
     reasoning_effort: 'low',
     max_tokens: NEON_TURN_MAX_TOKENS,
   });
-  expect(room).toBe(1_000_000n);
+  expect(made[0]).toEqual(TERMS);
+  // The room of a turn is under the channel's deposit cap.
+  expect(room).toBe(NEON_CHANNEL_DEPOSIT_CAP_ATOMIC);
   const record = await readNeonRecord(data, sent.id);
   // The job counts what was charged, not the ceiling the voucher allowed.
-  expect(record).toMatchObject({ spentAtomic: '7321', settledAtomic: '7321' });
+  expect(record).toMatchObject({
+    spentAtomic: '7321',
+    settledAtomic: '7321',
+    taskClass: 'writing',
+  });
   expect(record!.calls[0]).toMatchObject({
+    model: 'test/model',
     quotedAtomic: '40000',
     settledAtomic: '7321',
     settlement: 'settled',
     outputTokens: 12,
     cachedInputTokens: 8,
-    // Where the input went is kept for each call.
     systemTokens: 0,
   });
   expect(record!.calls[0]!.messageTokens).toBeGreaterThan(0);
+  // The paid ledger names the seller of the saved terms.
+  expect(await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8')).toContain('seller.example');
 });
 
-it('keeps a deposit at the channel cap and inside the person limits', async () => {
-  const admitted: bigint[] = [];
-  const admit = async (amount: bigint) => void admitted.push(amount);
-  expect(X402INFERENCE_MAX_CHANNEL_DEPOSIT_ATOMIC).toBe(250_000n);
-  // An empty channel fills to the cap, and the limits see that amount.
-  expect(await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '0' }, admit)).toBe(
-    250_000n,
-  );
-  expect(admitted).toEqual([250_000n]);
-  // A channel part full tops up to the cap only.
-  expect(
-    await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '100000' }, admit),
-  ).toBe(150_000n);
-  // The seller's own ceiling on a deposit is kept, and a call it cannot cover is refused.
-  expect(
-    await channelDeposit(
-      { minimumDepositAmount: '40000', currentBalance: '0', maxDeposit: '90000' },
-      admit,
-    ),
-  ).toBe(90_000n);
-  await expect(
-    channelDeposit({ minimumDepositAmount: '40000', currentBalance: '230000' }, admit),
-  ).rejects.toThrow(ChannelDepositRefused);
-  await expect(
-    channelDeposit({ minimumDepositAmount: '300000', currentBalance: '0' }, admit),
-  ).rejects.toThrow(ChannelDepositRefused);
-  // A deposit over the person's limits stops before it is signed.
-  await expect(
-    channelDeposit({ minimumDepositAmount: '1', currentBalance: '0' }, async () => {
-      throw new Error('over limits');
-    }),
-  ).rejects.toThrow('over limits');
+it('sends the effort the door saved with the job', async () => {
+  const { ctx, repo } = await fixture();
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  const sent = job(repo);
+  sent.decision.neonEffort = 'medium';
+  await neon.messages(sent, MESSAGES, signal());
+  expect(JSON.parse(batch.post.mock.calls[0]![0])).toMatchObject({ reasoning_effort: 'medium' });
+});
+
+it('steps a turn down to the daily budget that is left, and sends none when the floor does not fit', async () => {
+  const { ctx, repo } = await fixture({ sessionBudget: '50000' });
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  await neon.messages(job(repo), MESSAGES, signal());
+  const sent = JSON.parse(batch.post.mock.calls[0]![0]);
+  // $0.05 buys under 3,200 output tokens at $15.75 per million.
+  expect(sent.max_tokens).toBeLessThan(3_200);
+  expect(sent.max_tokens).toBeGreaterThanOrEqual(1_024);
+  await writeFile(join(ctx.dataDir, 'config.json'), JSON.stringify({ sessionBudget: '1000' }));
+  const none = await neon
+    .messages(
+      job(repo, '1000000', TERMS, '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12'),
+      MESSAGES,
+      signal(),
+    )
+    .catch((error: unknown) => error);
+  expect((none as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect(batch.post).toHaveBeenCalledTimes(1);
+});
+
+it('never sends a turn the job ceiling cannot hold, and never a job with no seller terms', async () => {
+  const { ctx, repo } = await fixture();
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+  const failure = await neon
+    .messages(job(repo, '500'), MESSAGES, signal())
+    .catch((e: unknown) => e);
+  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  const bare = await neon
+    .messages(job(repo, '1000000', null), MESSAGES, signal())
+    .catch((e: unknown) => e);
+  expect((bare as ModelCallFailed).detail).toMatchObject({ uncharged: true });
+  expect(batch.post).not.toHaveBeenCalled();
 });
 
 it('does not try a batch call again once a voucher was sent, and may where none was', async () => {
-  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
-  const { ctx, repo } = await fixture(consented);
+  const { ctx, repo } = await fixture();
   const sentVoucher = withBatch(ctx, async () => batchAnswer({ status: 502 }), {
     transmitted: true,
   });
   const failure = await withModelRetry(
-    () => sentVoucher.transport.messages(job(repo), MESSAGES, new AbortController().signal),
-    new AbortController().signal,
+    () => sentVoucher.transport.messages(job(repo), MESSAGES, signal()),
+    signal(),
     () => undefined,
     async () => undefined,
   ).catch((error: unknown) => error);
@@ -681,20 +253,108 @@ it('does not try a batch call again once a voucher was sent, and may where none 
     { transmitted: false },
   );
   const again = await unsent.transport
-    .messages(job(repo), MESSAGES, new AbortController().signal)
+    .messages(job(repo), MESSAGES, signal())
     .catch((error: unknown) => error);
   expect((again as ModelCallFailed).detail).toMatchObject({ uncharged: true });
 });
 
-it('asks the channel for its remainder through the batch payer', async () => {
-  const { ctx } = await fixture(consented);
-  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
-  expect(await neon.refundChannel(new AbortController().signal)).toEqual({ success: true });
-  expect(batch.refund).toHaveBeenCalledTimes(1);
+// Failure caught: a seller that names another payee than its row got the first voucher. The
+// payer signs nothing, the call is proven unpaid, and it ends the job as a budget end.
+it('ends the job with nothing signed when the live 402 names another payee than the row', async () => {
+  const { ctx, repo } = await fixture();
+  const { batch, transport: neon } = withBatch(
+    ctx,
+    async () => {
+      throw new PayeeMismatch(TERMS.payTo, ['0x00000000000000000000000000000000DeaDBeef']);
+    },
+    { transmitted: false },
+  );
+  const failure = await withModelRetry(
+    () => neon.messages(job(repo), MESSAGES, signal()),
+    signal(),
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect(batch.post).toHaveBeenCalledTimes(1);
+});
+
+// Failure caught: a turn that spent its whole cap on thought wrote nothing, and sending it again
+// would spend the same again. The call stays recorded at its charge.
+it('ends the job charged and with no answer, with no second try, when a turn writes nothing', async () => {
+  const { ctx, repo, data } = await fixture();
+  const empty = JSON.stringify({
+    choices: [{ finish_reason: 'length', message: { role: 'assistant', content: null } }],
+    usage: { prompt_tokens: 40, completion_tokens: 16_000 },
+  });
+  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer({ text: empty }));
+  const sent = job(repo);
+  const failure = await withModelRetry(
+    () => neon.messages(sent, MESSAGES, signal()),
+    signal(),
+    () => undefined,
+    async () => undefined,
+  ).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ stop: { kind: 'provider_limit', reason: 'output_limit' } });
+  expect(batch.post).toHaveBeenCalledTimes(1);
+  // The charge counts in the job and stays recorded as a call with no answer.
+  const record = await readNeonRecord(data, sent.id);
+  expect(record).toMatchObject({ spentAtomic: '7321' });
+  expect(record!.calls[0]).toMatchObject({ ok: false });
+  // The result and the progress view say it: charged, no answer, not sent again.
+  expect(workerEndText('output_limit', 'neon')).toMatch(/charged.*daily budget.*not sent again/);
+});
+
+it('keeps a call raw reply and request only when asked, and never the system prompt text', async () => {
+  const { ctx, repo, data } = await fixture();
+  const { transport: neon } = withBatch(ctx, async () => batchAnswer());
+  const sent = job(repo);
+  await neon.messages(sent, { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' }, signal());
+  await expect(
+    readFile(join(data, 'model-jobs', `${sent.id}.neon-raw`, 'call-1.request.json'), 'utf8'),
+  ).rejects.toThrow();
+  vi.stubEnv('TENJIN_NEON_CAPTURE', '1');
+  const second = job(repo, '1000000', TERMS, '7f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a12');
+  await neon.messages(second, { ...MESSAGES, system: 'SECRET-SYSTEM-PROMPT' }, signal());
+  const kept = join(data, 'model-jobs', `${second.id}.neon-raw`);
+  const request = await readFile(join(kept, 'call-1.request.json'), 'utf8');
+  expect(request).not.toContain('SECRET-SYSTEM-PROMPT');
+  expect(JSON.parse(request).messages[0]).toMatchObject({ role: 'system', content: { bytes: 22 } });
+});
+
+it('keeps a deposit at the channel cap and inside the person limits', async () => {
+  const admitted: bigint[] = [];
+  const admit = async (amount: bigint) => void admitted.push(amount);
+  // The cap sits above the quote of a full 16,000-token turn.
+  expect(NEON_CHANNEL_DEPOSIT_CAP_ATOMIC).toBeGreaterThan(252_000n);
+  expect(await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '0' }, admit)).toBe(
+    NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
+  );
+  expect(admitted).toEqual([NEON_CHANNEL_DEPOSIT_CAP_ATOMIC]);
+  // A channel part full tops up to the cap only.
+  expect(
+    await channelDeposit({ minimumDepositAmount: '40000', currentBalance: '400000' }, admit),
+  ).toBe(100_000n);
+  // The seller's own ceiling on a deposit is kept, and a call it cannot cover is refused.
+  expect(
+    await channelDeposit(
+      { minimumDepositAmount: '40000', currentBalance: '0', maxDeposit: '90000' },
+      admit,
+    ),
+  ).toBe(90_000n);
+  await expect(
+    channelDeposit({ minimumDepositAmount: '40000', currentBalance: '480000' }, admit),
+  ).rejects.toThrow(ChannelDepositRefused);
+  // A deposit over the person's limits stops before it is signed.
+  await expect(
+    channelDeposit({ minimumDepositAmount: '1', currentBalance: '0' }, async () => {
+      throw new Error('over limits');
+    }),
+  ).rejects.toThrow('over limits');
 });
 
 it('counts every voucher against the daily budget, a pre-funded channel included, at its real charge', async () => {
-  const { data } = await fixture(consented);
+  const { data } = await fixture();
   const policy = {
     maxAutoSpendAtomic: 250_000n,
     sessionBudgetAtomic: 280_000n,
@@ -705,50 +365,167 @@ it('counts every voucher against the daily budget, a pre-funded channel included
     const ledger = await readSpendSummary(data);
     return ledger === null ? 0n : spentOf(ledger);
   };
-  // A call on a funded channel pays no deposit, only a voucher: it still counts.
-  const first = new VoucherSpend(authorizer, 'x402inference.com', 'call-1');
+  const first = new VoucherSpend(authorizer, 'seller.example', 'call-1');
   expect(await first.before(40_000n)).toBeUndefined();
   await first.settle(7_321n, 40_000n, true);
   expect(await spentNow()).toBe(7_321n);
   // A call whose voucher was sent and never answered stays counted at its ceiling.
-  const lost = new VoucherSpend(authorizer, 'x402inference.com', 'call-2');
+  const lost = new VoucherSpend(authorizer, 'seller.example', 'call-2');
   await lost.before(40_000n);
   await lost.settle(undefined, 40_000n, true);
   expect(await spentNow()).toBe(47_321n);
   // A call that signed nothing gives its reservation back.
-  const unsent = new VoucherSpend(authorizer, 'x402inference.com', 'call-3');
+  const unsent = new VoucherSpend(authorizer, 'seller.example', 'call-3');
   await unsent.before(40_000n);
   await unsent.settle(undefined, 40_000n, false);
   expect(await spentNow()).toBe(47_321n);
-  // A ceiling over the per-call limit, or past what the daily budget has left, is refused
-  // before any voucher is signed.
   expect(
-    await new VoucherSpend(authorizer, 'x402inference.com', 'call-4').before(260_000n),
+    await new VoucherSpend(authorizer, 'seller.example', 'call-4').before(260_000n),
   ).toMatchObject({ abort: true });
   expect(
-    await new VoucherSpend(authorizer, 'x402inference.com', 'call-5').before(250_000n),
+    await new VoucherSpend(authorizer, 'seller.example', 'call-5').before(250_000n),
   ).toMatchObject({ abort: true });
 });
 
-it('reads the eval output cap override, bounded', () => {
-  expect(neonMaxTokens({})).toBe(8_192);
-  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '20000' })).toBe(20_000);
-  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '40000' })).toBe(8_192);
-  expect(neonMaxTokens({ TENJIN_NEON_MAX_TOKENS: '0' })).toBe(8_192);
-});
+// ---- The job-end refund, and the refund after the provider row changes ----
 
-it('asks for the model the eval named and records it, with the ledger label of that model', async () => {
-  vi.stubEnv('TENJIN_NEON_MODEL', 'google/gemini-4-hydrogen');
-  vi.stubEnv('TENJIN_NEON_SELLER', 'x402inference');
-  const { ctx, repo, data } = await fixture(consented);
-  const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
+it('asks the seller for the channel remainder when a run ends, and keeps a failed refund on record', async () => {
+  const { ctx, repo, data } = await fixture();
+  const ok = withBatch(ctx, async () => batchAnswer());
   const sent = job(repo);
-  await neon.messages(sent, MESSAGES, new AbortController().signal);
-  expect(JSON.parse(batch.post.mock.calls[0]![0]).model).toBe('google/gemini-4-hydrogen');
-  expect((await readNeonRecord(data, sent.id))!.calls[0]).toMatchObject({
-    model: 'google/gemini-4-hydrogen',
+  await ok.transport.withInferenceRun(sent.id, signal(), (t) =>
+    t.messages(sent, MESSAGES, signal()),
+  );
+  expect(ok.batch.refund).toHaveBeenCalledTimes(1);
+  const done = await new NeonRefunds({ dataDir: data, payer: () => ok.batch }).entries();
+  expect(done).toMatchObject([{ state: 'refunded', terms: { payTo: TERMS.payTo } }]);
+
+  // A seller that does not answer leaves the channel on record as failed, never as lost.
+  const second = await fixture();
+  const failing = withBatch(
+    second.ctx,
+    async () => batchAnswer(),
+    { transmitted: false },
+    async () => {
+      throw new Error('Refund probe expected 402, got 503');
+    },
+  );
+  const next = job(second.repo);
+  await failing.transport.withInferenceRun(next.id, signal(), (t) =>
+    t.messages(next, MESSAGES, signal()),
+  );
+  expect(
+    await new NeonRefunds({ dataDir: second.data, payer: () => failing.batch }).entries(),
+  ).toMatchObject([{ state: 'failed', note: expect.stringContaining('503') }]);
+});
+
+// Failure caught: a refund that looked the provider up again after the catalog row changed would
+// go to another payee, and a failed lookup would strand the money. It uses the saved terms.
+it('refunds after the provider row changes, from the terms the job was paid under, with no lookup', async () => {
+  const { ctx, repo, data } = await fixture();
+  const refundsAt: NeonTerms[] = [];
+  const first = withBatch(
+    ctx,
+    async () => batchAnswer(),
+    { transmitted: false },
+    async () => {
+      throw new Error('the seller was unreachable');
+    },
+  );
+  const sent = job(repo);
+  await first.transport.withInferenceRun(sent.id, signal(), (t) =>
+    t.messages(sent, MESSAGES, signal()),
+  );
+  // `tenjin refund` is built from the journal alone: it never reads the catalog, so a row that
+  // now names another seller changes nothing.
+  const retry = new NeonRefunds({
+    dataDir: data,
+    payer: (terms) => {
+      refundsAt.push(terms);
+      return { refund: async () => ({ success: true, transaction: '0xback', amount: '9000' }) };
+    },
   });
-  const ledger = await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8');
-  expect(ledger).toContain('Gemini 4 Hydrogen worker');
-  expect(ledger).not.toContain('Gemini 4 Neon worker');
+  const after = await retry.retry();
+  expect(refundsAt).toEqual([TERMS]);
+  expect(after).toMatchObject([
+    { state: 'refunded', refundedAtomic: '9000', transaction: '0xback' },
+  ]);
+  // Nothing is asked twice once it is refunded.
+  await retry.retry();
+  expect(refundsAt).toHaveLength(1);
+});
+
+it('keeps a seller and payee that differ in separate channel records', async () => {
+  const { data } = await fixture();
+  const refunds = new NeonRefunds({
+    dataDir: data,
+    payer: () => ({ refund: async () => ({ success: true }) }),
+  });
+  await refunds.open('job-a', TERMS);
+  await refunds.open('job-b', { ...TERMS, payTo: '0x00000000000000000000000000000000000000bb' });
+  await refunds.open('job-c', TERMS);
+  const entries = await refunds.entries();
+  expect(entries).toHaveLength(2);
+  expect(entries.find((e) => e.terms.payTo === TERMS.payTo)!.jobIds).toEqual(['job-a', 'job-c']);
+});
+
+it('starts the timed withdrawal when the seller does not answer, and finishes it after the delay', async () => {
+  const { data } = await fixture();
+  let now = 1_000;
+  const channel = { balance: 50_000n, claimed: 0n, pending: 0n, initiatedAt: 0 };
+  const calls: string[] = [];
+  const chain = {
+    channel: async () => ({
+      id: '0xchannel',
+      balanceAtomic: channel.balance,
+      claimedAtomic: channel.claimed,
+      pendingAtomic: channel.pending,
+      initiatedAt: channel.initiatedAt,
+      delayS: 900,
+      nowS: now,
+    }),
+    initiate: async (_terms: NeonTerms, amount: bigint) => {
+      calls.push(`initiate ${amount}`);
+      channel.pending = amount;
+      channel.initiatedAt = now;
+      return '0xinit';
+    },
+    finalize: async () => {
+      calls.push('finalize');
+      return '0xfinal';
+    },
+  };
+  const refunds = new NeonRefunds({
+    dataDir: data,
+    payer: () => ({
+      refund: async () => {
+        throw new Error('Refund probe expected 402, got 503');
+      },
+    }),
+  });
+  await refunds.open('job-a', TERMS);
+  expect(await refunds.retry(chain)).toMatchObject([
+    { state: 'withdrawal_started', withdrawal: { amountAtomic: '50000', delayS: 900 } },
+  ]);
+  // Before the delay passes nothing is sent again, and the person is told it waits.
+  now += 100;
+  expect(await refunds.retry(chain)).toMatchObject([{ state: 'withdrawal_started' }]);
+  expect(calls).toEqual(['initiate 50000']);
+  now += 900;
+  expect(await refunds.retry(chain)).toMatchObject([
+    { state: 'withdrawn', transaction: '0xfinal', refundedAtomic: '50000' },
+  ]);
+  expect(calls).toEqual(['initiate 50000', 'finalize']);
+});
+
+it('runs a job with no consent record, and an old consent record left in the settings changes nothing', async () => {
+  const { ctx, repo } = await fixture();
+  const { transport: neon } = withBatch(ctx, async () => batchAnswer());
+  await writeFile(
+    join(ctx.dataDir, 'config.json'),
+    JSON.stringify({
+      router: { neon: true, neonConsent: { version: 1, recipients: ['Old', 'Recipients'] } },
+    }),
+  );
+  await expect(neon.messages(job(repo), MESSAGES, signal())).resolves.toBeTruthy();
 });

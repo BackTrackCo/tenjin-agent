@@ -1244,7 +1244,7 @@ export class ModelTransport {
 /**
  * WHAT A WORKER'S RUN NEEDS OF ITS MODEL TRANSPORT, whichever provider pays for its calls:
  * the DeepSeek worker's {@link ModelTransport} through Tenjin's proxy, or the Neon worker's
- * `NeonTransport` straight to BlockRun.
+ * `NeonTransport` straight to the provider of its row.
  */
 export type WorkerTransport = Pick<
   ModelTransport,

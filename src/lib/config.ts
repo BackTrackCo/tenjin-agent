@@ -312,8 +312,6 @@ export const RawConfigSchema = ConfigSchema.partial()
     router: RouterGlobalSchema.extend({
       subagents: z.unknown().optional(),
       subagentConsent: z.unknown().optional(),
-      neon: z.unknown().optional(),
-      neonConsent: z.unknown().optional(),
       windowsWorker: z.unknown().optional(),
       policy: z.unknown().optional(),
       nativeReplacement: z.unknown().optional(),

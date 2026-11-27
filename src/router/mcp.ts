@@ -2,6 +2,8 @@ import { sweepJobFolders } from './job-folders';
 import { isModelWorkerProcess } from './model-worker-context';
 import { registerModelTool, stopModelWorkers } from './model-mcp';
 import { ModelTransport } from './model-transport';
+import { runNeonApprove } from './neon-approve';
+import { lookupNeonTerms } from './neon-terms';
 import { NeonTransport } from './neon-transport';
 import type { ModelSession } from './model-handoff';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -353,32 +355,30 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           },
         });
       },
-      // THE NEON WORKER'S model calls are paid to BlockRun by this process, from the person's
-      // wallet, through the CLI's own payer: its limits, its daily budget, no Tenjin proxy.
+      // THE NEON WORKER'S model calls are paid by this process, from the person's wallet, to the
+      // seller the Tenjin router's provider row names for the job: the person's own limits, their
+      // daily budget, no Tenjin proxy and no routing fee.
       neonTransport: async () => {
         const settings = await resolveContextSettings(ctx);
+        const fetchImpl = opts.handlerDeps?.fetchImpl ?? opts.handlerDeps?.payDeps?.fetchImpl;
         return new NeonTransport({
           dataDir: ctx.dataDir,
           ctx,
           provider,
           readContract: chainReader(settings.rpcUrl),
           authorizer: opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy),
-          ...(opts.handlerDeps?.fetchImpl !== undefined || opts.handlerDeps?.payDeps !== undefined
-            ? {
-                payDeps: {
-                  ...(opts.handlerDeps.payDeps?.destination !== undefined
-                    ? { destination: opts.handlerDeps.payDeps.destination }
-                    : {}),
-                  ...((opts.handlerDeps.fetchImpl ?? opts.handlerDeps.payDeps?.fetchImpl) !==
-                  undefined
-                    ? {
-                        fetchImpl: (opts.handlerDeps.fetchImpl ??
-                          opts.handlerDeps.payDeps?.fetchImpl)!,
-                      }
-                    : {}),
-                },
-              }
-            : {}),
+          ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+        });
+      },
+      // THE NEON DOOR'S ONE FREE LOOKUP of its provider row, through the router's `{tool}` form.
+      // A lookup that fails fails the job with nothing sent: no seller is named here.
+      neonTerms: async () => {
+        const settings = await resolveContextSettings(ctx);
+        const fetchImpl = opts.handlerDeps?.fetchImpl ?? opts.handlerDeps?.payDeps?.fetchImpl;
+        return lookupNeonTerms({
+          ctx,
+          baseUrl: settings.baseUrl,
+          ...(fetchImpl !== undefined ? { fetchImpl } : {}),
         });
       },
       // A WORKER'S WEB SEARCH is this request tool's own call, made by this process for it
@@ -694,6 +694,18 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             'failed',
             'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',
           ),
+        );
+      // A Neon revision's quote is its own kind: the yes grows that job's ceiling, nothing else.
+      const neonRevision = await runNeonApprove({ quote, total, what }, { dataDir: ctx.dataDir });
+      if (neonRevision !== null)
+        return toolResult(
+          neonRevision.ok
+            ? {
+                isError: false,
+                summary: neonRevision.text,
+                envelope: { status: 'approved', reason: neonRevision.text },
+              }
+            : fail('needs_input', neonRevision.reason),
         );
       const settings = await resolveContextSettings(ctx);
       const authorizer =
