@@ -322,6 +322,9 @@ export class ModelHandoff {
     if (!claudeWorkerPermissionMode(session.claudePermissionMode))
       return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();
+    // A Linux Node without node:sqlite cannot take the job store's lock, which the repeat check
+    // just below needs: this comes first, so the reason is the one that is kept. No offer, no fee.
+    if (!lockSupport().ok) return stay('worker_unqualified', { detail: 'linux_needs_node_22_13' });
     // The parent kept a held call native by sending it again unchanged: no new routing, no fee.
     const kept = await this.store.nativeRepeat(
       session.sessionId,
@@ -351,8 +354,6 @@ export class ModelHandoff {
           homeDir: homedir(),
         });
     if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
-    // A Linux Node without node:sqlite cannot take the worker's locks: no offer, no fee.
-    if (!lockSupport().ok) return stay('worker_unqualified', { detail: 'linux_needs_node_22_13' });
     const worker = await qualifiedModelWorker(
       session.cwd,
       agentType,

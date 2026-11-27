@@ -1,9 +1,11 @@
+import { lockSupport } from '../lib/held-lock';
 import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import { resolveWalletProvider } from '../lib/wallet';
 import { ModelRefundJournal } from '../router/model-refund';
 import { chainReader, chainRefundReads } from '../router/routing-payer';
 import { dollars } from './fund-watch';
+import { CliError } from '../lib/errors';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -18,6 +20,13 @@ export async function runReclaimSubagentCredit(
   ctx: CommandContext,
   deps: Partial<ConstructorParameters<typeof ModelRefundJournal>[2]> = {},
 ): Promise<CommandResult> {
+  // A refund is closed under a lock this process takes. Where it cannot take one, the run would
+  // report every channel as pending and say only that it should be run again.
+  const lock = lockSupport();
+  if (!lock.ok)
+    throw new CliError('USAGE', `Nothing was reclaimed. ${lock.reason}`, {
+      fix: 'Run this command with Node 24, as the Tenjin installer sets up, then run it again.',
+    });
   const settings = await resolveContextSettings(ctx);
   const provider = resolveWalletProvider(ctx, {});
   const journal = new ModelRefundJournal(ctx.dataDir, settings.baseUrl, {

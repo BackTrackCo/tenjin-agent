@@ -186,7 +186,7 @@ function defaultFactory(): AttemptFactory {
   if (platform === 'linux')
     return (held) => {
       const sqlite = loadSqlite();
-      if (!sqlite) throw new LockUnavailableError(SQLITE_MISSING);
+      if (!sqlite) throw new LockUnavailableError(sqliteMissing());
       return sqliteAttempt(held, sqlite);
     };
   return () => {
@@ -195,17 +195,35 @@ function defaultFactory(): AttemptFactory {
 }
 const factory = defaultFactory();
 
-const SQLITE_MISSING = `Subagent workers on Linux need Node 22.13 or later; this is Node ${process.versions.node}.`;
+const sqliteMissing = (version: string = process.versions.node) =>
+  `Subagent workers on Linux need Node 22.13 or later; this is Node ${version}.`;
+
+/** The first Node whose `node:sqlite` loads with no flag. */
+const SQLITE_FROM = [22, 13, 0] as const;
+const atLeastSqliteNode = (version: string) => {
+  const [major = 0, minor = 0, patch = 0] = version.split('.').map(Number);
+  const have = [major, minor, patch];
+  for (const [index, need] of SQLITE_FROM.entries())
+    if (have[index]! !== need) return have[index]! > need;
+  return true;
+};
 
 /**
  * Whether this platform and Node can take a held lock, and if not, one sentence why. Linux needs
- * the built-in node:sqlite (Node 22.13 or later); macOS and Windows need nothing.
+ * the built-in node:sqlite (Node 22.13 or later); macOS and Windows need nothing. `nodeVersion`
+ * is the version of the Node that will take the lock when that is not this process: a terminal
+ * command judging the Node of Tenjin's own runtime, which runs the plugin and its workers.
  */
-export function lockSupport(): { ok: true } | { ok: false; reason: string } {
+export function lockSupport(nodeVersion?: string): { ok: true } | { ok: false; reason: string } {
   const { platform } = process;
   if (platform === 'darwin' || platform === 'win32') return { ok: true };
-  if (platform === 'linux')
-    return loadSqlite() ? { ok: true } : { ok: false, reason: SQLITE_MISSING };
+  if (platform === 'linux') {
+    if (nodeVersion !== undefined)
+      return atLeastSqliteNode(nodeVersion)
+        ? { ok: true }
+        : { ok: false, reason: sqliteMissing(nodeVersion) };
+    return loadSqlite() ? { ok: true } : { ok: false, reason: sqliteMissing() };
+  }
   return { ok: false, reason: `Tenjin cannot lock files on ${platform}.` };
 }
 

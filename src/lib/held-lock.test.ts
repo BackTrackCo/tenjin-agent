@@ -405,6 +405,25 @@ describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
   },
 );
 
+// Issue 577: a terminal command judges the Node that runs the worker, not the terminal's own.
+it('judges the Node it is given on Linux, and this one on macOS and Windows', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  try {
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    expect(lockSupport('24.22.3')).toEqual({ ok: true });
+    expect(lockSupport('22.13.0')).toEqual({ ok: true });
+    expect(lockSupport('22.12.9')).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('this is Node 22.12.9'),
+    });
+    expect(lockSupport('20.19.0')).toMatchObject({ ok: false });
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+    expect(lockSupport('20.19.0')).toEqual({ ok: true });
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
 describe.skipIf(process.platform !== 'linux')('Linux without node:sqlite', () => {
   afterEach(() => forgetSqlite());
 

@@ -1,6 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { CliError } from '../lib/errors';
 import { lockSupport } from '../lib/held-lock';
+import { runtimeNodeVersion } from '../lib/runtime-layout';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
@@ -238,7 +239,8 @@ export async function runConfigSubagents(
       'USAGE',
       'Use on [--repository <path>...] [--max-job <USD>], off, why, or no mode for the status.',
     );
-  const lock = lockSupport();
+  // The Node that runs the worker is Tenjin's runtime's, not the terminal's.
+  const lock = lockSupport(runtimeNodeVersion(ctx.dataDir));
   if (!lock.ok)
     throw new CliError('USAGE', `DeepSeek subagents cannot run here. ${lock.reason}`, {
       fix: 'Run Tenjin with Node 24, as its installer sets up, then run this command again.',

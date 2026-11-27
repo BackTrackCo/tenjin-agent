@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { holdLock, isHeldLockName, sweepHeldLocks, withHeldLock } from '../lib/held-lock';
+import {
+  holdLock,
+  isHeldLockName,
+  lockSupport,
+  sweepHeldLocks,
+  withHeldLock,
+} from '../lib/held-lock';
 import { LockTimeoutError } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
 import { WORKER_ENDS } from './model-worker-control';
@@ -457,7 +463,7 @@ export class ModelJobStore {
     try {
       const parsed = noOfferSchema.safeParse({ ...entry, at: Date.now() });
       if (!parsed.success) return;
-      await this.locked(async () => {
+      const write = async () => {
         const kept = (await this.noOffers()).filter(
           (old) => parsed.data.at - old.at < MODEL_RECORD_TTL_MS,
         );
@@ -465,7 +471,14 @@ export class ModelJobStore {
           join(this.dir, NO_OFFERS_FILE),
           JSON.stringify({ records: [...kept, parsed.data].slice(-NO_OFFERS_KEPT) }),
         );
-      });
+      };
+      // Where this process cannot take the lock (a Linux Node without node:sqlite), the write goes
+      // without it: a lost update of this diagnostic costs less than the lost reason.
+      if (lockSupport().ok) await this.locked(write);
+      else {
+        await mkdir(this.dir, { recursive: true, mode: 0o700 });
+        await write();
+      }
     } catch {
       // Diagnostics only: a failed write never changes what the call does.
     }
