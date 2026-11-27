@@ -227,14 +227,7 @@ try {
   try {
     process.env.Path = [workspace, originalPath].join(delimiter);
     assert.equal(
-      await qualifiedModelWorker(
-        workspace,
-        'general-purpose',
-        undefined,
-        dataDir,
-        signal,
-        'default',
-      ),
+      await qualifiedModelWorker(workspace, 'general-purpose', dataDir, signal, 'default'),
       null,
     );
     assert.equal(
@@ -246,9 +239,7 @@ try {
     process.env.Path = originalPath;
     await rm(fixtureExe);
   }
-  assert(
-    await qualifiedModelWorker(workspace, 'general-purpose', undefined, dataDir, signal, 'default'),
-  );
+  assert(await qualifiedModelWorker(workspace, 'general-purpose', dataDir, signal, 'default'));
   const [host, caller] = InMemoryTransport.createLinkedPair();
   model = registerModelTool(server, {
     dataDir,
