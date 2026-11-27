@@ -507,7 +507,7 @@ export class ModelHandoff {
         job,
         workerHandleFor(job.id),
         terms,
-        need - settings.maxJobAtomic,
+        need,
         need,
         settings.maxJobAtomic,
       );
@@ -575,17 +575,23 @@ export class ModelHandoff {
       if (!terms.success) return continuationRefusal('Original Neon seller terms are unavailable');
       const left = await neonRoomLeftAtomic(dataDir, original, settings.maxJobAtomic);
       const need = await neonNextCallNeedAtomic(dataDir, original, terms.data);
-      if (
-        left < (need > neonMinimumJobAtomic(terms.data) ? need : neonMinimumJobAtomic(terms.data))
-      )
+      const needed =
+        need > neonMinimumJobAtomic(terms.data) ? need : neonMinimumJobAtomic(terms.data);
+      if (left < needed) {
+        // The grant is at least one ceiling, and enough for what the next call measured it needs.
+        if (needed > NEON_CHANNEL_DEPOSIT_CAP_ATOMIC)
+          return continuationRefusal(
+            'The next call is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent.',
+          );
         return neonRevisionApproval(
           dataDir,
           original,
           handle,
           terms.data,
-          settings.maxJobAtomic,
+          needed - left > settings.maxJobAtomic ? needed - left : settings.maxJobAtomic,
           left,
         );
+      }
     }
     await prepareClaudeWorkerSession(
       { resume: conversation.sdkSessionId, onSession: async () => {} },

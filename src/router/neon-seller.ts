@@ -55,6 +55,13 @@ export function channelDirectory(dataDir: string, terms: Pick<NeonTerms, 'url' |
 
 export class ChannelDepositRefused extends Error {}
 
+/** What a person approved past their per-call limit, spent once, one payment at a time. */
+export type PaymentApproval = {
+  leftAtomic: bigint;
+  consume: (amountAtomic: bigint) => Promise<boolean>;
+  restore: (amountAtomic: bigint) => Promise<void>;
+};
+
 /**
  * EVERY VOUCHER COUNTS AGAINST THE PERSON'S LIMITS, a pre-funded channel's too. A voucher spends
  * from money already in the channel, so no wallet payment shows it: without this the daily
@@ -69,23 +76,36 @@ export class VoucherSpend {
     private authorizer: SpendAuthorizer,
     private creator: string,
     private requestKey: string,
-    private mode: 'automatic' | 'manual' = 'automatic',
+    private approval?: PaymentApproval,
   ) {}
   /** The hook before a payment is created: abort it where the limits refuse it. */
   async before(ceilingAtomic: bigint): Promise<void | { abort: true; reason: string }> {
     // A corrective retry signs again under the reservation the call already holds.
     if (this.held) return;
-    const authorization = await this.authorizer.authorize({
-      mode: this.mode,
-      amountAtomic: ceilingAtomic,
-      creator: this.creator,
-      requestKey: this.requestKey,
-    });
-    // A payment the person approved comes back as `confirm`, which their yes already answered.
-    const passed =
-      authorization.decision === 'allow' ||
-      (this.mode === 'manual' && authorization.decision === 'confirm');
-    if (!passed) return { abort: true, reason: authorization.message ?? 'Over your spend limits.' };
+    const ask = (approvedAbove: boolean) =>
+      this.authorizer.authorize({
+        mode: 'automatic',
+        amountAtomic: ceilingAtomic,
+        creator: this.creator,
+        requestKey: this.requestKey,
+        ...(approvedAbove ? { approvedAbove } : {}),
+      });
+    let authorization = await ask(false);
+    // A payment over the per-call limit may use the approval the person gave, once: it is spent
+    // before the payment is created and given back where the budget still refuses it. Only the
+    // per-call limit is lifted; the allowlist and the rolling budget apply as always.
+    if (
+      authorization.decision !== 'allow' &&
+      authorization.reason === 'above_auto_spend' &&
+      this.approval &&
+      ceilingAtomic <= this.approval.leftAtomic &&
+      (await this.approval.consume(ceilingAtomic))
+    ) {
+      authorization = await ask(true);
+      if (authorization.decision !== 'allow') await this.approval.restore(ceilingAtomic);
+    }
+    if (authorization.decision !== 'allow')
+      return { abort: true, reason: authorization.message ?? 'Over your spend limits.' };
     this.reservation = authorization.reservationId;
     this.held = true;
   }
@@ -239,8 +259,8 @@ export type BatchSellerOptions = {
    * nothing is signed.
    */
   onChannel?: (channel: ChannelConfig) => Promise<void>;
-  /** How a payment is authorized: the person's own limits (the default) or one they approved. */
-  mode?: 'automatic' | 'manual';
+  /** What the person approved past their per-call limit, if anything is left of it. */
+  approval?: PaymentApproval;
   fetchImpl?: typeof fetch;
   /**
    * Where a request may go, and how it connects (test seams). A provider request is never plain
@@ -363,7 +383,7 @@ export class BatchSeller {
           this.options.authorizer,
           new URL(terms.url).host,
           this.options.requestKey ?? `neon:${Date.now()}`,
-          this.options.mode ?? 'automatic',
+          this.options.approval,
         )
       : undefined;
     // Before anything is signed: the person's limits, then the channel's config is kept.

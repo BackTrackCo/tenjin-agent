@@ -5,7 +5,7 @@ import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
-import { readSpendSummary } from '../lib/spend-ledger';
+import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { BatchSeller, channelDirectory, PayeeMismatch, type SellerTerms } from './neon-seller';
 
@@ -360,7 +360,7 @@ describe('what the seller sees before a payment exists', () => {
     messages: [{ role: 'user', content: PROMPT }],
   });
   /** The seller stub, recording the body of every request by whether it carried a payment. */
-  function recording(paidStatus = 200) {
+  function recording(paidStatus = 200, hold?: Promise<void>) {
     const unpaid: string[] = [];
     const paid: string[] = [];
     const inner = seller('7321');
@@ -369,6 +369,7 @@ describe('what the seller sees before a payment exists', () => {
       const text = await request.clone().text();
       if (request.headers.has('payment-signature')) {
         paid.push(text);
+        await hold;
         return new Response(paidStatus === 200 ? '{"choices":[]}' : 'down', {
           status: paidStatus,
           headers: paidStatus === 200 ? { 'x-request-cost-atomic': '7321' } : {},
@@ -428,34 +429,94 @@ describe('what the seller sees before a payment exists', () => {
     expect(batch.transmitted).toBe(false);
   });
 
-  it('lets a payment the person approved pass their per-call limit, and refuses it otherwise', async () => {
-    const account = await payer();
-    const run = async (mode: 'automatic' | 'manual') => {
-      const { fetchImpl, paid } = recording();
-      const batch = new BatchSeller({
-        dataDir: dir,
-        terms: TERMS,
-        provider: { getSigner: async () => account } as never,
-        admit: async () => undefined,
-        authorizer: createLocalSpendAuthorizer({
+  // Failure caught by review (money): an approval made every later call pay as a manual payment,
+  // which the daily budget never counted. An approval now lifts only the per-call limit, is spent
+  // once, and every payment under it is reserved and counted against the budget like any other.
+  describe('a payment the person approved past their per-call limit', () => {
+    const CEILING = 42_521n; // what the seller stub's 402 asks for
+    function setup(budget: bigint | null) {
+      const left = { value: 1_000_000n };
+      const restored: bigint[] = [];
+      const approval = () => ({
+        leftAtomic: left.value,
+        consume: async (amount: bigint) => {
+          if (amount > left.value) return false;
+          left.value -= amount;
+          return true;
+        },
+        restore: async (amount: bigint) => {
+          left.value += amount;
+          restored.push(amount);
+        },
+      });
+      const authorizer = () =>
+        createLocalSpendAuthorizer({
           dir,
           policy: {
             maxAutoSpendAtomic: 1_000n,
-            sessionBudgetAtomic: null,
+            sessionBudgetAtomic: budget,
             allowlistCreators: [],
           },
-        }),
-        mode,
-        fetchImpl,
-      });
-      const outcome = await batch
-        .post(body, new AbortController().signal, 1_000_000n)
-        .then(() => 'paid')
-        .catch(() => 'refused');
-      return { outcome, paid: paid.length };
-    };
-    expect(await run('automatic')).toEqual({ outcome: 'refused', paid: 0 });
-    expect(await run('manual')).toEqual({ outcome: 'paid', paid: 1 });
+        });
+      const call = async (key: string, withApproval = true, hold?: Promise<void>) => {
+        const { fetchImpl, paid } = recording(200, hold);
+        const batch = new BatchSeller({
+          dataDir: dir,
+          terms: TERMS,
+          provider: { getSigner: async () => account } as never,
+          admit: async () => undefined,
+          authorizer: authorizer(),
+          requestKey: key,
+          ...(withApproval ? { approval: approval() } : {}),
+          fetchImpl,
+        });
+        return batch
+          .post(body, new AbortController().signal, 1_000_000n)
+          .then(() => ({ outcome: 'paid', paid: paid.length }))
+          .catch(() => ({ outcome: 'refused', paid: paid.length }));
+      };
+      return { left, restored, call };
+    }
+    let account: Awaited<ReturnType<typeof payer>>;
+
+    it('passes the per-call limit once, and is gone after that', async () => {
+      account = await payer();
+      const t = setup(null);
+      expect(await t.call('a', false)).toEqual({ outcome: 'refused', paid: 0 });
+      expect(await t.call('b')).toEqual({ outcome: 'paid', paid: 1 });
+      expect(t.left.value).toBe(1_000_000n - CEILING);
+      // A later call with nothing left of the approval goes back to the normal check.
+      t.left.value = 0n;
+      expect(await t.call('c')).toEqual({ outcome: 'refused', paid: 0 });
+    });
+
+    it('stays inside the daily budget: two approved calls against a small day are not both paid', async () => {
+      account = await payer();
+      // Room for one call at its 42,521 ceiling, and not for a second beside the first's charge.
+      const t = setup(45_000n);
+      expect(await t.call('first')).toEqual({ outcome: 'paid', paid: 1 });
+      const used = await readSpendSummary(dir);
+      expect(spentOf(used!)).toBe(7_321n);
+      expect(await t.call('second')).toEqual({ outcome: 'refused', paid: 0 });
+      // The budget refused it before the approval was touched: nothing of it was spent.
+      expect(t.restored).toEqual([]);
+      expect(t.left.value).toBe(1_000_000n - CEILING);
+    });
+
+    it('counts two approved calls that run together, and pays one', async () => {
+      account = await payer();
+      const t = setup(60_000n);
+      // Neither call is answered until both asked, so the first one's charge is not yet counted
+      // when the second asks: its reservation is what the second meets.
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const running = Promise.all([t.call('one', true, hold), t.call('two', true, hold)]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      release();
+      const outcomes = await running;
+      expect(outcomes.filter(({ outcome }) => outcome === 'paid')).toHaveLength(1);
+      expect(outcomes.reduce((sum, { paid }) => sum + paid, 0)).toBe(1);
+    });
   });
 
   // The terms are the server's row, saved with the job: changing them changes where the request

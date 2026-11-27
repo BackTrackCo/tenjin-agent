@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -179,6 +179,61 @@ it('asks about a revision with no room left, and offers it on the same worker on
     instruction: expect.stringContaining('forbid this text for a Test Writer worker'),
   });
   expect(JSON.stringify(offered)).not.toMatch(/DeepSeek/);
+});
+
+// Failure caught by review: a first call whose real request was larger than the door's estimate
+// failed after the yes and ended the worker. The record keeps what that request measured, and the
+// same worker is asked about at that amount, with a grant that covers it.
+it('asks about a call that measured more than the job has, with a grant that covers it, on the same worker', async () => {
+  const f = await fixture('0', {}, [], '1000000');
+  const recordPath = neonRecordPath(dir, f.initial.id);
+  const kept = JSON.parse(await readFile(recordPath, 'utf8'));
+  await writeFile(recordPath, JSON.stringify({ ...kept, needAtomic: '1800000' }));
+  // Over what one channel holds: nothing could carry it, and nothing is sent.
+  expect(
+    await f.model.capture(
+      f.session,
+      'rev-1',
+      revision(f.conversation.handle),
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({ action: 'refused' });
+  await writeFile(
+    recordPath,
+    JSON.stringify({
+      ...kept,
+      needAtomic: '400000',
+      spentAtomic: '900000',
+      settledAtomic: '900000',
+    }),
+  );
+  const asked = await f.model.capture(
+    f.session,
+    'rev-2',
+    revision(f.conversation.handle),
+    undefined,
+    'SendMessage',
+  );
+  expect(asked).toMatchObject({ status: 'needs_approval', started: false });
+  const quote = (await readQuote(dir, (asked as unknown as { quote: { id: string } }).quote.id))!;
+  // 100,000 is left of the 1,000,000 ceiling and 400,000 is needed: the grant is the one ceiling
+  // (1,000,000), which covers the 300,000 that was missing.
+  expect(BigInt((quote.call as { ceilingAtomic: string }).ceilingAtomic)).toBeGreaterThanOrEqual(
+    300_000n,
+  );
+  expect(
+    await runNeonApprove({ quote: quote.id, total: '$1', what: quote.what }, { dataDir: dir }),
+  ).toMatchObject({ ok: true });
+  expect(
+    await f.model.capture(
+      f.session,
+      'rev-3',
+      revision(f.conversation.handle),
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({ action: 'offer', continuation: true, worker_handle: f.conversation.handle });
 });
 
 it('offers a revision the job still has room for with no question, whatever the DeepSeek setting is', async () => {

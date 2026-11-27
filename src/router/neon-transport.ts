@@ -17,6 +17,7 @@ import { readJsonFile, writePrivate } from './store-files';
 import {
   BatchSeller,
   type ChannelConfig,
+  type PaymentApproval,
   ChannelDepositRefused,
   NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
   PayeeMismatch,
@@ -104,6 +105,10 @@ const recordSchema = z.object({
   spentAtomic: z.string().regex(/^\d+$/),
   /** Room the person approved beyond the ceiling, one more ceiling at a time (`approve`). */
   grantedAtomic: z.string().regex(/^\d+$/).default('0'),
+  /** Approved room already spent on a payment over the per-call limit: an approval is spent once. */
+  approvedSpentAtomic: z.string().regex(/^\d+$/).default('0'),
+  /** What the last call that did not fit would have needed, measured from its real request. */
+  needAtomic: z.string().regex(/^\d+$/).optional(),
   settledAtomic: z.string().regex(/^\d+$/),
   calls: z.array(callSchema),
   signatures: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
@@ -123,6 +128,7 @@ export const freshNeonRecord = (jobId: string, startedAt: number): NeonRecord =>
   wallMs: 0,
   spentAtomic: '0',
   grantedAtomic: '0',
+  approvedSpentAtomic: '0',
   settledAtomic: '0',
   calls: [],
   signatures: {},
@@ -197,9 +203,23 @@ export async function neonNextCallNeedAtomic(
   const record = await readNeonRecord(dataDir, job.id);
   const last = record?.calls.at(-1);
   const history = last?.bytes ?? (last ? last.inputTokens * 4 : 0);
-  return neonPeakQuoteAtomic(terms, history + NEON_RESUME_MARGIN_BYTES, NEON_TURN_FLOOR_TOKENS);
+  const estimate = neonPeakQuoteAtomic(
+    terms,
+    history + NEON_RESUME_MARGIN_BYTES,
+    NEON_TURN_FLOOR_TOKENS,
+  );
+  // A call that did not fit measured its own real request: that is what the next try needs.
+  const measured = record?.needAtomic !== undefined ? BigInt(record.needAtomic) : 0n;
+  return measured > estimate ? measured : estimate;
 }
 const NEON_RESUME_MARGIN_BYTES = 20_000;
+/**
+ * What Claude Code puts around a first draft (its system prompt, the tools and the instruction
+ * files): about 16,600 input tokens measured in live runs on a one-line draft. It is the floor the
+ * door quotes; the real first request is measured when it is sent, and a call it still does not
+ * fit is asked about again on the same worker.
+ */
+const NEON_FIRST_CONTEXT_BYTES = 70_000;
 
 /**
  * What a job's FIRST call needs at least, by the same estimate: the draft's own size, the context
@@ -210,7 +230,7 @@ export const neonFirstCallNeedAtomic = (
   terms: Parameters<typeof neonPeakQuoteAtomic>[0],
   promptBytes: number,
 ): bigint =>
-  neonPeakQuoteAtomic(terms, promptBytes + NEON_RESUME_MARGIN_BYTES, NEON_TURN_FLOOR_TOKENS);
+  neonPeakQuoteAtomic(terms, promptBytes + NEON_FIRST_CONTEXT_BYTES, NEON_TURN_FLOOR_TOKENS);
 
 /** The person approved one more ceiling for a job: its next call may spend it. */
 export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic: bigint) {
@@ -226,6 +246,30 @@ export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic
         grantedAtomic: (BigInt(record.grantedAtomic) + amountAtomic).toString(),
       }),
     );
+  });
+}
+
+/** Spend part of a job's approved room on one payment over the per-call limit, once. */
+async function editApproval(
+  dataDir: string,
+  jobId: string,
+  change: (left: bigint) => bigint | null,
+) {
+  const path = neonRecordPath(dataDir, jobId);
+  return modelLock(`${path}.lock`, async () => {
+    const record = await readNeonRecord(dataDir, jobId);
+    if (!record) return false;
+    const left = BigInt(record.grantedAtomic) - BigInt(record.approvedSpentAtomic);
+    const next = change(left);
+    if (next === null) return false;
+    await writePrivate(
+      path,
+      JSON.stringify({
+        ...record,
+        approvedSpentAtomic: (BigInt(record.approvedSpentAtomic) + next).toString(),
+      }),
+    );
+    return true;
   });
 }
 
@@ -403,6 +447,17 @@ export class NeonTransport {
     return inOrder(job.id, () => this.send(job, messages, signal, beforeSend));
   }
 
+  /** What a call that did not fit needed, measured from its real request. */
+  private async keepNeed(job: ModelJob, needAtomic: bigint) {
+    const path = neonRecordPath(this.options.dataDir, job.id);
+    await this.load(job);
+    await modelLock(`${path}.lock`, async () => {
+      const record = await readNeonRecord(this.options.dataDir, job.id);
+      if (record)
+        await writePrivate(path, JSON.stringify({ ...record, needAtomic: needAtomic.toString() }));
+    });
+  }
+
   /** What the rolling day's budget has left, or null with no budget. */
   private async dayRoom(
     policy: Awaited<ReturnType<typeof resolveContextSettings>>['policy'],
@@ -450,9 +505,11 @@ export class NeonTransport {
     // A call the person's own per-call limit pays is fitted to it before anything is sent. Room
     // the person approved (`approve`) is theirs to spend past that limit: its calls are paid as
     // approved payments, and the deposit is sized to the call.
-    const approved = BigInt(record.grantedAtomic) > 0n;
+    const approvedLeft = BigInt(record.grantedAtomic) - BigInt(record.approvedSpentAtomic);
     const perCall = settings.policy.maxAutoSpendAtomic;
-    if (!approved && perCall < room) room = perCall;
+    // What the person approved lifts only the per-call limit, once: the daily budget stays.
+    const callCap = approvedLeft > perCall ? approvedLeft : perCall;
+    if (callCap < room) room = callCap;
     const asked =
       typeof messages.max_tokens === 'number' && Number.isInteger(messages.max_tokens)
         ? messages.max_tokens
@@ -462,8 +519,15 @@ export class NeonTransport {
     // The body's size is the input estimate's basis; the output cap is stepped down to fit.
     const probe = JSON.stringify(chatBody(messages, carry, 1, terms.model, effort));
     const maxTokens = fittingNeonTokens(terms, Buffer.byteLength(probe), asked, room);
-    if (maxTokens === null || room <= 0n)
+    if (maxTokens === null || room <= 0n) {
+      // The real request is known now: what it needs is kept, so the next try is asked about at
+      // that amount and not at an estimate.
+      await this.keepNeed(
+        job,
+        neonPeakQuoteAtomic(terms, Buffer.byteLength(probe), NEON_TURN_FLOOR_TOKENS),
+      ).catch(() => undefined);
       throw nothingSigned('The job ceiling has no room for another Neon call', { cause: 'budget' });
+    }
     const chat = chatBody(messages, carry, maxTokens, terms.model, effort);
     const body = JSON.stringify(chat);
     const n = record.calls.length + 1;
@@ -475,17 +539,27 @@ export class NeonTransport {
       terms,
       depositAdmitter({
         dataDir,
-        policy: approved
-          ? {
-              ...settings.policy,
-              maxAutoSpendAtomic: room > perCall ? room : perCall,
-            }
-          : settings.policy,
+        policy:
+          approvedLeft > 0n
+            ? {
+                ...settings.policy,
+                maxAutoSpendAtomic: callCap > perCall ? callCap : perCall,
+              }
+            : settings.policy,
         creator: neonHost(terms),
         ...(this.options.now ? { now: this.options.now } : {}),
       }),
       canonicalHash({ job: job.id, n, body }),
-      approved ? 'manual' : 'automatic',
+      approvedLeft > 0n
+        ? {
+            leftAtomic: approvedLeft,
+            consume: (amount) =>
+              editApproval(dataDir, job.id, (left) => (amount <= left ? amount : null)),
+            restore: async (amount) => {
+              await editApproval(dataDir, job.id, () => -amount);
+            },
+          }
+        : undefined,
       // The channel's own config is kept BEFORE the first payment leaves, so a call that was
       // funded and then failed still leaves what a withdrawal needs without asking the seller.
       (channel) => this.refunds.saveChannel(terms, channel),
@@ -603,7 +677,7 @@ export class NeonTransport {
     terms: NeonTerms,
     admit: (amountAtomic: bigint) => Promise<bigint | void>,
     requestKey = `neon:${Date.now()}`,
-    mode: 'automatic' | 'manual' = 'automatic',
+    approval?: PaymentApproval,
     onChannel?: (channel: ChannelConfig) => Promise<void>,
   ): BatchLike {
     if (this.options.batch) return this.options.batch(terms, admit);
@@ -614,7 +688,7 @@ export class NeonTransport {
       admit,
       authorizer: this.options.authorizer,
       requestKey,
-      mode,
+      ...(approval ? { approval } : {}),
       ...(onChannel ? { onChannel } : {}),
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
@@ -724,6 +798,8 @@ export class NeonTransport {
       const settled = BigInt(record.settledAtomic) + BigInt(call.settledAtomic ?? '0');
       return {
         ...record,
+        // A call that went through meets what it needs: the measured need is spent.
+        needAtomic: undefined,
         spentAtomic: spent.toString(),
         settledAtomic: settled.toString(),
         calls: [...record.calls, call].slice(-CALLS_KEPT),

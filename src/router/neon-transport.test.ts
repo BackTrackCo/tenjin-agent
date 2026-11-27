@@ -15,6 +15,7 @@ import {
 import { neonMinimumJobAtomic, NEON_TURN_MAX_TOKENS } from './neon-chat';
 import {
   depositAdmitter,
+  grantNeonRoom,
   neonNextCallNeedAtomic,
   NeonTransport,
   readNeonRecord,
@@ -286,6 +287,58 @@ it('keeps the funded channel config when the paid request fails with a 503', asy
     receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
     withdrawDelay: 900,
   });
+});
+
+// Failure caught by review: the door quoted a first draft from an estimate of what Claude Code
+// adds around it, and a real first request over that estimate failed right after the yes with no
+// way to ask again. The call that does not fit now measures its real request and keeps what it
+// needs, so the same worker is asked about at that amount and not at the estimate.
+it('measures a first request that does not fit, and asks about it again at that amount', async () => {
+  const { ctx, repo, data } = await fixture();
+  const { transport: neon, batch } = withBatch(ctx, async () => batchAnswer());
+  const big = {
+    ...MESSAGES,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(200_000) }] }],
+  };
+  // Room for the estimate of a small draft and not for the real 200 KB request.
+  const small = job(repo, '100000');
+  const refused = await neon.messages(small, big, signal()).catch((e: unknown) => e);
+  expect((refused as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect(batch.post).not.toHaveBeenCalled();
+  const record = (await readNeonRecord(data, small.id))!;
+  const need = BigInt(record.needAtomic!);
+  expect(need).toBeGreaterThan(100_000n);
+  // The next try is asked about at the measured amount, not at the fixed allowance.
+  expect(await neonNextCallNeedAtomic(data, small, TERMS)).toBe(need);
+  // The yes grows the same job's room by that amount, and the call then goes out on the same job.
+  await grantNeonRoom(data, small.id, need);
+  await neon.messages(small, big, signal());
+  expect(batch.post).toHaveBeenCalledTimes(1);
+  // A call that went through spends the measured need.
+  expect((await readNeonRecord(data, small.id))!.needAtomic).toBeUndefined();
+});
+
+// Failure caught by review (money): after one approval every later call kept paying past the
+// per-call limit. An approval lifts the limit for the room it was given, once.
+it('returns to the per-call limit once the approved room is spent', async () => {
+  const { ctx, repo, data } = await fixture({ maxAutoSpend: '50000' });
+  const rooms: bigint[] = [];
+  const { transport: neon } = withBatch(ctx, async (_body, _signal, room) => {
+    rooms.push(room);
+    return batchAnswer();
+  });
+  const j = job(repo, '1000000');
+  await neon.messages(j, MESSAGES, signal());
+  // The person approved 200,000 more room: the next call may use it past the 50,000 limit.
+  await grantNeonRoom(data, j.id, 200_000n);
+  await neon.messages(j, MESSAGES, signal());
+  expect(rooms[1]).toBeGreaterThan(50_000n);
+  // Once that approval is spent, the next call is held to the limit again.
+  const path = join(data, 'model-jobs', `${j.id}.neon.json`);
+  const kept = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...kept, approvedSpentAtomic: kept.grantedAtomic }));
+  await neon.messages(j, MESSAGES, signal());
+  expect(rooms[2]).toBe(50_000n);
 });
 
 it('sends the effort the door saved with the job', async () => {
