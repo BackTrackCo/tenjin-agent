@@ -174,7 +174,14 @@ export const register: Register = (on) => {
       const router = data
         ? asRecord((await readJson($, `${data}/config.json`))?.router)
         : undefined;
-      if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
+      // THE SUBAGENT SETTING ONLY DECIDES WHETHER A HELD CALL IS OFFERED FOR ROUTING. A follow-up
+      // to a worker already owned by this session is no routing: it goes to the handoff with the
+      // setting on or off, which refuses it for a DeepSeek worker without the setting and runs it
+      // for a Neon worker, which no setting gates.
+      if (
+        (router?.subagents !== true && !owned) ||
+        (await $.env.get('TENJIN_MODEL_WORKER')) === '1'
+      )
         return owned ? unavailable() : next(e);
       // A held call is never rewritten: the parent keeps it native by sending it
       // again unchanged, and that repeat runs here as it was reviewed. The model
@@ -257,6 +264,7 @@ export const register: Register = (on) => {
           offer: offer.offer_id,
           context: heldOfferContext(offer, continuation),
           continuation,
+          worker: workerOfOffer(offer),
         });
       }
     } catch {
@@ -1037,7 +1045,13 @@ async function callerOf($: Dollar, agentId: string): Promise<Json> {
 function heldAnswer(
   tool: string,
   offerText: string,
-  held?: { offer: string; context: string[] | undefined; continuation?: boolean },
+  held?: {
+    offer: string;
+    context: string[] | undefined;
+    continuation?: boolean;
+    /** What the held text calls the worker: DeepSeek unless the offer's own label says another. */
+    worker?: string;
+  },
 ) {
   // Native SendMessage refusals return this data shape; an offer is not a delivered message.
   if (tool === 'SendMessage')
@@ -1046,7 +1060,7 @@ function heldAnswer(
         success: false,
         // The statement of what happened comes first: the host shows a held call as a refusal.
         message: held
-          ? `Not delivered yet: the follow-up to the DeepSeek worker is held until you run it with subagent({offer_id}) or cancel it. ${offerText}`
+          ? `Not delivered yet: the follow-up to the ${held.worker ?? 'DeepSeek'} worker is held until you run it with subagent({offer_id}) or cancel it. ${offerText}`
           : offerText,
       },
       ...(held?.context ? { context: held.context } : {}),
@@ -1058,7 +1072,7 @@ function heldAnswer(
       // A FOLLOW-UP TO A TENJIN WORKER HAS NO NATIVE FORM: its handle never reaches a native
       // tool, so the same call sent again is held again, as a new offer in place of this one.
       held.continuation
-        ? `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this follow-up to a DeepSeek worker until you choose. Your two moves are to run it with subagent({offer_id}), or to cancel it with subagent({cancel: offer_id}). Sending this same ${tool} call again does not run it: a Tenjin worker handle never runs natively, and the repeat is held again. Do not switch to another tool or do the work yourself because of this message.`
+        ? `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this follow-up to a ${held.worker ?? 'DeepSeek'} worker until you choose. Your two moves are to run it with subagent({offer_id}), or to cancel it with subagent({cancel: offer_id}). Sending this same ${tool} call again does not run it: a Tenjin worker handle never runs natively, and the repeat is held again. Do not switch to another tool or do the work yourself because of this message.`
         : `This is not a failure, and there is nothing to recover or work around: the Tenjin plugin holds this ${tool} call until you choose. Your two moves are to accept the offer with subagent({offer_id}), or to send this same ${tool} call again unchanged, which runs it natively. Do not switch to another tool or do the work yourself because of this message.`,
       ...(held.context ?? []),
       offerText,
@@ -1066,8 +1080,33 @@ function heldAnswer(
   };
 }
 
+/** What a held text calls the worker of an offer: the label of a worker that is not DeepSeek. */
+function workerOfOffer(offer: Json): string {
+  const label = offer.label;
+  return typeof label === 'string' && label.length > 0 && !/^DeepSeek/i.test(label)
+    ? label
+    : 'DeepSeek';
+}
+
 function heldOfferContext(offer: Json, continuation = false): string[] | undefined {
   const consent = asRecord(offer.consent);
+  // A Neon worker has no router and no consent record to check: its offer names its workspace
+  // only, and the local handoff made it after its own checks.
+  if (
+    workerOfOffer(offer) !== 'DeepSeek' &&
+    typeof consent?.repository === 'string' &&
+    consent.repository.trim() &&
+    consent.recipients === undefined &&
+    typeof offer.capAtomic === 'string' &&
+    /^[1-9][0-9]*$/.test(offer.capAtomic) &&
+    typeof offer.parentPolicy === 'string' &&
+    offer.parentPolicy.trim()
+  )
+    return [
+      continuation
+        ? "This local Tenjin hook held the continuation; no continuation started. Run it with the subagent tool and this offer_id, or cancel it with that id. Its suitability is not judged again; the binding model, privacy and planning restrictions in the offer's parentPolicy still apply to its text. It reuses the worker's history and the original job's budget."
+        : "The offer's parentPolicy is local Tenjin guidance: apply it with the full assignment and the binding model and privacy restrictions.",
+    ];
   if (
     consent?.version !== 2 ||
     typeof consent.repository !== 'string' ||

@@ -26,6 +26,7 @@ vi.mock('./model-worker', () => ({
   qualifiedModelWorker: worker.qualified,
 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
+import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 
 import { registerModelTool } from './model-mcp';
 import { ModelJobStore } from './model-job';
@@ -54,7 +55,8 @@ const TERMS: NeonTerms = {
 let dir: string;
 afterEach(async () => {
   vi.unstubAllEnvs();
-  if (dir) await rm(dir, { recursive: true, force: true });
+  // A follow-up runs on in the background: its last files may land while the folder goes.
+  if (dir) await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 beforeEach(() => {
   vi.clearAllMocks();
@@ -124,7 +126,7 @@ async function door(
     return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
   };
   const listTools = async () => (await client.listTools()).tools;
-  return { call, route, repo, neon, listTools };
+  return { call, route, repo, neon, listTools, session };
 }
 
 const request = { neon: { prompt: 'Write the release notes', description: 'Release notes' } };
@@ -184,6 +186,39 @@ it.each([
     expect(await new ModelJobStore(dir).noOffers()).toEqual([]);
   },
 );
+
+// Failure caught by the first live Neon job: its result told the parent that a follow-up "goes to
+// DeepSeek at once", and the follow-up's answer said "The DeepSeek worker ... continues". A Neon
+// job names its own worker in every text it returns to the parent, in either provider's case.
+it('names the Neon worker, never DeepSeek, in the result and in the follow-up it returns', async () => {
+  const { call, session, repo } = await door({});
+  // The worker's own history, as the SDK finds it for the resumed conversation.
+  vi.mocked(getSessionInfo).mockImplementation((async (id: string) => ({
+    sessionId: id,
+    cwd: repo,
+  })) as never);
+  worker.run.mockResolvedValue('The release notes are written.');
+  const first = await call(request);
+  expect(first.status).toBe('completed');
+  expect(first.continuation).toContain('goes to Test Writer at once');
+  expect(JSON.stringify(first)).not.toMatch(/DeepSeek/);
+  session.turnId = 'followup-turn';
+  const sent = await call({
+    capture: {
+      session_id: session.sessionId,
+      tool_use_id: 'followup',
+      tool: 'SendMessage',
+      input: { to: first.worker_handle, message: 'Make it shorter.' },
+    },
+  });
+  expect(sent).toMatchObject({
+    action: 'continued',
+    worker_handle: first.worker_handle,
+    message: expect.stringMatching(/^The Test Writer worker tenjin-worker-.* continues with/),
+  });
+  expect(JSON.stringify(sent)).not.toMatch(/DeepSeek/);
+  await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(2));
+});
 
 it('saves the effort the door was given and refuses one it does not know', async () => {
   const { call } = await door({});

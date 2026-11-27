@@ -43,7 +43,7 @@ import {
   NEON_TURN_MAX_TOKENS,
   type NeonEffort,
 } from './neon-chat';
-import { neonJobLabel, neonTermsSchema, type NeonTerms } from './neon-terms';
+import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
 import { neonRevisionApproval } from './neon-approve';
 import { neonRoomLeftAtomic } from './neon-transport';
 import { resolve } from 'node:path';
@@ -64,8 +64,8 @@ import { callLimitSchema } from './model-pace';
  * worker suits it. What binds any assignment still binds this text, since it goes to
  * another model: the person's own restrictions, and planning, which stays native.
  */
-const continuationPolicy =
-  "This follow-up continues a DeepSeek worker that was already accepted, with its history. It is not a new offer, and its suitability is not judged again. Binding restrictions apply to its text as to any assignment: an explicit instruction of the person that restricts this worker's model, privacy, disclosure or paid inference still binds, and plan authoring and substantive plan review stay native. Where the follow-up would break one of those, cancel it and do that work natively. It carries no permission: the worker keeps its permission mode, rules and sandbox, and only the person can approve what those ask about. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.";
+const continuationPolicy = (name: string) =>
+  `This follow-up continues a ${name} worker that was already accepted, with its history. It is not a new offer, and its suitability is not judged again. Binding restrictions apply to its text as to any assignment: an explicit instruction of the person that restricts this worker's model, privacy, disclosure or paid inference still binds, and plan authoring and substantive plan review stay native. Where the follow-up would break one of those, cancel it and do that work natively. It carries no permission: the worker keeps its permission mode, rules and sandbox, and only the person can approve what those ask about. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.`;
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -308,7 +308,7 @@ export class ModelHandoff {
     const reference = ownedModelReference(native, nativeTool);
     if (reference.owned) {
       if (reference.error || !reference.handle || !reference.task)
-        return continuationRefusal(reference.error ?? 'Unavailable DeepSeek continuation');
+        return continuationRefusal(reference.error ?? 'Unavailable worker continuation');
       try {
         return await this.continue(
           session,
@@ -320,7 +320,7 @@ export class ModelHandoff {
           direct,
         );
       } catch {
-        return continuationRefusal('DeepSeek continuation is unavailable or interrupted');
+        return continuationRefusal('Worker continuation is unavailable or interrupted');
       }
     }
     if (nativeTool === 'SendMessage' || isModelWorkerProcess()) return { action: 'native' };
@@ -635,7 +635,7 @@ export class ModelHandoff {
       proxyFeePercent: 5,
       capAtomic: cap,
       reason: `Continue the owned ${provider === 'neon' ? 'Neon' : 'DeepSeek'} worker with its history and remaining original budget`,
-      parentPolicy: continuationPolicy,
+      parentPolicy: continuationPolicy(workerNameOf(original.decision)),
       workspace: worker.claudeWorkspace,
       ...droppedNote(worker.claudeWorkspace),
       consent: offerConsent(
@@ -643,8 +643,7 @@ export class ModelHandoff {
         modelClaudeRepositories(worker.claudeWorkspace, latest),
         provider,
       ),
-      instruction:
-        "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
+      instruction: `Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a ${workerNameOf(original.decision)} worker. Do not send a Tenjin handle to native tools. No assignment has been sent.`,
     };
   }
   private async route(

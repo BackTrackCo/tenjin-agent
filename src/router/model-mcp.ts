@@ -7,7 +7,7 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
 import { NEON_EFFORTS } from './neon-chat';
-import { neonJobLabel, type NeonTerms } from './neon-terms';
+import { neonJobLabel, workerNameOf, type NeonTerms } from './neon-terms';
 import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
 import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
@@ -143,8 +143,8 @@ const backgroundJob = (job: Pick<ModelJob, 'native'>) => nativeBackground(job.na
 const PROMPT_WAIT_MS = 2_147_483_647;
 
 /** What the parent reads when a background worker has started, as a native background agent's launch reads. */
-const BACKGROUND_STARTED =
-  'The DeepSeek worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.';
+const backgroundStarted = (name: string) =>
+  `The ${name} worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.`;
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
   await workerShutdown.get(server)?.();
@@ -695,7 +695,7 @@ export function registerModelTool(
           action: 'continued',
           worker_handle: offer.worker_handle,
           offer_id: offer.offer_id,
-          message: `The DeepSeek worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does. To write to it meanwhile, send another message to the same handle.`,
+          message: `The ${typeof offer.label === 'string' && !/^DeepSeek/i.test(offer.label) ? offer.label : 'DeepSeek'} worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does. To write to it meanwhile, send another message to the same handle.`,
         });
       await Promise.resolve(
         base({ cancel: offer.offer_id } as Parameters<typeof base>[0], extra),
@@ -889,12 +889,12 @@ export function registerModelTool(
                       );
                     if (live.inbox.push(sentTo.task) === 'closed')
                       return unavailable(
-                        'The DeepSeek worker has already reported, so the message was not delivered. Its result arrives next; send the message again after it.',
+                        `The ${sentProvider === 'neon' ? 'Neon' : 'DeepSeek'} worker has already reported, so the message was not delivered. Its result arrives next; send the message again after it.`,
                       );
                     return answer({
                       action: 'delivered',
                       worker_handle: sentTo.handle,
-                      message: `Delivered to the DeepSeek worker ${sentTo.handle}: it reads your message at its next turn and its result will include the answer. It is the same job and budget; nothing was charged for the message.`,
+                      message: `Delivered to the ${sentProvider === 'neon' ? 'Neon' : 'DeepSeek'} worker ${sentTo.handle}: it reads your message at its next turn and its result will include the answer. It is the same job and budget; nothing was charged for the message.`,
                     });
                   }
                   try {
@@ -1310,7 +1310,7 @@ export function registerModelTool(
                       ...(activeConversation
                         ? {
                             worker_handle: activeConversation.handle,
-                            continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to DeepSeek at once, so apply the offer's parentPolicy to its text before you send it.`,
+                            continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to ${workerNameOf(job.decision)} at once, so apply the offer's parentPolicy to its text before you send it.`,
                           }
                         : {}),
                     };
@@ -1462,7 +1462,7 @@ export function registerModelTool(
                     provider === 'neon' ? neonJobLabel(job.decision) : 'DeepSeek V4.1 Flash 1017',
                   offer_id: job.id,
                   worker_handle: activeConversation.handle,
-                  instruction: BACKGROUND_STARTED,
+                  instruction: backgroundStarted(workerNameOf(job.decision)),
                 });
               })
               .catch(async () => {

@@ -147,6 +147,8 @@ it('asks about a revision with no room left, and offers it on the same worker on
     reason: expect.stringContaining('needs_approval'),
     instruction: expect.stringContaining('approve({quote: "q_'),
   });
+  // A Neon job never reads a DeepSeek name in what it asks or offers.
+  expect(JSON.stringify(asked)).not.toMatch(/DeepSeek/);
   const id = (asked as unknown as { quote: { id: string } }).quote.id;
   expect(isQuoteId(id)).toBe(true);
   const quote = (await readQuote(dir, id))!;
@@ -168,7 +170,10 @@ it('asks about a revision with no room left, and offers it on the same worker on
     worker_handle: f.conversation.handle,
     routingFeeAtomic: '0',
     label: 'Test Writer',
+    parentPolicy: expect.stringContaining('continues a Test Writer worker'),
+    instruction: expect.stringContaining('forbid this text for a Test Writer worker'),
   });
+  expect(JSON.stringify(offered)).not.toMatch(/DeepSeek/);
 });
 
 it('offers a revision the job still has room for with no question, whatever the DeepSeek setting is', async () => {

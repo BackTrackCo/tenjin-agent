@@ -113,3 +113,11 @@ export function neonJobLabel(decision: Record<string, unknown>): string {
   const terms = neonTermsSchema.safeParse(decision.neonTerms);
   return terms.success ? terms.data.label : 'Neon writer';
 }
+
+/**
+ * What a text calls the worker of a job: DeepSeek for the DeepSeek worker, the row's label for a
+ * Neon worker. A Neon job never reads a DeepSeek name in a result, a refusal or a follow-up line.
+ */
+export function workerNameOf(decision: Record<string, unknown>): string {
+  return decision.provider === 'neon' ? neonJobLabel(decision) : 'DeepSeek';
+}
