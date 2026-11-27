@@ -197,6 +197,10 @@ export class NeonRefunds {
               ended: entry.ended.filter((id) => id !== jobId),
               epoch: entry.epoch + 1,
               state: entry.state === 'withdrawal_started' ? entry.state : ('open' as const),
+              // The channel is used again: what the last refund returned is no longer its state.
+              ...(entry.state === 'withdrawal_started'
+                ? {}
+                : { refundedAtomic: undefined, transaction: undefined }),
               at: this.now(),
             },
       );
@@ -228,12 +232,14 @@ export class NeonRefunds {
               state: result.state,
               at: this.now(),
               ...(result.state === 'failed' ? { note: result.note } : { note: undefined }),
-              ...(result.state === 'refunded'
-                ? {
-                    ...(result.amountAtomic ? { refundedAtomic: result.amountAtomic } : {}),
-                    ...(result.transaction ? { transaction: result.transaction } : {}),
-                  }
-                : {}),
+              // What an earlier refund returned is not this result's: only a refund that happened now
+              // names an amount and a transaction.
+              refundedAtomic:
+                result.state === 'refunded' && result.amountAtomic
+                  ? result.amountAtomic
+                  : undefined,
+              transaction:
+                result.state === 'refunded' && result.transaction ? result.transaction : undefined,
             },
       ),
     );

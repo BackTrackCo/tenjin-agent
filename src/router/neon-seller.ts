@@ -201,31 +201,6 @@ function dollars(atomic: bigint): string {
   return '$' + cents.replace(/0+$/, '').replace(/[.]$/, '');
 }
 
-/**
- * A request body with the same size, model and output cap as `real` and none of its content: the
- * seller quotes its price from these, and learns nothing of the prompt.
- */
-export function placeholderBody(real: string): string {
-  let model: unknown;
-  let maxTokens: unknown;
-  try {
-    const parsed = JSON.parse(real) as { model?: unknown; max_tokens?: unknown };
-    model = parsed.model;
-    maxTokens = parsed.max_tokens;
-  } catch {
-    // A body that is not JSON keeps only its size.
-  }
-  const make = (filler: string) =>
-    JSON.stringify({
-      ...(typeof model === 'string' ? { model } : {}),
-      ...(typeof maxTokens === 'number' ? { max_tokens: maxTokens } : {}),
-      messages: [{ role: 'user', content: filler }],
-    });
-  const bare = Buffer.byteLength(make(''));
-  const wanted = Buffer.byteLength(real);
-  return make('x'.repeat(Math.max(0, wanted - bare)));
-}
-
 /** One answer from the seller: the reply body, the ceiling its voucher allowed, the real charge. */
 /** What a timed withdrawal needs of a funded channel, kept from the call that funded it. */
 export type ChannelConfig = {
@@ -235,6 +210,8 @@ export type ChannelConfig = {
 };
 
 export type BatchAnswer = {
+  /** The seller answered 402 to the paid request: it did not accept the payment. */
+  paymentRefused?: boolean;
   status: number;
   text: string;
   /** The amount the 402 quoted as the most this call could cost. */
@@ -409,22 +386,10 @@ export class BatchSeller {
       return undefined;
     });
     const base = this.fetcher();
-    const watched: typeof fetch = async (input, init) => {
+    const watched: typeof fetch = (input, init) => {
       // The payment wrapper calls fetch with a Request and no init: read its headers too.
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
       if (headers.has('payment-signature')) this.transmitted = true;
-      // THE UNPAID REQUEST CARRIES NO PROMPT. The seller's terms come from a request of the same
-      // size, model and output cap with filler in place of the draft; the draft goes only with a
-      // payment that has passed the person's limits, the payee check and the channel's config.
-      else if (input instanceof Request && input.method === 'POST')
-        return base(
-          new Request(input.url, {
-            method: 'POST',
-            headers: input.headers,
-            body: placeholderBody(await input.clone().text()),
-          }),
-          { ...init, signal },
-        );
       return base(input, { ...init, signal });
     };
     let response: Response;
@@ -442,13 +407,17 @@ export class BatchSeller {
       throw error;
     }
     const cost = response.headers.get('x-request-cost-atomic');
+    // A 402 to the paid request is the seller saying it did not accept the payment: nothing is
+    // owed, so the reservation is given back and the call is not counted as charged.
+    const refused = response.status === 402 && this.transmitted;
     await spend?.settle(
       cost !== null && /^\d+$/.test(cost) ? BigInt(cost) : undefined,
       ceiling ?? room,
-      this.transmitted,
+      this.transmitted && !refused,
     );
     return {
       status: response.status,
+      ...(refused ? { paymentRefused: true } : {}),
       text: await response.text(),
       ...(ceiling !== undefined ? { ceilingAtomic: ceiling } : {}),
       ...(cost !== null && /^\d+$/.test(cost) ? { costAtomic: BigInt(cost) } : {}),

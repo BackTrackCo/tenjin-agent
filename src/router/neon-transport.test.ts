@@ -276,8 +276,9 @@ it('keeps the funded channel config when the paid request fails with a 503', asy
   await expect(neon.messages(job(repo), messages, signal())).rejects.toBeInstanceOf(
     ModelCallFailed,
   );
-  // The first request, the unpaid one, carried none of the draft.
-  expect(bodies[0]).not.toContain(secret);
+  // The request that is quoted is the request that is paid: the same body both times.
+  expect(bodies[0]).toContain(secret);
+  expect(bodies[0]).toBe(bodies[1]);
   const [entry] = await new NeonRefunds({
     dataDir: data,
     payer: () => ({ refund: async () => ({}) }),
@@ -360,6 +361,15 @@ it('fits a call to the day budget again once the approved room is spent', async 
   await writeFile(path, JSON.stringify({ ...kept, approvedSpentAtomic: kept.grantedAtomic }));
   await neon.messages(j, MESSAGES, signal());
   expect(rooms[2]).toBeLessThanOrEqual(60_000n);
+});
+
+// A payee the person has not allowed is known before any request: nothing is sent to be quoted.
+it('sends nothing at all to a seller the allowlist does not name', async () => {
+  const { ctx, repo } = await fixture({ allowlistCreators: ['somebody.else'] });
+  const { transport: neon, batch } = withBatch(ctx, async () => batchAnswer());
+  const refused = await neon.messages(job(repo), MESSAGES, signal()).catch((e: unknown) => e);
+  expect((refused as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect(batch.post).not.toHaveBeenCalled();
 });
 
 it('sends the effort the door saved with the job', async () => {

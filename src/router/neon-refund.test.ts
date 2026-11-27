@@ -66,6 +66,36 @@ it('records a refund that nothing disturbed, and a retry of an open channel the 
   expect((await refunds.entries())[0]).toMatchObject({ state: 'refunded', refundedAtomic: '500' });
 });
 
+// Failure caught by the live check at ef6ae364: a refund that found nothing to take back printed the
+// amount and transaction of an EARLIER refund beside the state `empty`, so it read as money that had
+// just come back. Only a refund that happened now names an amount.
+it('names no amount and no transaction on a channel that has nothing to take back', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  let answer: () => Promise<unknown> = async () => ({
+    success: true,
+    amount: '496440',
+    transaction: '0xold',
+  });
+  const refunds = new NeonRefunds({ dataDir: dir, payer: () => ({ refund: () => answer() }) });
+  await refunds.open('job-a', TERMS);
+  await refunds.settle(['job-a'], new AbortController().signal);
+  expect((await refunds.entries())[0]).toMatchObject({
+    state: 'refunded',
+    refundedAtomic: '496440',
+    transaction: '0xold',
+  });
+  // The channel is used again, and its next end finds nothing to take back.
+  await refunds.open('job-b', TERMS);
+  answer = async () => {
+    throw new Error('Refund failed: channel has no remaining balance (balance=0)');
+  };
+  await refunds.settle(['job-b'], new AbortController().signal);
+  const [entry] = await refunds.entries();
+  expect(entry).toMatchObject({ state: 'empty' });
+  expect(entry!.refundedAtomic).toBeUndefined();
+  expect(entry!.transaction).toBeUndefined();
+});
+
 // Failure caught by review: the timed withdrawal read the channel's receiver authorizer and delay
 // from the seller's live 402, so a seller that was offline, or that had changed either, left the
 // unused deposit where it was or pointed recovery at another channel. The config is kept from the

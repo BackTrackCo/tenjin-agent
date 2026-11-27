@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 /** The seller as a stub: a 402 for the unpaid request, then a reply that names its charge. */
-function seller(cost: string | undefined, payTo = PAYEE) {
+function seller(cost: string | undefined, payTo = PAYEE, amount = '42521') {
   const paid: Headers[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const headers = new Request(input, init).headers;
@@ -45,7 +45,7 @@ function seller(cost: string | undefined, payTo = PAYEE) {
               {
                 scheme: 'batch-settlement',
                 network: 'eip155:8453',
-                amount: '42521',
+                amount,
                 asset: USDC_ADDRESS,
                 payTo,
                 maxTimeoutSeconds: 330,
@@ -352,31 +352,50 @@ it('ends a refund whose seller never answers when its signal aborts', async () =
 // terms, so a first call the person's limits then refused had already sent its draft. The unpaid
 // request now carries a placeholder of the same size and nothing of the prompt, and the draft goes
 // only with a payment that passed the limits.
-describe('what the seller sees before a payment exists', () => {
+describe('what the seller quotes and accepts', () => {
   const PROMPT = 'SECRET-DRAFT-TEXT-THAT-MUST-NOT-LEAK';
   const body = JSON.stringify({
     model: 'test/model',
     max_tokens: 1000,
     messages: [{ role: 'user', content: PROMPT }],
   });
-  /** The seller stub, recording the body of every request by whether it carried a payment. */
+  /**
+   * The seller stub, as the real one behaves (x402inference.com, read with unpaid requests): the
+   * ceiling it quotes is priced from the request's own content, and a payment is accepted only
+   * where its `accepted.amount` equals the price of the body that carries it. Any other payment
+   * is answered 402 "payment was not accepted", as x402's server does (`accepted` is compared with
+   * the offer field by field, the amount included).
+   */
+  const priceOf = (text: string) =>
+    String(
+      40_000 +
+        Buffer.byteLength(text) +
+        // Content counts, not only size: a body of filler is never priced like the draft.
+        [...text].reduce((sum, char) => sum + (char.charCodeAt(0) % 7), 0),
+    );
   function recording(paidStatus = 200, hold?: Promise<void>) {
     const unpaid: string[] = [];
     const paid: string[] = [];
-    const inner = seller('7321');
     const fetchImpl: typeof fetch = async (input, init) => {
       const request = input instanceof Request ? input.clone() : new Request(input, init);
       const text = await request.clone().text();
-      if (request.headers.has('payment-signature')) {
+      const signature = request.headers.get('payment-signature');
+      if (signature) {
         paid.push(text);
         await hold;
+        const accepted = decodePaymentSignatureHeader(signature).accepted as { amount: string };
+        if (accepted.amount !== priceOf(text))
+          return new Response(
+            JSON.stringify({ error: { message: 'payment was not accepted: Payment required.' } }),
+            { status: 402 },
+          );
         return new Response(paidStatus === 200 ? '{"choices":[]}' : 'down', {
           status: paidStatus,
           headers: paidStatus === 200 ? { 'x-request-cost-atomic': '7321' } : {},
         });
       }
       unpaid.push(text);
-      return inner.fetchImpl(input, init);
+      return seller('7321', PAYEE, priceOf(text)).fetchImpl(input, init);
     };
     return { fetchImpl, unpaid, paid };
   }
@@ -385,7 +404,11 @@ describe('what the seller sees before a payment exists', () => {
     return privateKeyToAccount(generatePrivateKey());
   };
 
-  it('sends no prompt in the unpaid request, and the whole draft with the payment', async () => {
+  // Failure caught by the live check at ef6ae364: the unpaid request carried filler of the draft's
+  // size, so the seller quoted the filler's price. A payment is accepted only for the price of the
+  // body that carries it, so the real draft was refused (402) and the call failed with its voucher
+  // sent. The request that is quoted is the request that is paid.
+  it('quotes the real request and pays for it, so the seller accepts the payment', async () => {
     const account = await payer();
     const { fetchImpl, unpaid, paid } = recording();
     const batch = new BatchSeller({
@@ -395,18 +418,16 @@ describe('what the seller sees before a payment exists', () => {
       admit: async () => undefined,
       fetchImpl,
     });
-    await batch.post(body, new AbortController().signal, 1_000_000n);
-    expect(unpaid).toHaveLength(1);
-    expect(unpaid[0]).not.toContain(PROMPT);
-    // Same size and same model and cap, so the seller quotes what the real request is quoted.
-    expect(Buffer.byteLength(unpaid[0]!)).toBe(Buffer.byteLength(body));
-    expect(JSON.parse(unpaid[0]!)).toMatchObject({ model: 'test/model', max_tokens: 1000 });
+    const answer = await batch.post(body, new AbortController().signal, 1_000_000n);
+    expect(answer.status).toBe(200);
+    expect(unpaid).toEqual([body]);
     expect(paid).toEqual([body]);
+    expect(answer.ceilingAtomic).toBe(BigInt(priceOf(body)));
   });
 
-  it('sends none of the prompt at all when the limits refuse the payment', async () => {
+  it('sends no payment where the limits refuse it, and releases what it held', async () => {
     const account = await payer();
-    const { fetchImpl, unpaid, paid } = recording();
+    const { fetchImpl, paid } = recording();
     const authorizer = createLocalSpendAuthorizer({
       dir,
       policy: {
@@ -425,8 +446,43 @@ describe('what the seller sees before a payment exists', () => {
     });
     await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toThrow();
     expect(paid).toHaveLength(0);
-    expect(unpaid.join('')).not.toContain(PROMPT);
     expect(batch.transmitted).toBe(false);
+    expect(
+      spentOf(
+        (await readSpendSummary(dir)) ?? ({ committedAtomic: '0', reservations: [] } as never),
+      ),
+    ).toBe(0n);
+  });
+
+  // A 402 to the paid request is the seller refusing the payment: nothing is owed, so nothing
+  // stays counted against the day.
+  it('gives the reservation back when the seller answers 402 to the paid request', async () => {
+    const account = await payer();
+    const { fetchImpl } = recording();
+    // A seller that quotes one price and wants another for the paid body.
+    const moving: typeof fetch = async (input, init) => {
+      const request = input instanceof Request ? input.clone() : new Request(input, init);
+      if (request.headers.has('payment-signature'))
+        return new Response('{"error":{"message":"payment was not accepted"}}', { status: 402 });
+      return fetchImpl(input, init);
+    };
+    const authorizer = createLocalSpendAuthorizer({
+      dir,
+      policy: { maxAutoSpendAtomic: 1_000_000n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    });
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      authorizer,
+      fetchImpl: moving,
+    });
+    const answer = await batch.post(body, new AbortController().signal, 1_000_000n);
+    expect(answer).toMatchObject({ status: 402, paymentRefused: true });
+    const kept = (await readSpendSummary(dir))!;
+    expect(spentOf(kept)).toBe(0n);
+    expect(kept.reservations).toEqual([]);
   });
 
   // Failure caught by review (money): an approval made every later call of the job pay past the
@@ -434,7 +490,7 @@ describe('what the seller sees before a payment exists', () => {
   // day's budget as an approved payment (the allowlist still applies), spent once; the next call goes
   // back to the normal checks, and concurrent calls cannot spend the same approval twice.
   describe('a payment the person approved past a limit', () => {
-    const CEILING = 42_521n; // what the seller stub's 402 asks for
+    const CEILING = BigInt(priceOf(body)); // what the seller stub's 402 asks for
     let account: Awaited<ReturnType<typeof payer>>;
     function setup(budget: bigint | null, approved = 1_000_000n) {
       const left = { value: approved };
@@ -592,7 +648,7 @@ describe('what the seller sees before a payment exists', () => {
     );
   });
 
-  it('sends none of the prompt when the seller names another payee than the row', async () => {
+  it('signs and pays nothing when the seller names another payee than the row', async () => {
     const account = await payer();
     const other = seller('7321', '0x00000000000000000000000000000000DeaDBeef');
     const unpaid: string[] = [];
@@ -611,7 +667,7 @@ describe('what the seller sees before a payment exists', () => {
     await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toBeInstanceOf(
       PayeeMismatch,
     );
-    expect(unpaid.join('')).not.toContain(PROMPT);
+    expect(batch.transmitted).toBe(false);
   });
 
   // Failure caught by review: the channel config was kept only after a paid reply succeeded, so a

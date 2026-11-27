@@ -551,6 +551,21 @@ export class NeonTransport {
     const body = JSON.stringify(chat);
     const n = record.calls.length + 1;
     const started = this.now();
+    // BEFORE ANY REQUEST: the call as the price rule sizes it, met against the allowlist. The
+    // seller's exact ceiling is known only from the 402 of this very request (a payment is
+    // accepted only for the price of the body that carries it), so the request is sent to be
+    // quoted, and nothing is signed until the limits have passed that ceiling. What is known
+    // here is refused here, with nothing sent.
+    const pre = await admitPlan(
+      [
+        {
+          amountAtomic: neonPeakQuoteAtomic(terms, Buffer.byteLength(body), maxTokens),
+          creator: neonHost(terms),
+        },
+      ],
+      { dataDir, policy: settings.policy, ...(this.options.now ? { now: this.options.now } : {}) },
+    );
+    if ('refused' in pre) throw nothingSigned(pre.refused.message, { cause: 'budget' });
     // The channel is on record before any money moves, with the terms this job was paid under.
     await this.refunds.open(job.id, terms);
     // A deposit meets the person's limits like any payment, and is sized to what they admit.
@@ -597,6 +612,18 @@ export class NeonTransport {
         room,
         signal,
       );
+    }
+    if (answer.status < 200 || answer.status >= 300) {
+      // What the seller said, in a few words, so a failed call is never a mystery again.
+      const said = answer.text.replace(/\s+/g, ' ').slice(0, 200);
+      await this.note(job, `call ${n}: the seller answered ${answer.status}: ${said}`);
+      // A refused payment signed nothing the seller kept: nothing was charged, and the worker may
+      // try again.
+      if (answer.paymentRefused)
+        throw new ModelCallFailed(
+          `The seller did not accept the payment (it answered ${answer.status}). Nothing was charged.`,
+          { cause: 'payment_refused', status: answer.status, uncharged: true },
+        );
     }
     if (answer.status < 200 || answer.status >= 300)
       throw await this.failedCall(
