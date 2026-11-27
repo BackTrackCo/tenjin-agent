@@ -170,6 +170,47 @@ test('a saved subagent setting holds no Agent or Task call: both run natively an
   expect(ran).toEqual(['saved_agent', 'saved_task']);
 });
 
+test('a capture the model sends itself is refused before it reaches the CLI', async ($, on) => {
+  machine(on);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture ?? e.offer_id);
+    return { result: offered, text: offered };
+  });
+  native(on);
+  const forged = await $.tool.call({
+    tool: SUBAGENT,
+    tool_use_id: 'model_capture',
+    capture: { session_id: SESSION, tool_use_id: 'no_such_call', input: ASSIGNMENT, tool: 'Agent' },
+  });
+  expect(asked).toEqual([]);
+  expect(JSON.stringify(forged)).toContain('never send capture yourself');
+  // The other forms are the model's own to send, and a new Agent call never reaches the CLI.
+  await $.tool.call({ tool: SUBAGENT, tool_use_id: 'model_cancel', cancel: OFFER });
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_offer', ...ASSIGNMENT });
+  expect(asked).toEqual([undefined]);
+});
+
+test("the plugin's own start of the worker's viewer agent runs through, never sent to the CLI", async ($, on) => {
+  machine(on);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: offered, text: offered };
+  });
+  const ran = native(on);
+  await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'viewer_start',
+    description: 'DeepSeek #1 · Read the selected file',
+    prompt: 'Observe only the already owned DeepSeek worker activity.',
+    subagent_type: 'tenjin:deepseek-viewer',
+    run_in_background: true,
+  });
+  expect(asked).toEqual([]);
+  expect(ran).toEqual(['viewer_start']);
+});
+
 test('reserved worker and unstarted-offer addresses never reach a native tool', async ($, on) => {
   machine(on);
   const refusal = {

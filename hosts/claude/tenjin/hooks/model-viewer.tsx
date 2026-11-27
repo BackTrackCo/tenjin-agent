@@ -8,7 +8,7 @@ import type {
 import { update } from 'claude-code';
 import {
   asRecord as record,
-  subagentsEnabled as enabled,
+  sessionHasJob as hasJob,
   HELD_NOT_STARTED,
   HELD_WITH_OFFER,
   tenjinDataDir,
@@ -468,7 +468,7 @@ export async function rememberModelOffer(
   nativeInput: Json,
 ): Promise<void> {
   try {
-    if (!UUID.test(offerId) || !(await enabled($))) return;
+    if (!UUID.test(offerId) || !(await hasJob($, offerId))) return;
     const profile = nativeInput.subagent_type ?? 'general-purpose';
     if (!profileOf(profile)) return;
     const priorSerial = await serial($);
@@ -1746,7 +1746,7 @@ async function watchAccept(
       liveWorkers.delete(offerId);
     }
   };
-  if (await enabled($).catch(() => false)) {
+  if (await hasJob($, offerId).catch(() => false)) {
     // THE LIVE ROW comes first and stands alone: it reads the CLI's own activity
     // file, so it needs neither the viewer, nor its bookkeeping below, nor a
     // second call on this connection. Followed here before its record is written.
@@ -1878,7 +1878,8 @@ export function registerModelViewer(on: On): void {
     // A module the host keeps across `/clear` serves the next session too.
     sessionEnding = false;
     try {
-      if (await enabled($)) await registerType($);
+      // A session that kept viewer records already has a job; a first job registers the type itself.
+      if (((await $.state.get(STATE)).value?.records.length ?? 0) > 0) await registerType($);
     } catch {
       /* Optional viewer. */
     }
@@ -2136,7 +2137,11 @@ export function registerModelViewer(on: On): void {
       marked = true;
       guardViewer(e.agentId, e.turnId);
       const owned = await identify($, e.agentId, e.turnId);
-      if (!owned || !(await enabled($)) || (owned.item.turnId && owned.item.turnId !== e.turnId))
+      if (
+        !owned ||
+        !(await hasJob($, owned.item.offerId)) ||
+        (owned.item.turnId && owned.item.turnId !== e.turnId)
+      )
         return yield* finish(
           e,
           'DeepSeek activity unavailable. Continue through the owned worker handle.',
