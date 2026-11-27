@@ -260,6 +260,8 @@ export type BatchSellerOptions = {
    * nothing is signed.
    */
   onChannel?: (channel: ChannelConfig) => Promise<void>;
+  /** The channel's salt, part of its identity: none is the SDK's own, and a retired channel's successor has its own. */
+  salt?: Hex;
   /** What the person approved past their per-call limit, if anything is left of it. */
   approval?: PaymentApproval;
   fetchImpl?: typeof fetch;
@@ -323,6 +325,7 @@ export class BatchSeller {
     );
     const payer = signer.address.toLowerCase();
     const scheme = new BatchSettlementEvmScheme(clientSigner, {
+      ...(this.options.salt ? { salt: this.options.salt } : {}),
       storage: new FileClientChannelStorage({
         directory: join(channelDirectory(this.options.dataDir, this.options.terms), payer),
       }),

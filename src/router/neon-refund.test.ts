@@ -96,6 +96,45 @@ it('names no amount and no transaction on a channel that has nothing to take bac
   expect(entry!.transaction).toBeUndefined();
 });
 
+// A voucher has no expiry and no nonce, and the highest one above what was claimed is claimable: a
+// channel a voucher left unsettled is never deposited into again. It stays on record, and the refund
+// reaches it with the salt it was opened with.
+it('retires a channel and opens the next with a salt of its own, and refunds both', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const refunded: Array<string | undefined> = [];
+  const refunds = new NeonRefunds({
+    dataDir: dir,
+    payer: (_terms, salt) => ({
+      refund: async () => {
+        refunded.push(salt);
+        return { success: true, amount: '1000' };
+      },
+    }),
+  });
+  expect(await refunds.open('job-a', TERMS)).toEqual({});
+  const config = {
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  };
+  await refunds.saveChannel(TERMS, config);
+  await refunds.retire(TERMS);
+  const next = await refunds.open('job-a', TERMS);
+  expect(next.salt).toMatch(/^0x[0-9a-f]{64}$/);
+  await refunds.saveChannel(TERMS, config);
+  const entries = await refunds.entries();
+  expect(entries).toHaveLength(2);
+  const old = entries.find((entry) => entry.retired)!;
+  expect(old).toMatchObject({ jobIds: ['job-a'], channel: config });
+  expect(old.salt).toBeUndefined();
+  expect(entries.find((entry) => !entry.retired)!.channel).toEqual({ ...config, salt: next.salt });
+  // The same channel keeps its salt for the jobs that follow.
+  expect((await refunds.open('job-b', TERMS)).salt).toBe(next.salt);
+  // Both are refunded where the jobs end, each with its own salt.
+  await refunds.settle(['job-a', 'job-b'], new AbortController().signal);
+  expect(refunded.sort()).toEqual([undefined, next.salt].sort());
+});
+
 // Failure caught by review: the timed withdrawal read the channel's receiver authorizer and delay
 // from the seller's live 402, so a seller that was offline, or that had changed either, left the
 // unused deposit where it was or pointed recovery at another channel. The config is kept from the

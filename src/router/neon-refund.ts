@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { modelLock } from './model-job';
@@ -15,6 +16,17 @@ import { readJsonFile, writePrivate } from './store-files';
 const entrySchema = z.object({
   /** The channel's key: the seller's origin and payee. The payer is the wallet. */
   key: z.string(),
+  /**
+   * The channel's salt, which is part of its identity. Absent is the SDK's own (zero) salt. A
+   * channel RETIRED because a voucher left it unsettled is never deposited into again: the next
+   * channel of the same payer and seller has a salt of its own, so that voucher has no funds to
+   * reach there. The retired entry stays, for a late settlement, the refund and the withdrawal.
+   */
+  salt: z
+    .string()
+    .regex(/^0x[0-9a-f]{64}$/)
+    .optional(),
+  retired: z.boolean().optional(),
   terms: neonTermsSchema,
   jobIds: z.array(z.string()).max(200),
   /**
@@ -32,6 +44,7 @@ const entrySchema = z.object({
       payer: z.string(),
       receiverAuthorizer: z.string(),
       withdrawDelay: z.number().int().min(1),
+      salt: z.string().optional(),
     })
     .optional(),
   /** The last refusal or failure, in words, for the person. */
@@ -136,7 +149,7 @@ export interface WithdrawChain {
 export type NeonRefundsOptions = {
   dataDir: string;
   /** The payer of one seller's saved terms. It deposits nothing. */
-  payer: (terms: NeonTerms) => { refund(signal: AbortSignal): Promise<unknown> };
+  payer: (terms: NeonTerms, salt?: string) => { refund(signal: AbortSignal): Promise<unknown> };
   /**
    * Whether a job's runner is alive (the job store's runner lock). A job with no live runner
    * never holds a channel back, so a crashed job cannot block a refund for ever. Where this
@@ -168,12 +181,21 @@ export class NeonRefunds {
     });
   }
 
-  /** A job paid on this channel: it is on record before any money moves, under the job's terms. */
-  async open(jobId: string, terms: NeonTerms): Promise<void> {
+  /**
+   * A job paid on this channel: it is on record before any money moves, under the job's terms.
+   * It names the channel's salt: none for the first channel of a payer and seller, and a salt of
+   * its own for one that follows a retired channel.
+   */
+  async open(jobId: string, terms: NeonTerms): Promise<{ salt?: string }> {
     const key = channelKey(terms);
+    let salt: string | undefined;
     await this.change((channels) => {
       const known = channels.find((entry) => entry.key === key);
-      if (!known)
+      if (!known) {
+        const followsRetired = channels.some(
+          (entry) => entry.retired && entry.key.startsWith(`${key}.`),
+        );
+        salt = followsRetired ? `0x${randomBytes(32).toString('hex')}` : undefined;
         return [
           ...channels,
           {
@@ -184,8 +206,11 @@ export class NeonRefunds {
             epoch: 1,
             state: 'open' as const,
             at: this.now(),
+            ...(salt ? { salt } : {}),
           },
         ];
+      }
+      salt = known.salt;
       return channels.map((entry) =>
         entry.key !== key
           ? entry
@@ -205,6 +230,27 @@ export class NeonRefunds {
             },
       );
     });
+    return salt === undefined ? {} : { salt };
+  }
+
+  /**
+   * RETIRES THE CHANNEL A VOUCHER LEFT UNSETTLED. A voucher is a claim on the channel with no
+   * expiry and no nonce: any signed voucher whose amount is above what was claimed and within
+   * the channel's balance can be claimed, the highest first, and a later voucher with a lower
+   * amount does not void it. A deposit into the same channel would put funds in its reach, so
+   * the channel is never deposited into again: its entry is renamed and kept (its jobs, its
+   * saved config and salt, its state), and the next call opens a channel with a salt of its own.
+   * The refund and the timed withdrawal still reach the retired channel.
+   */
+  async retire(terms: NeonTerms): Promise<void> {
+    const key = channelKey(terms);
+    await this.change((channels) =>
+      channels.map((entry) =>
+        entry.key !== key
+          ? entry
+          : { ...entry, key: `${key}.${this.now().toString(36)}`, retired: true, at: this.now() },
+      ),
+    );
   }
 
   /**
@@ -215,7 +261,9 @@ export class NeonRefunds {
     const key = channelKey(terms);
     await this.change((channels) =>
       channels.map((entry) =>
-        entry.key === key && entry.channel === undefined ? { ...entry, channel } : entry,
+        entry.key === key && entry.channel === undefined
+          ? { ...entry, channel: entry.salt ? { ...channel, salt: entry.salt } : channel }
+          : entry,
       ),
     );
   }
@@ -282,7 +330,7 @@ export class NeonRefunds {
     for (const entry of due)
       await this.record(
         entry.key,
-        await cooperativeRefund(this.options.payer(entry.terms), signal),
+        await cooperativeRefund(this.options.payer(entry.terms, entry.salt), signal),
         entry.epoch,
       );
     return this.entries();
@@ -326,7 +374,7 @@ export class NeonRefunds {
         continue;
       }
       if (entry.state !== 'withdrawal_started') {
-        const result = await cooperativeRefund(this.options.payer(entry.terms));
+        const result = await cooperativeRefund(this.options.payer(entry.terms, entry.salt));
         await this.record(entry.key, result, entry.epoch);
         if (result.state !== 'failed' || !chain) continue;
       }

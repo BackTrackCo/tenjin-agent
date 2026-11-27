@@ -96,7 +96,8 @@ export type WithdrawDeps = {
  */
 export async function channelConfigOf(
   terms: NeonTerms,
-  saved: { payer: string; receiverAuthorizer: string; withdrawDelay: number } | undefined,
+  saved:
+    { payer: string; receiverAuthorizer: string; withdrawDelay: number; salt?: string } | undefined,
   deps: WithdrawDeps,
 ) {
   const wallet = getAddress(deps.signer.address);
@@ -134,7 +135,8 @@ export async function channelConfigOf(
     receiverAuthorizer: getAddress(receiverAuthorizer),
     token: getAddress(terms.asset),
     withdrawDelay,
-    salt: SALT,
+    // A channel opened after another was retired has its own salt; the first one has the SDK's.
+    salt: (saved?.salt as Hex | undefined) ?? SALT,
   };
   return { config, id: computeChannelId(config, terms.network) };
 }

@@ -1,5 +1,6 @@
 import type { ChainRead } from './routing-payer';
 import { mkdir } from 'node:fs/promises';
+import type { Hex } from 'viem';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { CommandContext } from '../context';
@@ -15,6 +16,7 @@ import { appendPaidRecord, recordedSent } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
 import {
   BatchSeller,
+  channelKey,
   type ChannelConfig,
   type PaymentApproval,
   type SignedDeposit,
@@ -383,7 +385,8 @@ export class NeonTransport {
   constructor(private options: NeonTransportOptions) {
     this.refunds = new NeonRefunds({
       dataDir: options.dataDir,
-      payer: (terms) => this.batchPayer(terms, async () => refusedDeposit()),
+      payer: (terms, salt) =>
+        this.batchPayer(terms, async () => refusedDeposit(), undefined, undefined, undefined, salt),
       live:
         options.liveJob ??
         ((jobId) => (this.store ??= new ModelJobStore(options.dataDir)).runnerLive(jobId)),
@@ -489,6 +492,15 @@ export class NeonTransport {
     return inOrder(job.id, () => this.send(job, messages, signal, beforeSend));
   }
 
+  /** Whether any of these jobs sent a voucher whose charge was never settled. */
+  private async leftUnsettled(jobIds: readonly string[]): Promise<boolean> {
+    for (const id of jobIds) {
+      const record = await readNeonRecord(this.options.dataDir, id);
+      if (record?.calls.some((call) => call.settlement === 'unknown')) return true;
+    }
+    return false;
+  }
+
   /** What a call that did not fit needed, measured from its real request. */
   private async keepNeed(job: ModelJob, needAtomic: bigint) {
     const path = neonRecordPath(this.options.dataDir, job.id);
@@ -573,7 +585,14 @@ export class NeonTransport {
     );
     if ('refused' in pre) throw nothingSigned(pre.refused.message, { cause: 'budget' });
     // The channel is on record before any money moves, with the terms this job was paid under.
-    await this.refunds.open(job.id, terms);
+    // A channel an earlier call left a voucher unsettled on (this build retires it at the failure;
+    // a record an older build left is found here) is never deposited into again.
+    const active = (await this.refunds.entries()).find(
+      (entry) => entry.key === channelKey(terms) && !entry.retired,
+    );
+    if (active && (await this.leftUnsettled(active.jobIds.slice(-50))))
+      await this.refunds.retire(terms);
+    const { salt } = await this.refunds.open(job.id, terms);
     // A deposit meets the person's limits like any payment, and is sized to what they admit.
     const batch = this.batchPayer(
       terms,
@@ -599,6 +618,7 @@ export class NeonTransport {
       // The channel's own config is kept BEFORE the first payment leaves, so a call that was
       // funded and then failed still leaves what a withdrawal needs without asking the seller.
       (channel) => this.refunds.saveChannel(terms, channel),
+      salt,
     );
     let answer;
     try {
@@ -659,6 +679,8 @@ export class NeonTransport {
     }
     // A seller that names the real charge is settled at it; else the call is at its ceiling.
     const settled = answer.costAtomic !== undefined;
+    // A seller that named no charge leaves its voucher unsettled: the channel is retired.
+    if (!settled) await this.refunds.retire(terms).catch(() => undefined);
     if (process.env[NEON_CAPTURE_ENV] === '1')
       await this.capture(job, n, capturedRequest(chat), answer.text).catch(() => undefined);
     // The funded channel's own config is kept, so a withdrawal never has to ask the seller.
@@ -722,6 +744,7 @@ export class NeonTransport {
     requestKey = `neon:${Date.now()}`,
     approval?: PaymentApproval,
     onChannel?: (channel: ChannelConfig) => Promise<void>,
+    salt?: string,
   ): BatchLike {
     if (this.options.batch) return this.options.batch(terms, admit);
     return new BatchSeller({
@@ -733,6 +756,7 @@ export class NeonTransport {
       requestKey,
       ...(approval ? { approval } : {}),
       ...(onChannel ? { onChannel } : {}),
+      ...(salt ? { salt: salt as Hex } : {}),
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
       ...(this.options.destination ? { destination: this.options.destination } : {}),
@@ -789,6 +813,8 @@ export class NeonTransport {
     // authorization that never was releases this amount. Without one (the voucher spent a channel
     // that was already funded) nothing can prove it, and it stays counted until the window rolls.
     const savedTerms = termsOfJob(job);
+    // A voucher left unsettled: the channel is never deposited into again.
+    if (savedTerms) await this.refunds.retire(savedTerms).catch(() => undefined);
     if (signed?.onlyThroughDeposit && savedTerms)
       await appendPaidRecord(this.options.dataDir, {
         version: 1,

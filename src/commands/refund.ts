@@ -1,3 +1,4 @@
+import type { Hex } from 'viem';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
@@ -50,10 +51,11 @@ export async function runRefund(
       dataDir: ctx.dataDir,
       // A channel a Neon job in another session still pays from is left alone.
       live: (jobId) => new ModelJobStore(ctx.dataDir).runnerLive(jobId),
-      payer: (terms) =>
+      payer: (terms, salt) =>
         new BatchSeller({
           dataDir: ctx.dataDir,
           terms,
+          ...(salt ? { salt: salt as Hex } : {}),
           provider,
           admit: async () => {
             throw new CliError('POLICY_REFUSED', 'A refund deposits nothing.');
