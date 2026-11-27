@@ -19,7 +19,6 @@ import { addressQrLines, textQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { underAgentHarness } from '../lib/session';
-import { SUGGESTED_FUND_USD } from '../router/fee';
 import {
   dollars,
   forgetLink,
@@ -282,16 +281,20 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     const browser = browserAvailable(env, opts.platform ?? process.platform);
     const opened = willOpen && browser ? await (opts.openUrl ?? openInBrowser)(issued.url) : false;
     if (!human) return opened;
+    // The Tenjin fund page also takes a code; a hosted Coinbase checkout only a payment.
+    const label = issued.hosted ? 'Checkout' : 'Fund page';
+    const indent = ' '.repeat(label.length + 4);
+    const toDo = issued.hosted ? 'to pay' : 'to add funds';
     if (onItsWay !== undefined) {
       say();
       say('  A payment is already on its way.');
       say(`  ${dim(issued.url)}`);
     } else if (opened) {
-      say('  Checkout  opened in your browser');
-      say(`            ${dim(issued.url)}`);
+      say(`  ${label}  opened in your browser`);
+      say(`${indent}${dim(issued.url)}`);
     } else if (!willOpen) {
-      say('  Checkout  open this link to pay:');
-      say(`            ${issued.url}`);
+      say(`  ${label}  open this link ${toDo}:`);
+      say(`${indent}${issued.url}`);
     } else {
       // No browser here (SSH, no display) or it would not open: a phone
       // camera opens the same page, the same flow.
@@ -300,16 +303,16 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       if (qr.length > 0) {
         say(
           browser
-            ? "  Couldn't open a browser. Scan to pay on your phone:"
-            : '  No browser on this machine. Scan to pay on your phone:',
+            ? `  Couldn't open a browser. Scan ${toDo} on your phone:`
+            : `  No browser on this machine. Scan ${toDo} on your phone:`,
         );
         for (const line of qr) say(`  ${line}`);
         say(`  or open  ${issued.url}`);
       } else {
         say(
           browser
-            ? "  Couldn't open a browser. Open this link to pay:"
-            : '  No browser on this machine. Open this link to pay:',
+            ? `  Couldn't open a browser. Open this link ${toDo}:`
+            : `  No browser on this machine. Open this link ${toDo}:`,
         );
         say(`  ${issued.url}`);
       }
@@ -346,11 +349,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
         // AN EXPIRED LINK, at a terminal: say whether money moved, then offer
         // a fresh link. Nothing was charged on it, unless the page could not
         // report (no status), where the payment may still be landing.
-        live.warn(
-          end.statusKnown
-            ? 'The checkout link expired. Nothing was charged.'
-            : 'The checkout link expired.',
-        );
+        live.warn(end.statusKnown ? 'The link expired. Nothing was charged.' : 'The link expired.');
         if (!end.statusKnown) say('    If you paid, it still lands; `tenjin balance` shows it.');
         const ask = opts.readKey ?? (process.stdin.isTTY ? readKey : undefined);
         if (ask === undefined) break;
@@ -372,7 +371,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   if (arrived !== undefined) await forgetLink(ctx.dataDir);
   const status: LinkStatus | undefined = end?.status ?? onItsWay;
   const balanceAtomic = arrived?.balance ?? startBalance;
-  const amount = preset !== undefined ? String(preset) : SUGGESTED_FUND_USD;
   return {
     data: {
       address,
@@ -392,7 +390,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
           ? 'Funds confirmed. Continue the original task; funding does not require another restart.'
           : agentNextStep({
               opened,
-              amount,
+              hosted: link.hosted,
               inFlight: onItsWay !== undefined,
               ...(need ? { need } : {}),
             }),
@@ -443,7 +441,7 @@ function humanEnding(
  */
 function agentNextStep(o: {
   opened: boolean;
-  amount: string;
+  hosted: boolean;
   inFlight: boolean;
   need?: FundNeed;
 }): string {
@@ -455,11 +453,13 @@ function agentNextStep(o: {
   const what =
     o.need !== undefined
       ? `what the money is for (${o.need.label}, $${o.need.priceUsd} a call)`
-      : 'what the money is for (the paid tool you wanted and its price, if there is one)';
-  const where = o.opened
-    ? `that checkout is open in their browser with $${o.amount} filled in`
-    : `that checkout is ready with $${o.amount} filled in, and show checkoutUrl as a clickable link`;
-  return `Tell the person in one or two sentences ${what} and ${where}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
+      : 'what the money is for (the paid tool and its price, if any)';
+  // Only the Tenjin fund page takes a code; a hosted Coinbase checkout does not.
+  const where = o.hosted
+    ? `that checkout is ${o.opened ? 'open in their browser' : 'ready'}`
+    : `that the fund page${o.opened ? ' in their browser' : ''} takes a payment or a code (under Have a code?)`;
+  const link = o.opened ? '' : ', and show checkoutUrl as a clickable link';
+  return `Tell the person in one or two sentences ${what} and ${where}${link}. Then ${wait} Never ask the person to type "done" or to tell you when they have paid. Ask about adding funds at most once per session: if they decline, carry on without paid tools and do not offer again. Do not open another checkout unless they ask for a new link.`;
 }
 
 /**

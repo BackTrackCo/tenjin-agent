@@ -59,19 +59,20 @@ export async function fundStep(
       options: [
         {
           id: 'fund',
-          label: `Add $${SUGGESTED_FUND_USD}`,
+          label: FUND_LABEL,
           recommended: true,
           command: `${command} --source install`,
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this once, after the limits question, with both options: Add $${SUGGESTED_FUND_USD} opens checkout in their browser; with Not now, you ask when a task first needs a paid tool. On Add $${SUGGESTED_FUND_USD}, run its command yourself: opening checkout moves no money, and the person confirms the payment in their browser. Then follow that command's nextStep: run \`tenjin balance --wait\` in the background and carry on when it exits. Never ask the person to type "done". On Not now, continue activation and their task with the tools available, and do not offer funding again unless they ask.`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this once, after the limits question, with both options: Add funds opens a page in their browser; with Not now, you ask when a task first needs a paid tool. On Add funds, run its command yourself: opening it moves no money, and the person confirms any payment in their browser. Then follow that command's nextStep: run \`tenjin balance --wait\` in the background and carry on when it exits. Never ask the person to type "done". On Not now, continue activation and their task with the tools available, and do not offer funding again unless they ask.`,
     },
   };
 }
 
-/** The money question, in a terminal and for an agent alike. */
-export const FUND_QUESTION = `Add $${SUGGESTED_FUND_USD} to your balance now?`;
+/** The money question, in a terminal and for an agent alike. No amount: a code may pay instead. */
+export const FUND_QUESTION = 'Add funds to your balance now?';
+const FUND_LABEL = 'Add funds: pay or use a code';
 
 async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> {
   const { getUsdcBalance } = await import('../lib/usdc');
@@ -107,9 +108,9 @@ function pendingFund(data: unknown): FundStep | undefined {
 /**
  * THE MONEY QUESTION IN A TERMINAL, after the receipt and before its tail:
  * the receipt is visible before checkout and stays true if checkout fails.
- * "Add $5" opens checkout and watches the payment land, with the live
- * status `tenjin fund` draws; the balance, the limits, the next step and the
- * disclosure close the output either way.
+ * "Add funds" opens the fund page and watches a payment or a code land, with
+ * the live status `tenjin fund` draws; the balance, the limits, the next step
+ * and the disclosure close the output either way.
  */
 export async function finishTerminalFunding(
   result: CommandResult,
@@ -132,11 +133,7 @@ export async function finishTerminalFunding(
       selectOne({
         message: step.question,
         choices: [
-          {
-            value: 'fund',
-            label: `Add $${SUGGESTED_FUND_USD}`,
-            hint: 'opens checkout in your browser',
-          },
+          { value: 'fund', label: FUND_LABEL, hint: 'opens in your browser' },
           {
             value: 'later',
             label: 'Not now',
@@ -150,6 +147,7 @@ export async function finishTerminalFunding(
   try {
     const run = opts.fund ?? (await import('../commands/fund')).runFund;
     const funded = await run(ctx, {
+      // The card form's suggestion; a code needs none.
       amountUsd: String(SUGGESTED_FUND_USD),
       source: 'install',
       header: false,

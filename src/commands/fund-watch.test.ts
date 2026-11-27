@@ -62,6 +62,11 @@ describe('the fund status a link reports', () => {
     expect(parseStatus({ url: 'https://tenjin.sh/fund' })).toBeNull();
   });
 
+  it('keeps `via` only for a code', () => {
+    expect(parseStatus({ state: 'paying', via: 'code' })).toEqual({ state: 'paying', via: 'code' });
+    expect(parseStatus({ state: 'paying', via: 'card' })).toEqual({ state: 'paying' });
+  });
+
   it('takes the token from a Tenjin /fund link only', () => {
     const t = token(1);
     expect(tokenOf(`https://tenjin.sh/fund?amount=5#${t}`)).toBe(t);
@@ -126,10 +131,137 @@ describe('watching a link until the money lands', () => {
     expect(end).toMatchObject({ kind: 'arrived', added: 5_000_000n, status: { state: 'paid' } });
     expect(said).toEqual([
       '… Waiting for the page to open…',
-      '✓ Checkout open',
+      '✓ Fund page open',
+      '… Waiting for a payment or a code…',
       '… Waiting for your payment…',
       '✓ Payment received $5.20 charged',
       '… Adding to your balance…',
+      '✓ Added to your balance +$5.00',
+    ]);
+  });
+
+  /** Watch a fund-page link whose status route answers `statuses` in turn. */
+  async function watchCode(
+    statuses: [number, unknown][],
+    balance: (read: number) => bigint,
+    expiresAt = clock + 600_000,
+  ) {
+    const { fetchImpl } = statusServer(statuses);
+    const { live, said } = recorder();
+    let reads = 0;
+    const end = await watchFunding({
+      startBalance: 0n,
+      readBalance: async () => balance(++reads),
+      token: token(expiresAt),
+      expiresAt,
+      deadline: expiresAt + STATUS_GRACE_MS,
+      view: 'checkout',
+      live,
+      fetchImpl,
+      now,
+      sleep,
+    });
+    return { end, said };
+  }
+
+  it('says a code is being redeemed, waits past the link while it lands, and names it on arrival', async () => {
+    const expiresAt = clock + 4_000;
+    const { end, said } = await watchCode(
+      [
+        [200, { state: 'opened', updatedAt: 'a' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'b' }],
+      ],
+      (read) => (read >= 5 ? 1_000_000n : 0n),
+      expiresAt,
+    );
+    expect(end).toMatchObject({ kind: 'arrived', added: 1_000_000n });
+    expect(clock).toBeGreaterThan(expiresAt);
+    expect(said).toEqual([
+      '✓ Fund page open',
+      '… Waiting for a payment or a code…',
+      '… Redeeming your code…',
+      '✓ Code accepted +$1.00',
+    ]);
+  });
+
+  // The fund page says why a code was refused; the terminal only goes back to waiting.
+  it('prints no line for a refused code, and a card payment still lands', async () => {
+    const { end, said } = await watchCode(
+      [
+        [200, { state: 'opened', updatedAt: 'a' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'b' }],
+        [200, { state: 'opened', updatedAt: 'c' }],
+        [200, { state: 'opened', updatedAt: 'c' }],
+        [200, { state: 'paying', updatedAt: 'd' }],
+        [200, { state: 'paid', updatedAt: 'e', amountUsd: 5 }],
+      ],
+      (read) => (read >= 5 ? 5_000_000n : 0n),
+    );
+    expect(end).toMatchObject({ kind: 'arrived', added: 5_000_000n });
+    expect(said).toEqual([
+      '✓ Fund page open',
+      '… Waiting for a payment or a code…',
+      '… Redeeming your code…',
+      '… Waiting for a payment or a code…',
+      '… Waiting for your payment…',
+      '✓ Payment received $5.00 charged',
+      '… Adding to your balance…',
+      '✓ Added to your balance +$5.00',
+    ]);
+  });
+
+  it('prints no line for each wrong code tried, and a later code is accepted', async () => {
+    const { end, said } = await watchCode(
+      [
+        [200, { state: 'paying', via: 'code', updatedAt: 'a' }],
+        [200, { state: 'opened', updatedAt: 'b' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'c' }],
+        [200, { state: 'opened', updatedAt: 'd' }],
+        [200, { state: 'paying', via: 'code', updatedAt: 'e' }],
+      ],
+      (read) => (read >= 3 ? 1_000_000n : 0n),
+    );
+    expect(end).toMatchObject({ kind: 'arrived' });
+    expect(said).toEqual([
+      '✓ Fund page open',
+      '… Redeeming your code…',
+      '… Waiting for a payment or a code…',
+      '… Redeeming your code…',
+      '… Waiting for a payment or a code…',
+      '✓ Code accepted +$1.00',
+    ]);
+  });
+
+  it('never credits a refused code with money whose payment the status missed', async () => {
+    const { said } = await watchCode(
+      [
+        [200, { state: 'paying', via: 'code', updatedAt: 'a' }],
+        [200, { state: 'opened', updatedAt: 'b' }],
+        [500, {}],
+      ],
+      (read) => (read >= 4 ? 5_000_000n : 0n),
+    );
+    expect(said.at(-1)).toBe('✓ Added to your balance +$5.00');
+  });
+
+  // A server before codes never sends `via`, and another value is not a code.
+  it.each([
+    ['no via', {}],
+    ['an unknown via', { via: 'voucher' }],
+  ])('treats a status with %s as a card payment', async (_label, via) => {
+    const { end, said } = await watchCode(
+      [
+        [200, { state: 'failed', updatedAt: 'a', ...via }],
+        [200, { state: 'paying', updatedAt: 'b', ...via }],
+      ],
+      (read) => (read >= 3 ? 5_000_000n : 0n),
+    );
+    expect(end).toMatchObject({ kind: 'arrived' });
+    expect(said).toEqual([
+      '✓ Fund page open',
+      "! That payment didn't go through. Nothing was charged.",
+      '… Waiting for a payment or a code…',
+      '… Waiting for your payment…',
       '✓ Added to your balance +$5.00',
     ]);
   });
