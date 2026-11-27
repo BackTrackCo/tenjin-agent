@@ -53,6 +53,7 @@ const TERMS: NeonTerms = {
 
 let dir: string;
 afterEach(async () => {
+  vi.unstubAllEnvs();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 beforeEach(() => {
@@ -67,6 +68,10 @@ async function door(
   dir = await realpath(await mkdtemp(join(tmpdir(), 'neon-door-')));
   const repo = join(dir, 'repo');
   await mkdir(join(repo, '.git'), { recursive: true });
+  // The worker's conversation lives under the Claude config folder, which a CI machine lacks.
+  const configDir = join(dir, 'claude');
+  await mkdir(configDir);
+  vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
   await writeFile(join(dir, 'config.json'), JSON.stringify({ ...limits, router }));
   const transcript = join(dir, 'root.jsonl');
   await writeFile(transcript, '');
