@@ -20,6 +20,7 @@ import {
   ChannelDepositRefused,
   NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
   PayeeMismatch,
+  unspentInChannel,
 } from './neon-seller';
 import { NeonRefunds } from './neon-refund';
 import type { NeonTerms } from './neon-terms';
@@ -351,6 +352,59 @@ it('keeps a deposit at the channel cap and inside the person limits', async () =
       throw new Error('over limits');
     }),
   ).rejects.toThrow('over limits');
+});
+
+// Failure caught by the first live follow-up: a job's end refunded the channel, so its next call
+// had to deposit again, but the cap was held against the channel's whole balance, which keeps what
+// was charged in earlier jobs (3.93 USD in the live channel) and so sat far above the 0.50 cap
+// with nothing in the channel. Every later deposit was refused and the revision never ran.
+it('bounds the deposit by what is unspent in the channel, not by its whole balance', async () => {
+  const drained = {
+    currentBalance: '3930826',
+    clientContext: { chargedCumulativeAmount: '3930826', totalClaimed: '3930826' },
+  };
+  expect(unspentInChannel(drained)).toBe(0n);
+  const admit = async () => undefined;
+  expect(
+    await channelDeposit(
+      { minimumDepositAmount: '40000', currentBalance: unspentInChannel(drained).toString() },
+      admit,
+    ),
+  ).toBe(NEON_CHANNEL_DEPOSIT_CAP_ATOMIC);
+  // A channel that still holds 100,000 unspent tops up to the cap only; the claimed amount never
+  // counts as unspent, and a record that shows more charged than the balance reads as empty.
+  expect(
+    unspentInChannel({
+      currentBalance: '4030826',
+      clientContext: { chargedCumulativeAmount: '3930826', totalClaimed: '3900000' },
+    }),
+  ).toBe(100_000n);
+  expect(
+    unspentInChannel({ currentBalance: '1', clientContext: { chargedCumulativeAmount: '5' } }),
+  ).toBe(0n);
+  // The balance alone is the unspent amount for a channel with no charge on record.
+  expect(unspentInChannel({ currentBalance: '90000' })).toBe(90_000n);
+});
+
+it('reads a refused deposit through the error that wraps it, and keeps why a call was not sent', async () => {
+  const { ctx, repo, data } = await fixture();
+  const wrapped = withBatch(
+    ctx,
+    async () => {
+      throw new Error('Failed to create payment payload', {
+        cause: new ChannelDepositRefused('The channel is at its deposit cap'),
+      });
+    },
+    { transmitted: false },
+  );
+  const sent = job(repo);
+  const failure = await wrapped.transport
+    .messages(sent, MESSAGES, signal())
+    .catch((e: unknown) => e);
+  // A refused deposit is a budget end, not a failure to retry, and says why.
+  expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
+  expect((failure as ModelCallFailed).message).toContain('deposit cap');
+  expect((await readNeonRecord(data, sent.id))!.notSent[0]).toContain('call 1 not sent');
 });
 
 it('counts every voucher against the daily budget, a pre-funded channel included, at its real charge', async () => {

@@ -104,6 +104,24 @@ export class VoucherSpend {
 }
 
 /**
+ * HOW MUCH OF A CHANNEL IS STILL UNSPENT: its balance less what the seller has charged, by the
+ * larger of the charge this client counted and the amount the chain says was claimed. The deposit
+ * cap bounds this, since this is what waits at the seller. The balance itself also holds what
+ * was charged long ago, so a channel used for many jobs can show a balance above the cap while
+ * holding nothing: bounding the balance would refuse every later deposit.
+ */
+export function unspentInChannel(ctx: {
+  currentBalance: string;
+  clientContext?: { chargedCumulativeAmount?: string; totalClaimed?: string };
+}): bigint {
+  const balance = BigInt(ctx.currentBalance);
+  const charged = BigInt(ctx.clientContext?.chargedCumulativeAmount ?? '0');
+  const claimed = BigInt(ctx.clientContext?.totalClaimed ?? '0');
+  const spent = charged > claimed ? charged : claimed;
+  return balance > spent ? balance - spent : 0n;
+}
+
+/**
  * HOW MUCH A DEPOSIT PUTS INTO THE CHANNEL: what fills it to the cap, never more, and never
  * less than the call needs. A channel that cannot hold what the call needs, or a deposit over
  * the person's limits, is refused before anything is signed.
@@ -184,7 +202,19 @@ export class BatchSeller {
       storage: new FileClientChannelStorage({
         directory: join(channelDirectory(this.options.dataDir, this.options.terms), payer),
       }),
-      depositStrategy: (ctx) => channelDeposit(ctx, this.options.admit, deposits),
+      depositStrategy: (ctx) =>
+        channelDeposit(
+          {
+            minimumDepositAmount: ctx.minimumDepositAmount,
+            // What the channel still holds for the seller to charge, not its whole balance: the
+            // balance keeps what was already charged, so after a refund it can stay far above
+            // the cap with nothing left in the channel.
+            currentBalance: unspentInChannel(ctx).toString(),
+            ...(ctx.maxDeposit !== undefined ? { maxDeposit: ctx.maxDeposit } : {}),
+          },
+          this.options.admit,
+          deposits,
+        ),
     });
     return { scheme, payer };
   }

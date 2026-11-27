@@ -95,6 +95,8 @@ const recordSchema = z.object({
   settledAtomic: z.string().regex(/^\d+$/),
   calls: z.array(callSchema),
   signatures: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+  /** The last few reasons a call was not sent, for finding why a job ended without one. */
+  notSent: z.array(z.string().max(300)).max(5).default([]),
 });
 export type NeonRecord = z.infer<typeof recordSchema>;
 
@@ -115,8 +117,9 @@ export async function neonRoomLeftAtomic(
   maxJobAtomic: bigint,
 ): Promise<bigint> {
   const record = await readNeonRecord(dataDir, job.id);
-  if (!record) return 0n;
   const ceiling = maxJobAtomic < BigInt(job.capAtomic) ? maxJobAtomic : BigInt(job.capAtomic);
+  // A job that has made no call has spent nothing: its whole ceiling is left.
+  if (!record) return ceiling;
   const left = ceiling + BigInt(record.grantedAtomic) - BigInt(record.spentAtomic);
   return left > 0n ? left : 0n;
 }
@@ -292,6 +295,7 @@ export class NeonTransport {
         settledAtomic: '0',
         calls: [],
         signatures: {},
+        notSent: [],
       };
       await writePrivate(path, JSON.stringify(fresh));
       return fresh;
@@ -542,14 +546,25 @@ export class NeonTransport {
     if (!transmitted) {
       if (error instanceof PayeeMismatch)
         return new ModelCallFailed(error.message, { cause: 'budget', uncharged: true });
-      const refused =
-        (error instanceof CliError && error.code === 'POLICY_REFUSED') ||
-        error instanceof ChannelDepositRefused ||
-        (error instanceof Error && /no .*(scheme|network|requirement)|policy/i.test(error.message));
-      return new ModelCallFailed('The Neon call was not sent to its seller', {
-        cause: refused ? 'budget' : 'failed',
-        uncharged: true,
-      });
+      // The SDK may wrap what a deposit or a policy threw: the whole chain of causes is read.
+      const chain: unknown[] = [];
+      for (let e: unknown = error; e !== undefined && chain.length < 5; e = (e as Error)?.cause)
+        chain.push(e);
+      const refused = chain.some(
+        (e) =>
+          (e instanceof CliError && e.code === 'POLICY_REFUSED') ||
+          e instanceof ChannelDepositRefused ||
+          (e instanceof Error && /no .*(scheme|network|requirement)|policy/i.test(e.message)),
+      );
+      // Why, in a few words: the failure was once only "not sent", with nothing to find it by.
+      const why = (chain.at(-1) instanceof Error ? (chain.at(-1) as Error).message : '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 200);
+      await this.note(job, `call ${n} not sent: ${why || 'no reason given'}`);
+      return new ModelCallFailed(
+        `The Neon call was not sent to its seller${why ? `: ${why}` : ''}`,
+        { cause: refused ? 'budget' : 'failed', uncharged: true },
+      );
     }
     await this.record(
       job,
@@ -572,6 +587,14 @@ export class NeonTransport {
       'The Neon call failed after its voucher was sent; it stays counted until its charge is read',
       { cause: 'failed' },
     );
+  }
+
+  /** Keeps why a call was not sent, never failing the call that reports it. */
+  private async note(job: ModelJob, line: string) {
+    await this.update(job.id, (record) => ({
+      ...record,
+      notSent: [...record.notSent, line].slice(-5),
+    })).catch(() => undefined);
   }
 
   /** The amount a call signed, for `tenjin payments` and its reconcile. */
