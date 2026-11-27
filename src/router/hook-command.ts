@@ -1,6 +1,5 @@
 import {
   runAnswerHook,
-  runAskHook,
   runDelegationHook,
   runNativeHook,
   runPromptHook,
@@ -139,11 +138,9 @@ export async function runHookKind(
           ? await runNativeHook(event, deps)
           : kind === 'shortfall'
             ? await runShortfallHook(event, deps)
-            : kind === 'ask'
-              ? await runAskHook(event, deps)
-              : kind === 'answer'
-                ? await runAnswerHook(event, deps)
-                : await runDelegationHook(event, deps);
+            : kind === 'answer'
+              ? await runAnswerHook(event, deps)
+              : await runDelegationHook(event, deps);
     response = withNotices(outcome.response, notices);
   } catch (err) {
     // No answer carries the lines: the next leg is offered them again.
