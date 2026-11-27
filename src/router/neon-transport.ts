@@ -31,7 +31,9 @@ import {
   NEON_CAPTURE_ENV,
   NEON_DEFAULT_EFFORT,
   NEON_EFFORTS,
+  NEON_TURN_FLOOR_TOKENS,
   NEON_TURN_MAX_TOKENS,
+  neonPeakQuoteAtomic,
   NeonNoText,
   NeonReplyInvalid,
   replyOfBody,
@@ -62,6 +64,8 @@ const callSchema = z.object({
   model: z.string().optional(),
   /** Thought tokens counted in the output, where the seller reports them. */
   reasoningTokens: z.number().optional(),
+  /** The request body's size in bytes: a revision's history is at least this big again. */
+  bytes: z.number().optional(),
   /** The `max_tokens` the call asked for: what the seller's quote was sized by. */
   maxTokens: z.number(),
   /** What the seller quoted and the wallet signed, atomic USDC. */
@@ -123,6 +127,25 @@ export async function neonRoomLeftAtomic(
   const left = ceiling + BigInt(record.grantedAtomic) - BigInt(record.spentAtomic);
   return left > 0n ? left : 0n;
 }
+
+/**
+ * What the next call of a resumed job needs at least, by the same estimate the call is fitted by:
+ * the history the last call sent (its size in bytes, or four bytes a token where only tokens were
+ * kept), room for the person's note and the context Claude Code adds again (about 20 KB), and one
+ * floor-sized turn of output. A revision that cannot afford this would fail at its first call and
+ * end its conversation, so it is asked about before it is sent.
+ */
+export async function neonNextCallNeedAtomic(
+  dataDir: string,
+  job: Pick<ModelJob, 'id'>,
+  terms: Parameters<typeof neonPeakQuoteAtomic>[0],
+): Promise<bigint> {
+  const record = await readNeonRecord(dataDir, job.id);
+  const last = record?.calls.at(-1);
+  const history = last?.bytes ?? (last ? last.inputTokens * 4 : 0);
+  return neonPeakQuoteAtomic(terms, history + NEON_RESUME_MARGIN_BYTES, NEON_TURN_FLOOR_TOKENS);
+}
+const NEON_RESUME_MARGIN_BYTES = 20_000;
 
 /** The person approved one more ceiling for a job: its next call may spend it. */
 export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic: bigint) {
@@ -463,6 +486,7 @@ export class NeonTransport {
       ...usage,
       ...inputSplit(chat as unknown as Record<string, unknown>, usage.inputTokens),
       maxTokens,
+      bytes: Buffer.byteLength(body),
       model: terms.model,
       quotedAtomic: (answer.ceilingAtomic ?? quoted).toString(),
       settledAtomic: settled ? quoted.toString() : null,

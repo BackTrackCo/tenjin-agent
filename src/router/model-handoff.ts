@@ -45,7 +45,7 @@ import {
 } from './neon-chat';
 import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
 import { neonRevisionApproval } from './neon-approve';
-import { neonRoomLeftAtomic } from './neon-transport';
+import { neonNextCallNeedAtomic, neonRoomLeftAtomic } from './neon-transport';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -551,7 +551,10 @@ export class ModelHandoff {
       const terms = neonTermsSchema.safeParse(original.decision.neonTerms);
       if (!terms.success) return continuationRefusal('Original Neon seller terms are unavailable');
       const left = await neonRoomLeftAtomic(dataDir, original, settings.maxJobAtomic);
-      if (left < neonMinimumJobAtomic(terms.data))
+      const need = await neonNextCallNeedAtomic(dataDir, original, terms.data);
+      if (
+        left < (need > neonMinimumJobAtomic(terms.data) ? need : neonMinimumJobAtomic(terms.data))
+      )
         return neonRevisionApproval(
           dataDir,
           original,

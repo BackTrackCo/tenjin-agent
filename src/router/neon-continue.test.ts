@@ -37,7 +37,12 @@ const TERMS: NeonTerms = {
 };
 
 /** A finished Neon job with a worker conversation, and a record that has spent `spent`. */
-async function fixture(spent: string, config: Record<string, unknown> = {}) {
+async function fixture(
+  spent: string,
+  config: Record<string, unknown> = {},
+  calls: Record<string, unknown>[] = [],
+  cap = '20000',
+) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'neon-continue-')));
   const repo = join(dir, 'repo');
   const configDir = join(dir, 'claude');
@@ -81,7 +86,7 @@ async function fixture(spent: string, config: Record<string, unknown> = {}) {
       claudePermissionMode: 'default',
       claudeWorkspace: workspace,
     },
-    capAtomic: '20000',
+    capAtomic: cap,
   });
   await mkdir(join(dir, 'model-jobs'), { recursive: true });
   await writeFile(
@@ -94,7 +99,7 @@ async function fixture(spent: string, config: Record<string, unknown> = {}) {
       wallMs: 0,
       spentAtomic: spent,
       settledAtomic: spent,
-      calls: [],
+      calls,
       signatures: {},
     }),
   );
@@ -178,7 +183,7 @@ it('asks about a revision with no room left, and offers it on the same worker on
 
 it('offers a revision the job still has room for with no question, whatever the DeepSeek setting is', async () => {
   for (const config of [{}, { router: { subagents: false } }]) {
-    const f = await fixture('1000', config);
+    const f = await fixture('1000', config, [], '1000000');
     const offered = await f.model.capture(
       f.session,
       'rev-1',
@@ -189,4 +194,37 @@ it('offers a revision the job still has room for with no question, whatever the 
     expect(offered).toMatchObject({ action: 'offer', continuation: true });
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Failure caught by review: the check for room counted one floor-sized turn of output and no input,
+// so a revision with 0.03 USD left passed it. The resumed conversation sends its whole history
+// (87 KB at the live job's fourth call, about 0.14 USD of input at the estimate), so the first call
+// failed with "no room", which ends the conversation: the person could no longer approve more room
+// for that writer. The history's size is kept with each call and counts in the check.
+it('asks about a revision whose history alone does not fit what is left, before anything is sent', async () => {
+  const last = {
+    n: 1,
+    at: 1,
+    inputTokens: 25_000,
+    cachedInputTokens: 0,
+    outputTokens: 800,
+    maxTokens: 16_000,
+    quotedAtomic: '300000',
+    settledAtomic: '90000',
+    settlement: 'settled',
+    ok: true,
+    ms: 1,
+    bytes: 87_000,
+  };
+  // The job's ceiling is 30,000 and nothing is spent, so 30,000 is left: one floor-sized turn
+  // fits, 87 KB of history does not.
+  const f = await fixture('0', {}, [last], '30000');
+  const asked = await f.model.capture(
+    f.session,
+    'rev-near',
+    revision(f.conversation.handle),
+    undefined,
+    'SendMessage',
+  );
+  expect(asked).toMatchObject({ status: 'needs_approval', started: false });
 });

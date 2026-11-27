@@ -10,8 +10,8 @@ import {
   withModelRetry,
   workerEndText,
 } from './model-worker-control';
-import { NEON_TURN_MAX_TOKENS } from './neon-chat';
-import { NeonTransport, readNeonRecord } from './neon-transport';
+import { neonMinimumJobAtomic, NEON_TURN_MAX_TOKENS } from './neon-chat';
+import { neonNextCallNeedAtomic, NeonTransport, readNeonRecord } from './neon-transport';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import {
@@ -186,6 +186,11 @@ it('posts chat completions to the row, and records the real charge beside the ce
     systemTokens: 0,
   });
   expect(record!.calls[0]!.messageTokens).toBeGreaterThan(0);
+  // The size of the request is kept: a revision's history is at least that big again.
+  expect(record!.calls[0]!.bytes).toBe(Buffer.byteLength(body));
+  expect(await neonNextCallNeedAtomic(data, sent, TERMS)).toBeGreaterThan(
+    neonMinimumJobAtomic(TERMS),
+  );
   // The paid ledger names the seller of the saved terms.
   expect(await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8')).toContain('seller.example');
 });
