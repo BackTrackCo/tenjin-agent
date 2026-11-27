@@ -178,6 +178,17 @@ function checkHint(decision: { id: string; hint: string }, ctx: z.RefinementCtx)
 }
 
 /**
+ * AN INFERENCE ROW'S HINT is one plain line and no call to make: a `request` call does not run
+ * the row, only a worker's door does, so the line names no call and carries no id. The door
+ * never shows it to a model. A row's hint still has to be one plain line.
+ */
+function checkInferenceHint(decision: { hint: string }, ctx: z.RefinementCtx): void {
+  if (/[\p{Cc}\p{Cf}]/u.test(decision.hint)) {
+    ctx.addIssue({ code: 'custom', path: ['hint'], message: 'a hint is one plain line' });
+  }
+}
+
+/**
  * A PAY-PER-CALL SERVICE NOBODY CURATED. When a Tenjin list service does the
  * task the gate picked, or no task fits and a listed x402 service could do the
  * step, the server names that one service: who sells it, where, for how much,
@@ -765,7 +776,11 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
       spec: z.union([ToolSpecSchema, AccountSpecSchema]),
       hint: z.string().min(1).max(2_000),
     })
-    .superRefine(checkHint),
+    .superRefine((decision, ctx) =>
+      'inference' in decision.spec && decision.spec.inference !== undefined
+        ? checkInferenceHint(decision, ctx)
+        : checkHint(decision, ctx),
+    ),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),

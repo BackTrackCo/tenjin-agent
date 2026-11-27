@@ -14,44 +14,85 @@ const ctx = {
   io: { stdout: process.stdout, stderr: process.stderr, isTTY: false },
 } as CommandContext;
 
-const INFERENCE = {
-  model: 'test/model',
-  wire: 'chat',
-  scheme: 'batch-settlement',
-  usage: 'nanogpt',
-  price: {
-    inputAtomicPerMillion: '3150000',
-    outputAtomicPerMillion: '15750000',
-    cacheReadAtomicPerMillion: '157500',
-  },
-};
-
-/** The router's answer to a `{tool}` lookup of a row, as a stub. */
-const answer = (rowId: string, overrides: Record<string, unknown> = {}, inference = INFERENCE) => ({
+/**
+ * The router's answer to a `{tool}` lookup of the Neon row, whole, as the server builds it: the
+ * spec `capabilitySpec` returns for the row, the fixed hint of an inference row (no call to make,
+ * no id in it), and `jev` as the object the route sends for a free lookup. The spec and the hint
+ * are the server's own code (`INFERENCE_HINT` in its route); a test must not shape them to fit
+ * this parser.
+ */
+const SERVER_ANSWER = {
   schemaVersion: 1,
-  routerVersion: 'test',
+  routerVersion: 'server',
   decision: {
     action: 'spec',
-    id: 'fresh-id',
-    hint: 'Run request({id: "fresh-id", input: {}}) once.',
+    id: '6f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a11',
     spec: {
-      capabilityId: rowId,
-      provider: 'Test Seller',
-      label: 'Test Writer',
-      description: 'A model row',
-      priceAtomic: '0',
+      capabilityId: 'x402inference-gemini-4-neon',
+      provider: 'x402inference (NanoGPT) (Google Gemini 4 Neon)',
+      label: 'Gemini 4 Neon',
+      holds: {},
+      output: 'json',
+      description:
+        "Google's Gemini 4 Neon by chat completions, for a Tenjin door that runs a subagent on it. It settles in batches on Base: the call is charged what it used, list price plus x402inference's 5%.",
+      priceAtomic: '1000',
       priceVaries: true,
-      maxAmountAtomic: '500000',
-      payTo: '0x00000000000000000000000000000000000000aa',
+      maxAmountAtomic: '277200',
+      payTo: '0x6Be3A763E0FAddAa2f2FCBbaFf60f1A91d49227A',
       network: 'eip155:8453',
       asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-      request: { method: 'POST', url: 'https://seller.example/chat', fields: {}, location: 'body' },
-      input: {},
-      pinned: {},
+      request: {
+        method: 'POST',
+        url: 'https://x402inference.com/accountless/chat/completions',
+        fields: { model: 'body', messages: 'body', max_tokens: 'body' },
+        location: 'body',
+      },
+      input: {
+        type: 'object',
+        properties: {
+          model: {
+            type: 'string',
+            enum: ['google/gemini-4-neon'],
+            default: 'google/gemini-4-neon',
+          },
+          messages: { type: 'array', minItems: 1 },
+          max_tokens: { type: 'integer', minimum: 1, maximum: 16000 },
+        },
+        required: ['model', 'messages'],
+        additionalProperties: false,
+      },
+      pinned: { model: 'google/gemini-4-neon' },
+      example: { messages: [{ role: 'user', content: 'Say hello.' }], max_tokens: 16 },
+      returns: 'an OpenAI chat completion with the reply, the reasoning and the usage',
+      inference: {
+        model: 'google/gemini-4-neon',
+        wire: 'chat',
+        scheme: 'batch-settlement',
+        usage: 'nanogpt',
+        price: {
+          inputAtomicPerMillion: '3150000',
+          outputAtomicPerMillion: '15750000',
+          cacheReadAtomicPerMillion: '157500',
+        },
+      },
       requires: ['inference'],
-      inference,
-      ...overrides,
     },
+    hint: 'This is an inference provider. Only a Tenjin door runs it; a request call does not.',
+  },
+  jev: { calls: 0, latencyMs: 0 },
+};
+const ROW = SERVER_ANSWER.decision.spec.capabilityId;
+
+/** The server's answer for `rowId`, with the spec changed by `over`. */
+const answer = (
+  rowId: string = ROW,
+  over: Record<string, unknown> = {},
+  inference: Record<string, unknown> = SERVER_ANSWER.decision.spec.inference,
+) => ({
+  ...SERVER_ANSWER,
+  decision: {
+    ...SERVER_ANSWER.decision,
+    spec: { ...SERVER_ANSWER.decision.spec, capabilityId: rowId, ...over, inference },
   },
 });
 
@@ -68,17 +109,17 @@ function router(body: unknown, seen: { body?: Record<string, unknown> } = {}, st
 it('reads the seller, payee, model, wire, scheme, usage dialect and price rule from the row, asking with the inference token', async () => {
   const seen: { body?: Record<string, unknown> } = {};
   const terms = await lookupNeonTerms(
-    { ctx, baseUrl: 'https://router.example', fetchImpl: router(answer('row-1'), seen) as never },
-    'row-1',
+    { ctx, baseUrl: 'https://router.example', fetchImpl: router(answer(), seen) as never },
+    ROW,
   );
   expect(terms).toEqual({
-    rowId: 'row-1',
-    label: 'Test Writer',
-    url: 'https://seller.example/chat',
-    payTo: '0x00000000000000000000000000000000000000aa',
+    rowId: ROW,
+    label: 'Gemini 4 Neon',
+    url: 'https://x402inference.com/accountless/chat/completions',
+    payTo: '0x6Be3A763E0FAddAa2f2FCBbaFf60f1A91d49227A',
     network: 'eip155:8453',
     asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    model: 'test/model',
+    model: 'google/gemini-4-neon',
     wire: 'chat',
     scheme: 'batch-settlement',
     usage: 'nanogpt',
@@ -87,8 +128,26 @@ it('reads the seller, payee, model, wire, scheme, usage dialect and price rule f
     cacheReadAtomicPerMillion: '157500',
   });
   // The lookup is the free `{tool}` form, and only it asks for the inference token.
-  expect(seen.body).toMatchObject({ tool: 'row-1' });
+  expect(seen.body).toMatchObject({ tool: ROW });
   expect(seen.body!.accepts).toContain('inference');
+});
+
+// Failure caught: the first live run of the door refused with "did not give the provider row"
+// although the lookup was answered. The decision was thrown away whole because its hint, the
+// server's fixed line for an inference row, names no call and carries no id, as the hint of a
+// runnable service must. The parse now takes the server's own answer as it is.
+it("reads the server's whole answer for the Neon row, hint and jev included", async () => {
+  const terms = await lookupNeonTerms({
+    ctx,
+    baseUrl: 'https://router.example',
+    fetchImpl: router(SERVER_ANSWER) as never,
+  });
+  expect(terms).toMatchObject({
+    rowId: ROW,
+    model: 'google/gemini-4-neon',
+    scheme: 'batch-settlement',
+  });
+  expect(ROW).toBe(NEON_ROW_ID);
 });
 
 // Failure caught: a failed lookup must fail the job with nothing sent, never fall back to a
@@ -108,25 +167,25 @@ it.each([
   [
     'a row with no inference terms',
     router({
-      ...answer('row-1'),
+      ...answer(),
       decision: {
-        ...answer('row-1').decision,
-        spec: { ...answer('row-1').decision.spec, inference: undefined },
+        ...answer().decision,
+        spec: { ...answer().decision.spec, inference: undefined },
       },
     }),
   ],
   [
     'a wire shape this build has no adapter for',
-    router(answer('row-1', {}, { ...INFERENCE, wire: 'messages' })),
+    router(answer(ROW, {}, { ...SERVER_ANSWER.decision.spec.inference, wire: 'messages' })),
   ],
   [
     'a payment scheme this build has no adapter for',
-    router(answer('row-1', {}, { ...INFERENCE, scheme: 'exact' })),
+    router(answer(ROW, {}, { ...SERVER_ANSWER.decision.spec.inference, scheme: 'exact' })),
   ],
   [
     'a seller URL that is not https',
     router(
-      answer('row-1', {
+      answer(ROW, {
         request: {
           method: 'POST',
           url: 'http://seller.example/chat',
@@ -138,10 +197,7 @@ it.each([
   ],
 ])('fails the lookup, with no fallback seller, on %s', async (_name, fetchImpl) => {
   await expect(
-    lookupNeonTerms(
-      { ctx, baseUrl: 'https://router.example', fetchImpl: fetchImpl as never },
-      'row-1',
-    ),
+    lookupNeonTerms({ ctx, baseUrl: 'https://router.example', fetchImpl: fetchImpl as never }, ROW),
   ).rejects.toBeInstanceOf(NeonLookupFailed);
 });
 
