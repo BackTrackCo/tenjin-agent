@@ -286,6 +286,13 @@ it('asks about a first draft the per-call limit cannot carry, sends nothing, and
   const quote = (await readQuote(folder, asked.quote.id))!;
   expect(isNeonRevisionQuote(quote)).toBe(true);
 
+  // Failure caught by review: the queued draft was an ordinary offer, so accepting it started the
+  // worker before any yes. It waits for its quote: nothing starts, and the offer stays available.
+  const early = await call({ offer_id: asked.offer_id });
+  expect(early).toMatchObject({ status: 'needs_approval', started: false });
+  expect(early.instruction).toContain(`approve({quote: "${asked.quote.id}"`);
+  expect(worker.run).not.toHaveBeenCalled();
+
   // A yes that shows other numbers than the quote's grants nothing.
   expect(
     await runNeonApprove(
@@ -308,6 +315,34 @@ it('asks about a first draft the per-call limit cannot carry, sends nothing, and
     result: 'Written.',
   });
   expect(worker.run).toHaveBeenCalledTimes(1);
+});
+
+// Failure caught by review: a day's budget with less left than the first call needs started a worker
+// that then stopped at the budget with no question. It is asked about like the per-call limit is.
+it('asks about a first draft the day budget cannot carry, with the day named, and queues it unrunnable', async () => {
+  const { call, dir: folder } = await doorWithDir({}, { sessionBudget: '20000' });
+  const asked = await call({ neon: { prompt: 'Write the notes' } });
+  expect(asked).toMatchObject({ status: 'needs_approval', started: false });
+  expect(asked.reason).toContain("today's automatic budget");
+  expect(worker.run).not.toHaveBeenCalled();
+  // The offer does not run before the yes, and the quote is the one it waits on.
+  expect(await call({ offer_id: asked.offer_id })).toMatchObject({ status: 'needs_approval' });
+  expect(worker.run).not.toHaveBeenCalled();
+  const quote = (await readQuote(folder, asked.quote.id))!;
+  await runNeonApprove(
+    { quote: quote.id, total: asked.quote.total, what: quote.what },
+    { dataDir: folder },
+  );
+  worker.run.mockResolvedValue('Done.');
+  expect(await call({ offer_id: asked.offer_id })).toMatchObject({ status: 'completed' });
+  expect(worker.run).toHaveBeenCalledTimes(1);
+  // The quote runs once: a second yes grants nothing more.
+  expect(
+    await runNeonApprove(
+      { quote: quote.id, total: asked.quote.total, what: quote.what },
+      { dataDir: folder },
+    ),
+  ).toMatchObject({ ok: false });
 });
 
 it('refuses a draft larger than one channel deposit holds, with nothing sent', async () => {

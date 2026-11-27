@@ -82,26 +82,31 @@ export class VoucherSpend {
   async before(ceilingAtomic: bigint): Promise<void | { abort: true; reason: string }> {
     // A corrective retry signs again under the reservation the call already holds.
     if (this.held) return;
-    const ask = (approvedAbove: boolean) =>
+    const ask = (mode: 'automatic' | 'manual') =>
       this.authorizer.authorize({
-        mode: 'automatic',
+        mode,
         amountAtomic: ceilingAtomic,
         creator: this.creator,
         requestKey: this.requestKey,
-        ...(approvedAbove ? { approvedAbove } : {}),
       });
-    let authorization = await ask(false);
-    // A payment over the per-call limit may use the approval the person gave, once: it is spent
-    // before the payment is created and given back where the budget still refuses it. Only the
-    // per-call limit is lifted; the allowlist and the rolling budget apply as always.
+    let authorization = await ask('automatic');
+    // THE TOOL PAYER'S RULE: a payment over the per-call limit or the day's budget is the
+    // person's to approve, and their yes (a quote for this job) pays that one payment as an
+    // approved payment: the allowlist still applies, and it is recorded in the ledger as
+    // approved spend, not in the automatic budget. The approval is spent before the payment is
+    // created and given back where it is still refused, so it pays once.
     if (
       authorization.decision !== 'allow' &&
-      authorization.reason === 'above_auto_spend' &&
+      (authorization.reason === 'above_auto_spend' ||
+        authorization.reason === 'session_budget_exceeded') &&
       this.approval &&
       ceilingAtomic <= this.approval.leftAtomic &&
       (await this.approval.consume(ceilingAtomic))
     ) {
-      authorization = await ask(true);
+      authorization = await ask('manual');
+      // An approved payment comes back as `confirm`: the person's yes already answered it.
+      if (authorization.decision === 'confirm')
+        authorization = { ...authorization, decision: 'allow' };
       if (authorization.decision !== 'allow') await this.approval.restore(ceilingAtomic);
     }
     if (authorization.decision !== 'allow')

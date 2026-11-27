@@ -7,6 +7,9 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
 import { NEON_EFFORTS } from './neon-chat';
+import { neonAwaitingApproval } from './neon-transport';
+import { approveCall } from './plan';
+import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import { neonJobLabel, workerNameOf, type NeonTerms } from './neon-terms';
 import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
@@ -835,6 +838,26 @@ export function registerModelTool(
             const record = await jobs.owned(offered, session.sessionId);
             // Another session's offer, a swept one and one that never was read the same.
             if (!record) return unavailable('No such offer in this session');
+            // A queued Neon draft waits for the yes to its quote: nothing starts, and the offer stays.
+            const awaiting =
+              providerOf(record) === 'neon'
+                ? await neonAwaitingApproval(options.dataDir, record.id)
+                : null;
+            if (awaiting !== null) {
+              const quote = await readQuote(options.dataDir, awaiting);
+              return answer({
+                status: 'needs_approval',
+                action: 'refused',
+                started: false,
+                reason:
+                  'needs_approval: this draft waits for the user to approve its quote. Nothing was sent and nothing was paid.',
+                instruction:
+                  quote !== null && quoteClosed(quote, Date.now()) === null
+                    ? `Call ${approveCall(quote)}: it asks the user and runs only on their yes. Then run the draft with subagent({offer_id: ${JSON.stringify(record.id)}}).`
+                    : 'The quote is no longer open. Send the Neon call again for a fresh one.',
+                offer_id: record.id,
+              });
+            }
             ownedContinuation ||=
               typeof record.decision.workerHandle === 'string' ||
               (await conversations.findByJob(offered, jobOwner(record))) !== null;

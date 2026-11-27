@@ -429,13 +429,15 @@ describe('what the seller sees before a payment exists', () => {
     expect(batch.transmitted).toBe(false);
   });
 
-  // Failure caught by review (money): an approval made every later call pay as a manual payment,
-  // which the daily budget never counted. An approval now lifts only the per-call limit, is spent
-  // once, and every payment under it is reserved and counted against the budget like any other.
-  describe('a payment the person approved past their per-call limit', () => {
+  // Failure caught by review (money): an approval made every later call of the job pay past the
+  // limits. It follows the tool payer: a quote's yes pays ONE payment over the per-call limit or the
+  // day's budget as an approved payment (the allowlist still applies), spent once; the next call goes
+  // back to the normal checks, and concurrent calls cannot spend the same approval twice.
+  describe('a payment the person approved past a limit', () => {
     const CEILING = 42_521n; // what the seller stub's 402 asks for
-    function setup(budget: bigint | null) {
-      const left = { value: 1_000_000n };
+    let account: Awaited<ReturnType<typeof payer>>;
+    function setup(budget: bigint | null, approved = 1_000_000n) {
+      const left = { value: approved };
       const restored: bigint[] = [];
       const approval = () => ({
         leftAtomic: left.value,
@@ -449,15 +451,6 @@ describe('what the seller sees before a payment exists', () => {
           restored.push(amount);
         },
       });
-      const authorizer = () =>
-        createLocalSpendAuthorizer({
-          dir,
-          policy: {
-            maxAutoSpendAtomic: 1_000n,
-            sessionBudgetAtomic: budget,
-            allowlistCreators: [],
-          },
-        });
       const call = async (key: string, withApproval = true, hold?: Promise<void>) => {
         const { fetchImpl, paid } = recording(200, hold);
         const batch = new BatchSeller({
@@ -465,7 +458,14 @@ describe('what the seller sees before a payment exists', () => {
           terms: TERMS,
           provider: { getSigner: async () => account } as never,
           admit: async () => undefined,
-          authorizer: authorizer(),
+          authorizer: createLocalSpendAuthorizer({
+            dir,
+            policy: {
+              maxAutoSpendAtomic: 1_000n,
+              sessionBudgetAtomic: budget,
+              allowlistCreators: [],
+            },
+          }),
           requestKey: key,
           ...(withApproval ? { approval: approval() } : {}),
           fetchImpl,
@@ -477,9 +477,8 @@ describe('what the seller sees before a payment exists', () => {
       };
       return { left, restored, call };
     }
-    let account: Awaited<ReturnType<typeof payer>>;
 
-    it('passes the per-call limit once, and is gone after that', async () => {
+    it('passes the per-call limit once, and the next call goes back to the limit', async () => {
       account = await payer();
       const t = setup(null);
       expect(await t.call('a', false)).toEqual({ outcome: 'refused', paid: 0 });
@@ -490,24 +489,22 @@ describe('what the seller sees before a payment exists', () => {
       expect(await t.call('c')).toEqual({ outcome: 'refused', paid: 0 });
     });
 
-    it('stays inside the daily budget: two approved calls against a small day are not both paid', async () => {
+    it('passes a tight day budget once, as the tool payer does, and asks again for the next call', async () => {
       account = await payer();
-      // Room for one call at its 42,521 ceiling, and not for a second beside the first's charge.
-      const t = setup(45_000n);
+      // Room for no call at all: the day's budget is below one call's ceiling.
+      const t = setup(30_000n, CEILING);
       expect(await t.call('first')).toEqual({ outcome: 'paid', paid: 1 });
-      const used = await readSpendSummary(dir);
-      expect(spentOf(used!)).toBe(7_321n);
+      // Approved spend is recorded in the ledger's total, beside the automatic budget (the tool
+      // payer's own rule), and the approval is gone: the second call is refused.
+      expect(spentOf((await readSpendSummary(dir))!)).toBe(0n);
       expect(await t.call('second')).toEqual({ outcome: 'refused', paid: 0 });
-      // The budget refused it before the approval was touched: nothing of it was spent.
-      expect(t.restored).toEqual([]);
-      expect(t.left.value).toBe(1_000_000n - CEILING);
+      expect(t.left.value).toBe(0n);
     });
 
-    it('counts two approved calls that run together, and pays one', async () => {
+    it('spends one approval once when two calls run together', async () => {
       account = await payer();
-      const t = setup(60_000n);
-      // Neither call is answered until both asked, so the first one's charge is not yet counted
-      // when the second asks: its reservation is what the second meets.
+      const t = setup(30_000n, CEILING);
+      // Neither call is answered until both asked.
       let release!: () => void;
       const hold = new Promise<void>((resolve) => (release = resolve));
       const running = Promise.all([t.call('one', true, hold), t.call('two', true, hold)]);
@@ -516,6 +513,42 @@ describe('what the seller sees before a payment exists', () => {
       const outcomes = await running;
       expect(outcomes.filter(({ outcome }) => outcome === 'paid')).toHaveLength(1);
       expect(outcomes.reduce((sum, { paid }) => sum + paid, 0)).toBe(1);
+    });
+
+    it('gives the approval back when the allowlist still refuses the payment', async () => {
+      account = await payer();
+      const left = { value: 1_000_000n };
+      const restored: bigint[] = [];
+      const { fetchImpl, paid } = recording();
+      const batch = new BatchSeller({
+        dataDir: dir,
+        terms: TERMS,
+        provider: { getSigner: async () => account } as never,
+        admit: async () => undefined,
+        authorizer: createLocalSpendAuthorizer({
+          dir,
+          policy: {
+            maxAutoSpendAtomic: 1_000n,
+            sessionBudgetAtomic: null,
+            allowlistCreators: ['somebody.else'],
+          },
+        }),
+        approval: {
+          leftAtomic: left.value,
+          consume: async (amount) => {
+            left.value -= amount;
+            return true;
+          },
+          restore: async (amount) => {
+            left.value += amount;
+            restored.push(amount);
+          },
+        },
+        fetchImpl,
+      });
+      await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toThrow();
+      expect(paid).toHaveLength(0);
+      expect(left.value).toBe(1_000_000n);
     });
   });
 

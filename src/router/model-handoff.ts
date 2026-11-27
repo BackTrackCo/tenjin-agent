@@ -44,6 +44,9 @@ import {
   type NeonEffort,
 } from './neon-chat';
 import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
+import { toMoney } from '../lib/money';
+import { resolveContextSettings } from '../lib/settings';
+import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { NEON_CHANNEL_DEPOSIT_CAP_ATOMIC } from './neon-seller';
 import { neonFirstCallApproval, neonRevisionApproval } from './neon-approve';
 import {
@@ -472,6 +475,25 @@ export class ModelHandoff {
       return refuse(
         'This draft is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent and nothing was charged. Send a shorter draft.',
       );
+    // The same two limits the tool payer asks about: the per-call limit (which is the job's
+    // ceiling) and what the rolling day's budget has left.
+    const policy = (
+      await resolveContextSettings({ dataDir: this.options.dataDir, flags: {} } as never)
+    ).policy;
+    const spent = await readSpendSummary(this.options.dataDir);
+    const dayLeft =
+      policy.sessionBudgetAtomic === null
+        ? null
+        : policy.sessionBudgetAtomic > (spent === null ? 0n : spentOf(spent))
+          ? policy.sessionBudgetAtomic - (spent === null ? 0n : spentOf(spent))
+          : 0n;
+    const usd = (atomic: bigint) => `$${toMoney(atomic.toString()).usd}`;
+    const over =
+      need > settings.maxJobAtomic
+        ? `more than the ${usd(settings.maxJobAtomic)} this machine pays for one call without asking`
+        : dayLeft !== null && need > dayLeft
+          ? `more than today's automatic budget has left (${usd(dayLeft)})`
+          : null;
     const native = {
       prompt: input.prompt,
       ...(input.description !== undefined ? { description: input.description } : {}),
@@ -501,7 +523,7 @@ export class ModelHandoff {
       },
       capAtomic: settings.maxJobAtomic.toString(),
     });
-    if (need > settings.maxJobAtomic)
+    if (over)
       return neonFirstCallApproval(
         this.options.dataDir,
         job,
@@ -509,7 +531,7 @@ export class ModelHandoff {
         terms,
         need,
         need,
-        settings.maxJobAtomic,
+        over,
       );
     return {
       action: 'offer',

@@ -107,6 +107,8 @@ const recordSchema = z.object({
   grantedAtomic: z.string().regex(/^\d+$/).default('0'),
   /** Approved room already spent on a payment over the per-call limit: an approval is spent once. */
   approvedSpentAtomic: z.string().regex(/^\d+$/).default('0'),
+  /** The quote a first draft waits on: until the person's yes is recorded, the job does not run. */
+  awaiting: z.string().optional(),
   /** What the last call that did not fit would have needed, measured from its real request. */
   needAtomic: z.string().regex(/^\d+$/).optional(),
   settledAtomic: z.string().regex(/^\d+$/),
@@ -232,8 +234,28 @@ export const neonFirstCallNeedAtomic = (
 ): bigint =>
   neonPeakQuoteAtomic(terms, promptBytes + NEON_FIRST_CONTEXT_BYTES, NEON_TURN_FLOOR_TOKENS);
 
+/** The quote a queued job waits on, or null where it waits on none. */
+export async function neonAwaitingApproval(dataDir: string, jobId: string): Promise<string | null> {
+  return (await readNeonRecord(dataDir, jobId))?.awaiting ?? null;
+}
+
+/** A queued first draft is not runnable until its quote is approved. */
+export async function markNeonAwaiting(dataDir: string, jobId: string, quoteId: string) {
+  const path = neonRecordPath(dataDir, jobId);
+  await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
+  await modelLock(`${path}.lock`, async () => {
+    const record = (await readNeonRecord(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
+    await writePrivate(path, JSON.stringify({ ...record, awaiting: quoteId }));
+  });
+}
+
 /** The person approved one more ceiling for a job: its next call may spend it. */
-export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic: bigint) {
+export async function grantNeonRoom(
+  dataDir: string,
+  jobId: string,
+  amountAtomic: bigint,
+  quoteId?: string,
+) {
   const path = neonRecordPath(dataDir, jobId);
   await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
   await modelLock(`${path}.lock`, async () => {
@@ -243,6 +265,8 @@ export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic
       path,
       JSON.stringify({
         ...record,
+        // The matching yes is recorded here, and only now is a queued draft runnable.
+        awaiting: record.awaiting === quoteId ? undefined : record.awaiting,
         grantedAtomic: (BigInt(record.grantedAtomic) + amountAtomic).toString(),
       }),
     );
@@ -501,15 +525,16 @@ export class NeonTransport {
     // the floor.
     let room =
       remaining < NEON_CHANNEL_DEPOSIT_CAP_ATOMIC ? remaining : NEON_CHANNEL_DEPOSIT_CAP_ATOMIC;
-    if (day !== null && day < room) room = day;
-    // A call the person's own per-call limit pays is fitted to it before anything is sent. Room
-    // the person approved (`approve`) is theirs to spend past that limit: its calls are paid as
-    // approved payments, and the deposit is sized to the call.
+    // A call the person's own limits pay (the per-call limit and the day's budget) is fitted to
+    // them before anything is sent. What the person approved (`approve`) is theirs to spend past
+    // either limit, as the tool payer's approved call is, and once: it pays one payment as an
+    // approved payment, and the next call goes back to the limits.
     const approvedLeft = BigInt(record.grantedAtomic) - BigInt(record.approvedSpentAtomic);
     const perCall = settings.policy.maxAutoSpendAtomic;
-    // What the person approved lifts only the per-call limit, once: the daily budget stays.
-    const callCap = approvedLeft > perCall ? approvedLeft : perCall;
+    const normalCap = day !== null && day < perCall ? day : perCall;
+    const callCap = approvedLeft > normalCap ? approvedLeft : normalCap;
     if (callCap < room) room = callCap;
+    const needsApproval = room > normalCap;
     const asked =
       typeof messages.max_tokens === 'number' && Number.isInteger(messages.max_tokens)
         ? messages.max_tokens
@@ -539,13 +564,9 @@ export class NeonTransport {
       terms,
       depositAdmitter({
         dataDir,
-        policy:
-          approvedLeft > 0n
-            ? {
-                ...settings.policy,
-                maxAutoSpendAtomic: callCap > perCall ? callCap : perCall,
-              }
-            : settings.policy,
+        policy: needsApproval
+          ? { ...settings.policy, maxAutoSpendAtomic: room, sessionBudgetAtomic: null }
+          : settings.policy,
         creator: neonHost(terms),
         ...(this.options.now ? { now: this.options.now } : {}),
       }),

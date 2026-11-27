@@ -55,12 +55,6 @@ export interface SpendRequest {
    * reservation TTL is what bounds "same turn". Omit it and nothing changes.
    */
   requestKey?: string;
-  /**
-   * The person approved this payment past their per-call limit. Only that limit is lifted for it:
-   * the allowlist and the rolling budget still apply, and the reservation and the charge count
-   * against the budget like any automatic payment.
-   */
-  approvedAbove?: boolean;
 }
 
 export interface SpendAuthorization {
@@ -183,11 +177,7 @@ export function createLocalSpendAuthorizer(deps: LocalSpendAuthorizerDeps): Spen
             policyEnforcement: 'client-only',
           };
         }
-        const policy =
-          req.approvedAbove === true && req.amountAtomic > deps.policy.maxAutoSpendAtomic
-            ? { ...deps.policy, maxAutoSpendAtomic: req.amountAtomic }
-            : deps.policy;
-        const evaluation = evaluateSpendPolicy(policy, {
+        const evaluation = evaluateSpendPolicy(deps.policy, {
           mode: req.mode ?? 'automatic',
           amountAtomic: req.amountAtomic,
           creator: req.creator,

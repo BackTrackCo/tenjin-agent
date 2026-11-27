@@ -341,6 +341,27 @@ it('returns to the per-call limit once the approved room is spent', async () => 
   expect(rooms[2]).toBe(50_000n);
 });
 
+// The same rule for the day's budget: an approval lifts it for the room it was given, once, and the
+// call after it is fitted to what the day has left again.
+it('fits a call to the day budget again once the approved room is spent', async () => {
+  const { ctx, repo, data } = await fixture({ sessionBudget: '60000' });
+  const rooms: bigint[] = [];
+  const { transport: neon } = withBatch(ctx, async (_body, _signal, room) => {
+    rooms.push(room);
+    return batchAnswer();
+  });
+  const j = job(repo, '1000000');
+  await neon.messages(j, MESSAGES, signal());
+  await grantNeonRoom(data, j.id, 200_000n);
+  await neon.messages(j, MESSAGES, signal());
+  expect(rooms[1]).toBeGreaterThan(60_000n);
+  const path = join(data, 'model-jobs', `${j.id}.neon.json`);
+  const kept = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...kept, approvedSpentAtomic: kept.grantedAtomic }));
+  await neon.messages(j, MESSAGES, signal());
+  expect(rooms[2]).toBeLessThanOrEqual(60_000n);
+});
+
 it('sends the effort the door saved with the job', async () => {
   const { ctx, repo } = await fixture();
   const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());

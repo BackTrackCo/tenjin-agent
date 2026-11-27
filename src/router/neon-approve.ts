@@ -2,7 +2,7 @@ import { toMoney } from '../lib/money';
 import { createQuote, quoteClosed, readQuote, useQuote, type Quote } from '../lib/spend-quotes';
 import type { ModelJob } from './model-job';
 import { approveCall } from './plan';
-import { grantNeonRoom } from './neon-transport';
+import { grantNeonRoom, markNeonAwaiting } from './neon-transport';
 import { neonHost, type NeonTerms } from './neon-terms';
 
 /**
@@ -81,12 +81,12 @@ export async function neonFirstCallApproval(
   terms: NeonTerms,
   grantAtomic: bigint,
   needAtomic: bigint,
-  ceilingAtomic: bigint,
+  why: string,
 ) {
   const what = `a writing job for the ${terms.label} of up to ${usd(needAtomic)} for its first call`;
   const quote = await createQuote(dataDir, {
     what,
-    sentence: `This draft needs up to ${usd(needAtomic)} for its first call, more than the ${usd(ceilingAtomic)} this machine pays for one call without asking, so it would be paid to ${neonHost(terms)} as the writer's calls need it.`,
+    sentence: `This draft needs up to ${usd(needAtomic)} for its first call, ${why}, so it would be paid to ${neonHost(terms)} as the writer's calls need it.`,
     payments: [{ amountAtomic: needAtomic, creator: neonHost(terms) }],
     call: {
       kind: KIND,
@@ -96,6 +96,8 @@ export async function neonFirstCallApproval(
       then: 'first_call',
     },
   });
+  // The queued draft does not run until this quote's yes is recorded.
+  await markNeonAwaiting(dataDir, job.id, quote.id);
   return {
     status: 'needs_approval' as const,
     action: 'refused' as const,
@@ -145,7 +147,7 @@ export async function runNeonApprove(
   if ('refused' in used)
     return { ok: false, reason: 'That quote can no longer run, so nothing was granted.' };
   const call = quote.call as NeonRevisionCall;
-  await grantNeonRoom(deps.dataDir, call.jobId, BigInt(call.ceilingAtomic));
+  await grantNeonRoom(deps.dataDir, call.jobId, BigInt(call.ceilingAtomic), quote.id);
   return {
     ok: true,
     text:
