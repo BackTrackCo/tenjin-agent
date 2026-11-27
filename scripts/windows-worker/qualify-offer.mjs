@@ -122,12 +122,18 @@ let accepted = false;
 let responseFailure;
 const transport = {
   origin,
+  // The transport answers a route with the router's offer and what its payment authorized.
   route: async ({ jobId }) => {
     routes++;
-    return { ...offer, jobId };
+    return { json: { ...offer, jobId }, authorizedAtomic: BigInt(offer.routingFeeAtomic) };
   },
-  messages: async (_job, body) => {
+  // A run is wrapped by its transport: this one has no channel to open or close.
+  withInferenceRun: async (_runId, _signal, run) => run(transport),
+  requireResumeBudget: async () => undefined,
+  recoverInferenceRefunds: async () => undefined,
+  messages: async (_job, body, _signal, beforeSend) => {
     try {
+      await beforeSend?.();
       assert(accepted, 'Inference before acceptance');
       requests++;
       const read = {
