@@ -695,7 +695,7 @@ export function registerModelTool(
           action: 'continued',
           worker_handle: offer.worker_handle,
           offer_id: offer.offer_id,
-          message: `The ${typeof offer.label === 'string' && !/^DeepSeek/i.test(offer.label) ? offer.label : 'DeepSeek'} worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does. To write to it meanwhile, send another message to the same handle.`,
+          message: `The ${typeof offer.label === 'string' && !/^DeepSeek/i.test(offer.label) ? offer.label : 'DeepSeek'} worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does, and the host delivers it when your turn ends, not during it: do not wait for it or poll with a sleep or a tool call, end your turn or do other work. To write to it meanwhile, send another message to the same handle.`,
         });
       await Promise.resolve(
         base({ cancel: offer.offer_id } as Parameters<typeof base>[0], extra),
@@ -1310,7 +1310,7 @@ export function registerModelTool(
                       ...(activeConversation
                         ? {
                             worker_handle: activeConversation.handle,
-                            continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to ${workerNameOf(job.decision)} at once, so apply the offer's parentPolicy to its text before you send it.`,
+                            continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself when your turn ends, so do not wait for it or poll; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to ${workerNameOf(job.decision)} at once, so apply the offer's parentPolicy to its text before you send it.`,
                           }
                         : {}),
                     };

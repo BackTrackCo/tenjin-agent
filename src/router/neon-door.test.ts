@@ -217,6 +217,11 @@ it('names the Neon worker, never DeepSeek, in the result and in the follow-up it
     message: expect.stringMatching(/^The Test Writer worker tenjin-worker-.* continues with/),
   });
   expect(JSON.stringify(sent)).not.toMatch(/DeepSeek/);
+  // The host delivers a background worker's text when the parent's turn ends: the parent is told
+  // so, not left to wait or poll for minutes (the live comparison polled 6 x 20 s after each send).
+  expect(first.continuation).toContain('when your turn ends');
+  expect(sent.message).toContain('when your turn ends');
+  expect(sent.message).toContain('do not wait for it or poll');
   await vi.waitFor(() => expect(worker.run).toHaveBeenCalledTimes(2));
 });
 

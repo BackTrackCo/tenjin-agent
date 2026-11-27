@@ -333,6 +333,42 @@ it('keeps the chat body a prefix of the next one when a system message and text 
   expect(between.messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'user']);
 });
 
+// The live cache check (2026-11-27): a follow-up resumes the writer's conversation in a new run,
+// and its second and third calls read 14,397 and 17,446 of their 19,495 and 22,533 input tokens
+// from the cache, because each request began with the bytes of the one before. A request that
+// changed its start (the system text, the tools, an earlier turn) would read none. The captured
+// requests were equal over the whole earlier part; this pins that for the bridge's translation.
+it('starts a follow-up request with the exact start of the first request', () => {
+  const system = [{ type: 'text', text: 'You are a writing assistant.' }];
+  const tools = [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object' } }];
+  const context = {
+    role: 'user',
+    content: [{ type: 'text', text: '<system-reminder>context</system-reminder>' }],
+  };
+  const task = { role: 'user', content: [{ type: 'text', text: 'Write the paragraph.' }] };
+  const draft = { role: 'assistant', content: [{ type: 'text', text: 'The first draft.' }] };
+  const note = { role: 'user', content: [{ type: 'text', text: 'Make it shorter.' }] };
+  const first = chatBody({ system, tools, messages: [context, task] }, {}, 16_000, TERMS.model);
+  // The resumed conversation: the draft, the person's note, and Claude Code's context block again.
+  const followUp = chatBody(
+    { system, tools, messages: [context, task, draft, note, context] },
+    {},
+    16_000,
+    TERMS.model,
+  );
+  expect(followUp.messages.slice(0, first.messages.length)).toEqual(first.messages);
+  expect(followUp.tools).toEqual(first.tools);
+  expect(JSON.stringify(followUp).startsWith(JSON.stringify(first).slice(0, 200))).toBe(true);
+  // The second follow-up starts as the first follow-up did.
+  const again = chatBody(
+    { system, tools, messages: [context, task, draft, note, context, draft, note, context] },
+    {},
+    16_000,
+    TERMS.model,
+  );
+  expect(again.messages.slice(0, followUp.messages.length)).toEqual(followUp.messages);
+});
+
 it('reads the nanogpt usage dialect: cache hits that the standard usage fields leave at zero', () => {
   // The shape of job 7e7ad935, call 2: billed at the cached rate, reported in a block of its own.
   const reply = {
