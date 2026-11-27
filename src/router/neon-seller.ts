@@ -9,6 +9,7 @@ import { wrapFetchWithPayment } from '@x402/fetch';
 import type { TypedDataDefinition } from 'viem';
 import { CliError } from '../lib/errors';
 import type { NeonTerms } from './neon-terms';
+import { pinnedFetch, type PinnedFetchOptions } from './pinned-fetch';
 import type { SpendAuthorizer } from '../lib/wallet/spend';
 import type { WalletProvider } from '../lib/wallet';
 
@@ -144,6 +145,13 @@ export async function channelDeposit(
 }
 
 /** One answer from the seller: the reply body, the ceiling its voucher allowed, the real charge. */
+/** What a timed withdrawal needs of a funded channel, kept from the call that funded it. */
+export type ChannelConfig = {
+  payer: string;
+  receiverAuthorizer: string;
+  withdrawDelay: number;
+};
+
 export type BatchAnswer = {
   status: number;
   text: string;
@@ -153,6 +161,8 @@ export type BatchAnswer = {
   costAtomic?: bigint;
   /** What a deposit put into the channel for this call, atomic. */
   depositedAtomic: bigint;
+  /** The channel's own config as the seller's 402 named it, and the wallet that paid. */
+  channel?: ChannelConfig;
 };
 
 export type BatchSellerOptions = {
@@ -167,6 +177,13 @@ export type BatchSellerOptions = {
   /** Names the call, so one request in flight cannot become two. */
   requestKey?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * Where a request may go, and how it connects (test seams). A provider request is never plain
+   * `fetch`: it goes to the public address that was checked ({@link pinnedFetch}), unless a
+   * `fetchImpl` stands in for the network.
+   */
+  destination?: PinnedFetchOptions['destination'];
+  pinnedTransport?: PinnedFetchOptions['transport'];
   /** Chain reads for the scheme's channel checks. */
   readContract?: ChainRead;
 };
@@ -181,10 +198,21 @@ export class BatchSeller {
   transmitted = false;
   constructor(private options: BatchSellerOptions) {}
 
+  /** The fetch every request to the seller goes through. */
+  private fetcher(): typeof fetch {
+    return (
+      this.options.fetchImpl ??
+      pinnedFetch({
+        ...(this.options.destination ? { destination: this.options.destination } : {}),
+        ...(this.options.pinnedTransport ? { transport: this.options.pinnedTransport } : {}),
+      })
+    );
+  }
+
   private async scheme(
     signal: AbortSignal,
     deposits: { sum: bigint },
-  ): Promise<{ scheme: BatchSettlementEvmScheme; payer: string }> {
+  ): Promise<{ scheme: BatchSettlementEvmScheme; payer: string; address: string }> {
     const signer = await this.options.provider.getSigner();
     const read = this.options.readContract;
     const clientSigner = toClientEvmSigner(
@@ -216,14 +244,15 @@ export class BatchSeller {
           deposits,
         ),
     });
-    return { scheme, payer };
+    return { scheme, payer, address: signer.address };
   }
 
   /** One chat completion, paid from the channel, with its ceiling held to `room`. */
   async post(body: string, signal: AbortSignal, room: bigint): Promise<BatchAnswer> {
     const deposits = { sum: 0n };
-    const { scheme } = await this.scheme(signal, deposits);
+    const { scheme, address } = await this.scheme(signal, deposits);
     let ceiling: bigint | undefined;
+    let channel: ChannelConfig | undefined;
     const { terms } = this.options;
     // What the live 402 offered at another payee than the row names: nothing is signed for it.
     let wrongPayees: string[] = [];
@@ -243,7 +272,17 @@ export class BatchSeller {
           (offer) =>
             offer.payTo.toLowerCase() === terms.payTo.toLowerCase() && BigInt(offer.amount) <= room,
         );
-        if (fit[0]) ceiling = BigInt(fit[0].amount);
+        if (fit[0]) {
+          ceiling = BigInt(fit[0].amount);
+          const extra = fit[0].extra as
+            { receiverAuthorizer?: unknown; withdrawDelay?: unknown } | undefined;
+          if (typeof extra?.receiverAuthorizer === 'string')
+            channel = {
+              payer: address,
+              receiverAuthorizer: extra.receiverAuthorizer,
+              withdrawDelay: typeof extra.withdrawDelay === 'number' ? extra.withdrawDelay : 900,
+            };
+        }
         return fit;
       });
     const spend = this.options.authorizer
@@ -257,7 +296,7 @@ export class BatchSeller {
       client.onBeforePaymentCreation((ctx) =>
         spend.before(BigInt(ctx.selectedRequirements.amount)),
       );
-    const base = this.options.fetchImpl ?? fetch;
+    const base = this.fetcher();
     const watched: typeof fetch = (input, init) => {
       // The payment wrapper calls fetch with a Request and no init: read its headers too.
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
@@ -290,6 +329,7 @@ export class BatchSeller {
       ...(ceiling !== undefined ? { ceilingAtomic: ceiling } : {}),
       ...(cost !== null && /^\d+$/.test(cost) ? { costAtomic: BigInt(cost) } : {}),
       depositedAtomic: deposits.sum,
+      ...(channel !== undefined ? { channel } : {}),
     };
   }
 
@@ -301,6 +341,6 @@ export class BatchSeller {
    */
   async refund(signal: AbortSignal) {
     const { scheme } = await this.scheme(signal, { sum: 0n });
-    return scheme.refund(this.options.terms.url, { fetch: this.options.fetchImpl ?? fetch });
+    return scheme.refund(this.options.terms.url, { fetch: this.fetcher() });
   }
 }

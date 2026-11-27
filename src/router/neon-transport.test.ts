@@ -105,6 +105,7 @@ const batchAnswer = (
     ceilingAtomic: bigint;
     costAtomic: bigint;
     depositedAtomic: bigint;
+    channel: { payer: string; receiverAuthorizer: string; withdrawDelay: number };
   }> = {},
 ) => ({
   status: 200,
@@ -193,6 +194,25 @@ it('posts chat completions to the row, and records the real charge beside the ce
   );
   // The paid ledger names the seller of the saved terms.
   expect(await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8')).toContain('seller.example');
+});
+
+it('keeps the funded channel config the seller named, for a withdrawal that cannot ask it again', async () => {
+  const { ctx, repo, data } = await fixture();
+  const channel = {
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  };
+  const { transport: neon } = withBatch(ctx, async () => batchAnswer({ channel }));
+  await neon.messages(job(repo), MESSAGES, signal());
+  expect(
+    (
+      await new NeonRefunds({
+        dataDir: data,
+        payer: () => ({ refund: async () => ({}) }),
+      }).entries()
+    )[0]!.channel,
+  ).toEqual(channel);
 });
 
 it('sends the effort the door saved with the job', async () => {

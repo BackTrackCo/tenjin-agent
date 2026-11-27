@@ -65,3 +65,54 @@ it('records a refund that nothing disturbed, and a retry of an open channel the 
   await refunds.settle(['job-a'], new AbortController().signal);
   expect((await refunds.entries())[0]).toMatchObject({ state: 'refunded', refundedAtomic: '500' });
 });
+
+// Failure caught by review: the timed withdrawal read the channel's receiver authorizer and delay
+// from the seller's live 402, so a seller that was offline, or that had changed either, left the
+// unused deposit where it was or pointed recovery at another channel. The config is kept from the
+// call that funded the channel and handed to the chain steps.
+it('hands the saved channel config to every withdrawal step, with no call to the seller', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const config = {
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  };
+  const refunds = new NeonRefunds({
+    dataDir: dir,
+    payer: () => ({
+      refund: async () => {
+        throw new Error('seller offline');
+      },
+    }),
+  });
+  await refunds.open('job-a', TERMS);
+  await refunds.saveChannel(TERMS, config);
+  const seen: unknown[] = [];
+  const chain = {
+    channel: async (_terms: NeonTerms, saved: unknown) => {
+      seen.push(saved);
+      return {
+        id: '0xchannel',
+        balanceAtomic: 50_000n,
+        claimedAtomic: 0n,
+        pendingAtomic: 0n,
+        initiatedAt: 0,
+        delayS: 900,
+        nowS: 1_000,
+      };
+    },
+    initiate: async (_terms: NeonTerms, _amount: bigint, saved: unknown) => {
+      seen.push(saved);
+      return '0xinit';
+    },
+    finalize: async () => '0xfinal',
+  };
+  expect(await refunds.retry(chain)).toMatchObject([{ state: 'withdrawal_started' }]);
+  expect(seen).toEqual([config, config]);
+  // A second save does not replace what funded the channel with what a later call saw.
+  await refunds.saveChannel(TERMS, {
+    ...config,
+    receiverAuthorizer: '0x00000000000000000000000000000000000000d2',
+  });
+  expect((await refunds.entries())[0]!.channel).toEqual(config);
+});

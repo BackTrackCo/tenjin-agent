@@ -43,6 +43,7 @@ import {
 } from './neon-chat';
 import { neonHost, neonTermsSchema, type NeonTerms } from './neon-terms';
 import { NeonRefunds } from './neon-refund';
+import type { PinnedFetchOptions } from './pinned-fetch';
 
 /** The task class every Neon job is recorded under: the worker takes writing jobs. */
 export const NEON_TASK_CLASS = 'writing';
@@ -191,6 +192,9 @@ export type NeonTransportOptions = {
   liveJob?: (jobId: string) => Promise<boolean>;
   /** The network seam of the payer. Production leaves it unset. */
   fetchImpl?: typeof fetch;
+  /** Where a provider request may go, and how it connects (test seams). */
+  destination?: PinnedFetchOptions['destination'];
+  pinnedTransport?: PinnedFetchOptions['transport'];
   now?: () => number;
 };
 
@@ -479,6 +483,9 @@ export class NeonTransport {
     const settled = answer.costAtomic !== undefined;
     if (process.env[NEON_CAPTURE_ENV] === '1')
       await this.capture(job, n, capturedRequest(chat), answer.text).catch(() => undefined);
+    // The funded channel's own config is kept, so a withdrawal never has to ask the seller.
+    if (answer.channel)
+      await this.refunds.saveChannel(terms, answer.channel).catch(() => undefined);
     await this.ledger(job, terms, n, quoted, settled);
     const call: NeonCall = {
       n,
@@ -546,6 +553,8 @@ export class NeonTransport {
       requestKey,
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      ...(this.options.destination ? { destination: this.options.destination } : {}),
+      ...(this.options.pinnedTransport ? { pinnedTransport: this.options.pinnedTransport } : {}),
     });
   }
 

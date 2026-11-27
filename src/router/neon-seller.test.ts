@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
@@ -92,6 +92,13 @@ it('commits a batch call to the same ledger `tenjin status` and the next authori
   });
   const answer = await batch.post('{}', new AbortController().signal, 1_000_000n);
   expect(answer).toMatchObject({ status: 200, costAtomic: 7321n, ceilingAtomic: 42521n });
+  // What a timed withdrawal needs of the channel is kept from the seller's 402, so that recovery
+  // never has to ask the seller again.
+  expect(answer.channel).toEqual({
+    payer: account.address,
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  });
   expect(paid).toHaveLength(1);
   expect(batch.transmitted).toBe(true);
   // What `tenjin status` reads (`readSpendSummary`): the window now holds the real charge.
@@ -228,4 +235,43 @@ it('replaces the reservation with the settled charge in one ledger update, and n
   await expect(make(broken).post('{}', new AbortController().signal, 1_000_000n)).rejects.toThrow(
     'disk full',
   );
+});
+
+// Failure caught by review: the provider request used plain `fetch`, which resolves the name again
+// on its own, so a catalog URL that named a private address got the worker's prompt. With no stand-in
+// for the network the request goes through the pinned fetch, and a private address is refused before
+// anything is signed or sent, for the call and for the refund.
+it('refuses a seller whose name resolves to a private address, before anything is signed or sent', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+  const account = privateKeyToAccount(generatePrivateKey());
+  const signed: unknown[] = [];
+  const transport = vi.fn();
+  const make = () =>
+    new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: {
+        getSigner: async () => ({
+          address: account.address,
+          signTypedData: async (message: never) => {
+            signed.push(message);
+            return account.signTypedData(message);
+          },
+        }),
+      } as never,
+      admit: async () => undefined,
+      requestKey: 'call-1',
+      destination: { resolveHostname: async () => [{ address: '10.0.0.5', family: 4 }] },
+      pinnedTransport: transport,
+    });
+  const batch = make();
+  await expect(
+    batch.post('{"prompt":"private"}', new AbortController().signal, 1_000_000n),
+  ).rejects.toThrow(/private|network address/i);
+  expect(batch.transmitted).toBe(false);
+  await expect(make().refund(new AbortController().signal)).rejects.toThrow(
+    /private|network address/i,
+  );
+  expect(transport).not.toHaveBeenCalled();
+  expect(signed).toHaveLength(0);
 });

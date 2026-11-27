@@ -13,6 +13,7 @@ import { base } from 'viem/chains';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { SEND_MAX_FEE_PER_GAS_CAP, SEND_MAX_PRIORITY_FEE_CAP } from '../lib/usdc';
 import type { WithdrawChain } from './neon-refund';
+import { pinnedFetch } from './pinned-fetch';
 import type { NeonTerms } from './neon-terms';
 
 /**
@@ -84,28 +85,50 @@ export type WithdrawDeps = {
   fetchImpl?: typeof fetch;
 };
 
-/** The channel's config, from the seller's live 402 for the saved URL. */
-async function channelOf(terms: NeonTerms, deps: WithdrawDeps) {
-  const probe = await (deps.fetchImpl ?? fetch)(terms.url, { method: 'GET' });
-  const header = probe.headers.get('PAYMENT-REQUIRED');
-  if (probe.status !== 402 || !header)
-    throw new Error('The seller did not answer with its payment terms');
-  const requirements = decodePaymentRequiredHeader(header).accepts.find(
-    (accepted) => accepted.scheme === terms.scheme,
-  );
-  if (!requirements) throw new Error('The seller no longer offers the batch-settlement scheme');
-  if (requirements.payTo.toLowerCase() !== terms.payTo.toLowerCase())
-    throw new Error('The seller now names another payee than the one this job was paid to');
-  const extra = requirements.extra as
-    { receiverAuthorizer?: string; withdrawDelay?: number } | undefined;
-  if (!extra?.receiverAuthorizer) throw new Error('The seller names no receiver authorizer');
+/**
+ * THE CHANNEL'S CONFIG. A funded channel's config is kept from the call that funded it, so a
+ * withdrawal never needs the seller to answer, and a seller that later names another receiver
+ * authorizer or delay cannot point recovery at another channel. Only a record from before the
+ * config was kept reads the seller's live 402 for the saved URL, whose payee must be the one the
+ * job was paid to.
+ */
+export async function channelConfigOf(
+  terms: NeonTerms,
+  saved: { payer: string; receiverAuthorizer: string; withdrawDelay: number } | undefined,
+  deps: WithdrawDeps,
+) {
+  const wallet = getAddress(deps.signer.address);
+  let receiverAuthorizer: string;
+  let withdrawDelay: number;
+  if (saved) {
+    if (getAddress(saved.payer) !== wallet)
+      throw new Error('This channel was funded by another wallet than the one that is open');
+    receiverAuthorizer = saved.receiverAuthorizer;
+    withdrawDelay = saved.withdrawDelay;
+  } else {
+    const probe = await (deps.fetchImpl ?? pinnedFetch())(terms.url, { method: 'GET' });
+    const header = probe.headers.get('PAYMENT-REQUIRED');
+    if (probe.status !== 402 || !header)
+      throw new Error('The seller did not answer with its payment terms');
+    const requirements = decodePaymentRequiredHeader(header).accepts.find(
+      (accepted) => accepted.scheme === terms.scheme,
+    );
+    if (!requirements) throw new Error('The seller no longer offers the batch-settlement scheme');
+    if (requirements.payTo.toLowerCase() !== terms.payTo.toLowerCase())
+      throw new Error('The seller now names another payee than the one this job was paid to');
+    const extra = requirements.extra as
+      { receiverAuthorizer?: string; withdrawDelay?: number } | undefined;
+    if (!extra?.receiverAuthorizer) throw new Error('The seller names no receiver authorizer');
+    receiverAuthorizer = extra.receiverAuthorizer;
+    withdrawDelay = typeof extra.withdrawDelay === 'number' ? extra.withdrawDelay : 900;
+  }
   const config = {
-    payer: getAddress(deps.signer.address),
-    payerAuthorizer: getAddress(deps.signer.address),
+    payer: wallet,
+    payerAuthorizer: wallet,
     receiver: getAddress(terms.payTo),
-    receiverAuthorizer: getAddress(extra.receiverAuthorizer),
+    receiverAuthorizer: getAddress(receiverAuthorizer),
     token: getAddress(terms.asset),
-    withdrawDelay: typeof extra.withdrawDelay === 'number' ? extra.withdrawDelay : 900,
+    withdrawDelay,
     salt: SALT,
   };
   return { config, id: computeChannelId(config, terms.network) };
@@ -145,8 +168,8 @@ export function withdrawChain(deps: WithdrawDeps): WithdrawChain {
     return hash;
   };
   return {
-    async channel(terms) {
-      const { config, id } = await channelOf(terms, deps);
+    async channel(terms, saved) {
+      const { config, id } = await channelConfigOf(terms, saved, deps);
       const [[balance, claimed], [pending, initiatedAt], block] = await Promise.all([
         client.readContract({
           address: contract,
@@ -172,8 +195,8 @@ export function withdrawChain(deps: WithdrawDeps): WithdrawChain {
         nowS: Number(block.timestamp),
       };
     },
-    async initiate(terms, amountAtomic) {
-      const { config } = await channelOf(terms, deps);
+    async initiate(terms, amountAtomic, saved) {
+      const { config } = await channelConfigOf(terms, saved, deps);
       return send(
         encodeFunctionData({
           abi: withdrawAbi,
@@ -182,8 +205,8 @@ export function withdrawChain(deps: WithdrawDeps): WithdrawChain {
         }),
       );
     },
-    async finalize(terms) {
-      const { config } = await channelOf(terms, deps);
+    async finalize(terms, saved) {
+      const { config } = await channelConfigOf(terms, saved, deps);
       return send(
         encodeFunctionData({ abi: withdrawAbi, functionName: 'finalizeWithdraw', args: [config] }),
       );

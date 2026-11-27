@@ -26,6 +26,14 @@ const entrySchema = z.object({
   ended: z.array(z.string()).max(200).default([]),
   state: z.enum(['open', 'refunded', 'empty', 'failed', 'withdrawal_started', 'withdrawn']),
   at: z.number(),
+  /** The funded channel's own config, kept from the first call that funded it. */
+  channel: z
+    .object({
+      payer: z.string(),
+      receiverAuthorizer: z.string(),
+      withdrawDelay: z.number().int().min(1),
+    })
+    .optional(),
   /** The last refusal or failure, in words, for the person. */
   note: z.string().max(500).optional(),
   refundedAtomic: z.string().regex(/^\d+$/).optional(),
@@ -82,10 +90,16 @@ export async function cooperativeRefund(payer: {
   }
 }
 
+/** The channel config a funded channel was kept with. */
+export type SavedChannel = NonNullable<ChannelEntry['channel']>;
+
 /** The chain a timed withdrawal needs: reads and one transaction, injected so tests need no chain. */
 export interface WithdrawChain {
   /** The channel's balance and what the seller has claimed of it. */
-  channel(terms: NeonTerms): Promise<{
+  channel(
+    terms: NeonTerms,
+    saved?: SavedChannel,
+  ): Promise<{
     id: string;
     balanceAtomic: bigint;
     claimedAtomic: bigint;
@@ -95,9 +109,9 @@ export interface WithdrawChain {
     nowS: number;
   }>;
   /** Starts the withdrawal of `amountAtomic`, and returns the transaction. */
-  initiate(terms: NeonTerms, amountAtomic: bigint): Promise<string>;
+  initiate(terms: NeonTerms, amountAtomic: bigint, saved?: SavedChannel): Promise<string>;
   /** Finishes a withdrawal whose delay has passed, and returns the transaction. */
-  finalize(terms: NeonTerms): Promise<string>;
+  finalize(terms: NeonTerms, saved?: SavedChannel): Promise<string>;
 }
 
 export type NeonRefundsOptions = {
@@ -168,6 +182,19 @@ export class NeonRefunds {
             },
       );
     });
+  }
+
+  /**
+   * Keeps the config of the channel a job funded. The first one saved stays: a later call whose
+   * seller names another receiver authorizer or delay is not the channel the money is in.
+   */
+  async saveChannel(terms: NeonTerms, channel: SavedChannel): Promise<void> {
+    const key = channelKey(terms);
+    await this.change((channels) =>
+      channels.map((entry) =>
+        entry.key === key && entry.channel === undefined ? { ...entry, channel } : entry,
+      ),
+    );
   }
 
   private async record(key: string, result: RefundResult, epoch: number) {
@@ -256,7 +283,7 @@ export class NeonRefunds {
   }
 
   private async withdraw(entry: ChannelEntry, chain: WithdrawChain) {
-    const seen = await chain.channel(entry.terms);
+    const seen = await chain.channel(entry.terms, entry.channel);
     const set = (patch: Partial<ChannelEntry>) =>
       this.change((channels) =>
         channels.map((c) => (c.key === entry.key ? { ...c, ...patch, at: this.now() } : c)),
@@ -277,7 +304,7 @@ export class NeonRefunds {
           });
           return;
         }
-        const transaction = await chain.finalize(entry.terms);
+        const transaction = await chain.finalize(entry.terms, entry.channel);
         await set({
           state: 'withdrawn',
           transaction,
@@ -290,7 +317,7 @@ export class NeonRefunds {
         await set({ state: 'empty' });
         return;
       }
-      const transaction = await chain.initiate(entry.terms, left);
+      const transaction = await chain.initiate(entry.terms, left, entry.channel);
       await set({
         state: 'withdrawal_started',
         withdrawal: {
