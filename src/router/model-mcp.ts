@@ -256,7 +256,11 @@ export function registerModelTool(
       } catch {
         // Refused below.
       }
-      if (envelope?.status !== 'completed' || envelope.worker_handle !== conversation?.handle)
+      // A finished worker, or the quote a call that did not fit left for it (its worker stays).
+      if (
+        !['completed', 'needs_approval'].includes(String(envelope?.status)) ||
+        envelope?.worker_handle !== conversation?.handle
+      )
         return { refused: 'Stored worker completion is unavailable' };
       // The stored result stands. A local job update that failed earlier is repaired here.
       await jobs.finish(job.id, 'completed').catch(() => undefined);
@@ -1369,6 +1373,12 @@ export function registerModelTool(
                         ).catch(() => null)
                       : null;
                   const state = abort.signal.aborted ? 'cancelled' : miss ? 'completed' : 'unknown';
+                  // The whole answer is what the conversation keeps, so a replay after a reload
+                  // returns the same quote.
+                  const asked =
+                    miss && activeConversation
+                      ? { ...miss, offer_id: job.id, worker_handle: activeConversation.handle }
+                      : null;
                   if (activeConversation)
                     await model.conversations
                       .finish(
@@ -1376,17 +1386,14 @@ export function registerModelTool(
                         activeConversation.owner,
                         job.id,
                         state,
-                        miss
-                          ? 'Waiting for the approval of more room. Nothing was sent.'
-                          : undefined,
+                        asked ? JSON.stringify(asked) : undefined,
                       )
                       .catch(() => false);
                   const spend = await transport
                     .summary(executionJob)
                     .catch(() => ({ accounting: 'unknown' }));
                   activity?.finish(state, 'reservedAtomic' in spend ? spend : undefined);
-                  if (miss && activeConversation) {
-                    const asked = { ...miss, worker_handle: activeConversation.handle };
+                  if (asked) {
                     await model.store
                       .finish(job.id, 'completed', offered ? JSON.stringify(asked) : undefined)
                       .catch(() => undefined);

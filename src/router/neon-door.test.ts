@@ -260,6 +260,16 @@ it('keeps the worker and asks again when the real first request measured more th
     worker_handle: expect.stringMatching(/^tenjin-worker-/),
   });
   expect(asked.status).not.toBe('stopped');
+  // Failure caught by review: the quote was stored as plain text, so after a reload accepting the
+  // same offer answered "Stored worker completion is unavailable" and the pending quote was lost.
+  // The accept of a finished offer returns the stored answer: the same quote.
+  expect(typeof asked.offer_id).toBe('string');
+  const replay = await call({ offer_id: asked.offer_id });
+  expect(replay).toMatchObject({
+    status: 'needs_approval',
+    worker_handle: asked.worker_handle,
+    quote: { id: asked.quote.id },
+  });
   const quote = (await readQuote(folder, asked.quote.id))!;
   expect(
     await runNeonApprove(
