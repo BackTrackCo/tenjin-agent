@@ -1,0 +1,5 @@
+---
+'tenjin-cli': patch
+---
+
+`tenjin install` now ends with "Use of Tenjin is subject to the Terms (https://tenjin.sh/terms) and Privacy Policy (https://tenjin.sh/privacy)." in place of the bare Privacy and Terms links, for Claude Code and Codex. The install's JSON `disclosure` carries the same line, and an agent's `next` asks it to mention the Terms and Privacy Policy, in its own words and with both links, when it tells the person Tenjin is installed. The spending-limit question no longer ends with "Either choice approves this." The receipt also drops the line about what is sent for routing; the privacy policy covers it.

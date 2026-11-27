@@ -6,7 +6,7 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing and lets you accept or customize spending limits. It then offers **Add funds**, which opens the fund page in your browser to pay or enter a code; the terminal or your agent waits and carries on when the money lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. Checkout requires its own choice.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup links the Terms and the Privacy Policy, which says what is shared, lets you accept or customize spending limits. It then offers **Add funds**, which opens the fund page in your browser to pay or enter a code; the terminal or your agent waits and carries on when the money lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts setup and spending defaults. Checkout requires its own choice.
 
 DeepSeek subagents are off. No setting and no setup question turns them on, and a subagent setting saved by an earlier version is ignored, left in your config file and charged nothing. [What an earlier version offered →](./subagents.md)
 

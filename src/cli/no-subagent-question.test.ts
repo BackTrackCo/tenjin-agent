@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { main } from '../cli';
 import { captureIo } from '../context-test-utils';
 import { loadRawConfig } from '../lib/config';
+import { DISCLOSURE } from '../router/install';
 import type { RuntimeSetup } from '../lib/runtime';
 
 // What a person meets on a fresh setup and in `tenjin config`: no subagent question, no
@@ -149,7 +150,7 @@ const receipts = (output: string) => {
 };
 
 it.each([[['claude']], [['claude', 'codex']]] as ('claude' | 'codex')[][][])(
-  'a fresh setup on %j asks no subagent question and saves no subagent setting',
+  'a fresh setup on %j says the terms and asks no subagent question or setting',
   async (hosts) => {
     seams.hosts = hosts;
     for (const args of [[], ['--yes']]) {
@@ -157,6 +158,8 @@ it.each([[['claude']], [['claude', 'codex']]] as ('claude' | 'codex')[][][])(
       expect(out.code).toBe(0);
       for (const receipt of receipts(out.stdout))
         expect(receipt.nextSteps?.map(({ id }) => id) ?? []).not.toContain('subagents');
+      // The terms sentence stays; only the subagent question is gone.
+      expect(out.stdout).toContain(DISCLOSURE[0]);
       expect(out.stdout).not.toMatch(/cheap model|DeepSeek|--subagents/i);
       expect(out.config.router ?? {}).not.toHaveProperty('subagents');
       expect(out.config.router ?? {}).not.toHaveProperty('subagentConsent');

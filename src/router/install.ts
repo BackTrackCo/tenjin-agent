@@ -64,7 +64,6 @@ import {
   SPEND_QUESTION,
   spendChoiceQuestion,
   spendOptions,
-  FEE_APPROVAL,
 } from './spend-question';
 import { recordTermsTold } from './terms-notice';
 import { shQuote } from './plugin-files';
@@ -101,9 +100,19 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
-  'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
+  'Use of Tenjin is subject to the Terms (https://tenjin.sh/terms) and Privacy Policy (https://tenjin.sh/privacy).',
 ];
+
+/**
+ * The person reads the agent's reply, not the install's output, so an agent's
+ * `next` asks it to pass the disclosure on when it reports the install.
+ */
+export const TERMS_RELAY =
+  'When you tell the person Tenjin is installed, mention in your own words that use of Tenjin is subject to the Terms and Privacy Policy, with both links from `disclosure`.';
+
+export function withTermsRelay(next: string): string {
+  return `${next.replace(/\.$/, '')}. ${TERMS_RELAY}`;
+}
 
 /**
  * What Tenjin adds, said right after the success line: three things an agent
@@ -600,20 +609,22 @@ export async function runRouterInstall(
     ...(fund !== undefined ? [fund] : []),
   ];
 
+  const step = nextStep(
+    plugin,
+    claude,
+    wallet,
+    migration,
+    asksAgent ? nextSteps.length : 0,
+    ctx.io.isTTY,
+    command,
+    env,
+  );
+  const installed = plugin.state !== 'failed' && plugin.state !== 'deferred';
   const data = {
     plugin,
     claudeCode,
     migration,
-    next: nextStep(
-      plugin,
-      claude,
-      wallet,
-      migration,
-      asksAgent ? nextSteps.length : 0,
-      ctx.io.isTTY,
-      command,
-      env,
-    ),
+    next: asksAgent && installed ? withTermsRelay(step) : step,
     nextSteps,
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
     // The check for this scope, said outright; a bare doctor in the project
@@ -1196,14 +1207,13 @@ export interface QuestionStep {
 /**
  * The one question install asks, before anything is written: the defaults, or
  * your own limits. It is asked only when the file names neither limit. The
- * question names the routing fee and its deposits too, and either answer
- * approves it. Cancelling at any step writes nothing.
+ * question names the routing fee and its deposits too. Cancelling at any step writes nothing.
  */
 export async function approveLimits(
   deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`,
+    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return { ...ROUTER_DEFAULTS };

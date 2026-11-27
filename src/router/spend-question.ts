@@ -53,12 +53,9 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
   };
 }
 
-/** The fee terms approved with either spending-limit choice. */
+/** The fee terms shown with the spending-limit question. */
 export const ROUTING_FEE_TERMS =
   'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits.';
-
-/** The selector's own line: either answer approves the fee. */
-export const FEE_APPROVAL = 'Either choice approves this.';
 
 const DEFAULTS_USD = limitsUsd(ROUTER_DEFAULTS);
 
@@ -68,9 +65,9 @@ export const SPEND_QUESTION = 'How much can your agent spend from its balance?';
 /** The recommended answer: the defaults, as amounts. */
 export const DEFAULTS_LABEL = `Up to $${DEFAULTS_USD.maxAutoSpend} a call and $${DEFAULTS_USD.sessionBudget} a day`;
 
-/** The question with the fee terms either answer approves. */
+/** The question with the fee terms. */
 export function spendChoiceQuestion(): string {
-  return `${SPEND_QUESTION} ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
+  return `${SPEND_QUESTION} ${ROUTING_FEE_TERMS}`;
 }
 
 /** One answer to {@link spendChoiceQuestion}, and the one command that applies it. */
