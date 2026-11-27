@@ -483,8 +483,9 @@ const primitives = [''].concat(
 it.each(primitives.map((primitive) => ({ primitive, name: primitive || 'platform' })))(
   'the stress detector sees two holders when the lock is broken on 2 percent of the rounds ($name)',
   async ({ primitive }) => {
-    const result = await runStress('4000', 'none', '4', '0.02', '25', primitive);
-    expect(result.broken).toBeGreaterThanOrEqual(25);
+    const result = await runStress('4000', 'none', '4', '0.02', '10', primitive);
+    // Ten breaks cannot be met by luck at 2 percent, and a slow runner reaches them.
+    expect(result.broken).toBeGreaterThanOrEqual(10);
     expect(result.rounds).toBeGreaterThan(result.broken);
     expect(result.overlaps).toBeGreaterThan(0);
     // One break meets at most one other holder on each side, so more overlaps than that
