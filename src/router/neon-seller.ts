@@ -129,7 +129,12 @@ export function unspentInChannel(ctx: {
  */
 export async function channelDeposit(
   ctx: { minimumDepositAmount: string; currentBalance: string; maxDeposit?: string },
-  admit: (amountAtomic: bigint) => Promise<void>,
+  /**
+   * The person's limits meet a deposit before it is signed. It returns nothing where the whole
+   * amount is admitted, or the most the limits admit where it is not, and throws where the payee
+   * is refused outright.
+   */
+  admit: (amountAtomic: bigint) => Promise<bigint | void>,
   deposits: { sum: bigint } = { sum: 0n },
 ): Promise<bigint> {
   const needed = BigInt(ctx.minimumDepositAmount);
@@ -137,11 +142,34 @@ export async function channelDeposit(
   if (room <= 0n || room < needed)
     throw new ChannelDepositRefused('The channel is at its deposit cap');
   const max = ctx.maxDeposit === undefined ? room : BigInt(ctx.maxDeposit);
-  const deposit = max < room ? max : room;
+  let deposit = max < room ? max : room;
   if (deposit < needed) throw new ChannelDepositRefused('The deposit cannot cover the call');
-  await admit(deposit);
+  // THE SMALLEST AMOUNT THE LIMITS ADMIT THAT STILL SERVES THE CALL: the channel is filled to its
+  // cap where the limits allow it, and no further than they allow where they do not, but never
+  // below what the call itself needs. A call that cannot be served inside the limits is refused
+  // here, before anything is signed, and says why.
+  const admitted = await admit(deposit);
+  if (admitted !== undefined && admitted < deposit) {
+    if (admitted < needed)
+      throw new ChannelDepositRefused(
+        `Your spend limits admit a deposit of ${dollars(admitted)} at most, and this call needs a channel deposit of at least ${dollars(needed)}`,
+      );
+    deposit = admitted;
+    // The limits see the amount that is signed, too, and must take it whole.
+    const again = await admit(deposit);
+    if (again !== undefined && again < deposit)
+      throw new ChannelDepositRefused(
+        `Your spend limits do not admit a channel deposit of ${dollars(deposit)}`,
+      );
+  }
   deposits.sum += deposit;
   return deposit;
+}
+
+/** Atomic USDC as dollars, for a refusal the person reads. */
+function dollars(atomic: bigint): string {
+  const cents = (Number(atomic) / 1_000_000).toFixed(4);
+  return '$' + cents.replace(/0+$/, '').replace(/[.]$/, '');
 }
 
 /** One answer from the seller: the reply body, the ceiling its voucher allowed, the real charge. */
@@ -170,8 +198,8 @@ export type BatchSellerOptions = {
   /** The seller's saved terms: where it posts, who it is paid to, in what asset. */
   terms: SellerTerms;
   provider: WalletProvider;
-  /** The person's own limits meet a deposit before it is signed: throws where it is over them. */
-  admit: (amountAtomic: bigint) => Promise<void>;
+  /** The person's own limits meet a deposit before it is signed (see {@link channelDeposit}). */
+  admit: (amountAtomic: bigint) => Promise<bigint | void>;
   /** Where each call's ceiling and real charge are counted, pre-funded channel or not. */
   authorizer?: SpendAuthorizer;
   /** Names the call, so one request in flight cannot become two. */

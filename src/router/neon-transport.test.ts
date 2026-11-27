@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { ModelJobStore, type ModelJob } from './model-job';
 import {
@@ -11,7 +11,12 @@ import {
   workerEndText,
 } from './model-worker-control';
 import { neonMinimumJobAtomic, NEON_TURN_MAX_TOKENS } from './neon-chat';
-import { neonNextCallNeedAtomic, NeonTransport, readNeonRecord } from './neon-transport';
+import {
+  depositAdmitter,
+  neonNextCallNeedAtomic,
+  NeonTransport,
+  readNeonRecord,
+} from './neon-transport';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import {
@@ -430,6 +435,101 @@ it('reads a refused deposit through the error that wraps it, and keeps why a cal
   expect((failure as ModelCallFailed).detail).toMatchObject({ cause: 'budget', uncharged: true });
   expect((failure as ModelCallFailed).message).toContain('deposit cap');
   expect((await readNeonRecord(data, sent.id))!.notSent[0]).toContain('call 1 not sent');
+});
+
+// Failure caught by review: the deposit always filled the channel to its 0.50 USD cap and was
+// admitted as one automatic payment, so a call that fit the job was refused whenever the per-call
+// limit was under 0.50, or the day's budget had less than that left (`POLICY_REFUSED deposit
+// 500000`). The deposit is now the most the limits admit, never above the cap and never below what
+// the call itself needs, and a call that cannot fit is refused with the reason and nothing signed.
+describe('the size of a channel deposit', () => {
+  const needs = (minimumDepositAmount: string) => ({ minimumDepositAmount, currentBalance: '0' });
+  const admits =
+    (limit: bigint | undefined, seen: bigint[] = []) =>
+    async (amount: bigint) => {
+      seen.push(amount);
+      return limit !== undefined && amount > limit ? limit : undefined;
+    };
+
+  it('fills the channel to its cap when the limits admit it', async () => {
+    const seen: bigint[] = [];
+    expect(await channelDeposit(needs('40000'), admits(undefined, seen))).toBe(
+      NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
+    );
+    expect(seen).toEqual([NEON_CHANNEL_DEPOSIT_CAP_ATOMIC]);
+  });
+
+  it('shrinks to a per-call limit under the cap, and the limits see the amount that is signed', async () => {
+    const seen: bigint[] = [];
+    expect(await channelDeposit(needs('40000'), admits(300_000n, seen))).toBe(300_000n);
+    // The first ask is refused down to the limit, the amount that is signed is admitted again.
+    expect(seen).toEqual([NEON_CHANNEL_DEPOSIT_CAP_ATOMIC, 300_000n]);
+  });
+
+  it('shrinks to what a low day budget has left', async () => {
+    expect(await channelDeposit(needs('40000'), admits(200_000n))).toBe(200_000n);
+  });
+
+  it('never goes below the seller minimum for the call: it is refused, with the reason, before anything is signed', async () => {
+    const seen: bigint[] = [];
+    await expect(channelDeposit(needs('250000'), admits(200_000n, seen))).rejects.toThrow(
+      /spend limits admit .* at most/,
+    );
+    await expect(channelDeposit(needs('250000'), admits(200_000n))).rejects.toBeInstanceOf(
+      ChannelDepositRefused,
+    );
+    // Limits that keep refusing the amount they named are the same refusal, never a deposit.
+    await expect(
+      channelDeposit(needs('1'), async (amount) => (amount > 1n ? amount - 1n : 0n)),
+    ).rejects.toBeInstanceOf(ChannelDepositRefused);
+    // A limit of nothing is the same refusal.
+    await expect(channelDeposit(needs('1'), admits(0n))).rejects.toBeInstanceOf(
+      ChannelDepositRefused,
+    );
+  });
+});
+
+describe('the limits a deposit meets', () => {
+  const TARGET = 'seller.example';
+  const policy = (over: Record<string, unknown>) => ({
+    maxAutoSpendAtomic: 1_000_000n,
+    sessionBudgetAtomic: 5_000_000n,
+    allowlistCreators: [],
+    ...over,
+  });
+
+  it('admits a whole deposit inside the limits, and names the most the limits admit otherwise', async () => {
+    const { data } = await fixture();
+    const admit = depositAdmitter({ dataDir: data, policy: policy({}) as never, creator: TARGET });
+    expect(await admit(500_000n)).toBeUndefined();
+    // A per-call limit of 0.30 admits 0.30.
+    const tight = depositAdmitter({
+      dataDir: data,
+      policy: policy({ maxAutoSpendAtomic: 300_000n }) as never,
+      creator: TARGET,
+    });
+    expect(await tight(500_000n)).toBe(300_000n);
+    expect(await tight(300_000n)).toBeUndefined();
+    // A day's budget with 0.20 left, after 0.25 of 0.45 was spent, admits 0.20.
+    const authorizer = createLocalSpendAuthorizer({ dir: data, policy: policy({}) as never });
+    await authorizer.commit(undefined, 250_000n, { mode: 'automatic' });
+    const low = depositAdmitter({
+      dataDir: data,
+      policy: policy({ sessionBudgetAtomic: 450_000n }) as never,
+      creator: TARGET,
+    });
+    expect(await low(500_000n)).toBe(200_000n);
+  });
+
+  it('still refuses a payee the person has not allowed, for any amount', async () => {
+    const { data } = await fixture();
+    const admit = depositAdmitter({
+      dataDir: data,
+      policy: policy({ allowlistCreators: ['someone-else.example'] }) as never,
+      creator: TARGET,
+    });
+    await expect(admit(1n)).rejects.toThrow();
+  });
 });
 
 it('counts every voucher against the daily budget, a pre-funded channel included, at its real charge', async () => {

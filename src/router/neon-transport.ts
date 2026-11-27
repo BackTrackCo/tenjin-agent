@@ -136,6 +136,38 @@ export async function neonRoomLeftAtomic(
 }
 
 /**
+ * WHAT A DEPOSIT MEETS: the per-call limit, the rolling day's budget and the allowlist, as any
+ * payment does. It resolves to nothing where the whole amount is admitted, and to the most the
+ * limits admit where it is not, so the deposit can shrink to fit instead of refusing a call that
+ * does. A payee the person has not allowed is refused outright.
+ */
+export function depositAdmitter(options: {
+  dataDir: string;
+  policy: Parameters<typeof admitPlan>[1]['policy'];
+  creator: string;
+  now?: () => number;
+}): (amountAtomic: bigint) => Promise<bigint | undefined> {
+  return async (amountAtomic) => {
+    const admission = await admitPlan([{ amountAtomic, creator: options.creator }], {
+      dataDir: options.dataDir,
+      policy: options.policy,
+      ...(options.now ? { now: options.now } : {}),
+    });
+    if ('admitted' in admission) return undefined;
+    if ('refused' in admission)
+      throw new CliError('POLICY_REFUSED', admission.refused.message, {
+        details: { reason: 'neon_limits' },
+      });
+    const { maxAutoSpendAtomic, budgetLeftAtomic } = admission.over;
+    const most =
+      budgetLeftAtomic !== null && budgetLeftAtomic < maxAutoSpendAtomic
+        ? budgetLeftAtomic
+        : maxAutoSpendAtomic;
+    return most < amountAtomic ? most : amountAtomic - 1n;
+  };
+}
+
+/**
  * What the next call of a resumed job needs at least, by the same estimate the call is fitted by:
  * the history the last call sent (its size in bytes, or four bytes a token where only tokens were
  * kept), room for the person's note and the context Claude Code adds again (about 20 KB), and one
@@ -193,7 +225,7 @@ export type NeonTransportOptions = {
   /** Chain reads the batch scheme's channel checks need. */
   readContract?: ChainRead;
   /** The batch-settlement payer for a seller's saved terms. A test replaces it. */
-  batch?: (terms: NeonTerms, admit: (amountAtomic: bigint) => Promise<void>) => BatchLike;
+  batch?: (terms: NeonTerms, admit: (amountAtomic: bigint) => Promise<bigint | void>) => BatchLike;
   /** Whether a job's runner is alive. Production reads the job store's runner lock. */
   liveJob?: (jobId: string) => Promise<boolean>;
   /** The bound on the channel refund at a run's end. Production gives it a few seconds. */
@@ -415,28 +447,17 @@ export class NeonTransport {
     const body = JSON.stringify(chat);
     const n = record.calls.length + 1;
     const started = this.now();
-    const admitAmount = async (amountAtomic: bigint) =>
-      admitPlan([{ amountAtomic, creator: neonHost(terms) }], {
-        dataDir,
-        policy: settings.policy,
-        ...(this.options.now ? { now: this.options.now } : {}),
-      });
     // The channel is on record before any money moves, with the terms this job was paid under.
     await this.refunds.open(job.id, terms);
-    // A deposit meets the person's limits like any payment.
+    // A deposit meets the person's limits like any payment, and is sized to what they admit.
     const batch = this.batchPayer(
       terms,
-      async (amountAtomic) => {
-        const admission = await admitAmount(amountAtomic);
-        if (!('admitted' in admission))
-          throw new CliError(
-            'POLICY_REFUSED',
-            'over' in admission
-              ? 'This Neon deposit is over your spend limits; nothing was paid.'
-              : admission.refused.message,
-            { details: { reason: 'neon_limits' } },
-          );
-      },
+      depositAdmitter({
+        dataDir,
+        policy: settings.policy,
+        creator: neonHost(terms),
+        ...(this.options.now ? { now: this.options.now } : {}),
+      }),
       canonicalHash({ job: job.id, n, body }),
     );
     let answer;
@@ -550,7 +571,7 @@ export class NeonTransport {
   /** The batch-settlement payer for one seller's saved terms, made at the call. */
   private batchPayer(
     terms: NeonTerms,
-    admit: (amountAtomic: bigint) => Promise<void>,
+    admit: (amountAtomic: bigint) => Promise<bigint | void>,
     requestKey = `neon:${Date.now()}`,
   ): BatchLike {
     if (this.options.batch) return this.options.batch(terms, admit);
