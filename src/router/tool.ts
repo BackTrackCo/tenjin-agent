@@ -2292,8 +2292,8 @@ function pollDeps(deps: RequestToolDeps, take?: JobTake): PollDeps {
     ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
     ...(take !== undefined
       ? {
-          signIn: (challenge: string, url: string) =>
-            signInForPoll(challenge, url, deps.ctx, {
+          signIn: (header: (name: string) => string | undefined, url: string) =>
+            signInForPoll(header, url, deps.ctx, {
               ...(provider !== undefined ? { provider } : {}),
               paidBy: { ...(from !== undefined ? { from } : {}), url: take.call.url },
             }),
