@@ -1,10 +1,13 @@
 import { randomBytes } from 'node:crypto';
+import { open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { modelLock } from './model-job';
 import { channelKey } from './neon-seller';
 import { neonTermsSchema, type NeonTerms } from './neon-terms';
-import { readJsonFile, writePrivate } from './store-files';
+import { CliError } from '../lib/errors';
+import { writePrivate } from './store-files';
 
 /**
  * WHERE EACH NEON CHANNEL STANDS, kept with the seller terms its jobs were paid under. A job's
@@ -65,6 +68,49 @@ export type ChannelEntry = z.infer<typeof entrySchema>;
 const fileSchema = z.object({ version: z.literal(1), channels: z.array(entrySchema) });
 
 const journalPath = (dataDir: string) => join(dataDir, 'neon-channels.json');
+
+/** What the journal may grow to before it is refused rather than read. */
+const JOURNAL_MAX_BYTES = 8_000_000;
+
+/**
+ * THE JOURNAL, READ STRICTLY. A journal that is absent is empty; one that exists and cannot be
+ * read (too big, damaged, or not what this build writes) is NEVER empty: reading it as empty and
+ * then writing would erase the salts and saved configs `tenjin refund` needs to recover deposits.
+ * It is refused with a message, and the file is left as it is.
+ */
+async function readJournal(dataDir: string): Promise<ChannelEntry[]> {
+  const path = journalPath(dataDir);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      return undefined;
+    },
+  );
+  if (file === null) return [];
+  const unreadable = (why: string) =>
+    new CliError(
+      'CONFIG_INVALID',
+      `The record of Neon channels (${path}) exists but cannot be read (${why}). Nothing was changed and no call was made: it holds what \`tenjin refund\` needs to recover deposits, so it is kept as it is. Move it aside only after copying it.`,
+    );
+  if (file === undefined) throw unreadable('it cannot be opened');
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile()) throw unreadable('it is not a regular file');
+    if (stat.size > JOURNAL_MAX_BYTES)
+      throw unreadable(`it is ${stat.size} bytes, over ${JOURNAL_MAX_BYTES}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse((await file.readFile('utf8')) || 'null');
+    } catch {
+      throw unreadable('it is not valid JSON');
+    }
+    const checked = fileSchema.safeParse(parsed);
+    if (!checked.success) throw unreadable('it does not match what this build writes');
+    return checked.data.channels;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
 
 /** What the cooperative refund came to. */
 export type RefundResult =
@@ -166,10 +212,7 @@ export class NeonRefunds {
   }
 
   async entries(): Promise<ChannelEntry[]> {
-    const parsed = fileSchema.safeParse(
-      await readJsonFile(journalPath(this.options.dataDir), 1_000_000),
-    );
-    return parsed.success ? parsed.data.channels : [];
+    return readJournal(this.options.dataDir);
   }
   private async change(
     update: (channels: ChannelEntry[]) => ChannelEntry[] | Promise<ChannelEntry[]>,
@@ -380,7 +423,38 @@ export class NeonRefunds {
       }
       if (chain) await this.withdraw(entry, chain);
     }
+    await this.prune(chain).catch(() => 0);
     return this.entries();
+  }
+
+  /**
+   * FORGETS WHAT IS PROVABLY FINISHED, so retired channels do not pile up. A retired channel is
+   * never deposited into again, so it has nothing left to recover when the chain shows that its
+   * balance equals what was claimed and that no withdrawal is pending: nothing unclaimed is in it
+   * and nothing is on its way out. That proof is a chain read (`channels` and
+   * `pendingWithdrawals`), made here. A retired channel with no saved config never had a payment
+   * created for it, so it never held anything. A channel the read cannot prove stays.
+   */
+  async prune(chain?: WithdrawChain): Promise<number> {
+    const finished = new Set<string>();
+    for (const entry of await this.entries()) {
+      if (!entry.retired) continue;
+      if (!entry.channel) {
+        finished.add(entry.key);
+        continue;
+      }
+      if (!chain) continue;
+      try {
+        const seen = await chain.channel(entry.terms, entry.channel);
+        if (seen.balanceAtomic === seen.claimedAtomic && seen.pendingAtomic === 0n)
+          finished.add(entry.key);
+      } catch {
+        // Unproven stays.
+      }
+    }
+    if (finished.size === 0) return 0;
+    await this.change((channels) => channels.filter((entry) => !finished.has(entry.key)));
+    return finished.size;
   }
 
   private async withdraw(entry: ChannelEntry, chain: WithdrawChain) {

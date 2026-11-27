@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -133,6 +133,97 @@ it('retires a channel and opens the next with a salt of its own, and refunds bot
   // Both are refunded where the jobs end, each with its own salt.
   await refunds.settle(['job-a', 'job-b'], new AbortController().signal);
   expect(refunded.sort()).toEqual([undefined, next.salt].sort());
+});
+
+// Failure caught by review: a journal over the read limit was read as EMPTY, and the next change
+// wrote an empty journal over it, losing the salts and saved configs `tenjin refund` needs. An
+// unreadable journal is never empty: nothing is written, the file stays, and the person is told.
+it('refuses to write over a journal it cannot read, and keeps the file as it is', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const path = join(dir, 'neon-channels.json');
+  const refunds = new NeonRefunds({ dataDir: dir, payer: () => ({ refund: async () => ({}) }) });
+  const cases: Array<[string, string]> = [
+    [
+      'over the size limit',
+      JSON.stringify({ version: 1, channels: [], pad: 'x'.repeat(8_100_000) }),
+    ],
+    ['damaged', '{"version":1,"channels":[{"key"'],
+    ['not what this build writes', JSON.stringify({ version: 2, channels: [] })],
+  ];
+  for (const [, content] of cases) {
+    await writeFile(path, content);
+    await expect(refunds.open('job-a', TERMS)).rejects.toThrow(/cannot be read/);
+    await expect(refunds.retire(TERMS)).rejects.toThrow(/cannot be read/);
+    await expect(refunds.entries()).rejects.toThrow(/Nothing was changed/);
+    expect(await readFile(path, 'utf8')).toBe(content);
+  }
+  // Absent is empty, and writes.
+  await rm(path);
+  expect(await refunds.entries()).toEqual([]);
+  await refunds.open('job-a', TERMS);
+  expect(await refunds.entries()).toHaveLength(1);
+});
+
+// Retired channels do not pile up for ever, and only what is PROVEN finished is forgotten: a chain
+// read that shows balance equal to claimed and no withdrawal pending (nothing unclaimed is in it
+// and a retired channel is never deposited into again), or a retired entry that never had a
+// payment created. Funds, a pending withdrawal or a read that fails keep the entry.
+it('prunes a retired channel only on the proof that nothing is left in it', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const refunds = new NeonRefunds({ dataDir: dir, payer: () => ({ refund: async () => ({}) }) });
+  const channel = (seed: string) => ({
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    // The delay tells the channels apart in what the chain stub answers.
+    withdrawDelay: 900 + Number(seed),
+  });
+  const seen: Record<string, { balance: bigint; claimed: bigint; pending: bigint } | 'throws'> = {
+    '1': { balance: 5_000n, claimed: 5_000n, pending: 0n },
+    '2': { balance: 5_000n, claimed: 4_000n, pending: 0n },
+    '3': { balance: 5_000n, claimed: 5_000n, pending: 900n },
+    '4': 'throws',
+  };
+  // Four retired channels with a payment behind them, and one that never had one.
+  for (const seed of ['1', '2', '3', '4']) {
+    await refunds.open(`job-${seed}`, TERMS);
+    await refunds.saveChannel(TERMS, channel(seed));
+    await refunds.retire(TERMS);
+  }
+  await refunds.open('job-none', TERMS);
+  await refunds.retire(TERMS);
+  // One active channel, never retired.
+  await refunds.open('job-live', TERMS);
+  expect(await refunds.entries()).toHaveLength(6);
+  const chain = {
+    channel: async (_terms: NeonTerms, saved?: { withdrawDelay: number }) => {
+      const answer = seen[String(saved!.withdrawDelay - 900)]!;
+      if (answer === 'throws') throw new Error('rpc down');
+      return {
+        id: '0x',
+        balanceAtomic: answer.balance,
+        claimedAtomic: answer.claimed,
+        pendingAtomic: answer.pending,
+        initiatedAt: 0,
+        delayS: 900,
+        nowS: 0,
+      };
+    },
+    initiate: async () => '0x',
+    finalize: async () => '0x',
+  };
+  expect(await refunds.prune(chain as never)).toBe(2);
+  const left = await refunds.entries();
+  expect(left).toHaveLength(4);
+  // Funds, a pending withdrawal, a failed read and the active channel all stay.
+  expect(
+    left
+      .filter((entry) => entry.retired)
+      .map((entry) => String((entry.channel?.withdrawDelay ?? 0) - 900))
+      .sort(),
+  ).toEqual(['2', '3', '4']);
+  expect(left.some((entry) => !entry.retired)).toBe(true);
+  // Without a chain, only the entry that never had a payment goes.
+  expect(await refunds.prune()).toBe(0);
 });
 
 // Failure caught by review: the timed withdrawal read the channel's receiver authorizer and delay

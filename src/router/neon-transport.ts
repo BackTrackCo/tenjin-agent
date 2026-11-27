@@ -1,5 +1,5 @@
 import type { ChainRead } from './routing-payer';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import type { Hex } from 'viem';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -149,6 +149,25 @@ export async function readNeonRecord(dataDir: string, jobId: string): Promise<Ne
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * A job's record, for a write. Absent is null; one that exists and cannot be read is NEVER null,
+ * because a fresh record written over it would forget what the job spent and was granted.
+ */
+async function readNeonRecordForWrite(dataDir: string, jobId: string): Promise<NeonRecord | null> {
+  const kept = await readNeonRecord(dataDir, jobId);
+  if (kept) return kept;
+  const exists = await stat(neonRecordPath(dataDir, jobId)).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => error.code !== 'ENOENT',
+  );
+  if (exists)
+    throw new CliError(
+      'CONFIG_INVALID',
+      `The record of Neon job ${jobId} exists but cannot be read. Nothing was changed: it holds what the job spent and was granted, so it is kept as it is.`,
+    );
+  return null;
+}
+
 /** The room a job has left: its ceiling and what the person approved, less what it spent. */
 export async function neonRoomLeftAtomic(
   dataDir: string,
@@ -261,7 +280,8 @@ export async function markNeonAwaiting(dataDir: string, jobId: string, quoteId: 
   const path = neonRecordPath(dataDir, jobId);
   await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
   await modelLock(`${path}.lock`, async () => {
-    const record = (await readNeonRecord(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
+    const record =
+      (await readNeonRecordForWrite(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
     await writePrivate(path, JSON.stringify({ ...record, awaiting: quoteId }));
   });
 }
@@ -277,7 +297,8 @@ export async function grantNeonRoom(
   await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
   await modelLock(`${path}.lock`, async () => {
     // A first call asked about at the door is granted before its job has a record.
-    const record = (await readNeonRecord(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
+    const record =
+      (await readNeonRecordForWrite(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
     await writePrivate(
       path,
       JSON.stringify({
@@ -467,7 +488,7 @@ export class NeonTransport {
     const path = neonRecordPath(dataDir, job.id);
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     return modelLock(`${path}.lock`, async () => {
-      const kept = await readNeonRecord(dataDir, job.id);
+      const kept = await readNeonRecordForWrite(dataDir, job.id);
       if (kept) return kept;
       const fresh = freshNeonRecord(job.id, this.now());
       await writePrivate(path, JSON.stringify(fresh));

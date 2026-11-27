@@ -72,8 +72,15 @@ export async function runRefund(
       channels: channels.map((entry) => ({
         seller: new URL(entry.terms.url).host,
         state: entry.state,
-        ...(entry.refundedAtomic ? { refundedAtomic: entry.refundedAtomic } : {}),
-        ...(entry.transaction ? { transaction: entry.transaction } : {}),
+        // The last refund's amount and transaction, only where the state says it happened: an
+        // empty channel found nothing to take back now, whatever an earlier refund returned.
+        ...(entry.refundedAtomic && (entry.state === 'refunded' || entry.state === 'withdrawn')
+          ? { refundedAtomic: entry.refundedAtomic }
+          : {}),
+        ...(entry.transaction && (entry.state === 'refunded' || entry.state === 'withdrawn')
+          ? { transaction: entry.transaction }
+          : {}),
+        ...(entry.retired ? { retired: true } : {}),
         ...(entry.withdrawal ? { withdrawal: entry.withdrawal } : {}),
         ...(entry.note ? { note: entry.note } : {}),
       })),

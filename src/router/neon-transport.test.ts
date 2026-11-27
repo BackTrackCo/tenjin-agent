@@ -525,6 +525,27 @@ it('retires a channel whose earlier job left a voucher unsettled, before the nex
   expect(fresh.jobIds).toEqual(['6f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a11']);
 });
 
+// A record or a journal that exists and cannot be read is never treated as empty and written over:
+// a call is refused with nothing sent, a grant is refused, and the files stay as they were.
+it('refuses a call and a grant over a record or a journal it cannot read, and keeps both files', async () => {
+  const { ctx, repo, data } = await fixture();
+  const { transport: neon, batch } = withBatch(ctx, async () => batchAnswer());
+  const j = job(repo);
+  await mkdir(join(data, 'model-jobs'), { recursive: true });
+  const record = join(data, 'model-jobs', `${j.id}.neon.json`);
+  await writeFile(record, '{"version":1,"jobId"');
+  await expect(neon.messages(j, MESSAGES, signal())).rejects.toThrow(/cannot be read/);
+  await expect(grantNeonRoom(data, j.id, 1_000n)).rejects.toThrow(/cannot be read/);
+  expect(await readFile(record, 'utf8')).toBe('{"version":1,"jobId"');
+  await rm(record);
+  const journal = join(data, 'neon-channels.json');
+  const oversized = JSON.stringify({ version: 1, channels: [], pad: 'x'.repeat(8_100_000) });
+  await writeFile(journal, oversized);
+  await expect(neon.messages(j, MESSAGES, signal())).rejects.toThrow(/cannot be read/);
+  expect(batch.post).not.toHaveBeenCalled();
+  expect(await readFile(journal, 'utf8')).toBe(oversized);
+});
+
 it('sends the effort the door saved with the job', async () => {
   const { ctx, repo } = await fixture();
   const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());
