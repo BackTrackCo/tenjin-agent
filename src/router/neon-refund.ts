@@ -17,6 +17,11 @@ const entrySchema = z.object({
   key: z.string(),
   terms: neonTermsSchema,
   jobIds: z.array(z.string()).max(200),
+  /**
+   * How many times a job has opened this channel to pay on it. A refund in flight writes its result
+   * only if no job opened the channel meanwhile: a newer deposit it never saw stays open.
+   */
+  epoch: z.number().int().default(0),
   /** Jobs whose run has ended since they last sent a call: they no longer use the channel. */
   ended: z.array(z.string()).max(200).default([]),
   state: z.enum(['open', 'refunded', 'empty', 'failed', 'withdrawal_started', 'withdrawn']),
@@ -138,7 +143,15 @@ export class NeonRefunds {
       if (!known)
         return [
           ...channels,
-          { key, terms, jobIds: [jobId], ended: [], state: 'open' as const, at: this.now() },
+          {
+            key,
+            terms,
+            jobIds: [jobId],
+            ended: [],
+            epoch: 1,
+            state: 'open' as const,
+            at: this.now(),
+          },
         ];
       return channels.map((entry) =>
         entry.key !== key
@@ -149,6 +162,7 @@ export class NeonRefunds {
               jobIds: [...new Set([...entry.jobIds, jobId])].slice(-200),
               // It sends again, so it uses the channel again.
               ended: entry.ended.filter((id) => id !== jobId),
+              epoch: entry.epoch + 1,
               state: entry.state === 'withdrawal_started' ? entry.state : ('open' as const),
               at: this.now(),
             },
@@ -156,10 +170,12 @@ export class NeonRefunds {
     });
   }
 
-  private async record(key: string, result: RefundResult) {
+  private async record(key: string, result: RefundResult, epoch: number) {
     await this.change((channels) =>
       channels.map((entry) =>
-        entry.key !== key
+        // A job that opened the channel since this refund began has put money in it that this
+        // result knows nothing of: the channel stays open.
+        entry.key !== key || entry.epoch !== epoch
           ? entry
           : {
               ...entry,
@@ -212,7 +228,11 @@ export class NeonRefunds {
       return next;
     });
     for (const entry of due)
-      await this.record(entry.key, await cooperativeRefund(this.options.payer(entry.terms)));
+      await this.record(
+        entry.key,
+        await cooperativeRefund(this.options.payer(entry.terms)),
+        entry.epoch,
+      );
     return this.entries();
   }
 
@@ -227,7 +247,7 @@ export class NeonRefunds {
         continue;
       if (entry.state !== 'withdrawal_started') {
         const result = await cooperativeRefund(this.options.payer(entry.terms));
-        await this.record(entry.key, result);
+        await this.record(entry.key, result, entry.epoch);
         if (result.state !== 'failed' || !chain) continue;
       }
       if (chain) await this.withdraw(entry, chain);
