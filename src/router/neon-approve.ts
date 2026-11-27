@@ -16,7 +16,14 @@ import { neonHost, type NeonTerms } from './neon-terms';
  */
 const KIND = 'neon_revision';
 
-type NeonRevisionCall = { kind: typeof KIND; jobId: string; handle: string; ceilingAtomic: string };
+type NeonRevisionCall = {
+  kind: typeof KIND;
+  jobId: string;
+  handle: string;
+  ceilingAtomic: string;
+  /** What follows the yes: a revision sent again, or the first draft's offer accepted. */
+  then?: 'first_call';
+};
 
 const isRevisionCall = (call: unknown): call is NeonRevisionCall =>
   typeof call === 'object' &&
@@ -61,6 +68,45 @@ export async function neonRevisionApproval(
   };
 }
 
+/**
+ * A FIRST DRAFT THE JOB CEILING CANNOT CARRY is asked about before anything is sent, with the
+ * same quote and the same `approve`. The job exists with no spend; the yes grows its ceiling, and
+ * the first call is then paid as an approved payment, past the per-call limit. Nothing of the
+ * draft leaves the machine until then.
+ */
+export async function neonFirstCallApproval(
+  dataDir: string,
+  job: Pick<ModelJob, 'id'>,
+  handle: string,
+  terms: NeonTerms,
+  grantAtomic: bigint,
+  needAtomic: bigint,
+  ceilingAtomic: bigint,
+) {
+  const what = `a writing job for the ${terms.label} of up to ${usd(needAtomic)} for its first call`;
+  const quote = await createQuote(dataDir, {
+    what,
+    sentence: `This draft needs up to ${usd(needAtomic)} for its first call, more than the ${usd(ceilingAtomic)} this machine pays for one call without asking, so it would be paid to ${neonHost(terms)} as the writer's calls need it.`,
+    payments: [{ amountAtomic: needAtomic, creator: neonHost(terms) }],
+    call: {
+      kind: KIND,
+      jobId: job.id,
+      handle,
+      ceilingAtomic: grantAtomic.toString(),
+      then: 'first_call',
+    },
+  });
+  return {
+    status: 'needs_approval' as const,
+    action: 'refused' as const,
+    started: false,
+    reason: `needs_approval: ${quote.sentence} Nothing was sent and nothing was paid.`,
+    instruction: `Call ${approveCall(quote)}: it asks the user and runs only on their yes. On the yes, run the draft by calling subagent({offer_id: ${JSON.stringify(job.id)}}); do not run it before. Do not change a setting for it.`,
+    offer_id: job.id,
+    quote: { id: quote.id, what: quote.what, total: usd(needAtomic), expiresAt: quote.expiresAt },
+  };
+}
+
 /** What `approve` returns for a Neon revision: the same shape the tool's other answers use. */
 export type NeonApproveResult = { ok: true; text: string } | { ok: false; reason: string };
 
@@ -102,6 +148,9 @@ export async function runNeonApprove(
   await grantNeonRoom(deps.dataDir, call.jobId, BigInt(call.ceilingAtomic));
   return {
     ok: true,
-    text: `Approved: the writing job has ${usd(BigInt(call.ceilingAtomic))} more room. Send the revision again to worker ${call.handle}.`,
+    text:
+      call.then === 'first_call'
+        ? `Approved: the writing job has ${usd(BigInt(call.ceilingAtomic))} more room. Run the draft by calling subagent({offer_id: ${JSON.stringify(call.jobId)}}).`
+        : `Approved: the writing job has ${usd(BigInt(call.ceilingAtomic))} more room. Send the revision again to worker ${call.handle}.`,
   };
 }

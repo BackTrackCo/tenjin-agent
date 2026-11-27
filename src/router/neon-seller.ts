@@ -69,19 +69,23 @@ export class VoucherSpend {
     private authorizer: SpendAuthorizer,
     private creator: string,
     private requestKey: string,
+    private mode: 'automatic' | 'manual' = 'automatic',
   ) {}
   /** The hook before a payment is created: abort it where the limits refuse it. */
   async before(ceilingAtomic: bigint): Promise<void | { abort: true; reason: string }> {
     // A corrective retry signs again under the reservation the call already holds.
     if (this.held) return;
     const authorization = await this.authorizer.authorize({
-      mode: 'automatic',
+      mode: this.mode,
       amountAtomic: ceilingAtomic,
       creator: this.creator,
       requestKey: this.requestKey,
     });
-    if (authorization.decision !== 'allow')
-      return { abort: true, reason: authorization.message ?? 'Over your spend limits.' };
+    // A payment the person approved comes back as `confirm`, which their yes already answered.
+    const passed =
+      authorization.decision === 'allow' ||
+      (this.mode === 'manual' && authorization.decision === 'confirm');
+    if (!passed) return { abort: true, reason: authorization.message ?? 'Over your spend limits.' };
     this.reservation = authorization.reservationId;
     this.held = true;
   }
@@ -172,6 +176,31 @@ function dollars(atomic: bigint): string {
   return '$' + cents.replace(/0+$/, '').replace(/[.]$/, '');
 }
 
+/**
+ * A request body with the same size, model and output cap as `real` and none of its content: the
+ * seller quotes its price from these, and learns nothing of the prompt.
+ */
+export function placeholderBody(real: string): string {
+  let model: unknown;
+  let maxTokens: unknown;
+  try {
+    const parsed = JSON.parse(real) as { model?: unknown; max_tokens?: unknown };
+    model = parsed.model;
+    maxTokens = parsed.max_tokens;
+  } catch {
+    // A body that is not JSON keeps only its size.
+  }
+  const make = (filler: string) =>
+    JSON.stringify({
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof maxTokens === 'number' ? { max_tokens: maxTokens } : {}),
+      messages: [{ role: 'user', content: filler }],
+    });
+  const bare = Buffer.byteLength(make(''));
+  const wanted = Buffer.byteLength(real);
+  return make('x'.repeat(Math.max(0, wanted - bare)));
+}
+
 /** One answer from the seller: the reply body, the ceiling its voucher allowed, the real charge. */
 /** What a timed withdrawal needs of a funded channel, kept from the call that funded it. */
 export type ChannelConfig = {
@@ -204,6 +233,14 @@ export type BatchSellerOptions = {
   authorizer?: SpendAuthorizer;
   /** Names the call, so one request in flight cannot become two. */
   requestKey?: string;
+  /**
+   * Keeps the funded channel's own config. It runs BEFORE the first payment of a call is created,
+   * so a call that is funded and then fails still leaves what a withdrawal needs. Where it throws,
+   * nothing is signed.
+   */
+  onChannel?: (channel: ChannelConfig) => Promise<void>;
+  /** How a payment is authorized: the person's own limits (the default) or one they approved. */
+  mode?: 'automatic' | 'manual';
   fetchImpl?: typeof fetch;
   /**
    * Where a request may go, and how it connects (test seams). A provider request is never plain
@@ -326,17 +363,43 @@ export class BatchSeller {
           this.options.authorizer,
           new URL(terms.url).host,
           this.options.requestKey ?? `neon:${Date.now()}`,
+          this.options.mode ?? 'automatic',
         )
       : undefined;
-    if (spend)
-      client.onBeforePaymentCreation((ctx) =>
-        spend.before(BigInt(ctx.selectedRequirements.amount)),
-      );
+    // Before anything is signed: the person's limits, then the channel's config is kept.
+    client.onBeforePaymentCreation(async (ctx) => {
+      const refused = await spend?.before(BigInt(ctx.selectedRequirements.amount));
+      if (refused) return refused;
+      if (channel && this.options.onChannel) {
+        try {
+          await this.options.onChannel(channel);
+        } catch {
+          await spend?.settle(undefined, ceiling ?? room, false);
+          return {
+            abort: true,
+            reason: 'The channel config could not be kept, so nothing was signed.',
+          };
+        }
+      }
+      return undefined;
+    });
     const base = this.fetcher();
-    const watched: typeof fetch = (input, init) => {
+    const watched: typeof fetch = async (input, init) => {
       // The payment wrapper calls fetch with a Request and no init: read its headers too.
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
       if (headers.has('payment-signature')) this.transmitted = true;
+      // THE UNPAID REQUEST CARRIES NO PROMPT. The seller's terms come from a request of the same
+      // size, model and output cap with filler in place of the draft; the draft goes only with a
+      // payment that has passed the person's limits, the payee check and the channel's config.
+      else if (input instanceof Request && input.method === 'POST')
+        return base(
+          new Request(input.url, {
+            method: 'POST',
+            headers: input.headers,
+            body: placeholderBody(await input.clone().text()),
+          }),
+          { ...init, signal },
+        );
       return base(input, { ...init, signal });
     };
     let response: Response;

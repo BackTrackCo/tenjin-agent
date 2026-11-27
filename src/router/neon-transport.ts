@@ -16,6 +16,7 @@ import { appendPaidRecord, recordedSent } from './paid';
 import { readJsonFile, writePrivate } from './store-files';
 import {
   BatchSeller,
+  type ChannelConfig,
   ChannelDepositRefused,
   NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
   PayeeMismatch,
@@ -114,6 +115,20 @@ export type NeonRecord = z.infer<typeof recordSchema>;
 export const neonRecordPath = (dataDir: string, jobId: string) =>
   join(dataDir, 'model-jobs', `${jobId}.neon.json`);
 
+export const freshNeonRecord = (jobId: string, startedAt: number): NeonRecord => ({
+  version: 1,
+  jobId,
+  taskClass: NEON_TASK_CLASS,
+  startedAt,
+  wallMs: 0,
+  spentAtomic: '0',
+  grantedAtomic: '0',
+  settledAtomic: '0',
+  calls: [],
+  signatures: {},
+  notSent: [],
+});
+
 export async function readNeonRecord(dataDir: string, jobId: string): Promise<NeonRecord | null> {
   const parsed = recordSchema.safeParse(
     await readJsonFile(neonRecordPath(dataDir, jobId), 4_000_000),
@@ -186,12 +201,24 @@ export async function neonNextCallNeedAtomic(
 }
 const NEON_RESUME_MARGIN_BYTES = 20_000;
 
+/**
+ * What a job's FIRST call needs at least, by the same estimate: the draft's own size, the context
+ * Claude Code adds around it, and one floor-sized turn of output. The door asks about it before
+ * anything is sent, so a draft the job could not carry is never started.
+ */
+export const neonFirstCallNeedAtomic = (
+  terms: Parameters<typeof neonPeakQuoteAtomic>[0],
+  promptBytes: number,
+): bigint =>
+  neonPeakQuoteAtomic(terms, promptBytes + NEON_RESUME_MARGIN_BYTES, NEON_TURN_FLOOR_TOKENS);
+
 /** The person approved one more ceiling for a job: its next call may spend it. */
 export async function grantNeonRoom(dataDir: string, jobId: string, amountAtomic: bigint) {
   const path = neonRecordPath(dataDir, jobId);
+  await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
   await modelLock(`${path}.lock`, async () => {
-    const record = await readNeonRecord(dataDir, jobId);
-    if (!record) throw new Error('The job has no record');
+    // A first call asked about at the door is granted before its job has a record.
+    const record = (await readNeonRecord(dataDir, jobId)) ?? freshNeonRecord(jobId, Date.now());
     await writePrivate(
       path,
       JSON.stringify({
@@ -353,19 +380,7 @@ export class NeonTransport {
     return modelLock(`${path}.lock`, async () => {
       const kept = await readNeonRecord(dataDir, job.id);
       if (kept) return kept;
-      const fresh: NeonRecord = {
-        version: 1,
-        jobId: job.id,
-        taskClass: NEON_TASK_CLASS,
-        startedAt: this.now(),
-        wallMs: 0,
-        spentAtomic: '0',
-        grantedAtomic: '0',
-        settledAtomic: '0',
-        calls: [],
-        signatures: {},
-        notSent: [],
-      };
+      const fresh = freshNeonRecord(job.id, this.now());
       await writePrivate(path, JSON.stringify(fresh));
       return fresh;
     });
@@ -432,6 +447,12 @@ export class NeonTransport {
     let room =
       remaining < NEON_CHANNEL_DEPOSIT_CAP_ATOMIC ? remaining : NEON_CHANNEL_DEPOSIT_CAP_ATOMIC;
     if (day !== null && day < room) room = day;
+    // A call the person's own per-call limit pays is fitted to it before anything is sent. Room
+    // the person approved (`approve`) is theirs to spend past that limit: its calls are paid as
+    // approved payments, and the deposit is sized to the call.
+    const approved = BigInt(record.grantedAtomic) > 0n;
+    const perCall = settings.policy.maxAutoSpendAtomic;
+    if (!approved && perCall < room) room = perCall;
     const asked =
       typeof messages.max_tokens === 'number' && Number.isInteger(messages.max_tokens)
         ? messages.max_tokens
@@ -454,11 +475,20 @@ export class NeonTransport {
       terms,
       depositAdmitter({
         dataDir,
-        policy: settings.policy,
+        policy: approved
+          ? {
+              ...settings.policy,
+              maxAutoSpendAtomic: room > perCall ? room : perCall,
+            }
+          : settings.policy,
         creator: neonHost(terms),
         ...(this.options.now ? { now: this.options.now } : {}),
       }),
       canonicalHash({ job: job.id, n, body }),
+      approved ? 'manual' : 'automatic',
+      // The channel's own config is kept BEFORE the first payment leaves, so a call that was
+      // funded and then failed still leaves what a withdrawal needs without asking the seller.
+      (channel) => this.refunds.saveChannel(terms, channel),
     );
     let answer;
     try {
@@ -573,6 +603,8 @@ export class NeonTransport {
     terms: NeonTerms,
     admit: (amountAtomic: bigint) => Promise<bigint | void>,
     requestKey = `neon:${Date.now()}`,
+    mode: 'automatic' | 'manual' = 'automatic',
+    onChannel?: (channel: ChannelConfig) => Promise<void>,
   ): BatchLike {
     if (this.options.batch) return this.options.batch(terms, admit);
     return new BatchSeller({
@@ -582,6 +614,8 @@ export class NeonTransport {
       admit,
       authorizer: this.options.authorizer,
       requestKey,
+      mode,
+      ...(onChannel ? { onChannel } : {}),
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
       ...(this.options.destination ? { destination: this.options.destination } : {}),

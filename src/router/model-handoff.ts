@@ -44,8 +44,13 @@ import {
   type NeonEffort,
 } from './neon-chat';
 import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
-import { neonRevisionApproval } from './neon-approve';
-import { neonNextCallNeedAtomic, neonRoomLeftAtomic } from './neon-transport';
+import { NEON_CHANNEL_DEPOSIT_CAP_ATOMIC } from './neon-seller';
+import { neonFirstCallApproval, neonRevisionApproval } from './neon-approve';
+import {
+  neonFirstCallNeedAtomic,
+  neonNextCallNeedAtomic,
+  neonRoomLeftAtomic,
+} from './neon-transport';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -457,6 +462,16 @@ export class ModelHandoff {
       );
     if (settings.maxJobAtomic < neonMinimumJobAtomic(terms))
       return refuse('The job ceiling has no room for one Neon call. Raise the per-call limit.');
+    // A DRAFT THE JOB CEILING CANNOT CARRY IS ASKED ABOUT, NOT SENT: its first call is sized from
+    // the draft and the row's price rule, against the person's per-call limit, before any request
+    // to the seller. Where one approved ceiling can carry it, the answer is the quote and the
+    // `approve` call, with the job kept; where none can (more than one channel deposit holds), it
+    // is refused with the reason. Either way nothing of the draft is sent.
+    const need = neonFirstCallNeedAtomic(terms, Buffer.byteLength(input.prompt));
+    if (need > NEON_CHANNEL_DEPOSIT_CAP_ATOMIC)
+      return refuse(
+        'This draft is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent and nothing was charged. Send a shorter draft.',
+      );
     const native = {
       prompt: input.prompt,
       ...(input.description !== undefined ? { description: input.description } : {}),
@@ -486,6 +501,16 @@ export class ModelHandoff {
       },
       capAtomic: settings.maxJobAtomic.toString(),
     });
+    if (need > settings.maxJobAtomic)
+      return neonFirstCallApproval(
+        this.options.dataDir,
+        job,
+        workerHandleFor(job.id),
+        terms,
+        need - settings.maxJobAtomic,
+        need,
+        settings.maxJobAtomic,
+      );
     return {
       action: 'offer',
       started: false,

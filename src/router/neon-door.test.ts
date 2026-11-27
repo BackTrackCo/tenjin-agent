@@ -31,6 +31,9 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { registerModelTool } from './model-mcp';
 import { ModelJobStore } from './model-job';
 import { modelConsent } from './model-settings';
+import { isNeonRevisionQuote, runNeonApprove } from './neon-approve';
+import { readNeonRecord } from './neon-transport';
+import { readQuote } from '../lib/spend-quotes';
 import type { NeonTerms } from './neon-terms';
 import type { ModelSession } from './model-handoff';
 import type { ModelTransport, WorkerTransport } from './model-transport';
@@ -127,6 +130,12 @@ async function door(
   };
   const listTools = async () => (await client.listTools()).tools;
   return { call, route, repo, neon, listTools, session };
+}
+
+/** The door, with the data folder it runs in. */
+async function doorWithDir(router: Record<string, unknown>, limits: Record<string, unknown> = {}) {
+  const opened = await door(router, async () => TERMS, limits);
+  return { ...opened, dir };
 }
 
 const request = { neon: { prompt: 'Write the release notes', description: 'Release notes' } };
@@ -254,6 +263,58 @@ it('refuses a job whose ceiling has no room for one call to the row, and sends n
   // No Neon path reads a `--max-job` ceiling, so the refusal names none: the limit is the cap.
   expect(reply.reason).not.toContain('max-job');
   expect(reply.reason).toContain('per-call limit');
+  expect(worker.run).not.toHaveBeenCalled();
+});
+
+// Failure caught by review: a first draft over the person's limits met the seller before any
+// spend decision and failed with no way to ask. It is sized from the draft and the row's price
+// rule at the door: nothing is sent, the answer is the quote, and only the yes runs the draft.
+it('asks about a first draft the per-call limit cannot carry, sends nothing, and runs it only after the yes', async () => {
+  // Room for one floor-sized turn and not for a draft with its context.
+  const { call, dir: folder } = await doorWithDir({}, { maxAutoSpend: '20000' });
+  const asked = await call({ neon: { prompt: 'SECRET-DRAFT-TEXT', description: 'Notes' } });
+  expect(asked).toMatchObject({
+    status: 'needs_approval',
+    action: 'refused',
+    started: false,
+    instruction: expect.stringContaining('approve({quote: "q_'),
+  });
+  expect(typeof asked.offer_id).toBe('string');
+  expect(JSON.stringify(asked)).not.toMatch(/DeepSeek/);
+  // Nothing ran: no worker started, so no request of any kind left for the seller.
+  expect(worker.run).not.toHaveBeenCalled();
+  const quote = (await readQuote(folder, asked.quote.id))!;
+  expect(isNeonRevisionQuote(quote)).toBe(true);
+
+  // A yes that shows other numbers than the quote's grants nothing.
+  expect(
+    await runNeonApprove(
+      { quote: quote.id, total: '$0.01', what: quote.what },
+      { dataDir: folder },
+    ),
+  ).toMatchObject({ ok: false });
+  const yes = await runNeonApprove(
+    { quote: quote.id, total: asked.quote.total, what: quote.what },
+    { dataDir: folder },
+  );
+  expect(yes).toMatchObject({ ok: true, text: expect.stringContaining(asked.offer_id) });
+  const record = await readNeonRecord(folder, asked.offer_id);
+  expect(BigInt(record!.grantedAtomic)).toBeGreaterThan(0n);
+
+  // The draft runs when it is accepted, on the same job.
+  worker.run.mockResolvedValue('Written.');
+  expect(await call({ offer_id: asked.offer_id })).toMatchObject({
+    status: 'completed',
+    result: 'Written.',
+  });
+  expect(worker.run).toHaveBeenCalledTimes(1);
+});
+
+it('refuses a draft larger than one channel deposit holds, with nothing sent', async () => {
+  const { call } = await door({}, async () => ({ ...TERMS, inputAtomicPerMillion: '40000000' }));
+  const reply = await call({ neon: { prompt: 'x'.repeat(200_000) } });
+  expect(reply).toMatchObject({ action: 'refused', charged: false });
+  expect(reply.reason).toContain('larger than one Neon call can carry');
   expect(worker.run).not.toHaveBeenCalled();
 });
 

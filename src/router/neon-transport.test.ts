@@ -1,6 +1,8 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { ModelJobStore, type ModelJob } from './model-job';
@@ -218,6 +220,72 @@ it('keeps the funded channel config the seller named, for a withdrawal that cann
       }).entries()
     )[0]!.channel,
   ).toEqual(channel);
+});
+
+// Failure caught by review: the channel config was kept only after a paid reply succeeded, so a
+// funded first request that got a 503 left a deposit that `tenjin refund` and the timed
+// withdrawal could not recover while the seller was offline. It is kept before the payment leaves.
+it('keeps the funded channel config when the paid request fails with a 503', async () => {
+  const { ctx, repo, data } = await fixture();
+  const account = privateKeyToAccount(generatePrivateKey());
+  const secret = 'SECRET-DRAFT-TEXT';
+  const bodies: string[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const request = input instanceof Request ? input.clone() : new Request(input, init);
+    bodies.push(await request.clone().text());
+    if (request.headers.has('payment-signature')) return new Response('down', { status: 503 });
+    return new Response('{}', {
+      status: 402,
+      headers: {
+        'payment-required': encodePaymentRequiredHeader({
+          x402Version: 2,
+          error: 'payment required',
+          resource: { url: TERMS.url, description: '', mimeType: 'application/json' },
+          accepts: [
+            {
+              scheme: 'batch-settlement',
+              network: 'eip155:8453',
+              amount: '42521',
+              asset: TERMS.asset,
+              payTo: TERMS.payTo,
+              maxTimeoutSeconds: 330,
+              extra: {
+                name: 'USD Coin',
+                version: '2',
+                receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+                withdrawDelay: 900,
+              },
+            },
+          ],
+        }),
+      },
+    });
+  };
+  const neon = new NeonTransport({
+    dataDir: data,
+    ctx,
+    provider: { getSigner: async () => account } as never,
+    authorizer: createLocalSpendAuthorizer({
+      dir: data,
+      policy: { maxAutoSpendAtomic: 1_000_000n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    }),
+    fetchImpl,
+  });
+  const messages = { ...MESSAGES, messages: [{ role: 'user', content: secret }] };
+  await expect(neon.messages(job(repo), messages, signal())).rejects.toBeInstanceOf(
+    ModelCallFailed,
+  );
+  // The first request, the unpaid one, carried none of the draft.
+  expect(bodies[0]).not.toContain(secret);
+  const [entry] = await new NeonRefunds({
+    dataDir: data,
+    payer: () => ({ refund: async () => ({}) }),
+  }).entries();
+  expect(entry!.channel).toEqual({
+    payer: account.address,
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  });
 });
 
 it('sends the effort the door saved with the job', async () => {

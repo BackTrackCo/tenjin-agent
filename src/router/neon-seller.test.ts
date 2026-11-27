@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
@@ -346,4 +346,185 @@ it('ends a refund whose seller never answers when its signal aborts', async () =
   expect(seen[0]).toBeDefined();
   stop.abort();
   expect(await refund).toContain('aborted');
+});
+
+// Failure caught by review: the payment wrapper posts the whole request to learn the seller's
+// terms, so a first call the person's limits then refused had already sent its draft. The unpaid
+// request now carries a placeholder of the same size and nothing of the prompt, and the draft goes
+// only with a payment that passed the limits.
+describe('what the seller sees before a payment exists', () => {
+  const PROMPT = 'SECRET-DRAFT-TEXT-THAT-MUST-NOT-LEAK';
+  const body = JSON.stringify({
+    model: 'test/model',
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: PROMPT }],
+  });
+  /** The seller stub, recording the body of every request by whether it carried a payment. */
+  function recording(paidStatus = 200) {
+    const unpaid: string[] = [];
+    const paid: string[] = [];
+    const inner = seller('7321');
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const request = input instanceof Request ? input.clone() : new Request(input, init);
+      const text = await request.clone().text();
+      if (request.headers.has('payment-signature')) {
+        paid.push(text);
+        return new Response(paidStatus === 200 ? '{"choices":[]}' : 'down', {
+          status: paidStatus,
+          headers: paidStatus === 200 ? { 'x-request-cost-atomic': '7321' } : {},
+        });
+      }
+      unpaid.push(text);
+      return inner.fetchImpl(input, init);
+    };
+    return { fetchImpl, unpaid, paid };
+  }
+  const payer = async () => {
+    dir = await mkdtemp(join(tmpdir(), 'neon-seller-'));
+    return privateKeyToAccount(generatePrivateKey());
+  };
+
+  it('sends no prompt in the unpaid request, and the whole draft with the payment', async () => {
+    const account = await payer();
+    const { fetchImpl, unpaid, paid } = recording();
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      fetchImpl,
+    });
+    await batch.post(body, new AbortController().signal, 1_000_000n);
+    expect(unpaid).toHaveLength(1);
+    expect(unpaid[0]).not.toContain(PROMPT);
+    // Same size and same model and cap, so the seller quotes what the real request is quoted.
+    expect(Buffer.byteLength(unpaid[0]!)).toBe(Buffer.byteLength(body));
+    expect(JSON.parse(unpaid[0]!)).toMatchObject({ model: 'test/model', max_tokens: 1000 });
+    expect(paid).toEqual([body]);
+  });
+
+  it('sends none of the prompt at all when the limits refuse the payment', async () => {
+    const account = await payer();
+    const { fetchImpl, unpaid, paid } = recording();
+    const authorizer = createLocalSpendAuthorizer({
+      dir,
+      policy: {
+        maxAutoSpendAtomic: 1_000n,
+        sessionBudgetAtomic: 5_000_000n,
+        allowlistCreators: [],
+      },
+    });
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      authorizer,
+      fetchImpl,
+    });
+    await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toThrow();
+    expect(paid).toHaveLength(0);
+    expect(unpaid.join('')).not.toContain(PROMPT);
+    expect(batch.transmitted).toBe(false);
+  });
+
+  it('lets a payment the person approved pass their per-call limit, and refuses it otherwise', async () => {
+    const account = await payer();
+    const run = async (mode: 'automatic' | 'manual') => {
+      const { fetchImpl, paid } = recording();
+      const batch = new BatchSeller({
+        dataDir: dir,
+        terms: TERMS,
+        provider: { getSigner: async () => account } as never,
+        admit: async () => undefined,
+        authorizer: createLocalSpendAuthorizer({
+          dir,
+          policy: {
+            maxAutoSpendAtomic: 1_000n,
+            sessionBudgetAtomic: null,
+            allowlistCreators: [],
+          },
+        }),
+        mode,
+        fetchImpl,
+      });
+      const outcome = await batch
+        .post(body, new AbortController().signal, 1_000_000n)
+        .then(() => 'paid')
+        .catch(() => 'refused');
+      return { outcome, paid: paid.length };
+    };
+    expect(await run('automatic')).toEqual({ outcome: 'refused', paid: 0 });
+    expect(await run('manual')).toEqual({ outcome: 'paid', paid: 1 });
+  });
+
+  it('sends none of the prompt when the seller names another payee than the row', async () => {
+    const account = await payer();
+    const other = seller('7321', '0x00000000000000000000000000000000DeaDBeef');
+    const unpaid: string[] = [];
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      fetchImpl: async (input, init) => {
+        unpaid.push(
+          await (input instanceof Request ? input.clone() : new Request(input, init)).text(),
+        );
+        return other.fetchImpl(input, init);
+      },
+    });
+    await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toBeInstanceOf(
+      PayeeMismatch,
+    );
+    expect(unpaid.join('')).not.toContain(PROMPT);
+  });
+
+  // Failure caught by review: the channel config was kept only after a paid reply succeeded, so a
+  // funded first request that got a 503 left a deposit nothing could recover without the seller.
+  it('keeps the channel config before the first payment leaves, and also when the paid request fails', async () => {
+    const account = await payer();
+    const { fetchImpl, paid } = recording(503);
+    const order: string[] = [];
+    const saved: unknown[] = [];
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      onChannel: async (channel) => {
+        order.push(`saved after ${paid.length} paid requests`);
+        saved.push(channel);
+      },
+      fetchImpl,
+    });
+    const answer = await batch.post(body, new AbortController().signal, 1_000_000n);
+    expect(answer.status).toBe(503);
+    expect(order).toEqual(['saved after 0 paid requests']);
+    expect(saved).toEqual([
+      {
+        payer: account.address,
+        receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+        withdrawDelay: 900,
+      },
+    ]);
+  });
+
+  it('signs nothing when the channel config cannot be kept', async () => {
+    const account = await payer();
+    const { fetchImpl, paid } = recording();
+    const batch = new BatchSeller({
+      dataDir: dir,
+      terms: TERMS,
+      provider: { getSigner: async () => account } as never,
+      admit: async () => undefined,
+      onChannel: async () => {
+        throw new Error('disk full');
+      },
+      fetchImpl,
+    });
+    await expect(batch.post(body, new AbortController().signal, 1_000_000n)).rejects.toThrow();
+    expect(paid).toHaveLength(0);
+    expect(batch.transmitted).toBe(false);
+  });
 });
