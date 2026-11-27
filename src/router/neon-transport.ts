@@ -611,8 +611,9 @@ export class NeonTransport {
     const active = (await this.refunds.entries()).find(
       (entry) => entry.key === channelKey(terms) && !entry.retired,
     );
+    // A record an older build left: nothing says when its authorization lapses, so it is held an hour.
     if (active && (await this.leftUnsettled(active.jobIds.slice(-50))))
-      await this.refunds.retire(terms);
+      await this.refunds.retire(terms, this.now() + 3_600_000);
     const { salt } = await this.refunds.open(job.id, terms);
     // A deposit meets the person's limits like any payment, and is sized to what they admit.
     const batch = this.batchPayer(
@@ -701,7 +702,10 @@ export class NeonTransport {
     // A seller that names the real charge is settled at it; else the call is at its ceiling.
     const settled = answer.costAtomic !== undefined;
     // A seller that named no charge leaves its voucher unsettled: the channel is retired.
-    if (!settled) await this.refunds.retire(terms).catch(() => undefined);
+    if (!settled)
+      await this.refunds
+        .retire(terms, batch.signed ? Number(batch.signed.validBefore) * 1000 : undefined)
+        .catch(() => undefined);
     if (process.env[NEON_CAPTURE_ENV] === '1')
       await this.capture(job, n, capturedRequest(chat), answer.text).catch(() => undefined);
     // The funded channel's own config is kept, so a withdrawal never has to ask the seller.
@@ -835,7 +839,10 @@ export class NeonTransport {
     // that was already funded) nothing can prove it, and it stays counted until the window rolls.
     const savedTerms = termsOfJob(job);
     // A voucher left unsettled: the channel is never deposited into again.
-    if (savedTerms) await this.refunds.retire(savedTerms).catch(() => undefined);
+    if (savedTerms)
+      await this.refunds
+        .retire(savedTerms, signed ? Number(signed.validBefore) * 1000 : undefined)
+        .catch(() => undefined);
     if (signed?.onlyThroughDeposit && savedTerms)
       await appendPaidRecord(this.options.dataDir, {
         version: 1,

@@ -30,6 +30,11 @@ const entrySchema = z.object({
     .regex(/^0x[0-9a-f]{64}$/)
     .optional(),
   retired: z.boolean().optional(),
+  /**
+   * Until when a deposit authorization signed for this channel could still reach it (ms): a retired
+   * channel is not forgotten before then, whatever its balance reads now.
+   */
+  holdUntil: z.number().optional(),
   terms: neonTermsSchema,
   jobIds: z.array(z.string()).max(200),
   /**
@@ -235,10 +240,11 @@ export class NeonRefunds {
     await this.change((channels) => {
       const known = channels.find((entry) => entry.key === key);
       if (!known) {
-        const followsRetired = channels.some(
-          (entry) => entry.retired && entry.key.startsWith(`${key}.`),
-        );
-        salt = followsRetired ? `0x${randomBytes(32).toString('hex')}` : undefined;
+        // EVERY NEW CHANNEL HAS A SALT OF ITS OWN, never the SDK's zero one: a voucher left on an
+        // earlier channel of this payer and seller has no expiry, and a channel that reused its
+        // identity (after its entry was forgotten) would put new funds in its reach. Nothing here
+        // depends on a record that can be pruned or lost.
+        salt = `0x${randomBytes(32).toString('hex')}`;
         return [
           ...channels,
           {
@@ -283,15 +289,22 @@ export class NeonRefunds {
    * amount does not void it. A deposit into the same channel would put funds in its reach, so
    * the channel is never deposited into again: its entry is renamed and kept (its jobs, its
    * saved config and salt, its state), and the next call opens a channel with a salt of its own.
-   * The refund and the timed withdrawal still reach the retired channel.
+   * The refund and the timed withdrawal still reach the retired channel. `holdUntilMs` is when a
+   * deposit authorization signed for it can no longer arrive.
    */
-  async retire(terms: NeonTerms): Promise<void> {
+  async retire(terms: NeonTerms, holdUntilMs?: number): Promise<void> {
     const key = channelKey(terms);
     await this.change((channels) =>
       channels.map((entry) =>
         entry.key !== key
           ? entry
-          : { ...entry, key: `${key}.${this.now().toString(36)}`, retired: true, at: this.now() },
+          : {
+              ...entry,
+              key: `${key}.${this.now().toString(36)}`,
+              retired: true,
+              at: this.now(),
+              ...(holdUntilMs !== undefined ? { holdUntil: holdUntilMs } : {}),
+            },
       ),
     );
   }
@@ -431,8 +444,9 @@ export class NeonRefunds {
    * FORGETS WHAT IS PROVABLY FINISHED, so retired channels do not pile up. A retired channel is
    * never deposited into again, so it has nothing left to recover when the chain shows that its
    * balance equals what was claimed and that no withdrawal is pending: nothing unclaimed is in it
-   * and nothing is on its way out. That proof is a chain read (`channels` and
-   * `pendingWithdrawals`), made here. A retired channel with no saved config never had a payment
+   * and nothing is on its way out, and no deposit authorization signed for it can still arrive
+   * (`holdUntil` has passed) and no job of it is live: an empty channel does not prove that a late
+   * deposit will not land. That proof is a chain read (`channels` and `pendingWithdrawals`), made here. A retired channel with no saved config never had a payment
    * created for it, so it never held anything. A channel the read cannot prove stays.
    */
   async prune(chain?: WithdrawChain): Promise<number> {
@@ -443,7 +457,8 @@ export class NeonRefunds {
         finished.add(entry.key);
         continue;
       }
-      if (!chain) continue;
+      // Every deposit authorization signed for it is past its expiry, and no job of it is live.
+      if (!chain || (entry.holdUntil ?? 0) > this.now() || (await this.inUse(entry))) continue;
       try {
         const seen = await chain.channel(entry.terms, entry.channel);
         if (seen.balanceAtomic === seen.claimedAtomic && seen.pendingAtomic === 0n)

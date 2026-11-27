@@ -221,7 +221,7 @@ it('keeps the funded channel config the seller named, for a withdrawal that cann
         payer: () => ({ refund: async () => ({}) }),
       }).entries()
     )[0]!.channel,
-  ).toEqual(channel);
+  ).toEqual({ ...channel, salt: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
 });
 
 // Failure caught by review: the channel config was kept only after a paid reply succeeded, so a
@@ -285,6 +285,7 @@ it('keeps the funded channel config when the paid request fails with a 503', asy
     payer: () => ({ refund: async () => ({}) }),
   }).entries();
   expect(entry!.channel).toEqual({
+    salt: expect.stringMatching(/^0x[0-9a-f]{64}$/),
     payer: account.address,
     receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
     withdrawDelay: 900,
@@ -472,7 +473,8 @@ it('keeps a call the seller answered 402 uncharged-unproven: counted, with its a
   expect(retired).toHaveLength(2);
   expect(journal.every((entry) => entry.retired)).toBe(true);
   const [one, two] = retired;
-  expect(one!.salt).toBeUndefined();
+  expect(one!.salt).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(two!.salt).not.toBe(one!.salt);
   expect(one!.channel).toMatchObject({ payer: account.address, withdrawDelay: 900 });
   expect(two!.salt).toMatch(/^0x[0-9a-f]{64}$/);
   expect(two!.channel).toMatchObject({ salt: two!.salt });
