@@ -476,11 +476,10 @@ it('never sweeps a held lock file, and sweeps a job lock file only once the job 
   expect(await exists(`${perJob}.held`)).toBe(true);
   expect(await probe(perJob)).toBe('held');
   expect(await exists(join(dir, 'model-jobs', `${job.id}.json`))).toBe(false);
-  // Its process ended: the lock file goes with the job, and the store-wide lock stays. Linux
-  // keeps every lock file (see `discardHeldLock`), so there the file stays and no one holds it.
+  // Its process ended: the lock file goes with the job, and the store-wide lock stays.
   await child.kill();
   await sweepModelRecords(dir);
-  expect(await exists(`${perJob}.held`)).toBe(process.platform === 'linux');
+  expect(await exists(`${perJob}.held`)).toBe(false);
   expect(await exists(`${global}.held`)).toBe(true);
   releaseGlobal();
 });

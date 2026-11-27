@@ -47,8 +47,8 @@ export function child(file: string, ...args: string[]) {
 }
 
 /** Starts a child that holds `lockPath` and waits until it does. */
-export async function holder(lockPath: string) {
-  const held = child('holder.ts', lockPath, 'hold');
+export async function holder(lockPath: string, primitive?: 'sqlite') {
+  const held = child('holder.ts', lockPath, 'hold', ...(primitive ? [primitive] : []));
   await held.line('held');
   return {
     ...held,
@@ -65,9 +65,19 @@ export async function holder(lockPath: string) {
   };
 }
 
+/** A child that takes the lock, drops its release and forces garbage collection. */
+export async function forgetter(lockPath: string, primitive?: 'sqlite') {
+  const held = child('holder.ts', lockPath, 'forget', ...(primitive ? [primitive] : []));
+  await held.line('held');
+  return held;
+}
+
 /** Whether a zero-wait attempt in another process finds `lockPath` held. */
-export async function probe(lockPath: string): Promise<'held' | 'free' | string> {
-  const probing = child('holder.ts', lockPath, 'probe');
+export async function probe(
+  lockPath: string,
+  primitive?: 'sqlite',
+): Promise<'held' | 'free' | string> {
+  const probing = child('holder.ts', lockPath, 'probe', ...(primitive ? [primitive] : []));
   await probing.exited;
   return (await probing.line('').catch(() => '')) || 'error';
 }

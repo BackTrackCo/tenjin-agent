@@ -253,22 +253,21 @@ export async function withHeldLock<T>(
 }
 
 /**
- * Removes a lock file no one holds, for the job sweep, except on Linux, where lock files are
- * never removed and this returns false: macOS and Linux probe, unlink while
- * holding and then close (an opener that resolved the old file notices its inode changed and
- * starts over); Windows probes, closes and then unlinks, ignoring a lost race. A lock that is
- * held is left alone. True when the lock is gone afterwards.
+ * Removes a lock file no one holds, for the job sweep. macOS and Linux probe, unlink while
+ * holding and then release (an opener that resolved the old file notices its inode changed and
+ * starts over); Windows probes, closes and then unlinks, ignoring a lost race. The file goes only
+ * while this call holds the lock, so no other process holds a lock on the file that is deleted.
+ * A lock that is held is left alone. True when the lock is gone afterwards. `make` is the
+ * primitive; only tests pass another.
  */
-export async function discardHeldLock(lockPath: string): Promise<boolean> {
+export async function discardHeldLock(
+  lockPath: string,
+  make: AttemptFactory = factory,
+): Promise<boolean> {
   const held = `${lockPath}.held`;
-  // Linux keeps every lock file. A deleted lock file can still be locked by the process that
-  // opened it before the delete, while another process creates and locks its replacement: two
-  // holders at once, with no way to see it from the path. If no code deletes a lock file, that
-  // cannot happen. The cost is one empty file for each job.
-  if (process.platform === 'linux') return false;
   let release: () => void;
   try {
-    release = await holdLockWith(factory, lockPath, { timeoutMs: 0 });
+    release = await holdLockWith(make, lockPath, { timeoutMs: 0 });
   } catch (error) {
     if (error instanceof LockTimeoutError) return false;
     throw error;
@@ -302,6 +301,7 @@ export async function sweepHeldLocks(
   dir: string,
   eligible: (name: string) => Promise<boolean>,
   limit = 50_000,
+  make: AttemptFactory = factory,
 ): Promise<void> {
   try {
     let seen = 0;
@@ -310,7 +310,7 @@ export async function sweepHeldLocks(
       const path = join(dir, entry.name);
       if (!entry.name.endsWith('.held')) continue;
       if (await eligible(entry.name).catch(() => false))
-        await discardHeldLock(path.slice(0, -'.held'.length)).catch(() => false);
+        await discardHeldLock(path.slice(0, -'.held'.length), make).catch(() => false);
     }
   } catch {
     // Housekeeping only.

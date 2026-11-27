@@ -1,7 +1,9 @@
 import {
   closeSync,
   constants,
+  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -28,10 +30,23 @@ import {
   sweepHeldLocks,
   systemOpenDeps,
   withHeldLock,
+  type AttemptFactory,
   type OpenDeps,
 } from './held-lock';
-import { forgetSqlite, loadSqlite, sqliteAttempt } from './held-lock-sqlite';
-import { child, holder as startHolder, killChildren, probe } from './held-lock-test/child';
+import {
+  forgetSqlite,
+  heldConnections,
+  loadSqlite,
+  sqliteAttempt,
+  type Sqlite,
+} from './held-lock-sqlite';
+import {
+  child,
+  forgetter,
+  holder as startHolder,
+  killChildren,
+  probe,
+} from './held-lock-test/child';
 import { LockTimeoutError } from './lock';
 
 // A child process starts slowly on a loaded runner: its tests get more than the default 5 s.
@@ -61,7 +76,9 @@ it('is the only code that names a lock file: nothing else opens, reads or delete
         const code = readFileSync(full, 'utf8')
           .replace(/\/\*[\s\S]*?\*\//g, '')
           .replace(/(^|[^:])\/\/.*$/gm, '$1');
-        if (/['"`][^'"`\n]*\.held\b/.test(code)) offenders.push(full);
+        // `.held` in a string, after a template placeholder or in a pattern. A property named
+        // `held` (`this.held`) is something else.
+        if (/['"`][^'"`\n]*\.held\b|\}\.held\b|\\\.held\b/.test(code)) offenders.push(full);
       }
     }
   };
@@ -73,10 +90,8 @@ describe('held lock, every platform', () => {
   it('discards an idle lock file and leaves a held one', async () => {
     const lock = join(tmp, 'discard');
     (await holdLock(lock))();
-    // Linux keeps lock files: a deleted one can be locked while its replacement is locked too.
-    const linux = process.platform === 'linux';
-    expect(await discardHeldLock(lock)).toBe(!linux);
-    expect(existsSync(heldPath(lock))).toBe(linux);
+    expect(await discardHeldLock(lock)).toBe(true);
+    expect(existsSync(heldPath(lock))).toBe(false);
     const held = await startHolder(lock);
     expect(await discardHeldLock(lock)).toBe(false);
     expect(existsSync(heldPath(lock))).toBe(true);
@@ -90,7 +105,7 @@ describe('held lock, every platform', () => {
     writeFileSync(drop, '');
     await sweepHeldLocks(tmp, async (name) => name === 'drop.held');
     expect(existsSync(keep)).toBe(true);
-    expect(existsSync(drop)).toBe(process.platform === 'linux');
+    expect(existsSync(drop)).toBe(false);
   });
 
   it('rejects a zero-wait probe while this process holds it', async () => {
@@ -240,12 +255,108 @@ describe.skipIf(process.platform === 'linux')('exclusive open (macOS and Windows
 describe.skipIf(process.platform === 'win32' || loadSqlite() === null)(
   'exclusive SQLite transaction (Linux primitive)',
   () => {
-    it.skipIf(process.platform !== 'linux')('a sweep leaves the lock file in place', async () => {
-      const lock = join(tmp, 'sq-keep');
-      (await holdLock(lock))();
-      await sweepHeldLocks(tmp, async () => true);
-      expect(await discardHeldLock(lock)).toBe(false);
+    const sqliteMake: AttemptFactory = (path) => sqliteAttempt(path, loadSqlite()!);
+
+    it('a cleanup deletes the lock file only while it holds the lock', async () => {
+      const lock = join(tmp, 'sq-discard');
+      const held = await startHolder(lock, 'sqlite');
+      expect(await discardHeldLock(lock, sqliteMake)).toBe(false);
+      await sweepHeldLocks(tmp, async () => true, 50_000, sqliteMake);
       expect(existsSync(heldPath(lock))).toBe(true);
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      await held.release();
+      expect(await discardHeldLock(lock, sqliteMake)).toBe(true);
+      expect(existsSync(heldPath(lock))).toBe(false);
+      // A lock taken afterwards is on a new file, and it excludes.
+      const again = await startHolder(lock, 'sqlite');
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      await again.release();
+    });
+
+    it('the housekeeping of a holder process leaves its own lock in place', async () => {
+      const lock = join(tmp, 'sq-own');
+      const release = await holdLockWith(sqliteMake, lock);
+      await sweepHeldLocks(tmp, async () => false, 50_000, sqliteMake);
+      expect(await discardHeldLock(lock, sqliteMake)).toBe(false);
+      expect(existsSync(heldPath(lock))).toBe(true);
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      release();
+      expect(await probe(lock, 'sqlite')).toBe('free');
+    });
+
+    // The taker reads the file's inode before it opens it. Read after the open, a file deleted
+    // and replaced in between would pass the check for a connection on the deleted file: two
+    // holders, one on each file.
+    it('does not hold a deleted file when a replacement appears while it opens', async () => {
+      const lock = join(tmp, 'sq-replaced');
+      const real = loadSqlite()!;
+      writeFileSync(heldPath(lock), '');
+      let replaced = false;
+      const replacing = {
+        ...real,
+        DatabaseSync: class extends real.DatabaseSync {
+          constructor(path: string) {
+            super(path);
+            if (replaced) return;
+            replaced = true;
+            // Another process's cleanup deleting the file and a taker creating its replacement.
+            unlinkSync(path);
+            new real.DatabaseSync(path).close();
+          }
+        },
+      } as Sqlite;
+      const release = await holdLockWith((path) => sqliteAttempt(path, replacing), lock);
+      expect(replaced).toBe(true);
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      release();
+    });
+
+    it('creates no side file, and locks a read-only folder', async () => {
+      const lock = join(tmp, 'sq-journal');
+      const release = await holdLockWith(sqliteMake, lock);
+      expect(readdirSync(tmp).filter((name) => name.startsWith('sq-journal'))).toEqual([
+        'sq-journal.held',
+      ]);
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      release();
+      if (!posix || process.getuid?.() === 0) return;
+      const folder = join(tmp, 'sq-readonly');
+      mkdirSync(folder);
+      const inside = join(folder, 'lock');
+      (await holdLockWith(sqliteMake, inside))();
+      chmodSync(folder, 0o555);
+      try {
+        const held = await holdLockWith(sqliteMake, inside);
+        expect(await probe(inside, 'sqlite')).toBe('held');
+        held();
+      } finally {
+        chmodSync(folder, 0o755);
+      }
+    });
+
+    it('still excludes a second process with the journal in memory', async () => {
+      const lock = join(tmp, 'sq-exclude');
+      const held = await startHolder(lock, 'sqlite');
+      await expect(holdLockWith(sqliteMake, lock, { timeoutMs: 0 })).rejects.toBeInstanceOf(
+        LockTimeoutError,
+      );
+      await held.release();
+      (await holdLockWith(sqliteMake, lock, { timeoutMs: 1000 }))();
+    });
+
+    it('keeps its connection until the release runs, so a lost release does not lose the lock', async () => {
+      const lock = join(tmp, 'sq-gc');
+      expect(heldConnections()).toBe(0);
+      const release = await holdLockWith(sqliteMake, lock);
+      expect(heldConnections()).toBe(1);
+      release();
+      expect(heldConnections()).toBe(0);
+      // A holder that drops its release and collects garbage still holds.
+      const lost = await forgetter(lock, 'sqlite');
+      expect(await probe(lock, 'sqlite')).toBe('held');
+      lost.proc.kill('SIGKILL');
+      await lost.exited;
+      expect(await probe(lock, 'sqlite')).toBe('free');
     });
 
     const attemptOn = (lock: string) => sqliteAttempt(heldPath(lock), loadSqlite()!);
@@ -315,34 +426,74 @@ describe.skipIf(process.platform !== 'linux')('Linux without node:sqlite', () =>
   });
 });
 
-async function runStress(ms: string, chaos: string, workers: string, broken = '0') {
-  const run = child('stress.ts', ms, chaos, workers, join(tmp, 'stress'), broken);
+async function runStress(
+  ms: string,
+  chaos: string,
+  workers: string,
+  broken = '0',
+  minBroken = '0',
+  primitive = '',
+) {
+  const run = child(
+    'stress.ts',
+    ms,
+    chaos,
+    workers,
+    join(tmp, 'stress'),
+    broken,
+    minBroken,
+    primitive,
+  );
   return JSON.parse(await run.line('{')) as {
     rounds: number;
     overlaps: number;
     timeouts: number;
     errors: number;
+    broken: number;
   };
 }
 
-// The control for the harness: against a lock skipped altogether, the log detector MUST
-// report overlaps. A detector that reports none here has proved nothing about a real lock.
-it('the stress detector sees two holders inside a deliberately broken lock', async () => {
-  const result = await runStress('5000', 'none', '4', '1');
-  expect(result.rounds).toBeGreaterThan(0);
-  expect(result.overlaps).toBeGreaterThan(0);
-}, 60_000);
+// The control for the harness: against a lock that is skipped on 2% of the rounds, the log
+// detector MUST report overlaps. The run goes on until the workers broke the lock 25 times, and
+// a detector that sees none of 25 breaks has proved nothing about a real lock. Each break is
+// an overlap with probability well above a half while the others contend, so missing all 25 by
+// luck is far below one in a million.
+const primitives = [''].concat(
+  process.platform !== 'linux' && process.platform !== 'win32' && loadSqlite() ? ['sqlite'] : [],
+);
+it.each(primitives.map((primitive) => ({ primitive, name: primitive || 'platform' })))(
+  'the stress detector sees two holders when the lock is broken on 2 percent of the rounds ($name)',
+  async ({ primitive }) => {
+    const result = await runStress('4000', 'none', '4', '0.02', '25', primitive);
+    expect(result.broken).toBeGreaterThanOrEqual(25);
+    expect(result.rounds).toBeGreaterThan(result.broken);
+    expect(result.overlaps).toBeGreaterThan(0);
+    // One break meets at most one other holder on each side, so more overlaps than that
+    // would be the detector counting something else.
+    expect(result.overlaps).toBeLessThanOrEqual(2 * result.broken);
+    expect(result.errors).toBe(0);
+    console.warn(`lock stress control: ${JSON.stringify(result)}`);
+  },
+  90_000,
+);
 
 const stress = process.env.TENJIN_LOCK_STRESS === '1';
 describe.skipIf(!stress)('stress (opt in with TENJIN_LOCK_STRESS=1)', () => {
-  it('lets no two holders in, with kills and stops', async () => {
+  it('lets no two holders in, with kills, stops and deleted lock files', async () => {
+    vi.stubEnv('STRESS_DISCARD', '0.1');
     const result = await runStress(
       process.env.TENJIN_LOCK_STRESS_MS ?? '20000',
       process.env.TENJIN_LOCK_STRESS_CHAOS ?? 'both',
       process.env.TENJIN_LOCK_STRESS_WORKERS ?? '8',
+      '0',
+      '0',
+      process.env.TENJIN_LOCK_STRESS_PRIMITIVE ?? '',
     );
+    vi.unstubAllEnvs();
     console.warn(`lock stress: ${JSON.stringify(result)}`);
-    expect(result.rounds).toBeGreaterThan(0);
+    // Zero overlaps in a handful of rounds proves nothing: require a run that was long enough.
+    expect(result.rounds).toBeGreaterThan(500);
+    expect(result.broken).toBe(0);
     expect(result.overlaps).toBe(0);
     expect(result.errors).toBe(0);
   }, 120_000);
