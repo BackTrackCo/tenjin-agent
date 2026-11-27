@@ -111,6 +111,17 @@ export const DISCLOSURE: readonly string[] = [
 ];
 
 /**
+ * The person reads the agent's reply, not the install's output, so an agent's
+ * `next` asks it to pass the disclosure on when it reports the install.
+ */
+export const TERMS_RELAY =
+  'When you tell the person Tenjin is installed, mention in your own words that use of Tenjin is subject to the Terms and Privacy Policy, with both links from `disclosure`.';
+
+export function withTermsRelay(next: string): string {
+  return `${next.replace(/\.$/, '')}. ${TERMS_RELAY}`;
+}
+
+/**
  * What Tenjin adds, said right after the success line: three things an agent
  * cannot do on its own (the groups tenjin.sh/tools leads with), and where the
  * rest is.
@@ -616,20 +627,22 @@ export async function runRouterInstall(
     ...(fund !== undefined ? [fund] : []),
   ];
 
+  const step = nextStep(
+    plugin,
+    claude,
+    wallet,
+    migration,
+    asksAgent ? nextSteps.length : 0,
+    ctx.io.isTTY,
+    command,
+    env,
+  );
+  const installed = plugin.state !== 'failed' && plugin.state !== 'deferred';
   const data = {
     plugin,
     claudeCode,
     migration,
-    next: nextStep(
-      plugin,
-      claude,
-      wallet,
-      migration,
-      asksAgent ? nextSteps.length : 0,
-      ctx.io.isTTY,
-      command,
-      env,
-    ),
+    next: asksAgent && installed ? withTermsRelay(step) : step,
     nextSteps,
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
     // The check for this scope, said outright; a bare doctor in the project

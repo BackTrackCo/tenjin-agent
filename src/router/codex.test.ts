@@ -684,6 +684,7 @@ describe('Codex install, uninstall and doctor', () => {
     expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
     expect(receipt(out).join(' ')).toContain('/hooks and trust the five Tenjin hooks');
     expect(receipt(out).join(' ')).toContain('then start a new session');
+    expect((out.data as { next: string }).next).not.toContain('When you tell the person');
   });
 
   it('asks nothing again once the file names a limit', async () => {
@@ -710,6 +711,9 @@ describe('Codex install, uninstall and doctor', () => {
     // The subagent terms follow an opt-in only: a receipt's disclosure does not repeat them.
     expect(JSON.stringify(out.data)).not.toContain('with parent accept or veto');
     expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
+    expect((out.data as { next: string }).next).toMatch(
+      /\. When you tell the person Tenjin is installed, mention in your own words that use of Tenjin is subject to the Terms and Privacy Policy, with both links from `disclosure`\.$/,
+    );
     expect(JSON.stringify(out)).not.toContain('Help improve routing');
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });

@@ -53,6 +53,9 @@ const ASK_LINES = [
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
 const RELOAD =
   'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
+/** An agent's `next` ends by asking it to pass the terms notice on. */
+const RELAY =
+  '. When you tell the person Tenjin is installed, mention in your own words that use of Tenjin is subject to the Terms and Privacy Policy, with both links from `disclosure`.';
 
 /** What a person reads: the receipt, then its tail (limits, next step, disclosure). */
 function receipt(r: { humanLines?: string[]; humanTail?: string[] }): string[] {
@@ -1184,7 +1187,7 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(receipt(result)).toEqual(expect.arrayContaining(ASK_LINES));
     expect(receipt(result)).not.toContain('  Ask the person: Add $5 to Tenjin now?');
     const { next } = result.data as { next: string };
-    expect(next).toBe(`follow the instructions in nextSteps, then ${RELOAD}`);
+    expect(next).toBe(`follow the instructions in nextSteps, then ${RELOAD}${RELAY}`);
     expect(next).not.toContain('wallet fund');
   });
 
@@ -1225,7 +1228,9 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(fund.next).toContain('you ask when a task first needs a paid tool');
     expect(fund.next).toContain('do not offer funding again unless they ask');
     expect(receipt(result).join('\n')).not.toContain(ADDRESS);
-    expect(nextLine(result)).toBe(`Next: follow the instructions in nextSteps, then ${RELOAD}`);
+    expect(nextLine(result)).toBe(
+      `Next: follow the instructions in nextSteps, then ${RELOAD}${RELAY}`,
+    );
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
   });
 
@@ -1258,7 +1263,7 @@ describe('install run by an agent hands back spending and funding instructions',
       }),
     );
     expect(stepsOf(result).map((q) => q.id)).toEqual([]);
-    expect(nextLine(result)).toBe(`Next: ${RELOAD}`);
+    expect(nextLine(result)).toBe(`Next: ${RELOAD}${RELAY}`);
   });
 
   it('does not suggest adding money when an existing balance cannot be checked', async () => {
@@ -1279,7 +1284,7 @@ describe('install run by an agent hands back spending and funding instructions',
     });
     expect(receipt(result).join(' ')).toContain('does not mean you need to add money again');
     expect(receipt(result).join(' ')).not.toContain('Add funds:');
-    expect(nextLine(result)).toBe(`Next: ${RELOAD}`);
+    expect(nextLine(result)).toBe(`Next: ${RELOAD}${RELAY}`);
   });
 
   it('a terminal installer offers funding without making activation depend on it', async () => {
@@ -1295,6 +1300,8 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(stepsOf(result).map((step) => step.id)).toEqual(['fund']);
     expect(nextLine(result)).toContain('open a new Claude Code session');
     expect((result.data as { next: string }).next).not.toContain('fund');
+    // The person reads this receipt, so no agent is asked to relay the terms.
+    expect(nextLine(result)).not.toContain('When you tell the person');
   });
 
   it('a script outside any harness gets the spend question and no funding question', async () => {
@@ -1492,7 +1499,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
       deps({ env: HARNESS_ENV, walletExists: async () => true, walletBalance: async () => 0n }),
     );
     const data_ = result.data as { next: string; nextSteps: { id: string; question: string }[] };
-    expect(data_.next).toBe(`follow the instructions in nextSteps, then ${RELOAD}`);
+    expect(data_.next).toBe(`follow the instructions in nextSteps, then ${RELOAD}${RELAY}`);
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',

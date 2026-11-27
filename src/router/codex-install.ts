@@ -45,6 +45,7 @@ import {
   DISCLOSURE,
   receiptTail,
   spendStepFor,
+  withTermsRelay,
   type QuestionStep,
   type RouterInstallDeps,
 } from './install';
@@ -461,6 +462,7 @@ export async function runCodexInstall(
   ];
   if (asksAgent && nextSteps.length > 0)
     next = `Follow the instructions in nextSteps, then ${next}`;
+  if (asksAgent && !tooOld) next = withTermsRelay(next);
   newInstall.completed.push(!tooOld);
   newInstall.continueWith ??= install;
   return {
