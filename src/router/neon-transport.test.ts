@@ -372,6 +372,73 @@ it('sends nothing at all to a seller the allowlist does not name', async () => {
   expect(batch.post).not.toHaveBeenCalled();
 });
 
+// A 402 to a paid request is the seller's word, not proof: the call stays counted against the job's
+// ceiling, and the deposit authorization it signed goes to the paid record that
+// `tenjin payments reconcile` reads, with the time after which the chain can prove it unused.
+it('keeps a call the seller answered 402 uncharged-unproven: counted, with its authorization on record', async () => {
+  const { ctx, repo, data } = await fixture();
+  const account = privateKeyToAccount(generatePrivateKey());
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const request = input instanceof Request ? input.clone() : new Request(input, init);
+    if (request.headers.has('payment-signature'))
+      return new Response('{"error":{"message":"payment was not accepted"}}', { status: 402 });
+    return new Response('{}', {
+      status: 402,
+      headers: {
+        'payment-required': encodePaymentRequiredHeader({
+          x402Version: 2,
+          error: 'payment required',
+          resource: { url: TERMS.url, description: '', mimeType: 'application/json' },
+          accepts: [
+            {
+              scheme: 'batch-settlement',
+              network: 'eip155:8453',
+              amount: '42521',
+              asset: TERMS.asset,
+              payTo: TERMS.payTo,
+              maxTimeoutSeconds: 330,
+              extra: {
+                name: 'USD Coin',
+                version: '2',
+                receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+                withdrawDelay: 900,
+              },
+            },
+          ],
+        }),
+      },
+    });
+  };
+  const neon = new NeonTransport({
+    dataDir: data,
+    ctx,
+    provider: { getSigner: async () => account } as never,
+    authorizer: createLocalSpendAuthorizer({
+      dir: data,
+      policy: { maxAutoSpendAtomic: 1_000_000n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    }),
+    fetchImpl,
+  });
+  const j = job(repo);
+  const failed = await neon.messages(j, MESSAGES, signal()).catch((e: unknown) => e);
+  // Never marked uncharged: a voucher left the process.
+  expect((failed as ModelCallFailed).detail).not.toMatchObject({ uncharged: true });
+  const record = (await readNeonRecord(data, j.id))!;
+  expect(BigInt(record.spentAtomic)).toBeGreaterThan(0n);
+  expect(record.calls[0]).toMatchObject({ ok: false, settlement: 'unknown' });
+  expect(record.calls[0]!.resolvesAt).toBeGreaterThan(Date.now());
+  const rows = (await readFile(join(data, 'paid', 'ledger.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  expect(rows.at(-1)).toMatchObject({
+    settlement: 'unknown',
+    payer: account.address,
+    authorization: { from: account.address, asset: TERMS.asset, network: TERMS.network },
+  });
+  expect(rows.at(-1).authorization.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+});
+
 it('sends the effort the door saved with the job', async () => {
   const { ctx, repo } = await fixture();
   const { batch, transport: neon } = withBatch(ctx, async () => batchAnswer());

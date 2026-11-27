@@ -6,7 +6,7 @@ import { toClientEvmSigner } from '@x402/evm';
 import { BatchSettlementEvmScheme } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
-import type { TypedDataDefinition } from 'viem';
+import { encodeAbiParameters, keccak256, type Hex, type TypedDataDefinition } from 'viem';
 import { CliError } from '../lib/errors';
 import type { NeonTerms } from './neon-terms';
 import { pinnedFetch, type PinnedFetchOptions } from './pinned-fetch';
@@ -120,7 +120,13 @@ export class VoucherSpend {
    * payment can take the room in between. A failed write is thrown, never swallowed: the
    * reservation then stays, and the caller counts the call as uncertain.
    */
-  async settle(costAtomic: bigint | undefined, ceilingAtomic: bigint, transmitted: boolean) {
+  async settle(
+    costAtomic: bigint | undefined,
+    ceilingAtomic: bigint,
+    transmitted: boolean,
+    /** The deposit authorization's nonce, where a deposit is what makes the voucher claimable. */
+    nonce?: string,
+  ) {
     if (!this.held) return;
     this.held = false;
     if (!transmitted) return this.authorizer.release(this.reservation);
@@ -129,6 +135,9 @@ export class VoucherSpend {
       mode: 'automatic',
       exposureAtomic: charged,
       settledAtomic: charged,
+      // Keyed by the deposit authorization's nonce, so `tenjin payments reconcile` can release
+      // exactly this exposure once the chain shows that authorization expired unused.
+      ...(nonce !== undefined ? { nonce } : {}),
     });
   }
 }
@@ -209,9 +218,19 @@ export type ChannelConfig = {
   withdrawDelay: number;
 };
 
+/** The deposit authorization a call signed: enough to ask the token later whether it was used. */
+export type SignedDeposit = {
+  from: string;
+  nonce: string;
+  /** Unix seconds; after it the authorization can no longer be used. */
+  validBefore: string;
+  network: string;
+  asset: string;
+  /** Nothing waited in the channel, so the voucher is claimable only through this deposit. */
+  onlyThroughDeposit: boolean;
+};
+
 export type BatchAnswer = {
-  /** The seller answered 402 to the paid request: it did not accept the payment. */
-  paymentRefused?: boolean;
   status: number;
   text: string;
   /** The amount the 402 quoted as the most this call could cost. */
@@ -263,6 +282,8 @@ export type BatchSellerOptions = {
 export class BatchSeller {
   /** An authorization or voucher reached the seller: from here a failure is not proven unpaid. */
   transmitted = false;
+  /** The deposit authorization the call signed, where it signed one. */
+  signed?: SignedDeposit;
   constructor(private options: BatchSellerOptions) {}
 
   /**
@@ -286,7 +307,7 @@ export class BatchSeller {
 
   private async scheme(
     signal: AbortSignal,
-    deposits: { sum: bigint },
+    deposits: { sum: bigint; unspent?: bigint },
   ): Promise<{ scheme: BatchSettlementEvmScheme; payer: string; address: string }> {
     const signer = await this.options.provider.getSigner();
     const read = this.options.readContract;
@@ -305,8 +326,11 @@ export class BatchSeller {
       storage: new FileClientChannelStorage({
         directory: join(channelDirectory(this.options.dataDir, this.options.terms), payer),
       }),
-      depositStrategy: (ctx) =>
-        channelDeposit(
+      depositStrategy: (ctx) => {
+        // What the channel held for the seller before this deposit: the voucher needs the deposit
+        // to be claimable only where this is nothing.
+        deposits.unspent = unspentInChannel(ctx);
+        return channelDeposit(
           {
             minimumDepositAmount: ctx.minimumDepositAmount,
             // What the channel still holds for the seller to charge, not its whole balance: the
@@ -317,14 +341,15 @@ export class BatchSeller {
           },
           this.options.admit,
           deposits,
-        ),
+        );
+      },
     });
     return { scheme, payer, address: signer.address };
   }
 
   /** One chat completion, paid from the channel, with its ceiling held to `room`. */
   async post(body: string, signal: AbortSignal, room: bigint): Promise<BatchAnswer> {
-    const deposits = { sum: 0n };
+    const deposits: { sum: bigint; unspent?: bigint } = { sum: 0n };
     const { scheme, address } = await this.scheme(signal, deposits);
     let ceiling: bigint | undefined;
     let channel: ChannelConfig | undefined;
@@ -368,6 +393,35 @@ export class BatchSeller {
           this.options.approval,
         )
       : undefined;
+    // WHAT WAS SIGNED, kept so a payment the seller did not answer with a charge is never released
+    // on its word: the deposit authorization's nonce and expiry are what a chain read can prove.
+    client.onAfterPaymentCreation(async (ctx) => {
+      const inner = ctx.paymentPayload.payload as {
+        type?: string;
+        voucher?: { channelId?: string };
+        deposit?: {
+          authorization?: { erc3009Authorization?: { validBefore?: string; salt?: string } };
+        };
+      };
+      const auth = inner.deposit?.authorization?.erc3009Authorization;
+      if (inner.type !== 'deposit' || !auth?.salt || !auth.validBefore || !inner.voucher?.channelId)
+        return;
+      this.signed = {
+        from: address,
+        // The nonce `receiveWithAuthorization` consumes, as the scheme derives it.
+        nonce: keccak256(
+          encodeAbiParameters(
+            [{ type: 'bytes32' }, { type: 'uint256' }],
+            [inner.voucher.channelId as Hex, BigInt(auth.salt)],
+          ),
+        ),
+        validBefore: auth.validBefore,
+        network: terms.network,
+        asset: terms.asset,
+        // The voucher needs this deposit to be claimable only where nothing waited in the channel.
+        onlyThroughDeposit: deposits.unspent === 0n,
+      };
+    });
     // Before anything is signed: the person's limits, then the channel's config is kept.
     client.onBeforePaymentCreation(async (ctx) => {
       const refused = await spend?.before(BigInt(ctx.selectedRequirements.amount));
@@ -400,30 +454,37 @@ export class BatchSeller {
         body,
       });
     } catch (error) {
-      await spend?.settle(undefined, ceiling ?? room, this.transmitted);
+      await spend?.settle(undefined, ceiling ?? room, this.transmitted, this.proofNonce());
       // A payee that is not the row's is told apart from any other refusal to sign.
       if (!this.transmitted && wrongPayees.length > 0 && ceiling === undefined)
         throw new PayeeMismatch(terms.payTo, wrongPayees);
       throw error;
     }
     const cost = response.headers.get('x-request-cost-atomic');
-    // A 402 to the paid request is the seller saying it did not accept the payment: nothing is
-    // owed, so the reservation is given back and the call is not counted as charged.
-    const refused = response.status === 402 && this.transmitted;
+    // A seller's status is not proof that its signature holder cannot use what was signed: a
+    // payment that was sent and not answered with a charge stays counted. Only a charge it names
+    // is the charge; an answer without one leaves the exposure keyed by the deposit authorization,
+    // which `tenjin payments reconcile` releases once the chain shows it expired unused.
+    const charged = cost !== null && /^\d+$/.test(cost);
     await spend?.settle(
-      cost !== null && /^\d+$/.test(cost) ? BigInt(cost) : undefined,
+      charged ? BigInt(cost) : undefined,
       ceiling ?? room,
-      this.transmitted && !refused,
+      this.transmitted,
+      response.status >= 200 && response.status < 300 && charged ? undefined : this.proofNonce(),
     );
     return {
       status: response.status,
-      ...(refused ? { paymentRefused: true } : {}),
       text: await response.text(),
       ...(ceiling !== undefined ? { ceilingAtomic: ceiling } : {}),
       ...(cost !== null && /^\d+$/.test(cost) ? { costAtomic: BigInt(cost) } : {}),
       depositedAtomic: deposits.sum,
       ...(channel !== undefined ? { channel } : {}),
     };
+  }
+
+  /** The nonce a chain read can prove unused, where the deposit is what makes the voucher claimable. */
+  private proofNonce(): string | undefined {
+    return this.signed?.onlyThroughDeposit ? this.signed.nonce : undefined;
   }
 
   /**

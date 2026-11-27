@@ -6,7 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { USDC_ADDRESS } from '../lib/usdc';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
-import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
+import { createLocalSpendAuthorizer, releaseUnchargedExposure } from '../lib/wallet/spend';
 import { BatchSeller, channelDirectory, PayeeMismatch, type SellerTerms } from './neon-seller';
 
 /** The row's terms for the seller stub below. */
@@ -454,35 +454,62 @@ describe('what the seller quotes and accepts', () => {
     ).toBe(0n);
   });
 
-  // A 402 to the paid request is the seller refusing the payment: nothing is owed, so nothing
-  // stays counted against the day.
-  it('gives the reservation back when the seller answers 402 to the paid request', async () => {
+  // A status from the party that holds the signature is not proof that it cannot use what was
+  // signed. What a first paid request signs: a deposit authorization (ERC-3009, from the payer to the
+  // deposit collector, valid until `validBefore`, one nonce) and a voucher (a claim up to an amount on
+  // the channel, with no expiry, claimable only against a deposit in the channel). After a 402 both
+  // stay counted; the deposit authorization is what a chain read can prove unused once it expired.
+  it('keeps a signed payment counted after a 402, and releases it only on the chain proof, never before', async () => {
     const account = await payer();
     const { fetchImpl } = recording();
-    // A seller that quotes one price and wants another for the paid body.
-    const moving: typeof fetch = async (input, init) => {
+    const refusing: typeof fetch = async (input, init) => {
       const request = input instanceof Request ? input.clone() : new Request(input, init);
       if (request.headers.has('payment-signature'))
         return new Response('{"error":{"message":"payment was not accepted"}}', { status: 402 });
       return fetchImpl(input, init);
     };
-    const authorizer = createLocalSpendAuthorizer({
-      dir,
-      policy: { maxAutoSpendAtomic: 1_000_000n, sessionBudgetAtomic: null, allowlistCreators: [] },
-    });
-    const batch = new BatchSeller({
-      dataDir: dir,
-      terms: TERMS,
-      provider: { getSigner: async () => account } as never,
-      admit: async () => undefined,
-      authorizer,
-      fetchImpl: moving,
-    });
-    const answer = await batch.post(body, new AbortController().signal, 1_000_000n);
-    expect(answer).toMatchObject({ status: 402, paymentRefused: true });
-    const kept = (await readSpendSummary(dir))!;
-    expect(spentOf(kept)).toBe(0n);
-    expect(kept.reservations).toEqual([]);
+    const ceiling = BigInt(priceOf(body));
+    // A day's budget with room for one call's ceiling and not for two.
+    const authorizer = () =>
+      createLocalSpendAuthorizer({
+        dir,
+        policy: {
+          maxAutoSpendAtomic: 1_000_000n,
+          sessionBudgetAtomic: ceiling + ceiling / 2n,
+          allowlistCreators: [],
+        },
+      });
+    const make = (key: string) =>
+      new BatchSeller({
+        dataDir: dir,
+        terms: TERMS,
+        provider: { getSigner: async () => account } as never,
+        admit: async () => undefined,
+        authorizer: authorizer(),
+        requestKey: key,
+        fetchImpl: refusing,
+      });
+    const first = make('first');
+    const answer = await first.post(body, new AbortController().signal, 1_000_000n);
+    expect(answer.status).toBe(402);
+    // The payment left, so the amount stays counted, keyed by the deposit authorization's nonce.
+    const nonce = first.signed?.nonce;
+    expect(nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(first.signed).toMatchObject({ from: account.address, onlyThroughDeposit: true });
+    expect(Number(first.signed!.validBefore) * 1000).toBeGreaterThan(Date.now());
+    expect(spentOf((await readSpendSummary(dir))!)).toBe(ceiling);
+    // A later call cannot use that room before the proof.
+    await expect(
+      make('second').post(body, new AbortController().signal, 1_000_000n),
+    ).rejects.toThrow();
+    // The proof is what `tenjin payments reconcile` has after the expiry: the token says the
+    // authorization was never used. Only then is exactly that amount released, once.
+    expect(await releaseUnchargedExposure(dir, nonce!)).toBe(ceiling);
+    expect(spentOf((await readSpendSummary(dir))!)).toBe(0n);
+    expect(await releaseUnchargedExposure(dir, nonce!)).toBe(0n);
+    expect((await make('third').post(body, new AbortController().signal, 1_000_000n)).status).toBe(
+      402,
+    );
   });
 
   // Failure caught by review (money): an approval made every later call of the job pay past the

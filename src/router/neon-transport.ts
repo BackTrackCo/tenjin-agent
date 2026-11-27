@@ -17,6 +17,7 @@ import {
   BatchSeller,
   type ChannelConfig,
   type PaymentApproval,
+  type SignedDeposit,
   ChannelDepositRefused,
   NEON_CHANNEL_DEPOSIT_CAP_ATOMIC,
   PayeeMismatch,
@@ -83,6 +84,8 @@ const callSchema = z.object({
   settledAtomic: z.string().regex(/^\d+$/).nullable(),
   settlement: z.enum(['settled', 'unknown']),
   ok: z.boolean(),
+  /** When a call left uncertain can be proven unpaid (ms): its deposit authorization's expiry. */
+  resolvesAt: z.number().optional(),
   ms: z.number(),
   txHash: z.string().optional(),
 });
@@ -322,7 +325,10 @@ function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
 }
 
 /** What the transport needs of the batch payer. */
-export type BatchLike = Pick<BatchSeller, 'post' | 'refund'> & { transmitted: boolean };
+export type BatchLike = Pick<BatchSeller, 'post' | 'refund'> & {
+  transmitted: boolean;
+  signed?: SignedDeposit;
+};
 
 export type NeonTransportOptions = {
   dataDir: string;
@@ -611,19 +617,13 @@ export class NeonTransport {
         batch.transmitted,
         room,
         signal,
+        batch.signed,
       );
     }
     if (answer.status < 200 || answer.status >= 300) {
       // What the seller said, in a few words, so a failed call is never a mystery again.
       const said = answer.text.replace(/\s+/g, ' ').slice(0, 200);
       await this.note(job, `call ${n}: the seller answered ${answer.status}: ${said}`);
-      // A refused payment signed nothing the seller kept: nothing was charged, and the worker may
-      // try again.
-      if (answer.paymentRefused)
-        throw new ModelCallFailed(
-          `The seller did not accept the payment (it answered ${answer.status}). Nothing was charged.`,
-          { cause: 'payment_refused', status: answer.status, uncharged: true },
-        );
     }
     if (answer.status < 200 || answer.status >= 300)
       throw await this.failedCall(
@@ -637,6 +637,7 @@ export class NeonTransport {
         true,
         answer.ceilingAtomic ?? room,
         signal,
+        batch.signed,
       );
     // The real charge where the seller said it; else the ceiling, which it may not exceed.
     const quoted = answer.costAtomic ?? answer.ceilingAtomic ?? 0n;
@@ -755,6 +756,7 @@ export class NeonTransport {
     transmitted: boolean,
     atRisk: bigint,
     signal: AbortSignal,
+    signed?: SignedDeposit,
   ): Promise<unknown> {
     if (signal.aborted && !transmitted) return signal.reason ?? error;
     if (!transmitted) {
@@ -780,11 +782,40 @@ export class NeonTransport {
         { cause: refused ? 'budget' : 'failed', uncharged: true },
       );
     }
+    // WHAT THE SELLER HOLDS, kept where a chain read can prove it: a payment that was sent and not
+    // answered with a charge is never released on the seller's word, whatever status it gave. The
+    // deposit authorization's nonce and expiry go to the paid record `tenjin payments reconcile`
+    // reads; after the expiry it asks the token whether the authorization was used, and only an
+    // authorization that never was releases this amount. Without one (the voucher spent a channel
+    // that was already funded) nothing can prove it, and it stays counted until the window rolls.
+    if (signed?.onlyThroughDeposit)
+      await appendPaidRecord(this.options.dataDir, {
+        version: 1,
+        ts: new Date(this.now()).toISOString(),
+        capabilityId: 'neon-worker',
+        provider: neonHost(termsOfJob(job) ?? ({ url: 'https://unknown' } as NeonTerms)),
+        label: 'Neon worker',
+        source: 'tenjin',
+        url: termsOfJob(job)?.url ?? '',
+        sent: recordedSent(`neon worker job ${job.id} call ${n}`),
+        amountAtomic: atRisk.toString(),
+        settlement: 'unknown',
+        savedFiles: [],
+        payer: signed.from,
+        authorization: {
+          from: signed.from,
+          nonce: signed.nonce,
+          validBefore: signed.validBefore,
+          network: signed.network,
+          asset: signed.asset,
+        },
+      });
     await this.record(
       job,
       {
         n,
         at: started,
+        ...(signed?.onlyThroughDeposit ? { resolvesAt: Number(signed.validBefore) * 1000 } : {}),
         inputTokens: 0,
         cachedInputTokens: 0,
         outputTokens: 0,
