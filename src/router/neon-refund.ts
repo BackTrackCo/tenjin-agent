@@ -1,9 +1,13 @@
+import { randomBytes } from 'node:crypto';
+import { open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { modelLock } from './model-job';
 import { channelKey } from './neon-seller';
 import { neonTermsSchema, type NeonTerms } from './neon-terms';
-import { readJsonFile, writePrivate } from './store-files';
+import { CliError } from '../lib/errors';
+import { writePrivate } from './store-files';
 
 /**
  * WHERE EACH NEON CHANNEL STANDS, kept with the seller terms its jobs were paid under. A job's
@@ -15,6 +19,22 @@ import { readJsonFile, writePrivate } from './store-files';
 const entrySchema = z.object({
   /** The channel's key: the seller's origin and payee. The payer is the wallet. */
   key: z.string(),
+  /**
+   * The channel's salt, which is part of its identity. Absent is the SDK's own (zero) salt. A
+   * channel RETIRED because a voucher left it unsettled is never deposited into again: the next
+   * channel of the same payer and seller has a salt of its own, so that voucher has no funds to
+   * reach there. The retired entry stays, for a late settlement, the refund and the withdrawal.
+   */
+  salt: z
+    .string()
+    .regex(/^0x[0-9a-f]{64}$/)
+    .optional(),
+  retired: z.boolean().optional(),
+  /**
+   * Until when a deposit authorization signed for this channel could still reach it (ms): a retired
+   * channel is not forgotten before then, whatever its balance reads now.
+   */
+  holdUntil: z.number().optional(),
   terms: neonTermsSchema,
   jobIds: z.array(z.string()).max(200),
   /**
@@ -32,6 +52,7 @@ const entrySchema = z.object({
       payer: z.string(),
       receiverAuthorizer: z.string(),
       withdrawDelay: z.number().int().min(1),
+      salt: z.string().optional(),
     })
     .optional(),
   /** The last refusal or failure, in words, for the person. */
@@ -52,6 +73,49 @@ export type ChannelEntry = z.infer<typeof entrySchema>;
 const fileSchema = z.object({ version: z.literal(1), channels: z.array(entrySchema) });
 
 const journalPath = (dataDir: string) => join(dataDir, 'neon-channels.json');
+
+/** What the journal may grow to before it is refused rather than read. */
+const JOURNAL_MAX_BYTES = 8_000_000;
+
+/**
+ * THE JOURNAL, READ STRICTLY. A journal that is absent is empty; one that exists and cannot be
+ * read (too big, damaged, or not what this build writes) is NEVER empty: reading it as empty and
+ * then writing would erase the salts and saved configs `tenjin refund` needs to recover deposits.
+ * It is refused with a message, and the file is left as it is.
+ */
+async function readJournal(dataDir: string): Promise<ChannelEntry[]> {
+  const path = journalPath(dataDir);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      return undefined;
+    },
+  );
+  if (file === null) return [];
+  const unreadable = (why: string) =>
+    new CliError(
+      'CONFIG_INVALID',
+      `The record of Neon channels (${path}) exists but cannot be read (${why}). Nothing was changed and no call was made: it holds what \`tenjin refund\` needs to recover deposits, so it is kept as it is. Move it aside only after copying it.`,
+    );
+  if (file === undefined) throw unreadable('it cannot be opened');
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile()) throw unreadable('it is not a regular file');
+    if (stat.size > JOURNAL_MAX_BYTES)
+      throw unreadable(`it is ${stat.size} bytes, over ${JOURNAL_MAX_BYTES}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse((await file.readFile('utf8')) || 'null');
+    } catch {
+      throw unreadable('it is not valid JSON');
+    }
+    const checked = fileSchema.safeParse(parsed);
+    if (!checked.success) throw unreadable('it does not match what this build writes');
+    return checked.data.channels;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
 
 /** What the cooperative refund came to. */
 export type RefundResult =
@@ -136,7 +200,7 @@ export interface WithdrawChain {
 export type NeonRefundsOptions = {
   dataDir: string;
   /** The payer of one seller's saved terms. It deposits nothing. */
-  payer: (terms: NeonTerms) => { refund(signal: AbortSignal): Promise<unknown> };
+  payer: (terms: NeonTerms, salt?: string) => { refund(signal: AbortSignal): Promise<unknown> };
   /**
    * Whether a job's runner is alive (the job store's runner lock). A job with no live runner
    * never holds a channel back, so a crashed job cannot block a refund for ever. Where this
@@ -153,10 +217,7 @@ export class NeonRefunds {
   }
 
   async entries(): Promise<ChannelEntry[]> {
-    const parsed = fileSchema.safeParse(
-      await readJsonFile(journalPath(this.options.dataDir), 1_000_000),
-    );
-    return parsed.success ? parsed.data.channels : [];
+    return readJournal(this.options.dataDir);
   }
   private async change(
     update: (channels: ChannelEntry[]) => ChannelEntry[] | Promise<ChannelEntry[]>,
@@ -168,12 +229,22 @@ export class NeonRefunds {
     });
   }
 
-  /** A job paid on this channel: it is on record before any money moves, under the job's terms. */
-  async open(jobId: string, terms: NeonTerms): Promise<void> {
+  /**
+   * A job paid on this channel: it is on record before any money moves, under the job's terms.
+   * It names the channel's salt: none for the first channel of a payer and seller, and a salt of
+   * its own for one that follows a retired channel.
+   */
+  async open(jobId: string, terms: NeonTerms): Promise<{ salt?: string }> {
     const key = channelKey(terms);
+    let salt: string | undefined;
     await this.change((channels) => {
       const known = channels.find((entry) => entry.key === key);
-      if (!known)
+      if (!known) {
+        // EVERY NEW CHANNEL HAS A SALT OF ITS OWN, never the SDK's zero one: a voucher left on an
+        // earlier channel of this payer and seller has no expiry, and a channel that reused its
+        // identity (after its entry was forgotten) would put new funds in its reach. Nothing here
+        // depends on a record that can be pruned or lost.
+        salt = `0x${randomBytes(32).toString('hex')}`;
         return [
           ...channels,
           {
@@ -184,8 +255,11 @@ export class NeonRefunds {
             epoch: 1,
             state: 'open' as const,
             at: this.now(),
+            ...(salt ? { salt } : {}),
           },
         ];
+      }
+      salt = known.salt;
       return channels.map((entry) =>
         entry.key !== key
           ? entry
@@ -205,6 +279,34 @@ export class NeonRefunds {
             },
       );
     });
+    return salt === undefined ? {} : { salt };
+  }
+
+  /**
+   * RETIRES THE CHANNEL A VOUCHER LEFT UNSETTLED. A voucher is a claim on the channel with no
+   * expiry and no nonce: any signed voucher whose amount is above what was claimed and within
+   * the channel's balance can be claimed, the highest first, and a later voucher with a lower
+   * amount does not void it. A deposit into the same channel would put funds in its reach, so
+   * the channel is never deposited into again: its entry is renamed and kept (its jobs, its
+   * saved config and salt, its state), and the next call opens a channel with a salt of its own.
+   * The refund and the timed withdrawal still reach the retired channel. `holdUntilMs` is when a
+   * deposit authorization signed for it can no longer arrive.
+   */
+  async retire(terms: NeonTerms, holdUntilMs?: number): Promise<void> {
+    const key = channelKey(terms);
+    await this.change((channels) =>
+      channels.map((entry) =>
+        entry.key !== key
+          ? entry
+          : {
+              ...entry,
+              key: `${key}.${this.now().toString(36)}`,
+              retired: true,
+              at: this.now(),
+              ...(holdUntilMs !== undefined ? { holdUntil: holdUntilMs } : {}),
+            },
+      ),
+    );
   }
 
   /**
@@ -215,7 +317,9 @@ export class NeonRefunds {
     const key = channelKey(terms);
     await this.change((channels) =>
       channels.map((entry) =>
-        entry.key === key && entry.channel === undefined ? { ...entry, channel } : entry,
+        entry.key === key && entry.channel === undefined
+          ? { ...entry, channel: entry.salt ? { ...channel, salt: entry.salt } : channel }
+          : entry,
       ),
     );
   }
@@ -282,7 +386,7 @@ export class NeonRefunds {
     for (const entry of due)
       await this.record(
         entry.key,
-        await cooperativeRefund(this.options.payer(entry.terms), signal),
+        await cooperativeRefund(this.options.payer(entry.terms, entry.salt), signal),
         entry.epoch,
       );
     return this.entries();
@@ -326,13 +430,46 @@ export class NeonRefunds {
         continue;
       }
       if (entry.state !== 'withdrawal_started') {
-        const result = await cooperativeRefund(this.options.payer(entry.terms));
+        const result = await cooperativeRefund(this.options.payer(entry.terms, entry.salt));
         await this.record(entry.key, result, entry.epoch);
         if (result.state !== 'failed' || !chain) continue;
       }
       if (chain) await this.withdraw(entry, chain);
     }
+    await this.prune(chain).catch(() => 0);
     return this.entries();
+  }
+
+  /**
+   * FORGETS WHAT IS PROVABLY FINISHED, so retired channels do not pile up. A retired channel is
+   * never deposited into again, so it has nothing left to recover when the chain shows that its
+   * balance equals what was claimed and that no withdrawal is pending: nothing unclaimed is in it
+   * and nothing is on its way out, and no deposit authorization signed for it can still arrive
+   * (`holdUntil` has passed) and no job of it is live: an empty channel does not prove that a late
+   * deposit will not land. That proof is a chain read (`channels` and `pendingWithdrawals`), made here. A retired channel with no saved config never had a payment
+   * created for it, so it never held anything. A channel the read cannot prove stays.
+   */
+  async prune(chain?: WithdrawChain): Promise<number> {
+    const finished = new Set<string>();
+    for (const entry of await this.entries()) {
+      if (!entry.retired) continue;
+      if (!entry.channel) {
+        finished.add(entry.key);
+        continue;
+      }
+      // Every deposit authorization signed for it is past its expiry, and no job of it is live.
+      if (!chain || (entry.holdUntil ?? 0) > this.now() || (await this.inUse(entry))) continue;
+      try {
+        const seen = await chain.channel(entry.terms, entry.channel);
+        if (seen.balanceAtomic === seen.claimedAtomic && seen.pendingAtomic === 0n)
+          finished.add(entry.key);
+      } catch {
+        // Unproven stays.
+      }
+    }
+    if (finished.size === 0) return 0;
+    await this.change((channels) => channels.filter((entry) => !finished.has(entry.key)));
+    return finished.size;
   }
 
   private async withdraw(entry: ChannelEntry, chain: WithdrawChain) {

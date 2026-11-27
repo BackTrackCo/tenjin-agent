@@ -1,3 +1,4 @@
+import type { Hex } from 'viem';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { resolveContextSettings } from '../lib/settings';
@@ -50,10 +51,11 @@ export async function runRefund(
       dataDir: ctx.dataDir,
       // A channel a Neon job in another session still pays from is left alone.
       live: (jobId) => new ModelJobStore(ctx.dataDir).runnerLive(jobId),
-      payer: (terms) =>
+      payer: (terms, salt) =>
         new BatchSeller({
           dataDir: ctx.dataDir,
           terms,
+          ...(salt ? { salt: salt as Hex } : {}),
           provider,
           admit: async () => {
             throw new CliError('POLICY_REFUSED', 'A refund deposits nothing.');
@@ -70,8 +72,15 @@ export async function runRefund(
       channels: channels.map((entry) => ({
         seller: new URL(entry.terms.url).host,
         state: entry.state,
-        ...(entry.refundedAtomic ? { refundedAtomic: entry.refundedAtomic } : {}),
-        ...(entry.transaction ? { transaction: entry.transaction } : {}),
+        // The last refund's amount and transaction, only where the state says it happened: an
+        // empty channel found nothing to take back now, whatever an earlier refund returned.
+        ...(entry.refundedAtomic && (entry.state === 'refunded' || entry.state === 'withdrawn')
+          ? { refundedAtomic: entry.refundedAtomic }
+          : {}),
+        ...(entry.transaction && (entry.state === 'refunded' || entry.state === 'withdrawn')
+          ? { transaction: entry.transaction }
+          : {}),
+        ...(entry.retired ? { retired: true } : {}),
         ...(entry.withdrawal ? { withdrawal: entry.withdrawal } : {}),
         ...(entry.note ? { note: entry.note } : {}),
       })),

@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from '@x402/core/http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
@@ -15,6 +15,7 @@ import {
 import { neonMinimumJobAtomic, NEON_TURN_MAX_TOKENS } from './neon-chat';
 import {
   depositAdmitter,
+  freshNeonRecord,
   grantNeonRoom,
   neonNextCallNeedAtomic,
   NeonTransport,
@@ -220,7 +221,7 @@ it('keeps the funded channel config the seller named, for a withdrawal that cann
         payer: () => ({ refund: async () => ({}) }),
       }).entries()
     )[0]!.channel,
-  ).toEqual(channel);
+  ).toEqual({ ...channel, salt: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
 });
 
 // Failure caught by review: the channel config was kept only after a paid reply succeeded, so a
@@ -284,6 +285,7 @@ it('keeps the funded channel config when the paid request fails with a 503', asy
     payer: () => ({ refund: async () => ({}) }),
   }).entries();
   expect(entry!.channel).toEqual({
+    salt: expect.stringMatching(/^0x[0-9a-f]{64}$/),
     payer: account.address,
     receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
     withdrawDelay: 900,
@@ -378,9 +380,12 @@ it('sends nothing at all to a seller the allowlist does not name', async () => {
 it('keeps a call the seller answered 402 uncharged-unproven: counted, with its authorization on record', async () => {
   const { ctx, repo, data } = await fixture();
   const account = privateKeyToAccount(generatePrivateKey());
+  const signatures: string[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const request = input instanceof Request ? input.clone() : new Request(input, init);
-    if (request.headers.has('payment-signature'))
+    const signed = request.headers.get('payment-signature');
+    if (signed) signatures.push(signed);
+    if (signed)
       return new Response('{"error":{"message":"payment was not accepted"}}', { status: 402 });
     return new Response('{}', {
       status: 402,
@@ -437,6 +442,110 @@ it('keeps a call the seller answered 402 uncharged-unproven: counted, with its a
     authorization: { from: account.address, asset: TERMS.asset, network: TERMS.network },
   });
   expect(rows.at(-1).authorization.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+
+  // A voucher is a claim with no expiry and no nonce: any one above what was claimed and within the
+  // channel's balance is claimable, the highest first, and a lower later one does not void it. A
+  // deposit into the same channel would put funds in its reach. The channel is retired: its record
+  // stays for the refund and the withdrawal, and the next call signs for a channel of its own.
+  const channelsSigned = () => [
+    ...new Set(
+      signatures.map(
+        (header) =>
+          (decodePaymentSignatureHeader(header).payload as { voucher: { channelId: string } })
+            .voucher.channelId,
+      ),
+    ),
+  ];
+  const first = channelsSigned();
+  expect(first).toHaveLength(1);
+  await neon.messages(j, MESSAGES, signal()).catch(() => undefined);
+  const both = channelsSigned();
+  expect(both).toHaveLength(2);
+  expect(both[1]).not.toBe(both[0]);
+  const journal = await new NeonRefunds({
+    dataDir: data,
+    payer: () => ({ refund: async () => ({}) }),
+  }).entries();
+  // Both calls left a voucher unsettled, so both channels are retired: the first with the SDK's own
+  // salt (none is kept), the second with the salt it was opened with, each with its saved config so
+  // the refund and the withdrawal reach it. The next call opens a third.
+  const retired = journal.filter((entry) => entry.retired);
+  expect(retired).toHaveLength(2);
+  expect(journal.every((entry) => entry.retired)).toBe(true);
+  const [one, two] = retired;
+  expect(one!.salt).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(two!.salt).not.toBe(one!.salt);
+  expect(one!.channel).toMatchObject({ payer: account.address, withdrawDelay: 900 });
+  expect(two!.salt).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(two!.channel).toMatchObject({ salt: two!.salt });
+  await neon.messages(j, MESSAGES, signal()).catch(() => undefined);
+  expect(channelsSigned()).toHaveLength(3);
+});
+
+// The records an older build left: its channel has a voucher that was never settled, and the next
+// call must not deposit into it. This machine's own channel is in this state.
+it('retires a channel whose earlier job left a voucher unsettled, before the next call pays on it', async () => {
+  const { ctx, repo, data } = await fixture();
+  const refunds = new NeonRefunds({ dataDir: data, payer: () => ({ refund: async () => ({}) }) });
+  await refunds.open('old-job', TERMS);
+  await refunds.saveChannel(TERMS, {
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  });
+  await mkdir(join(data, 'model-jobs'), { recursive: true });
+  await writeFile(
+    join(data, 'model-jobs', 'old-job.neon.json'),
+    JSON.stringify({
+      ...freshNeonRecord('old-job', 1),
+      calls: [
+        {
+          n: 1,
+          at: 1,
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          maxTokens: 1024,
+          quotedAtomic: '16222',
+          settledAtomic: null,
+          settlement: 'unknown',
+          ok: false,
+          ms: 1,
+        },
+      ],
+    }),
+  );
+  const { transport: neon } = withBatch(ctx, async () => batchAnswer());
+  await neon.messages(job(repo), MESSAGES, signal());
+  const journal = await refunds.entries();
+  expect(journal).toHaveLength(2);
+  const old = journal.find((entry) => entry.retired)!;
+  expect(old.jobIds).toEqual(['old-job']);
+  expect(old.channel).toMatchObject({ withdrawDelay: 900 });
+  const fresh = journal.find((entry) => !entry.retired)!;
+  expect(fresh.salt).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(fresh.jobIds).toEqual(['6f2f8f0e-2b64-4b4f-9a39-6d3b2f1c0a11']);
+});
+
+// A record or a journal that exists and cannot be read is never treated as empty and written over:
+// a call is refused with nothing sent, a grant is refused, and the files stay as they were.
+it('refuses a call and a grant over a record or a journal it cannot read, and keeps both files', async () => {
+  const { ctx, repo, data } = await fixture();
+  const { transport: neon, batch } = withBatch(ctx, async () => batchAnswer());
+  const j = job(repo);
+  await mkdir(join(data, 'model-jobs'), { recursive: true });
+  const record = join(data, 'model-jobs', `${j.id}.neon.json`);
+  await writeFile(record, '{"version":1,"jobId"');
+  await expect(neon.messages(j, MESSAGES, signal())).rejects.toThrow(/cannot be read/);
+  await expect(grantNeonRoom(data, j.id, 1_000n)).rejects.toThrow(/cannot be read/);
+  expect(await readFile(record, 'utf8')).toBe('{"version":1,"jobId"');
+  await rm(record);
+  const journal = join(data, 'neon-channels.json');
+  const oversized = JSON.stringify({ version: 1, channels: [], pad: 'x'.repeat(8_100_000) });
+  await writeFile(journal, oversized);
+  await expect(neon.messages(j, MESSAGES, signal())).rejects.toThrow(/cannot be read/);
+  expect(batch.post).not.toHaveBeenCalled();
+  expect(await readFile(journal, 'utf8')).toBe(oversized);
 });
 
 it('sends the effort the door saved with the job', async () => {
