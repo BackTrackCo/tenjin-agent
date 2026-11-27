@@ -251,6 +251,9 @@ it('refuses a job whose ceiling has no room for one call to the row, and sends n
   const { call } = await door({}, async () => TERMS, { maxAutoSpend: '1000' });
   const reply = await call(request);
   expect(reply).toMatchObject({ action: 'refused', charged: false });
+  // No Neon path reads a `--max-job` ceiling, so the refusal names none: the limit is the cap.
+  expect(reply.reason).not.toContain('max-job');
+  expect(reply.reason).toContain('per-call limit');
   expect(worker.run).not.toHaveBeenCalled();
 });
 

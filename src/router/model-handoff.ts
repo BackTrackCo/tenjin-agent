@@ -456,9 +456,7 @@ export class ModelHandoff {
         'This Claude Code, its login, policy, sandbox or the subagent type does not qualify for a worker here.',
       );
     if (settings.maxJobAtomic < neonMinimumJobAtomic(terms))
-      return refuse(
-        'The job ceiling has no room for one Neon call. Raise the per-call limit or the --max-job ceiling.',
-      );
+      return refuse('The job ceiling has no room for one Neon call. Raise the per-call limit.');
     const native = {
       prompt: input.prompt,
       ...(input.description !== undefined ? { description: input.description } : {}),
