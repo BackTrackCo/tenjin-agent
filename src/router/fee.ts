@@ -172,9 +172,10 @@ export function feeRefusal(policy: SpendPolicy, host: string, feeAtomic: bigint)
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
 
-/** The payer's route for a call to the router at `baseUrl`. `tenjin mcp`
- *  passes its payer's; absent, a call goes unpaid. */
-export type RouteFor = (baseUrl: string) => DecisionRoute;
+/** The payer's route for a call to the router at `baseUrl`, narrowed to pay
+ *  no fee above `limitAtomic` when it is given (a task run's approved fee).
+ *  `tenjin mcp` passes its payer's; absent, a call goes unpaid. */
+export type RouteFor = (baseUrl: string, limitAtomic?: bigint) => DecisionRoute;
 
 /**
  * WHY A CALL WAS NOT PAID, for the user: the reason and the fix, keyed by the

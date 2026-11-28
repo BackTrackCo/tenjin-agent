@@ -45,7 +45,40 @@ export type QuotedCall =
       keys: string[];
       input: Record<string, unknown>;
     }
-  | { kind: 'call'; call: ProviderCall };
+  | { kind: 'call'; call: ProviderCall }
+  /** A routed operation's run: the Tenjin fee and the provider's allowed maximum,
+   *  quoted together before either is paid. Nothing was sent to the router. */
+  | {
+      kind: 'operation';
+      operation: string;
+      label: string;
+      input: Record<string, unknown>;
+      offer?: string;
+      /** The compare key a person picked: what is approved is what runs. */
+      choice?: string;
+      /** The open-Bazaar row this run is for, which has no operation read. */
+      listing?: { operation: string; label: string; does: string; price: string; offer?: string };
+    }
+  /** A set of runs: every option of a compare group, or takes of one operation,
+   *  quoted together (the fees' sum and each provider's maximum). */
+  | {
+      kind: 'operation_set';
+      operation: string;
+      label: string;
+      input: Record<string, unknown>;
+      offer?: string;
+      count?: number;
+      options?: { key: string; operation: string }[];
+    }
+  /** A second attempt at the provider under a run already paid for, which a
+   *  person said yes to after the first attempt's reply was lost. */
+  | {
+      kind: 'operation_retry';
+      run: string;
+      operation: string;
+      label: string;
+      input: Record<string, unknown>;
+    };
 
 const Input = z.record(z.string(), z.unknown());
 const Digits = z.string().regex(/^\d+$/);
@@ -70,6 +103,45 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     kept: KeptChoicesSchema,
     specs: z.array(KeptSpecSchema).min(2).max(4),
     keys: z.array(z.string().min(1).max(64)).min(1).max(4),
+    input: Input,
+  }),
+  z.strictObject({
+    kind: z.literal('operation'),
+    operation: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
+    input: Input,
+    offer: z.string().min(1).max(64).optional(),
+    choice: z.string().min(1).max(32).optional(),
+    listing: z
+      .strictObject({
+        operation: z.string().min(1).max(200),
+        label: z.string().min(1).max(120),
+        does: z.string().min(1).max(500),
+        price: z.string().min(1).max(32),
+        offer: z.string().min(1).max(64).optional(),
+      })
+      .optional(),
+  }),
+  z.strictObject({
+    kind: z.literal('operation_set'),
+    operation: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
+    input: Input,
+    offer: z.string().min(1).max(64).optional(),
+    count: z.number().int().min(2).max(5).optional(),
+    options: z
+      .array(
+        z.strictObject({ key: z.string().min(1).max(32), operation: z.string().min(1).max(200) }),
+      )
+      .min(2)
+      .max(4)
+      .optional(),
+  }),
+  z.strictObject({
+    kind: z.literal('operation_retry'),
+    run: z.string().min(8).max(64),
+    operation: z.string().min(1).max(200),
+    label: z.string().min(1).max(120),
     input: Input,
   }),
   z.strictObject({
@@ -248,5 +320,10 @@ export function quotedHashes(call: QuotedCall): (string | undefined)[] {
       return call.specs.map((spec) => spec.settingsHash);
     case 'call':
       return [call.call.settingsHash];
+    // A run's rules are checked against the answer it is served.
+    case 'operation':
+    case 'operation_set':
+    case 'operation_retry':
+      return [];
   }
 }

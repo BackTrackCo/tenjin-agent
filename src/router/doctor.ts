@@ -315,6 +315,17 @@ export async function runRouterDoctor(
       ),
     );
   }
+  // THE ROUTED-OPERATION ANSWER, only once the router itself answered.
+  if (probe.status !== 'fail') {
+    const { checkOperationAnswer } = await import('./operation-request');
+    const operations = await checkOperationAnswer({
+      ctx,
+      baseUrl: settings.baseUrl,
+      timeoutMs: ctx.flags.timeout,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    checks.push({ name: 'operations', required: false, ...operations });
+  }
   const agents = await subagentsCheck(cwd, home);
   if (agents !== null) checks.push(agents);
 

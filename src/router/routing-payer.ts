@@ -447,7 +447,13 @@ export class RoutingPayer {
    */
   private paymentCeiling(): bigint {
     const lane = this.deps.modelLane;
-    if (!lane) return ROUTING_FEE_CEILING_ATOMIC;
+    if (!lane) {
+      // A TASK RUN'S APPROVED FEE narrows the tool router's ceiling for that call.
+      const approved = this.call?.limitAtomic;
+      return approved !== undefined && approved < ROUTING_FEE_CEILING_ATOMIC
+        ? approved
+        : ROUTING_FEE_CEILING_ATOMIC;
+    }
     if (modelChannelLane(lane.path) !== 'model-routing') return lane.ceilingAtomic;
     const widest =
       lane.ceilingAtomic < ROUTING_FEE_CEILING_ATOMIC

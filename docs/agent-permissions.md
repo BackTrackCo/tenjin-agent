@@ -2,7 +2,7 @@
 
 Tenjin suggests tools for your task and runs chosen tools through a local `router` MCP server. Your wallet and spending policy stay on your machine. This guide covers normal setup; the [CLI/MCP reference](./router-reference.md) holds detailed contracts.
 
-Your agent can also browse and choose a tool directly. Browsing and inspection are free; selected Context7 docs run without a wallet or payment. Paid tools keep the same spending checks.
+Your agent can also browse and choose an operation directly. Browsing, reading an operation and offers are free, and an operation run pays the routing fee when it is routed and its provider when it runs. Selected Context7 docs run without a wallet or payment. Paid tasks keep the same spending checks, applied once to the fee and the provider's allowed maximum together.
 
 ## Install and activate
 

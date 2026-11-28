@@ -30,6 +30,7 @@ import { bindDecision, claimRedirect, noteSession, renderProgress } from './prog
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { TERMS_CHANGED_SENTENCE } from './terms-notice';
+import { clearRouterMemo, OPERATION_ABSENT_MS, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -54,6 +55,13 @@ beforeEach(async () => {
     join(dir, 'config.json'),
     JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
+  // THESE TESTS ARE ABOUT TODAY'S PAID FLOW: the router is one that predates
+  // routed tasks, so its offers go to the paid route (`task-tool.test.ts` covers
+  // the free offer and the `fee_required` fall back itself).
+  await writeRouterMemo(dir, 'operation-absent', 'https://tenjin.sh', {
+    now: Date.now(),
+    ttlMs: OPERATION_ABSENT_MS,
+  });
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -209,6 +217,42 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
 
 /** The settings field a user with no rules sends on every routing call. */
 const NO_RULES = wireSettings(undefined, { mode: 'off' });
+
+describe('a cold first call, with no memo of the router', () => {
+  it("asks the free route once, is told fee_required, and then makes today's paid call", async () => {
+    await clearRouterMemo(dir, 'operation-absent', ROUTER);
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            reason: 'no',
+            diagnostics: {
+              reasonCode: 'fee_required',
+              stage: 'capability',
+              missing: [],
+              nextAction: 'x',
+            },
+          },
+        },
+      },
+      { url: ROUTER, status: 200, body: decision() },
+      ...providerLegs(),
+    ]);
+    const result = await runRequestTool(
+      { query: 'BTC and ETH price', id: 'k3f9-abcd' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+    expect(calls[1]!.url).toBe(`${ROUTER}${ROUTE_PAID_PATH}`);
+    expect(calls.filter((c) => c.paid)).toHaveLength(1);
+  });
+});
 
 describe('the request tool, one decision and one payment per lookup', () => {
   it('sends the query and the turn id, and pays the provider once', async () => {
@@ -2813,13 +2857,13 @@ describe('the tool list, read for free', () => {
     expect(result.summary).toContain(
       'CoinMarketCap quotes (id cmc-quotes, 1¢, Live crypto prices)',
     );
-    expect(result.summary).toContain('request({tool: "<id>"})');
+    expect(result.summary).toContain('request({operation: "<id>"})');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST', paid: false });
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       browse: 'live crypto prices',
-      accepts: ACCEPTS,
+      accepts: [...ACCEPTS, 'operation'],
       harness: 'claude',
       settings: NO_RULES,
     });

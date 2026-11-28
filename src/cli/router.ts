@@ -107,6 +107,33 @@ export function registerRouter(reg: Registration): void {
       unmark();
     });
 
+  leaf(INTEGRATION, 'request', 'run a routed operation from a script, or read one')
+    .description(
+      "Run one routed operation, or read it. `--operation <id>` alone reads the input fields of the service a run uses, and the price, free. With `--input '<json>'` it runs the operation: the Tenjin routing fee is paid when the run is routed, then the provider, both under your spend limits and checked as one quote before either is paid. It prints the same result the request tool gives your agent (`status`, `operation`, `run`, the service's own result, `receipt`, `fullResultPath`) and exits 0 when fulfilled, 2 for an input the operation's service does not take, 3 when it was refused (over your limits, or not routed), 4 after a failure past a payment, 1 for any other failure. It never asks for approval: a run over your limits pays nothing and says what it would cost. The input stays on this machine.",
+    )
+    .requiredOption('--operation <id>', 'the operation to read or run')
+    .option('--input <json>', 'the input fields, one JSON object; leave out to read the operation')
+    .option('--choice <key>', 'one choice of an operation a person picks between')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin request --operation x-post-search
+  $ tenjin request --operation x-post-search --input '{"query":"x402 min_faves:50"}' --json
+`,
+    )
+    .action(async function (this: Command) {
+      await runCommand('request', this, async (ctx) => {
+        const o = this.opts() as { operation: string; input?: string; choice?: string };
+        const { runRequestCommand } = await import('../router/operation-command');
+        return runRequestCommand(ctx, {
+          operation: o.operation,
+          ...(o.input !== undefined ? { input: o.input } : {}),
+          ...(o.choice !== undefined ? { choice: o.choice } : {}),
+        });
+      });
+    });
+
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")
     .description(
       "Print one line naming what this session is looking up right now: the provider actually being called, its bounded parameters, and what it cost. It reads Claude Code's status event on stdin for the session identity, reads that session's own progress records, writes nothing, and prints `x402 · ready` when this session has no activity. Opt-in: set it as your Claude Code status line command yourself.",

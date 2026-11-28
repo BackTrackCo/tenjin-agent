@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearRouterMemo, writeRouterMemo } from './router-memo';
+import { legacyFree } from './fee-test-utils';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -87,6 +89,11 @@ let rpcCalls: { url: string; body: unknown }[];
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-'));
+  // These tests are about today's paid flow: the router predates routed tasks.
+  await writeRouterMemo(dir, 'operation-absent', 'https://tenjin.sh', {
+    now: Date.now(),
+    ttlMs: 10 ** 12,
+  });
   // A git root of its own, so `router.*` resolves from here and no file on the
   // machine running the suite can switch the router off.
   const { mkdir, writeFile } = await import('node:fs/promises');
@@ -275,6 +282,22 @@ describe('the prompt hook', () => {
    * to look up, so the line asks for the model's own lookup and carries the id
    * that finds the packet again.
    */
+  it('on a cold first call asks the free route once, then the paid route, as before', async () => {
+    await clearRouterMemo(dir, 'operation-absent', BASE);
+    const seen: string[] = [];
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: legacyFree(fetchImpl, seen),
+      now: () => 1_800_000_000_000,
+    });
+    expect(seen).toEqual(['free']);
+    expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { url: string }).url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
+  });
+
   it('injects one line naming the turn and carrying the id', async () => {
     const { fetchImpl, calls } = router(EXECUTE);
     const out = await runPromptHook(promptEvent('read https://example.test/spec for me'), {

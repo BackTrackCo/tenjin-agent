@@ -697,6 +697,7 @@ describe('the doctor this release registers', () => {
       'wallet',
       'claude session',
       'router',
+      'operations',
     ]);
     // The experiment ships off, and doctor says so in its one line.
     const experimental = data_.checks.find((c) => c.name === 'experimental') as unknown as {

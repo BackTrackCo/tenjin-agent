@@ -60,7 +60,6 @@ import {
   MAX_INPUT_BYTES,
   reportSpecOutcome,
   requestBrowse,
-  requestDecision,
   requestToolSpec,
   type BrowseRow,
   type DecisionOutcome,
@@ -109,6 +108,19 @@ import {
 } from './paid';
 import { routerSettings, type RouterSettings } from './settings';
 import { markTaken } from './untaken';
+import { requestOffer } from './operation-request';
+import { storeOffer } from './operation-store';
+import {
+  LEGACY_ROUTER,
+  retryOperation,
+  runOperation,
+  runOperationForm,
+  runOperationQuoted,
+  rowFields,
+  runOperationSetQuoted,
+  showOffer,
+  type OperationEnv,
+} from './operation-run';
 import type { Harness } from './names';
 import {
   answerState,
@@ -174,6 +186,9 @@ import {
  */
 
 export interface RequestToolArgs {
+  /** A routed operation by its id: alone, the input fields of the service a run
+   *  uses and the price, free; with `input`, one run of it. */
+  operation?: string;
   /** The task to route, or the query for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
@@ -303,8 +318,8 @@ export async function runRequestTool(
       ? call
       : {
           ...call,
-          route: (baseUrl) => {
-            const picked = route(baseUrl);
+          route: (baseUrl, limitAtomic) => {
+            const picked = route(baseUrl, limitAtomic);
             routes.push(picked);
             return picked;
           },
@@ -442,9 +457,19 @@ export async function runApproveTool(
     baseUrl: settings.baseUrl,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
+  const footer = await openLookupFooter(
+    dataDir,
+    call.kind === 'spec' || call.kind === 'count' || call.kind === 'choices'
+      ? { id: call.id }
+      : (call.kind === 'operation' || call.kind === 'operation_set') && call.offer !== undefined
+        ? { id: call.offer }
+        : {},
+  );
   await footer.routing();
-  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings);
+  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings, {
+    sent: here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined,
+    improve: here.settings.improve.value,
+  });
   // A SHORT WALLET'S QUOTE STAYS OPEN: funded, the same quote runs on the
   // person's next yes, with no new quote to ask for. Its offers' claims go
   // with it, or the rerun would find each one paid.
@@ -485,6 +510,8 @@ function quoteFor(
     slot.amountAtomic > dearest.amountAtomic ? slot : dearest,
   );
   const priceAtomic = one.amountAtomic;
+  if (call.kind === 'operation' || call.kind === 'operation_set' || call.kind === 'operation_retry')
+    return { label: call.label, provider: call.label, priceAtomic };
   if (call.kind === 'call')
     return { label: call.call.label, provider: call.call.provider, priceAtomic };
   if (call.kind !== 'choices')
@@ -505,8 +532,15 @@ async function runQuoted(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   settings: ResolvedSettings,
+  env: OperationEnv,
 ): Promise<RequestToolResult> {
   switch (call.kind) {
+    case 'operation':
+      return runOperationQuoted(call, slots, call_, env, footer);
+    case 'operation_set':
+      return runOperationSetQuoted(call, slots, call_, env, footer);
+    case 'operation_retry':
+      return retryOperation(call, slots, call_, footer, reportDeps);
     case 'spec':
       return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
     case 'count':
@@ -564,6 +598,7 @@ async function requestTool(
     return settingsFail(UNREADABLE);
   }
   const sent = here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined;
+  const operationEnv: OperationEnv = { sent, improve: here.settings.improve.value };
   // AN ACCOUNT THE USER NAMED (plan 37): its own tools, never a lookup.
   if (args.source !== undefined) {
     const others = (['query', 'id', 'choice', 'browse', 'count', 'job'] as const).filter(
@@ -607,6 +642,18 @@ async function requestTool(
   // A call naming an offer's id takes it, whatever it asks: that offer was not
   // ignored, so nothing reports it so (`untaken.ts`).
   if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
+  // A ROUTED OPERATION: `{operation}` reads it, `{operation, input}` runs it, and
+  // an id that names an offer runs the offer's lead (`operation-run.ts`).
+  const operationTurn = await runOperationForm(args, deps, operationEnv);
+  if (operationTurn === LEGACY_ROUTER) {
+    // A router that predates routed operations: the old read of the same id, which
+    // it answers with a spec to run by its own id.
+    const legacy: RequestToolArgs = { ...args, tool: args.operation! };
+    delete legacy.operation;
+    delete legacy.input;
+    return requestTool(legacy, deps);
+  }
+  if (operationTurn !== undefined) return operationTurn;
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
@@ -800,13 +847,17 @@ async function requestTool(
   // ON THE PAID ROUTE the payer pays the routing fee with the stock x402
   // client. A call it cannot pay is answered here at once: nothing was
   // routed, and the agent uses its own tools.
+  // A QUERY'S OFFER IS ASKED FOR FREE, with no payer; a router that predates
+  // routed operations answers `fee_required`, and the same query then goes to the
+  // paid route as it always did (`requestOffer`).
   const fresh =
     args.tool !== undefined
       ? await requestToolSpec(args.tool.trim(), decisionDeps, query)
-      : await requestDecision(
+      : await requestOffer(
           'tool',
           { query, ...(id !== undefined ? { id } : {}) },
           { ...decisionDeps, route: deps.route?.(settings.baseUrl) },
+          (deps.now ?? Date.now)(),
         );
   if (fresh.status === 'skipped') {
     await footer.done('native');
@@ -834,6 +885,23 @@ async function requestTool(
     });
   }
   const { decision, note, settingsHash } = fresh.decision;
+
+  // AN OFFER OF OPERATIONS, free: kept by its id, so `request({id, input})` runs its
+  // lead operation, and shown with the router's line. An input the router bound
+  // from the query starts the run at once.
+  if (decision.action === 'offer') {
+    await storeOffer(deps.ctx.dataDir, decision, settingsHash);
+    if (decision.bound !== undefined) {
+      return runOperation(
+        { operation: decision.bound.operation, input: decision.bound.input, offer: decision.id },
+        deps,
+        operationEnv,
+        footer,
+      );
+    }
+    await footer.done('offered');
+    return showOffer(decision, note);
+  }
 
   if (args.tool !== undefined) {
     if (
@@ -984,7 +1052,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      'Browse with request({browse}), inspect with request({tool}), or run a free tool with request({tool, query}).',
+      'Browse with request({browse}), read an operation with request({operation}), run it with request({operation, input}), or run a free tool with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -1058,7 +1126,7 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
  *  price and the call that fetches its spec. */
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
-    'Inspect a tool for free with request({tool: "<id>"}). ' +
+    'Read an operation for free with request({operation: "<id>"}), and run it with request({operation: "<id>", input}). ' +
     'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
   if (rows.length === 0) {
     return {
@@ -1074,11 +1142,15 @@ function showRows(rows: readonly BrowseRow[]): RequestToolResult {
     does: flat(row.does),
     price: row.free ? 'free' : flat(row.price),
     kind: flat(row.kind),
+    ...(row.input !== undefined ? { input: row.input } : {}),
   }));
   return {
     isError: false,
     summary: [
-      ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
+      ...shown.flatMap((row) => [
+        `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`,
+        ...(row.input !== undefined ? [rowFields(row.input)] : []),
+      ]),
       nextStep,
     ].join('\n'),
     envelope: {

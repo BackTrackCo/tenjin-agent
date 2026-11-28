@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearRouterMemo, writeRouterMemo } from './router-memo';
 
 /** When armed, every provider `tenjin mcp` resolves has its `getSigner` counted,
  *  so a test can prove the request tool's provider is not unlocked separately. */
@@ -28,7 +29,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { FakeRouter, payerDeps } from './fee-test-utils';
+import { FakeRouter, legacyFree, payerDeps } from './fee-test-utils';
 import { runAliveHook, sessionServedByPlugin } from './alive';
 import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { hookToolInput } from './hook-tool';
@@ -62,6 +63,15 @@ function envelopeOf(called: Record<string, unknown>): unknown {
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-mcp-'));
+  // These tests are about today's paid flow: each router here predates routed tasks.
+  for (const origin of [
+    'https://tenjin.sh',
+    'https://router.test',
+    'https://env.example.test',
+    'https://file.example.test',
+  ]) {
+    await writeRouterMemo(dir, 'operation-absent', origin, { now: Date.now(), ttlMs: 10 ** 12 });
+  }
   // Its own git root: `router.*` resolves from here, never from the suite's cwd.
   await mkdir(join(dir, '.git'));
   // Asked Help improve routing already, so a prompt carries only its own answer.
@@ -593,8 +603,10 @@ describe('the hook tool', () => {
   });
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
+    await clearRouterMemo(dir, 'operation-absent', 'https://router.test');
     const { homeDir, transcript } = await home('sess-hook');
     const log: string[] = [];
+    const seenFree: string[] = [];
     const offer = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       log.push(`POST ${new URL(new Request(input, init).url).pathname}`);
       return Response.json({
@@ -620,9 +632,10 @@ describe('the hook tool', () => {
       handlerDeps: { cwd: dir, signer: await testWalletProvider().getSigner() },
       hookDeps: {
         baseUrl: 'https://router.test',
-        fetchImpl: offer,
+        fetchImpl: legacyFree(offer, seenFree),
         warn: () => undefined,
         // A wallet the hooks' file facts call ready, so the offer is shown.
+
         env: { TENJIN_WALLET_KEY: generatePrivateKey() },
       },
     });
@@ -633,8 +646,9 @@ describe('the hook tool', () => {
         arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
       });
       const text = (called.content as { text: string }[])[0]!.text;
-      // No payer in this server: the paid route, unpaid, which a router
-      // charging nothing answers.
+      // A cold first call: one free try (`fee_required`), then no payer in this
+      // server: the paid route, unpaid, which a router charging nothing answers.
+      expect(seenFree).toEqual(['free']);
       expect(log).toEqual(['POST /api/x402-router/route']);
       expect(JSON.parse(text)).toMatchObject({
         hookSpecificOutput: {
@@ -1249,13 +1263,18 @@ describe('what the tool tells the model to send', () => {
       expect(schema.properties.query.description).toContain('a task no line offered');
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
-      expect(schema.properties.id?.description).toContain("returns that service's spec");
+      expect(schema.properties.id?.description).toContain("returns that operation's input fields");
       expect(request.description).toContain('fill them and call `{id, input}` once');
       expect(request.description).toContain('returns the full spec');
-      expect(request.description).toContain("`{id}` alone returns the service's spec");
+      expect(request.description).toContain(
+        "`{id}` alone returns the operation's input fields too, free",
+      );
       // A projected result says where the rest of the response went.
       expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');
+      // A run is one call: the tool takes no run id, only an operation.
+      expect(schema.properties).not.toHaveProperty('run');
+      expect(schema.properties).toHaveProperty('operation');
       // Several takes of a media call, and a job resumed by its id.
       const extra = request.inputSchema.properties as Record<
         string,

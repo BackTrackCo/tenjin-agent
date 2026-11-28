@@ -5,8 +5,8 @@ import { MAX_CALL_WAIT_MS } from '../jobs';
 import { maskDeep, recordAccountRow } from '../paid';
 import {
   isAccountSpec,
-  requestRefused,
   type AccountOfferSpec,
+  type TaskOffer,
   type OfferSpec,
   type SpecOutcome,
 } from '../decision';
@@ -18,6 +18,9 @@ import {
   type SettingsRefusal,
 } from '../settings-check';
 import { personalSettingsAt } from '../settings';
+import { requestRefusedOffer } from '../operation-request';
+import { storeOffer } from '../operation-store';
+import { runOperation } from '../operation-run';
 import { mergedInput, specInputProblems, specText } from '../spec-call';
 import {
   claimSpecPayment,
@@ -309,23 +312,34 @@ async function reask(
   refused: string,
   deps: RequestToolDeps,
   routing: RouteDeps,
-): Promise<{ offer: KeptSpec | null; routed: boolean }> {
+): Promise<{ offer: KeptSpec | null; routed: boolean; task?: TaskOffer }> {
   const { dataDir } = deps.ctx;
   const here = await personalSettingsAt(dataDir).catch(() => undefined);
   if (here?.wire.status !== 'ok') return { offer: null, routed: false };
   const route = deps.route?.(routing.baseUrl);
-  const answer = await requestRefused(refused, {
-    ctx: deps.ctx,
-    baseUrl: routing.baseUrl,
-    acceptsBazaar: routing.acceptsBazaar === true,
-    harness: routing.harness ?? 'claude',
-    settings: here.wire.settings,
-    ...(routing.fetchImpl !== undefined ? { fetchImpl: routing.fetchImpl } : {}),
-    ...(route !== undefined ? { route } : {}),
-  }).catch(() => null);
+  // ASKED FOR FREE FIRST, like a query: a router that predates routed tasks
+  // answers `fee_required`, and the same ask goes to the paid route as before.
+  const answer = await requestRefusedOffer(
+    refused,
+    {
+      ctx: deps.ctx,
+      baseUrl: routing.baseUrl,
+      acceptsBazaar: routing.acceptsBazaar === true,
+      harness: routing.harness ?? 'claude',
+      settings: here.wire.settings,
+      ...(routing.fetchImpl !== undefined ? { fetchImpl: routing.fetchImpl } : {}),
+      ...(route !== undefined ? { route } : {}),
+    },
+    (deps.now ?? Date.now)(),
+  ).catch(() => null);
   const routed = answer?.status !== 'skipped';
   if (answer?.status !== 'decided') return { offer: null, routed };
   const { decision, settingsHash } = answer.decision;
+  // AN OFFER OF TASKS, free: kept by its id, and said beside the refusal.
+  if (decision.action === 'offer') {
+    await storeOffer(dataDir, decision, settingsHash);
+    return { offer: null, routed: false, task: decision };
+  }
   if (decision.action !== 'spec' || isAccountSpec(decision.spec)) return { offer: null, routed };
   const offer: OfferSpec = { ...decision.spec, id: decision.id };
   await storeSpecs(dataDir, [offer], settingsHash, { replaces: refused });
@@ -486,7 +500,14 @@ export async function offerAccountLead(
   }
   const account = await accountOf(lead, dataDir);
   const words = refusalWords('missing', account, undefined);
-  const { offer, routed } = await reask(lead.id, deps, routing);
+  const { offer, routed, task } = await reask(lead.id, deps, routing);
+  if (offer === null && task !== undefined) {
+    const said = `${words.said} Tenjin has its own tool for this task: ${task.hint}`;
+    return accountResult('native', said, said, account.label, {
+      nextStep: task.hint,
+      routed,
+    });
+  }
   if (offer === null) {
     const reason = `${words.said} Nothing was sent.`;
     return accountResult('native', reason, reason, account.label, {
@@ -900,10 +921,39 @@ async function refusal(
   });
   const words = refusalWords(reason, account, detail);
   const answered = opts.answered === true;
-  const { offer, routed } =
+  const { offer, routed, task } =
     reason === 'not_connected'
-      ? { offer: null, routed: false }
+      ? { offer: null, routed: false, task: undefined }
       : await reask(at.id, at.deps, at.reportDeps);
+  // THE USER'S OWN CHOICE FOR THIS ACCOUNT, through a task offer: the same
+  // input runs as a task, which checks it against the task's schema and the
+  // spend limits as any run does. An input the task does not take is not sent.
+  if (
+    task !== undefined &&
+    !answered &&
+    at.deps.via === undefined &&
+    SWITCHABLE.has(reason) &&
+    (await savedAccount(at.deps.ctx.dataDir, account.id))?.onRefusal === 'tenjin'
+  ) {
+    const here = await personalSettingsAt(at.deps.ctx.dataDir).catch(() => undefined);
+    const picked = task.bound?.operation ?? task.operations[0]!.operation;
+    const switched = await runOperation(
+      { operation: picked, input: at.input, offer: task.id },
+      at.deps,
+      { sent: here?.wire.status === 'ok' ? here.wire.settings : undefined, improve: false },
+      footer,
+    );
+    if (switched.envelope['status'] !== 'needs_input') {
+      const ran = !ranNothing(switched);
+      await settleRefused(at, ran ? { to: task.id } : false);
+      const note = `${words.said} Tenjin ran its own tool for this job instead, as you set for ${account.label}.`;
+      return {
+        ...switched,
+        summary: `${note}\n${switched.summary}`,
+        envelope: { ...switched.envelope, switched: { from: account.label, reason }, note },
+      };
+    }
+  }
   // The fallback setting is read now, not when the call started: the user
   // may have turned it off while the account call or the re-ask waited.
   const switchable =
@@ -938,9 +988,11 @@ async function refusal(
   await footer.done('needs_input', shownOf(at));
   // What the account said, and, when the call never reached it, that nothing
   // was sent: never a claim about charges, since the re-ask may have paid.
-  const text = sent
+  const said = sent
     ? words.said
     : `${words.said} Nothing was sent to your ${account.label} account.`;
+  const text =
+    task !== undefined ? `${said} Tenjin has its own tool for this job: ${task.hint}` : said;
   const refused = { account: account.label, reason, reconnect: `tenjin connect ${account.id}` };
   if (switchable && fitted === undefined) {
     // OPTED IN, BUT THE OFFER TAKES OTHER INPUTS: the agent fills them from

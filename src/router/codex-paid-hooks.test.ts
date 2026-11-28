@@ -292,8 +292,11 @@ describe('Codex automatic hooks', () => {
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
-      // The web call ran with the prompt's offer untaken: one free outcome report.
+      // A cold start asks the free route once and is told `fee_required`, as the
+      // live router answers; then the web call ran with the prompt's offer
+      // untaken: one free outcome report.
       expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
+        'POST /api/x402-router unpaid',
         'POST /api/x402-router unpaid',
       ]);
       expect(fake.depositedOn).toEqual(['warm']);
@@ -313,8 +316,10 @@ describe('Codex automatic hooks', () => {
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
       expect(out).toEqual({ systemMessage: expect.stringContaining('balance was too low') });
-      // The leg's 402, and the top-up's, which read the balance and stopped.
+      // The one free try (`fee_required`), the leg's 402, and the top-up's, which
+      // read the balance and stopped.
       expect(fake.log).toEqual([
+        'POST /api/x402-router unpaid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route warm unpaid',
       ]);
