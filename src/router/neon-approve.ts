@@ -88,7 +88,7 @@ export async function neonFirstCallApproval(
   needAtomic: bigint,
   why: string,
 ) {
-  const what = `a writing job for the ${terms.label} of up to ${usd(needAtomic)} for its first call`;
+  const what = `a ${terms.label} writing job, up to ${usd(needAtomic)} for its first call`;
   const quote = await createQuote(dataDir, {
     what,
     sentence: `This draft needs up to ${usd(needAtomic)} for its first call, ${why}, so it would be paid to ${neonHost(terms)} as the writer's calls need it.`,

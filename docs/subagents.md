@@ -1,7 +1,7 @@
 # DeepSeek subagents
 
 - **What it is.** Tenjin can offer DeepSeek V4.1 Flash, a cheap model, for an eligible Claude Code subagent job. Claude keeps its own model and accepts or declines each offer. DeepSeek subagents are off by default.
-- **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and the provider of the service the router names for the job (DeepSeek) get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. Each provider handles what it receives under its own terms. A web search runs inside the DeepSeek call; a page its WebFetch could not fetch goes to Exa.
+- **Who sees what.** Before each offer, Tenjin and TypeSafe get the task and recent conversation. When Claude accepts, Tenjin and DeepSeek get the task, its instructions and the worker's tool results, including what the worker reads in `~/.claude`. Each provider handles what it receives under its own terms. A web search runs inside the DeepSeek call; a page its WebFetch could not fetch goes to Exa.
 - **Cost.** A job costs up to your per-call limit ($1 by default), or a lower ceiling you name, within your daily budget. Routing costs one fee for each offer, also when Claude declines it: the amount the router quotes when it is asked ($0.0081, 15% of an expected job spend of $0.054), never more than $0.25. It is paid before any offer exists, inside your per-call limit and the job's ceiling.
 - **On.** `tenjin config subagents on`, or **Turn on** in fresh setup.
 - **Off.** `tenjin config subagents off`. No new job starts; cancel a running worker to stop it.

@@ -2,4 +2,4 @@
 'tenjin-cli': patch
 ---
 
-Make the Linux file lock of the DeepSeek worker safer: a take creates no side file, so it works in a read-only folder, and a lock no longer drops if the caller loses its release.
+On Linux, subagents use an exclusive SQLite lock with an in-memory journal. Once the lock file exists, the process can take the lock in a read-only folder. It holds the lock until it releases it or exits.
