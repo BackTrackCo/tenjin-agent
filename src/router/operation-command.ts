@@ -35,10 +35,15 @@ function failureOf(result: RequestToolResult): CliError {
   if (status === 'needs_input') return new CliError('USAGE', message, { details });
   if (status === 'needs_approval') return new CliError('POLICY_REFUSED', message, { details });
   if (status === 'native') return new CliError('REFUSED', message, { details });
+  type ServicePayment = { state?: string } | null;
+  const receipt = result.envelope['receipt'] as
+    | { service?: ServicePayment; services?: ServicePayment[]; routingFee?: { paid?: boolean } }
+    | undefined;
   const moved =
     result.envelope['possiblyPaid'] === true ||
-    (typeof result.envelope['receipt'] === 'object' &&
-      (result.envelope['receipt'] as { provider?: { state?: string } }).provider?.state === 'paid');
+    receipt?.routingFee?.paid === true ||
+    receipt?.service?.state === 'paid' ||
+    receipt?.services?.some((service) => service?.state === 'paid') === true;
   return new CliError(moved ? 'PAYMENT_FAILED' : 'API_UNREACHABLE', message, { details });
 }
 

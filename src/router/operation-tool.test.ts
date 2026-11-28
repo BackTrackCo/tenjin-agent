@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testWalletProvider, buildPaymentRequired } from '../lib/read-test-utils';
 import { httpRequest } from '../lib/http';
 import { resolveSpendAuthorizer } from '../lib/wallet';
-import { createQuote } from '../lib/spend-quotes';
+import { createQuote, readQuote } from '../lib/spend-quotes';
 import type { CommandContext } from '../context';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -155,6 +155,8 @@ interface ServiceScript {
   body: unknown;
   /** The paid leg's reply never arrives. */
   dropsReply?: boolean;
+  /** The facilitator refuses the payment because the wallet is short. */
+  shortOfFunds?: boolean;
   /** The status of the paid answer (a job's submit answers 202). */
   status?: number;
   /** Bytes sent as is in place of the JSON body (a file). */
@@ -167,6 +169,7 @@ const B: ServiceScript = { url: SERVICE_B, live: '1500', payTo: PAYEE_B, body: B
 interface Answer {
   /** The spec the run serves. Change it between calls to rotate the service. */
   lead: Record<string, unknown>;
+  runFeeAtomic?: string;
   free?: 'offer' | 'fee_required';
   /** Fields added to the free route's offer (choices, rows, bound). */
   offerExtra?: Record<string, unknown>;
@@ -287,8 +290,8 @@ class Stub {
         });
       }
       const known = this.runs.get(run);
-      const fee = known?.settled === true ? '0' : '750';
-      if (known === undefined || !known.settled) this.feePayments += 1;
+      const fee = known?.settled === true ? '0' : (this.answer.runFeeAtomic ?? '750');
+      if (fee !== '0') this.feePayments += 1;
       this.runs.set(run, { settled: true });
       return json({
         schemaVersion: 1,
@@ -313,6 +316,9 @@ class Stub {
     }
     this.signatures.set(url, (this.signatures.get(url) ?? 0) + 1);
     if (service.dropsReply === true) throw new TypeError('fetch failed');
+    if (service.shortOfFunds === true) {
+      return json({ error: 'payment_failed', reason: 'insufficient_funds' }, 402);
+    }
     if (service.raw !== undefined) {
       return new Response(service.raw, {
         status: service.status ?? 200,
@@ -566,6 +572,73 @@ describe('one quote for both payments', () => {
   });
 });
 
+describe('the approved operation payment plan', () => {
+  it.each([undefined, 2])(
+    'holds the payer and router to the quote after a read refresh (count %s)',
+    async (count) => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '4000', sessionBudget: '5000000' }),
+      );
+      const stub = new Stub({ lead: SPEC_A(), set: [SET[0]!] }, [A]);
+      const d = deps(stub, { approves: true });
+      const stopped = await runRequestTool(
+        { operation: OP, input: INPUT, ...(count !== undefined ? { count } : {}) },
+        d,
+      );
+      const quote = stopped.envelope.quote as { id: string; total: string; what: string };
+      await storeOperationRead(
+        dir,
+        {
+          ...OPERATION,
+          price: { expectedAtomic: '7000', maxAtomic: '7500', feeAtomic: '1000' },
+        },
+        undefined,
+      );
+
+      const ran = await runApproveTool(
+        { quote: quote.id, total: quote.total, what: quote.what },
+        d,
+      );
+
+      const fee = 750n * BigInt(count ?? 1);
+      expect(ran.envelope.status).toBe('fulfilled');
+      expect(d.routed.limits).toEqual([fee]);
+      expect(stub.runBodies()).toMatchObject([{ caps: { fee: fee.toString(), service: '5500' } }]);
+    },
+  );
+
+  it.each([undefined, 2])(
+    'keeps a quote used after its fee settles and service funding falls short (count %s)',
+    async (count) => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '4000', sessionBudget: '5000000' }),
+      );
+      const stub = new Stub({ lead: SPEC_A(), set: [SET[0]!] }, [{ ...A, shortOfFunds: true }]);
+      const base = deps(stub, { approves: true });
+      const chainFetch = (async () =>
+        new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'0'.repeat(64)}` }),
+        )) as typeof fetch;
+      const d = { ...base, payDeps: { ...base.payDeps, chainFetch } };
+      const stopped = await runRequestTool(
+        { operation: OP, input: INPUT, ...(count !== undefined ? { count } : {}) },
+        d,
+      );
+      const quote = stopped.envelope.quote as { id: string; total: string; what: string };
+      const approval = { quote: quote.id, total: quote.total, what: quote.what };
+
+      const refused = await runApproveTool(approval, d);
+      expect(refused.envelope).toMatchObject({ receipt: { routingFee: { paid: true } } });
+      expect(stub.totalSignatures()).toBe(count ?? 1);
+      expect((await readQuote(dir, quote.id))?.usedAt).toBeDefined();
+      expect((await runApproveTool(approval, d)).envelope.status).toBe('needs_input');
+      expect(stub.feePayments).toBe(1);
+    },
+  );
+});
+
 describe('a service reply lost after the payment was signed', () => {
   it('stops with a receipt and signs a second payment only on a yes', async () => {
     const stub = new Stub({ lead: SPEC_A() }, [{ ...A, dropsReply: true }]);
@@ -809,6 +882,33 @@ describe('tenjin request, for scripts', () => {
     );
     expect(done.data).toMatchObject({ status: 'fulfilled', operation: OP });
     expect(stub.feePayments).toBe(1);
+  });
+
+  it('exits 4 when the paid service answer fails its result check', async () => {
+    const spec = serviceSpec(SERVICE_A, PAYEE_A, 'service-a', {
+      resultSchema: {
+        type: 'object',
+        properties: { data: { type: 'object' } },
+        required: ['data'],
+      },
+    });
+    const stub = new Stub({ lead: spec, runFeeAtomic: '0' }, [A]);
+
+    await expect(
+      runRequestCommand(
+        ctx(),
+        { operation: OP, input: JSON.stringify(INPUT) },
+        { ...deps(stub), provider: testWalletProvider() },
+      ),
+    ).rejects.toMatchObject({
+      code: 'PAYMENT_FAILED',
+      exitCode: 4,
+      details: {
+        status: 'unverified',
+        receipt: { routingFee: { paid: false }, service: { state: 'paid' } },
+      },
+    });
+    expect(stub.totalSignatures()).toBe(1);
   });
 
   it('obeys the spend limits: over them nothing is paid, and the exit code says refused', async () => {

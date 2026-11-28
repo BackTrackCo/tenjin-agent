@@ -3,7 +3,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { mask } from '../lib/redact';
 import { inputProblems } from '../lib/request-schema';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
-import { admitPlan, type PlanSlot } from '../lib/spend-plan';
+import { admitPlan, spendSlot, type PlanSlot } from '../lib/spend-plan';
 import { createQuote } from '../lib/spend-quotes';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -505,9 +505,6 @@ export async function runOperation(
       summary: `${refused.summary}\n\nInputs:\n${inputLines(operation.input).join('\n')}`,
     };
   }
-  const expected = BigInt(operation.price.expectedAtomic);
-  const fee = BigInt(operation.price.feeAtomic);
-  const max = BigInt(operation.price.maxAtomic);
   // ONE QUOTE FOR BOTH PAYMENTS, before either is signed. The provider's host
   // is not known until the run is served, so both payments meet the policy as
   // payments to the router's host; the provider's own host meets it again, as
@@ -517,6 +514,9 @@ export async function runOperation(
     slots = approved;
   } else {
     const creator = new URL(settings.baseUrl).host;
+    const expected = BigInt(operation.price.expectedAtomic);
+    const fee = BigInt(operation.price.feeAtomic);
+    const max = BigInt(operation.price.maxAtomic);
     const payments = [
       { amountAtomic: fee, creator },
       { amountAtomic: max, creator },
@@ -549,11 +549,12 @@ export async function runOperation(
     }
     slots = admission.admitted;
   }
-  const serviceSlot = slots[1];
-  if (serviceSlot === undefined) {
+  const [feeSlot, serviceSlot] = slots;
+  if (feeSlot === undefined || serviceSlot === undefined || slots.length !== 2) {
     await footer.done('failed');
-    return fail('failed', 'The quote for this run holds no service payment, so nothing was paid.');
+    return fail('failed', 'The quote holds the wrong number of payments, so nothing was paid.');
   }
+  const caps = { fee: feeSlot.amountAtomic, service: serviceSlot.amountAtomic };
   const decisionDeps = await decisionDepsOf(deps, env, settings);
   const reportDeps: ReportDeps = {
     ctx: deps.ctx,
@@ -569,12 +570,12 @@ export async function runOperation(
   // service reply, and a paid job's resume.
   const run = randomUUID();
   const host = hostOfInput(operation, call.input);
-  const route = deps.route?.(settings.baseUrl, fee);
+  const route = deps.route?.(settings.baseUrl, caps.fee);
   const asked = await requestRunOnce(
     {
       operation: call.operation,
       run,
-      caps: { fee, service: max },
+      caps,
       ...(call.offer !== undefined ? { offer: call.offer } : {}),
       ...(host !== undefined ? { host } : {}),
       ...(call.choice !== undefined ? { choice: call.choice } : {}),
@@ -634,10 +635,7 @@ export async function runOperation(
     );
   }
   const answer = served;
-  // A re-sent run is served at $0: its fee was paid on the first request, whose
-  // answer was lost.
-  const feePaid =
-    BigInt(served.routingFeeAtomic) === 0n && asked.resent ? fee : BigInt(served.routingFeeAtomic);
+  const feePaid = recordRunFee(feeSlot, served.routingFeeAtomic, asked.resent);
   await storeRun(dataDir, {
     answer: served,
     ...(settingsHash !== undefined ? { settingsHash } : {}),
@@ -659,11 +657,20 @@ export async function runOperation(
     reportDeps,
   );
   if (attempt.maybePaid) {
-    return maybePaidResult(attempt, answer, operation, call.input, deps, max);
+    return maybePaidResult(attempt, answer, operation, call.input, deps, caps.service);
   }
   // A DELIVERED RUN IS CLOSED: nothing serves it to a later call.
   if (attempt.delivered) await closeRun(dataDir, answer.run);
   return attempt.result;
+}
+
+function recordRunFee(slot: PlanSlot, feeAtomic: string, resent: boolean | undefined): bigint {
+  const fee = BigInt(feeAtomic);
+  // A replay can return at $0 after the original paid request lost its answer.
+  const paid = fee === 0n && resent === true ? slot.amountAtomic : fee;
+  // A later service refusal must not reopen a quote that already paid for routing.
+  if (paid > 0n) spendSlot(slot, slot.amountAtomic);
+  return paid;
 }
 
 /** What a stopped run says when the router answered `no_run`. */
@@ -1222,14 +1229,6 @@ export async function runOperationSet(
       operation: read.operation,
     });
   }
-  const fees = members.map(({ operation }) => BigInt(operation.price.feeAtomic));
-  const maxes = members.map(({ operation }) => BigInt(operation.price.maxAtomic));
-  const expected = members.reduce(
-    (sum, { operation }) => sum + BigInt(operation.price.expectedAtomic),
-    0n,
-  );
-  const feeTotal = fees.reduce((sum, fee) => sum + fee, 0n);
-  const serviceCap = maxes.reduce((most, max) => (max > most ? max : most), 0n);
   const label =
     call.options !== undefined
       ? `${members.length} choices of ${call.label}`
@@ -1239,6 +1238,15 @@ export async function runOperationSet(
     slots = approved;
   } else {
     const creator = new URL(settings.baseUrl).host;
+    const feeTotal = members.reduce(
+      (sum, { operation }) => sum + BigInt(operation.price.feeAtomic),
+      0n,
+    );
+    const maxes = members.map(({ operation }) => BigInt(operation.price.maxAtomic));
+    const expected = members.reduce(
+      (sum, { operation }) => sum + BigInt(operation.price.expectedAtomic),
+      0n,
+    );
     const payments = [
       { amountAtomic: feeTotal, creator },
       ...maxes.map((amountAtomic) => ({ amountAtomic, creator })),
@@ -1272,10 +1280,18 @@ export async function runOperationSet(
     }
     slots = admission.admitted;
   }
-  if (slots.length !== members.length + 1) {
+  const [feeSlot, ...serviceSlots] = slots;
+  if (feeSlot === undefined || serviceSlots.length !== members.length) {
     await footer.done('failed');
     return fail('failed', 'The quote holds the wrong number of payments, so nothing was paid.');
   }
+  const caps = {
+    fee: feeSlot.amountAtomic,
+    service: serviceSlots.reduce(
+      (most, { amountAtomic }) => (amountAtomic > most ? amountAtomic : most),
+      0n,
+    ),
+  };
   const decisionDeps = await decisionDepsOf(deps, env, settings);
   const reportDeps: ReportDeps = {
     ctx: deps.ctx,
@@ -1284,12 +1300,12 @@ export async function runOperationSet(
     ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
   };
   const run = randomUUID();
-  const route = deps.route?.(settings.baseUrl, feeTotal);
+  const route = deps.route?.(settings.baseUrl, caps.fee);
   const asked = await requestRunOnce(
     {
       operation: call.operation,
       run,
-      caps: { fee: feeTotal, service: serviceCap },
+      caps,
       ...(call.offer !== undefined ? { offer: call.offer } : {}),
       ...(call.options !== undefined ? { choice: 'all' } : { count: call.count! }),
     },
@@ -1334,14 +1350,11 @@ export async function runOperationSet(
       'The router answered something other than the set asked for, so nothing was paid to a service.',
     );
   }
-  const feePaid =
-    BigInt(served.routingFeeAtomic) === 0n && asked.resent === true
-      ? feeTotal
-      : BigInt(served.routingFeeAtomic);
+  const feePaid = recordRunFee(feeSlot, served.routingFeeAtomic, asked.resent);
   const results: { key?: string; label: string; result: RequestToolResult; maybePaid: boolean }[] =
     [];
   for (const [index, member] of served.calls.entries()) {
-    const slot = slots[index + 1]!;
+    const slot = serviceSlots[index]!;
     const tried = members[index]!;
     const one: RunDecision = {
       action: 'run',
