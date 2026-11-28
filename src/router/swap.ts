@@ -79,7 +79,7 @@ export async function runSwap(
   if ('handback' in decided) return handBack(decided.handback);
   // A TASK OFFER'S BOUND INPUT runs as a task, through the same executor and
   // the same checks: `{task, id, input}`.
-  if ('taskBound' in decided) return runTaskSwap(decided, hookDeps, deps, notices);
+  if ('operationBound' in decided) return runOperationSwap(decided, hookDeps, deps, notices);
   const { bound, spec, tool } = decided;
   // THE SWITCH AS IT IS NOW: turned off while the router decided, it stops
   // here, before anything is claimed or sent. A changed provider scope or
@@ -124,20 +124,20 @@ export async function runSwap(
 
 /** The swap of a bound task input: the offer's id joins the run, and the line
  *  names the task and its price, never a provider. */
-async function runTaskSwap(
-  decided: Extract<Awaited<ReturnType<typeof decideSwap>>, { taskBound: unknown }>,
+async function runOperationSwap(
+  decided: Extract<Awaited<ReturnType<typeof decideSwap>>, { operationBound: unknown }>,
   hookDeps: HookDeps,
   deps: RequestToolDeps,
   notices: string[],
 ): Promise<RequestToolResult> {
-  const { taskBound, tool, offer } = decided;
+  const { operationBound, tool, offer } = decided;
   const now = await personalSettingsAt(hookDeps.dataDir).catch(() => undefined);
   if (now?.nativeReplacement.mode !== 'when-routed') return handBack('automatic use is off');
   if (!(await decided.claim())) return handBack('already routed once');
   let ran: RequestToolResult;
   try {
     ran = await runRequestTool(
-      { task: taskBound.task, id: offer.id, input: taskBound.input },
+      { operation: operationBound.operation, id: offer.id, input: operationBound.input },
       { ...deps, via: 'swap' },
     );
   } catch (err) {
@@ -150,7 +150,9 @@ async function runTaskSwap(
     await decided.unmark();
     return handBack(`it stopped before anything was sent (${String(envelope.reason ?? status)})`);
   }
-  const row = offer.tasks.find(({ task }) => task === taskBound.task) ?? offer.tasks[0]!;
+  const row =
+    offer.operations.find(({ operation }) => operation === operationBound.operation) ??
+    offer.operations[0]!;
   const line = `Tenjin ran ${row.label} (${row.price}) in place of this ${NATIVE_NAMES[tool]}, because the user turned on "Run Tenjin's picks automatically".`;
   return {
     ...ran,

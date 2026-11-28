@@ -70,7 +70,7 @@ beforeEach(async () => {
     'https://env.example.test',
     'https://file.example.test',
   ]) {
-    await writeRouterMemo(dir, 'task-absent', origin, { now: Date.now(), ttlMs: 10 ** 12 });
+    await writeRouterMemo(dir, 'operation-absent', origin, { now: Date.now(), ttlMs: 10 ** 12 });
   }
   // Its own git root: `router.*` resolves from here, never from the suite's cwd.
   await mkdir(join(dir, '.git'));
@@ -603,7 +603,7 @@ describe('the hook tool', () => {
   });
 
   it('runs the prompt leg in this process and answers in the hook format', async () => {
-    await clearRouterMemo(dir, 'task-absent', 'https://router.test');
+    await clearRouterMemo(dir, 'operation-absent', 'https://router.test');
     const { homeDir, transcript } = await home('sess-hook');
     const log: string[] = [];
     const seenFree: string[] = [];
@@ -1263,13 +1263,18 @@ describe('what the tool tells the model to send', () => {
       expect(schema.properties.query.description).toContain('a task no line offered');
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
-      expect(schema.properties.id?.description).toContain("returns that task's inputs");
+      expect(schema.properties.id?.description).toContain("returns that operation's input fields");
       expect(request.description).toContain('fill them and call `{id, input}` once');
       expect(request.description).toContain('returns the full spec');
-      expect(request.description).toContain("`{id}` alone returns the task's inputs");
+      expect(request.description).toContain(
+        "`{id}` alone returns the operation's input fields too, free",
+      );
       // A projected result says where the rest of the response went.
       expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');
+      // A run is one call: the tool takes no run id, only an operation.
+      expect(schema.properties).not.toHaveProperty('run');
+      expect(schema.properties).toHaveProperty('operation');
       // Several takes of a media call, and a job resumed by its id.
       const extra = request.inputSchema.properties as Record<
         string,

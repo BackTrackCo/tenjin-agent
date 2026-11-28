@@ -73,7 +73,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-account-run-'));
   await mkdir(join(dir, '.git'));
   // These tests are about today's paid flow: the router predates routed tasks.
-  await writeRouterMemo(dir, 'task-absent', ROUTER, { now: Date.now(), ttlMs: 10 ** 12 });
+  await writeRouterMemo(dir, 'operation-absent', ROUTER, { now: Date.now(), ttlMs: 10 ** 12 });
   keychain = fakeKeychain();
   clearVaultKeyCache();
 });
@@ -1002,7 +1002,7 @@ describe('a query answered with a map this account lacks', () => {
   });
 
   it('on a cold first call asks the free route once, then the paid route, as before', async () => {
-    await clearRouterMemo(dir, 'task-absent', ROUTER);
+    await clearRouterMemo(dir, 'operation-absent', ROUTER);
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT, { missingTools: ['run_model'] });
     const answer = read<{ decision: { id: string } }>('wire-lookup-spec-account.json');

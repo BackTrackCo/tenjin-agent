@@ -40,17 +40,6 @@ const Authorization = z.strictObject({
   asset: z.string().max(200).optional(),
 });
 
-const TaskJobSchema = z.strictObject({
-  run: z.string().min(8).max(64),
-  task: z.string().min(1).max(200),
-  service: z.string().min(1).max(120),
-  convert: z.string().min(1).max(2_000),
-  shape: z.record(z.string(), z.unknown()).optional(),
-  feeAtomic: z.string().regex(/^\d+$/),
-  payTo: z.string().min(1).max(200),
-});
-export type TaskJobInfo = z.infer<typeof TaskJobSchema>;
-
 const TakeSchema = z.strictObject({
   version: z.literal(1),
   offerId: z.string().min(1).max(200),
@@ -80,9 +69,6 @@ const TakeSchema = z.strictObject({
     }),
     resultSchema: z.record(z.string(), z.unknown()).optional(),
     outputSchema: z.record(z.string(), z.unknown()).optional(),
-    /** A routed task's job: what turns the finished body into the task's
-     *  output and its receipt, so a resumed job ends as a direct run does. */
-    task: TaskJobSchema.optional(),
   }),
   submittedAt: Iso,
   expiresAt: Iso,
@@ -114,11 +100,6 @@ const TakeSchema = z.strictObject({
   resultUnverified: z.boolean().optional(),
   /** Why, as the agent was told. */
   resultCaveat: z.string().max(1_000).optional(),
-  /** A routed task's whole converted output, in the results folder: what a
-   *  later read parses, never the cut `result` above. */
-  outputPath: z.string().max(4_096).optional(),
-  /** The provider's whole body, in the results folder. */
-  rawPath: z.string().max(4_096).optional(),
   /** Why a take failed, or why it stopped. */
   reason: z.string().max(1_000).optional(),
   /** The seller's own words for it, bounded and redacted. Untrusted text. */
@@ -130,40 +111,6 @@ export type JobTake = z.infer<typeof TakeSchema>;
 
 export function takePath(dataDir: string, offerId: string, take: number): string {
   return join(jobsDir(dataDir), `${sha256Hex(offerId)}.${take}.json`);
-}
-
-/**
- * A TASK JOB'S PAID RESULT, KEPT FOR THE LIFE OF ITS TAKE. The converted output
- * and the provider's body sit beside the take's record, and `pruneJobs` removes
- * each with the take that names it, never before: the results folder's own
- * 24-hour cleanup cannot take them while the take can be read. Bound: one
- * output and one body per take, so at most two files per live take (a take
- * lives at most 48 hours), each no larger than the 4 MB a result is checked at.
- */
-export function takeFilePath(
-  dataDir: string,
-  offerId: string,
-  take: number,
-  kind: 'output' | 'raw',
-): string {
-  return join(jobsDir(dataDir), `${sha256Hex(offerId)}.${take}.${kind}.json`);
-}
-
-/** Keep one of a take's result files; the path, or null when it could not be written. */
-export async function writeTakeFile(
-  dataDir: string,
-  offerId: string,
-  take: number,
-  kind: 'output' | 'raw',
-  text: string,
-): Promise<string | null> {
-  const path = takeFilePath(dataDir, offerId, take, kind);
-  try {
-    await writePrivate(path, text);
-    return path;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -255,16 +202,6 @@ export async function endTake(
  *  Housekeeping only: never throws. */
 export async function pruneJobs(dataDir: string, now: number): Promise<void> {
   await sweep(jobsDir(dataDir), async (name, path) => {
-    // A task job's result files go with the take that names them.
-    const kept = /^([0-9a-f]{64}\.\d)\.(output|raw)\.json$/.exec(name);
-    if (kept !== null) {
-      const record = TakeSchema.safeParse(
-        await readJsonFile(join(jobsDir(dataDir), `${kept[1]}.json`), MAX_RECORD_BYTES).catch(
-          () => null,
-        ),
-      );
-      return !record.success || Date.parse(record.data.expiresAt) < now;
-    }
     if (!/^[0-9a-f]{64}\.\d\.json$/.test(name)) return false;
     const parsed = TakeSchema.safeParse(await readJsonFile(path, MAX_RECORD_BYTES));
     if (parsed.success) return Date.parse(parsed.data.expiresAt) < now;

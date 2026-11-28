@@ -46,36 +46,36 @@ export type QuotedCall =
       input: Record<string, unknown>;
     }
   | { kind: 'call'; call: ProviderCall }
-  /** A routed task's run: the Tenjin fee and the provider's allowed maximum,
+  /** A routed operation's run: the Tenjin fee and the provider's allowed maximum,
    *  quoted together before either is paid. Nothing was sent to the router. */
   | {
-      kind: 'task';
-      task: string;
+      kind: 'operation';
+      operation: string;
       label: string;
       input: Record<string, unknown>;
       offer?: string;
       /** The compare key a person picked: what is approved is what runs. */
       choice?: string;
-      /** The open-Bazaar row this run is for, which has no task read. */
-      listing?: { task: string; label: string; does: string; price: string; offer?: string };
+      /** The open-Bazaar row this run is for, which has no operation read. */
+      listing?: { operation: string; label: string; does: string; price: string; offer?: string };
     }
-  /** A set of runs: every option of a compare group, or takes of one task,
+  /** A set of runs: every option of a compare group, or takes of one operation,
    *  quoted together (the fees' sum and each provider's maximum). */
   | {
-      kind: 'task_set';
-      task: string;
+      kind: 'operation_set';
+      operation: string;
       label: string;
       input: Record<string, unknown>;
       offer?: string;
       count?: number;
-      options?: { key: string; task: string }[];
+      options?: { key: string; operation: string }[];
     }
   /** A second attempt at the provider under a run already paid for, which a
    *  person said yes to after the first attempt's reply was lost. */
   | {
-      kind: 'task_retry';
+      kind: 'operation_retry';
       run: string;
-      task: string;
+      operation: string;
       label: string;
       input: Record<string, unknown>;
     };
@@ -106,15 +106,15 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     input: Input,
   }),
   z.strictObject({
-    kind: z.literal('task'),
-    task: z.string().min(1).max(200),
+    kind: z.literal('operation'),
+    operation: z.string().min(1).max(200),
     label: z.string().min(1).max(120),
     input: Input,
     offer: z.string().min(1).max(64).optional(),
     choice: z.string().min(1).max(32).optional(),
     listing: z
       .strictObject({
-        task: z.string().min(1).max(200),
+        operation: z.string().min(1).max(200),
         label: z.string().min(1).max(120),
         does: z.string().min(1).max(500),
         price: z.string().min(1).max(32),
@@ -123,22 +123,24 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
       .optional(),
   }),
   z.strictObject({
-    kind: z.literal('task_set'),
-    task: z.string().min(1).max(200),
+    kind: z.literal('operation_set'),
+    operation: z.string().min(1).max(200),
     label: z.string().min(1).max(120),
     input: Input,
     offer: z.string().min(1).max(64).optional(),
     count: z.number().int().min(2).max(5).optional(),
     options: z
-      .array(z.strictObject({ key: z.string().min(1).max(32), task: z.string().min(1).max(200) }))
+      .array(
+        z.strictObject({ key: z.string().min(1).max(32), operation: z.string().min(1).max(200) }),
+      )
       .min(2)
       .max(4)
       .optional(),
   }),
   z.strictObject({
-    kind: z.literal('task_retry'),
+    kind: z.literal('operation_retry'),
     run: z.string().min(8).max(64),
-    task: z.string().min(1).max(200),
+    operation: z.string().min(1).max(200),
     label: z.string().min(1).max(120),
     input: Input,
   }),
@@ -319,9 +321,9 @@ export function quotedHashes(call: QuotedCall): (string | undefined)[] {
     case 'call':
       return [call.call.settingsHash];
     // A run's rules are checked against the answer it is served.
-    case 'task':
-    case 'task_set':
-    case 'task_retry':
+    case 'operation':
+    case 'operation_set':
+    case 'operation_retry':
       return [];
   }
 }

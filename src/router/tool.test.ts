@@ -30,7 +30,7 @@ import { bindDecision, claimRedirect, noteSession, renderProgress } from './prog
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { TERMS_CHANGED_SENTENCE } from './terms-notice';
-import { clearRouterMemo, TASK_ABSENT_MS, writeRouterMemo } from './router-memo';
+import { clearRouterMemo, OPERATION_ABSENT_MS, writeRouterMemo } from './router-memo';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -58,9 +58,9 @@ beforeEach(async () => {
   // THESE TESTS ARE ABOUT TODAY'S PAID FLOW: the router is one that predates
   // routed tasks, so its offers go to the paid route (`task-tool.test.ts` covers
   // the free offer and the `fee_required` fall back itself).
-  await writeRouterMemo(dir, 'task-absent', 'https://tenjin.sh', {
+  await writeRouterMemo(dir, 'operation-absent', 'https://tenjin.sh', {
     now: Date.now(),
-    ttlMs: TASK_ABSENT_MS,
+    ttlMs: OPERATION_ABSENT_MS,
   });
 });
 afterEach(async () => {
@@ -220,7 +220,7 @@ const NO_RULES = wireSettings(undefined, { mode: 'off' });
 
 describe('a cold first call, with no memo of the router', () => {
   it("asks the free route once, is told fee_required, and then makes today's paid call", async () => {
-    await clearRouterMemo(dir, 'task-absent', ROUTER);
+    await clearRouterMemo(dir, 'operation-absent', ROUTER);
     const { fetchImpl, calls } = net([
       {
         url: ROUTER,
@@ -2857,13 +2857,13 @@ describe('the tool list, read for free', () => {
     expect(result.summary).toContain(
       'CoinMarketCap quotes (id cmc-quotes, 1¢, Live crypto prices)',
     );
-    expect(result.summary).toContain('request({tool: "<id>"})');
+    expect(result.summary).toContain('request({operation: "<id>"})');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST', paid: false });
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       browse: 'live crypto prices',
-      accepts: ACCEPTS,
+      accepts: [...ACCEPTS, 'operation'],
       harness: 'claude',
       settings: NO_RULES,
     });

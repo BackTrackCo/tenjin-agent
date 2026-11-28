@@ -108,20 +108,19 @@ import {
 } from './paid';
 import { routerSettings, type RouterSettings } from './settings';
 import { markTaken } from './untaken';
-import { requestOffer } from './task-request';
-import { storeTaskOffer } from './task-store';
+import { requestOffer } from './operation-request';
+import { storeOffer } from './operation-store';
 import {
   LEGACY_ROUTER,
-  retryTask,
-  runTask,
-  taskDelivery,
-  taskEndedResult,
-  runTaskForm,
-  runTaskQuoted,
-  runTaskSetQuoted,
-  showTaskOffer,
-  type TaskEnv,
-} from './task-run';
+  retryOperation,
+  runOperation,
+  runOperationForm,
+  runOperationQuoted,
+  rowFields,
+  runOperationSetQuoted,
+  showOffer,
+  type OperationEnv,
+} from './operation-run';
 import type { Harness } from './names';
 import {
   answerState,
@@ -141,9 +140,7 @@ import {
   readTake,
   readTakes,
   writeTake,
-  writeTakeFile,
   type JobTake,
-  type TaskJobInfo,
 } from './job-store';
 
 /**
@@ -189,9 +186,9 @@ import {
  */
 
 export interface RequestToolArgs {
-  /** A routed task by its id: alone, what it takes, returns and costs, free;
-   *  with `input`, one run of it. */
-  task?: string;
+  /** A routed operation by its id: alone, the input fields of the service a run
+   *  uses and the price, free; with `input`, one run of it. */
+  operation?: string;
   /** The task to route, or the query for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
@@ -464,7 +461,7 @@ export async function runApproveTool(
     dataDir,
     call.kind === 'spec' || call.kind === 'count' || call.kind === 'choices'
       ? { id: call.id }
-      : (call.kind === 'task' || call.kind === 'task_set') && call.offer !== undefined
+      : (call.kind === 'operation' || call.kind === 'operation_set') && call.offer !== undefined
         ? { id: call.offer }
         : {},
   );
@@ -513,7 +510,7 @@ function quoteFor(
     slot.amountAtomic > dearest.amountAtomic ? slot : dearest,
   );
   const priceAtomic = one.amountAtomic;
-  if (call.kind === 'task' || call.kind === 'task_set' || call.kind === 'task_retry')
+  if (call.kind === 'operation' || call.kind === 'operation_set' || call.kind === 'operation_retry')
     return { label: call.label, provider: call.label, priceAtomic };
   if (call.kind === 'call')
     return { label: call.call.label, provider: call.call.provider, priceAtomic };
@@ -535,15 +532,15 @@ async function runQuoted(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   settings: ResolvedSettings,
-  env: TaskEnv,
+  env: OperationEnv,
 ): Promise<RequestToolResult> {
   switch (call.kind) {
-    case 'task':
-      return runTaskQuoted(call, slots, call_, env, footer);
-    case 'task_set':
-      return runTaskSetQuoted(call, slots, call_, env, footer);
-    case 'task_retry':
-      return retryTask(call, slots, call_, footer, reportDeps);
+    case 'operation':
+      return runOperationQuoted(call, slots, call_, env, footer);
+    case 'operation_set':
+      return runOperationSetQuoted(call, slots, call_, env, footer);
+    case 'operation_retry':
+      return retryOperation(call, slots, call_, footer, reportDeps);
     case 'spec':
       return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
     case 'count':
@@ -601,7 +598,7 @@ async function requestTool(
     return settingsFail(UNREADABLE);
   }
   const sent = here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined;
-  const taskEnv: TaskEnv = { sent, improve: here.settings.improve.value };
+  const operationEnv: OperationEnv = { sent, improve: here.settings.improve.value };
   // AN ACCOUNT THE USER NAMED (plan 37): its own tools, never a lookup.
   if (args.source !== undefined) {
     const others = (['query', 'id', 'choice', 'browse', 'count', 'job'] as const).filter(
@@ -645,18 +642,18 @@ async function requestTool(
   // A call naming an offer's id takes it, whatever it asks: that offer was not
   // ignored, so nothing reports it so (`untaken.ts`).
   if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
-  // A ROUTED TASK: `{task}` reads it, `{task, input}` runs it, and an id that
-  // names an offer of tasks runs the offer's lead (`task-run.ts`).
-  const taskTurn = await runTaskForm(args, deps, taskEnv);
-  if (taskTurn === LEGACY_ROUTER) {
-    // A router that predates routed tasks: the old read of the same id, which
+  // A ROUTED OPERATION: `{operation}` reads it, `{operation, input}` runs it, and
+  // an id that names an offer runs the offer's lead (`operation-run.ts`).
+  const operationTurn = await runOperationForm(args, deps, operationEnv);
+  if (operationTurn === LEGACY_ROUTER) {
+    // A router that predates routed operations: the old read of the same id, which
     // it answers with a spec to run by its own id.
-    const legacy: RequestToolArgs = { ...args, tool: args.task! };
-    delete legacy.task;
+    const legacy: RequestToolArgs = { ...args, tool: args.operation! };
+    delete legacy.operation;
     delete legacy.input;
     return requestTool(legacy, deps);
   }
-  if (taskTurn !== undefined) return taskTurn;
+  if (operationTurn !== undefined) return operationTurn;
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
@@ -851,7 +848,7 @@ async function requestTool(
   // client. A call it cannot pay is answered here at once: nothing was
   // routed, and the agent uses its own tools.
   // A QUERY'S OFFER IS ASKED FOR FREE, with no payer; a router that predates
-  // routed tasks answers `fee_required`, and the same query then goes to the
+  // routed operations answers `fee_required`, and the same query then goes to the
   // paid route as it always did (`requestOffer`).
   const fresh =
     args.tool !== undefined
@@ -889,21 +886,21 @@ async function requestTool(
   }
   const { decision, note, settingsHash } = fresh.decision;
 
-  // AN OFFER OF TASKS, free: kept by its id, so `request({id, input})` runs its
-  // lead task, and shown with the router's line. An input the router bound
+  // AN OFFER OF OPERATIONS, free: kept by its id, so `request({id, input})` runs its
+  // lead operation, and shown with the router's line. An input the router bound
   // from the query starts the run at once.
   if (decision.action === 'offer') {
-    await storeTaskOffer(deps.ctx.dataDir, decision, settingsHash);
+    await storeOffer(deps.ctx.dataDir, decision, settingsHash);
     if (decision.bound !== undefined) {
-      return runTask(
-        { task: decision.bound.task, input: decision.bound.input, offer: decision.id },
+      return runOperation(
+        { operation: decision.bound.operation, input: decision.bound.input, offer: decision.id },
         deps,
-        taskEnv,
+        operationEnv,
         footer,
       );
     }
-    await footer.done('task offered');
-    return showTaskOffer(decision, note);
+    await footer.done('offered');
+    return showOffer(decision, note);
   }
 
   if (args.tool !== undefined) {
@@ -1055,7 +1052,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      'Browse with request({browse}), read a task with request({task}), run it with request({task, input}), or run a free tool with request({tool, query}).',
+      'Browse with request({browse}), read an operation with request({operation}), run it with request({operation, input}), or run a free tool with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -1129,7 +1126,7 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
  *  price and the call that fetches its spec. */
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
-    'Inspect a tool for free with request({tool: "<id>"}). ' +
+    'Read an operation for free with request({operation: "<id>"}), and run it with request({operation: "<id>", input}). ' +
     'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
   if (rows.length === 0) {
     return {
@@ -1145,11 +1142,15 @@ function showRows(rows: readonly BrowseRow[]): RequestToolResult {
     does: flat(row.does),
     price: row.free ? 'free' : flat(row.price),
     kind: flat(row.kind),
+    ...(row.input !== undefined ? { input: row.input } : {}),
   }));
   return {
     isError: false,
     summary: [
-      ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
+      ...shown.flatMap((row) => [
+        `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`,
+        ...(row.input !== undefined ? [rowFields(row.input)] : []),
+      ]),
       nextStep,
     ].join('\n'),
     envelope: {
@@ -1395,7 +1396,6 @@ export async function paySpec(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   take?: TakeOf,
-  task?: TaskJobInfo,
 ): Promise<Awaited<ReturnType<typeof payAndDeliver>>> {
   const { id, spec, merged, sentInput, built } = prepared;
   const startedAt = Date.now();
@@ -1424,7 +1424,6 @@ export async function paySpec(
       ...(spec.maxBytes !== undefined ? { maxBytes: spec.maxBytes } : {}),
       ...(spec.settingsHash !== undefined ? { settingsHash: spec.settingsHash } : {}),
       ...(deps.via !== undefined ? { via: deps.via } : {}),
-      ...(task !== undefined ? { task } : {}),
     },
     admission,
     deps,
@@ -1514,8 +1513,6 @@ export interface ProviderCall {
   /** The spec's promised fields: the result is cut to them, and the whole
    *  body is saved under the offer's id. */
   project?: { id: string; schema: Record<string, unknown> };
-  /** A routed task's conversion, kept with a job so its resume ends as a run does. */
-  task?: TaskJobInfo;
   /** The spec's job: how this call is finished when the seller answers
    *  before its result is ready, and which take of which offer it is. */
   job?: CallJob;
@@ -2283,7 +2280,6 @@ async function startJob(
       },
       ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
       ...(call.project !== undefined ? { outputSchema: call.project.schema } : {}),
-      ...(call.task !== undefined ? { task: call.task } : {}),
     },
     submittedAt: new Date(submit.submittedAt).toISOString(),
     expiresAt: new Date(submit.submittedAt + job.spec.keepH * 3_600_000).toISOString(),
@@ -2425,7 +2421,7 @@ async function finishTake(
     endTake(dataDir, take.offerId, take.take, ending).catch(() => undefined);
   // AN ENDING ANOTHER CALL RECORDED FIRST stands, and is this call's answer.
   const lostTo = async (ended: JobTake): Promise<TakeEnding> => {
-    const result = await endedResultOf(ended, deps.ctx.dataDir, { raced: true });
+    const result = endedResult(ended, { raced: true });
     const status = result.envelope.status as 'fulfilled' | 'unverified' | 'failed';
     await footer.done(status, shown);
     return { result, outcome: { status } };
@@ -2473,60 +2469,12 @@ async function finishTake(
         result: unsavedResult(take, call, opts.kept, delivered.unsaved),
       };
     }
-    // A ROUTED TASK'S JOB ENDS AS A DIRECT RUN DOES: the finished body is
-    // converted to the task's output and checked, with the receipt beside it.
-    const taskJob = take.call.task;
-    const shapedResult =
-      taskJob !== undefined
-        ? await taskDelivery(
-            taskJob,
-            delivered.result,
-            { provider: take.call.provider, url: take.call.url },
-            { paidAtomic: providerAtomic, ...(tx !== undefined ? { txHash: tx } : {}) },
-            deps,
-            take.offerId,
-          )
-        : delivered.result;
-    // THE TASK'S VERDICT IS KEPT WITH THE TAKE, and its whole output in the
-    // results folder: a later read parses that file, never the cut preview,
-    // and never reads a rejected body as checked output.
-    const taskOutput = shapedResult.envelope['output'];
-    const taskUnverified =
-      taskJob !== undefined && shapedResult.envelope['status'] === 'unverified';
-    // Both files live as long as the take does (`job-store.ts`), not as long
-    // as the results folder keeps a file.
-    const outputPath =
-      taskJob !== undefined && taskOutput !== undefined
-        ? await writeTakeFile(
-            dataDir,
-            take.offerId,
-            take.take,
-            'output',
-            JSON.stringify(taskOutput),
-          )
-        : null;
-    const rawBody = delivered.result.envelope['result'];
-    const rawPath =
-      taskJob !== undefined && typeof rawBody === 'string' && rawBody.length > 0
-        ? await writeTakeFile(dataDir, take.offerId, take.take, 'raw', rawBody)
-        : null;
-    const taskCaveat = shapedResult.envelope['resultCaveat'];
     const ended = await end({
       state: 'done',
       savedFiles: delivered.savedFiles.slice(0, 16),
-      result: keptResult(
-        taskJob !== undefined && taskOutput !== undefined
-          ? JSON.stringify(taskOutput)
-          : delivered.result.envelope.result,
-      ),
-      ...(unverified || taskUnverified ? { resultUnverified: true } : {}),
-      ...(caveat !== undefined
-        ? { resultCaveat: caveat.slice(0, 1_000) }
-        : typeof taskCaveat === 'string'
-          ? { resultCaveat: taskCaveat.slice(0, 1_000) }
-          : {}),
-      ...(outputPath !== null ? { outputPath } : {}),
-      ...(rawPath !== null ? { rawPath } : {}),
+      result: keptResult(delivered.result.envelope.result),
+      ...(unverified ? { resultUnverified: true } : {}),
+      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
     });
     if (ended?.won === false) return lostTo(ended.take);
     // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
@@ -2535,7 +2483,7 @@ async function finishTake(
       await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps));
     }
     return {
-      result: withJob(shapedResult, take.offerId),
+      result: withJob(delivered.result, take.offerId),
       outcome: delivered.outcome,
     };
   }
@@ -2713,21 +2661,6 @@ export function unsavedWords(
 
 /** A take that had already ended when its job was resumed, from its record;
  *  `raced`, one another call ended while this one was polling it. */
-async function endedResultOf(
-  take: JobTake,
-  dataDir: string,
-  opts: { raced?: boolean } = {},
-): Promise<RequestToolResult> {
-  if (take.state === 'done' && take.call.task !== undefined) {
-    const how =
-      opts.raced === true
-        ? 'another call finished this job first; nothing more was paid'
-        : 'already finished; nothing was polled or paid';
-    return withJob(await taskEndedResult(take.call.task, take, how), take.offerId);
-  }
-  return endedResult(take, opts);
-}
-
 function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestToolResult {
   const cost = costLines(BigInt(take.amountAtomic));
   const supplier = supplierOf(take.call.url);
@@ -2812,7 +2745,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
   const ended = await Promise.all(
     takes.map(async (take) => {
       if (take.state !== 'running') {
-        return { take, result: await endedResultOf(take, dataDir), outcome: null };
+        return { take, result: endedResult(take), outcome: null };
       }
       const waited = startedAt + MAX_CALL_WAIT_MS;
       const deadline = Math.min(

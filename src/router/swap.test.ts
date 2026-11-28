@@ -348,7 +348,7 @@ describe('the swap on a connected account', () => {
 
   it('stops the call once with the refusal and the re-ask’s offer when the account refuses', async () => {
     // The pinned body is the paid route's: the router predates routed tasks.
-    await writeRouterMemo(dir, 'task-absent', BASE, { now: Date.now(), ttlMs: 10 ** 12 });
+    await writeRouterMemo(dir, 'operation-absent', BASE, { now: Date.now(), ttlMs: 10 ** 12 });
     const { accounts, called } = await firecrawl('expired');
     const fixture = (name: string) =>
       JSON.parse(
@@ -380,7 +380,7 @@ describe('the swap on a connected account', () => {
   });
 });
 
-describe('the swap of a bound task input', () => {
+describe('the swap of a bound operation input', () => {
   const OFFER_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
   const RUN_PATH = `${BASE}/api/x402-router/route`;
   const TASK = {
@@ -430,7 +430,7 @@ describe('the swap of a bound task input', () => {
           decision: {
             action: 'run',
             run: parsed.run,
-            task: parsed.task,
+            operation: parsed.operation,
             expiresAt: new Date(Date.now() + 900_000).toISOString(),
             routingFeeAtomic: '1050',
             spec: {
@@ -451,8 +451,8 @@ describe('the swap of a bound task input', () => {
           },
         });
       }
-      if (parsed.task !== undefined)
-        return json({ schemaVersion: 1, routerVersion: 'v', task: TASK });
+      if (parsed.operation !== undefined)
+        return json({ schemaVersion: 1, routerVersion: 'v', operation: TASK });
       return json({
         schemaVersion: 1,
         routerVersion: 'v',
@@ -460,17 +460,19 @@ describe('the swap of a bound task input', () => {
         decision: {
           action: 'offer',
           id: OFFER_ID,
-          need: 'web search',
-          tasks: [{ task: 'web-search', label: 'Web search', does: 'searches', price: '$0.0077' }],
-          hint: 'Call request({"task":"web-search","input":{"query":"btc"}}) alone and wait for its result.',
-          bound: { task: 'web-search', input: { query: QUERY } },
+          task: 'web search',
+          operations: [
+            { operation: 'web-search', label: 'Web search', does: 'searches', price: '$0.0077' },
+          ],
+          hint: 'Call request({"operation":"web-search","input":{"query":"btc"}}) alone and wait for its result.',
+          bound: { operation: 'web-search', input: { query: QUERY } },
         },
       });
     }) as typeof fetch;
     return { fetchImpl, paidRoute, provider };
   }
 
-  it("runs the bound input as a task in the native call's place, joined to its offer, with no provider named", async () => {
+  it("runs the bound input as an operation in the native call's place, joined to its offer, with no provider named", async () => {
     const net = taskNetwork();
     const { hook, request } = depsFor(net.fetchImpl);
     const ran = await runSwap(event(), hook, request);
@@ -481,7 +483,7 @@ describe('the swap of a bound task input', () => {
     });
     expect(ran.summary).toContain('Tenjin ran Web search ($0.0077) in place of this web search');
     expect(net.paidRoute).toHaveLength(1);
-    expect(net.paidRoute[0]).toMatchObject({ task: 'web-search', offer: OFFER_ID });
+    expect(net.paidRoute[0]).toMatchObject({ operation: 'web-search', offer: OFFER_ID });
     expect(JSON.stringify(net.paidRoute[0])).not.toContain(QUERY);
     expect(JSON.parse(net.provider.at(-1)!.body!)).toMatchObject({ query: QUERY });
     expect(ran.summary).not.toContain('api.exa.ai');

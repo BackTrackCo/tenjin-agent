@@ -16,39 +16,39 @@ import {
   type ToolResponse,
 } from './decision';
 import type { Packet } from './context';
-import { readRouterMemo, TASK_ABSENT_MS, writeRouterMemo } from './router-memo';
+import { readRouterMemo, OPERATION_ABSENT_MS, writeRouterMemo } from './router-memo';
 import {
   buildRunBody,
-  buildTaskReadBody,
+  buildOperationReadBody,
   RunResponseSchema,
-  TaskReadResponseSchema,
+  OperationReadResponseSchema,
   type RunResponse,
-} from './task-wire';
+} from './operation-wire';
 
 /**
- * THE NETWORK SIDE OF A ROUTED TASK: the free read, the free offer with its
+ * THE NETWORK SIDE OF A ROUTED OPERATION: the free read, the free offer with its
  * fall back to today's paid flow, and the paid run.
  *
- * AN OFFER NEVER PAYS. A task client sends a hook line, a `{query}` and a
+ * AN OFFER NEVER PAYS. A operation client sends a hook line, a `{query}` and a
  * `{refused}` to the free route as a plain request: no payer, no wallet, no
  * turn on the routing channel, no 402 and no top-up wait. A router that
- * predates routed tasks answers `native` with `fee_required`; the same call
+ * predates routed operations answers `native` with `fee_required`; the same call
  * then goes to the paid route exactly as this CLI has always sent it (no
- * `task` in `accepts`, the payer, the quote checks), and the router is
- * remembered as one that predates them for {@link TASK_ABSENT_MS}, so a
+ * `operation` in `accepts`, the payer, the quote checks), and the router is
+ * remembered as one that predates them for {@link OPERATION_ABSENT_MS}, so a
  * session on it asks for each offer once, not twice.
  *
- * ONLY A RUN USES THE PAYER. Its body carries the task, the run id this client
+ * ONLY A RUN USES THE PAYER. Its body carries the operation, the run id this client
  * picked, the amounts it approved and nothing of the input.
  */
 
-/** Whether the router at `baseUrl` was found to predate routed tasks. */
-export async function routerPredatesTasks(
+/** Whether the router at `baseUrl` was found to predate routed operations. */
+export async function routerPredatesOperations(
   dataDir: string,
   baseUrl: string,
   now: number,
 ): Promise<boolean> {
-  return (await readRouterMemo(dataDir, 'task-absent', baseUrl, now)) !== null;
+  return (await readRouterMemo(dataDir, 'operation-absent', baseUrl, now)) !== null;
 }
 
 /**
@@ -75,7 +75,7 @@ export async function requestOffer(
   deps: DecisionDeps,
   now: number,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  if (!(await routerPredatesTasks(deps.ctx.dataDir, deps.baseUrl, now))) {
+  if (!(await routerPredatesOperations(deps.ctx.dataDir, deps.baseUrl, now))) {
     const free = await (kind === 'hook'
       ? requestDecision(
           'hook',
@@ -88,9 +88,9 @@ export async function requestOffer(
           { ...withoutRoute(deps), free: true },
         ));
     if (free.status !== 'decided' || !isFeeRequired(free.decision.decision)) return free;
-    await writeRouterMemo(deps.ctx.dataDir, 'task-absent', deps.baseUrl, {
+    await writeRouterMemo(deps.ctx.dataDir, 'operation-absent', deps.baseUrl, {
       now,
-      ttlMs: TASK_ABSENT_MS,
+      ttlMs: OPERATION_ABSENT_MS,
       detail: 'the free route answered fee_required',
     });
   }
@@ -105,12 +105,12 @@ export async function requestRefusedOffer(
   deps: DecisionDeps,
   now: number,
 ): Promise<DecisionOutcome<ToolResponse>> {
-  if (!(await routerPredatesTasks(deps.ctx.dataDir, deps.baseUrl, now))) {
+  if (!(await routerPredatesOperations(deps.ctx.dataDir, deps.baseUrl, now))) {
     const free = await requestRefused(refused, { ...withoutRoute(deps), free: true });
     if (free.status !== 'decided' || !isFeeRequired(free.decision.decision)) return free;
-    await writeRouterMemo(deps.ctx.dataDir, 'task-absent', deps.baseUrl, {
+    await writeRouterMemo(deps.ctx.dataDir, 'operation-absent', deps.baseUrl, {
       now,
-      ttlMs: TASK_ABSENT_MS,
+      ttlMs: OPERATION_ABSENT_MS,
       detail: 'the free route answered fee_required',
     });
   }
@@ -127,9 +127,9 @@ const sessionOf = (request: { sessionId?: string }) =>
   request.sessionId !== undefined ? { sessionId: request.sessionId } : {};
 const idOf = (request: { id?: string }) => (request.id !== undefined ? { id: request.id } : {});
 
-/** `{task}`: what one task takes, returns and costs, free, with no seller. */
-export async function requestTaskRead(
-  task: string,
+/** `{operation}`: what one operation takes, returns and costs, free, with no seller. */
+export async function requestOperationRead(
+  operation: string,
   deps: Omit<DecisionDeps, 'route'>,
   opts: { anonymous?: boolean } = {},
 ) {
@@ -139,15 +139,15 @@ export async function requestTaskRead(
       timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
       blockRedirects: true,
       ...(opts.anonymous === true ? { anonymous: true } : {}),
-      jsonBody: buildTaskReadBody({
-        task,
+      jsonBody: buildOperationReadBody({
+        operation,
         bazaar: deps.acceptsBazaar === true,
         harness: deps.harness ?? 'claude',
         ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
-    TaskReadResponseSchema,
+    OperationReadResponseSchema,
   );
 }
 
@@ -159,9 +159,9 @@ export async function requestTaskRead(
  */
 export async function requestRun(
   request: {
-    task: string;
+    operation: string;
     run: string;
-    caps: { fee: bigint; seller: bigint };
+    caps: { fee: bigint; service: bigint };
     offer?: string;
     host?: string;
     choice?: string;
@@ -224,32 +224,35 @@ export async function requestRunOnce(
 }
 
 /**
- * DOCTOR'S CHECK OF THE ROUTED-TASK ANSWER: one free read of a task id nobody
- * has. A router that knows routed tasks answers it with a decision (`needs_input`);
+ * DOCTOR'S CHECK OF THE ROUTED-OPERATION ANSWER: one free read of a operation id nobody
+ * has. A router that knows routed operations answers it with a decision (`needs_input`);
  * one that predates them refuses the unknown form (`validation_failed`), and
  * this CLI then sends offers to the paid route as it always did. Nothing is
  * paid and no gate runs; the request does not count this machine as an install.
  */
-export async function checkTaskAnswer(deps: Omit<DecisionDeps, 'route'>): Promise<{
+export async function checkOperationAnswer(deps: Omit<DecisionDeps, 'route'>): Promise<{
   status: 'ok' | 'warn';
   detail: string;
   fix?: string;
   checked?: false;
 }> {
-  const read = await requestTaskRead('doctor-check-no-such-task', deps, { anonymous: true });
+  const read = await requestOperationRead('doctor-check-no-such-operation', deps, {
+    anonymous: true,
+  });
   if (read.status === 'decided') {
-    return { status: 'ok', detail: 'the router answers a task read, and offers are free' };
+    return { status: 'ok', detail: 'the router answers a operation read, and offers are free' };
   }
   if (read.status === 'failed' && read.errorCode === 'validation_failed') {
     // Nothing to fix: the paid route serves every offer, as it always did.
     return {
       status: 'ok',
-      detail: 'the router predates routed tasks, so offers still go to its paid route as before',
+      detail:
+        'the router predates routed operations, so offers still go to its paid route as before',
     };
   }
   return {
     status: 'warn',
-    detail: `the task read was not checked (${read.status === 'failed' ? read.reason : 'no answer'})`,
+    detail: `the operation read was not checked (${read.status === 'failed' ? read.reason : 'no answer'})`,
     checked: false,
   };
 }

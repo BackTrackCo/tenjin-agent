@@ -10,7 +10,7 @@ import { ROUTE_PAID_PATH, RouteSkipped } from './decision';
 import { RoutingPayer } from './routing-payer';
 
 /**
- * THE APPROVED FEE BINDS THE REAL PAYER. A task run is quoted a fee, and the
+ * THE APPROVED FEE BINDS THE REAL PAYER. A operation run is quoted a fee, and the
  * payer is narrowed to it: a live 402 above it is not signed, whatever the
  * tool router's own ceiling allows. These tests drive the real `RoutingPayer`
  * against a stub router, not a stub of the payer.
@@ -21,7 +21,7 @@ const wallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'router-task-payer-'));
+  dir = await mkdtemp(join(tmpdir(), 'router-operation-payer-'));
   await mkdir(join(dir, '.git'));
   await writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '250000' }));
 });
@@ -33,12 +33,12 @@ function send(route: ReturnType<RoutingPayer['routeFor']>, fake: FakeRouter) {
   return route.send(`${BASE}${ROUTE_PAID_PATH}`, {
     method: 'POST',
     timeoutMs: 5000,
-    jsonBody: { schemaVersion: 1, task: 'x', run: 'r' },
+    jsonBody: { schemaVersion: 1, operation: 'x', run: 'r' },
     fetchImpl: fake.fetch,
   } as Parameters<typeof httpRequest>[1]);
 }
 
-describe('the fee a task run was approved for', () => {
+describe('the fee a operation run was approved for', () => {
   it('is not signed when the live 402 is above it', async () => {
     const fake = new FakeRouter({ amount: '1500' });
     const payer = new RoutingPayer(payerDeps(fake, dir, wallet));

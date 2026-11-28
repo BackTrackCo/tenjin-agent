@@ -2,7 +2,6 @@
   "@anthropic-ai/claude-agent-sdk",
   "@clack/core",
   "@clack/prompts",
-  "@jmespath-community/jmespath",
   "@modelcontextprotocol/sdk",
   "@noble/ciphers",
   "@noble/curves",

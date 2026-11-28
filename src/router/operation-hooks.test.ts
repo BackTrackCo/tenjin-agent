@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PAID_PATH, ROUTER_PATH, RouteSkipped, type DecisionRoute } from './decision';
 import { runPromptHook, type HookDeps } from './hooks';
-import { readTaskOffer } from './task-store';
+import { readOffer } from './operation-store';
 import { recordTermsTold } from './terms-notice';
 
 /**
@@ -15,11 +15,11 @@ import { recordTermsTold } from './terms-notice';
 
 const BASE = 'https://router.test';
 const OFFER_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
-const LINE = `Call request(${JSON.stringify({ task: 'x-post-search', input: { query: '<query>' } })}) alone and wait for its result.`;
+const LINE = `Call request(${JSON.stringify({ operation: 'x-post-search', input: { query: '<query>' } })}) alone and wait for its result.`;
 
 let dir: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'router-task-hooks-'));
+  dir = await mkdtemp(join(tmpdir(), 'router-operation-hooks-'));
   await mkdir(join(dir, '.git'));
   await writeFile(
     join(dir, 'config.json'),
@@ -50,10 +50,10 @@ function router(answer: 'offer' | 'fee_required'): {
         ? {
             action: 'offer',
             id: OFFER_ID,
-            need: 'x post search',
-            tasks: [
+            task: 'x post search',
+            operations: [
               {
-                task: 'x-post-search',
+                operation: 'x-post-search',
                 label: 'X post search',
                 does: 'finds posts',
                 price: '$0.0058',
@@ -101,7 +101,7 @@ function deps(fetchImpl: typeof fetch, route?: HookDeps['route']): HookDeps {
   };
 }
 
-describe('the prompt leg with a router that offers tasks', () => {
+describe('the prompt leg with a router that offers operations', () => {
   it('shows the offer with no wallet and no payer, and keeps it by its id', async () => {
     const fake = router('offer');
     const outcome = await runPromptHook(prompt(), deps(fake.fetchImpl));
@@ -109,8 +109,8 @@ describe('the prompt leg with a router that offers tasks', () => {
     expect(JSON.stringify(outcome.response)).toContain('alone and wait for its result');
     expect(JSON.stringify(outcome.response)).toContain('x-post-search');
     expect(fake.urls).toEqual([`${BASE}${ROUTER_PATH}`]);
-    expect((fake.bodies[0]!.accepts as string[]).includes('task')).toBe(true);
-    expect((await readTaskOffer(dir, OFFER_ID))?.tasks[0]?.task).toBe('x-post-search');
+    expect((fake.bodies[0]!.accepts as string[]).includes('operation')).toBe(true);
+    expect((await readOffer(dir, OFFER_ID))?.operations[0]?.operation).toBe('x-post-search');
   });
 
   it('is never skipped behind a busy channel, and makes no routing payment', async () => {
@@ -130,13 +130,13 @@ describe('the prompt leg with a router that offers tasks', () => {
   });
 });
 
-describe('the prompt leg with a router that predates routed tasks', () => {
+describe('the prompt leg with a router that predates routed operations', () => {
   it('asks the free route once, then sends the call to the paid route as it always did', async () => {
     const fake = router('fee_required');
     await runPromptHook(prompt(), deps(fake.fetchImpl));
     expect(fake.urls).toEqual([`${BASE}${ROUTER_PATH}`, `${BASE}${ROUTE_PAID_PATH}`]);
-    expect((fake.bodies[0]!.accepts as string[]).includes('task')).toBe(true);
-    expect((fake.bodies[1]!.accepts as string[]).includes('task')).toBe(false);
+    expect((fake.bodies[0]!.accepts as string[]).includes('operation')).toBe(true);
+    expect((fake.bodies[1]!.accepts as string[]).includes('operation')).toBe(false);
     // A second prompt goes straight to the paid route.
     await runPromptHook(prompt(), deps(fake.fetchImpl));
     expect(fake.urls.slice(2)).toEqual([`${BASE}${ROUTE_PAID_PATH}`]);

@@ -90,7 +90,7 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-'));
   // These tests are about today's paid flow: the router predates routed tasks.
-  await writeRouterMemo(dir, 'task-absent', 'https://tenjin.sh', {
+  await writeRouterMemo(dir, 'operation-absent', 'https://tenjin.sh', {
     now: Date.now(),
     ttlMs: 10 ** 12,
   });
@@ -283,7 +283,7 @@ describe('the prompt hook', () => {
    * that finds the packet again.
    */
   it('on a cold first call asks the free route once, then the paid route, as before', async () => {
-    await clearRouterMemo(dir, 'task-absent', BASE);
+    await clearRouterMemo(dir, 'operation-absent', BASE);
     const seen: string[] = [];
     const { fetchImpl, calls } = router(EXECUTE);
     const out = await runPromptHook(promptEvent('read https://example.test/spec for me'), {

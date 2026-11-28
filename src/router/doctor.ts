@@ -315,16 +315,16 @@ export async function runRouterDoctor(
       ),
     );
   }
-  // THE ROUTED-TASK ANSWER, only once the router itself answered.
+  // THE ROUTED-OPERATION ANSWER, only once the router itself answered.
   if (probe.status !== 'fail') {
-    const { checkTaskAnswer } = await import('./task-request');
-    const task = await checkTaskAnswer({
+    const { checkOperationAnswer } = await import('./operation-request');
+    const operations = await checkOperationAnswer({
       ctx,
       baseUrl: settings.baseUrl,
       timeoutMs: ctx.flags.timeout,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     });
-    checks.push({ name: 'routed tasks', required: false, ...task });
+    checks.push({ name: 'operations', required: false, ...operations });
   }
   const agents = await subagentsCheck(cwd, home);
   if (agents !== null) checks.push(agents);

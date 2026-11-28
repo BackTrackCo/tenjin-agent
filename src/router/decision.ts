@@ -14,17 +14,17 @@ import {
 } from './settings-wire';
 
 /**
- * OFFERS GO TO THE FREE ROUTE, A RUN TO THE PAID ONE. A task client's offers,
+ * OFFERS GO TO THE FREE ROUTE, A RUN TO THE PAID ONE. An operation client's offers,
  * the hook's and the `request` tool's, go to the free route
  * ({@link ROUTER_PATH}) as plain requests: no payer, no wallet and no 402
- * ({@link DecisionDeps.free}). Only a task run goes to the paid route
+ * ({@link DecisionDeps.free}). Only an operation run goes to the paid route
  * ({@link ROUTE_PAID_PATH}), where inside `tenjin mcp` the payer sends it
  * through the stock x402 client and pays the routing fee its 402 quotes
  * ({@link DecisionRoute}, `routing-payer.ts`); a call it cannot pay is
  * skipped, with no request to any other route. A router that predates routed
  * tasks answers an offer request on the free route with `fee_required`, and
  * the same call then goes to the paid route exactly as it always did
- * (`task-request.ts`). The free route also keeps browse, a task read and the
+ * (`operation-request.ts`). The free route also keeps browse, an operation read and the
  * outcome report.
  *
  * The backend answers with what it would do and what the provider charges,
@@ -686,24 +686,28 @@ function checkExecute(
 }
 
 /**
- * A FREE OFFER FOR A TASK CLIENT (`accepts: ["task"]`): the need the router
- * picked and the tasks that serve it, lead first, with the line to follow. It
- * carries no seller, URL, payee or spec, and it charges nothing. `bound` is an
+ * A FREE OFFER FOR AN OPERATION CLIENT (`accepts: ["operation"]`): the task the
+ * router picked and the operations that serve it, lead first, each with the
+ * input fields of the service a run would use, and the line to follow. It
+ * carries no service, URL, payee or spec, and it charges nothing. `bound` is an
  * input the router bound from the turn, which starts a run at once. The hint
- * names the call to make; it names no id, since the run call takes the task.
+ * names the call to make; it names no id, since the run call takes the operation.
  */
-export const TaskRowSchema = z.object({
-  task: z.string().min(1).max(200),
+export const OperationRowSchema = z.object({
+  operation: z.string().min(1).max(200),
   label: z.string().min(1).max(120),
   does: z.string().min(1).max(500),
   price: z.string().min(1).max(32),
   /** An open-Bazaar listing has no task of its own: its row names the offer row
    *  that holds it, and a run sends that back as `offer`. */
   offer: z.string().min(8).max(64).optional(),
+  /** The open input fields of the service a run would use, required first, each
+   *  with its short description; pinned fields are left out. */
+  input: z.record(z.string(), z.unknown()).optional(),
 });
-export type TaskRow = z.infer<typeof TaskRowSchema>;
+export type OperationRow = z.infer<typeof OperationRowSchema>;
 
-export const TaskOfferChoicesSchema = z.object({
+export const OfferChoicesSchema = z.object({
   group: z.string().min(1).max(40),
   default: z.string().min(1).max(32),
   options: z
@@ -712,7 +716,7 @@ export const TaskOfferChoicesSchema = z.object({
         key: z.string().min(1).max(32),
         label: z.string().min(1).max(60),
         strength: z.string().min(1).max(120),
-        task: z.string().min(1).max(200),
+        operation: z.string().min(1).max(200),
       }),
     )
     .min(2)
@@ -724,20 +728,20 @@ const TaskOfferSchema = z
   .object({
     action: z.literal('offer'),
     id: IdSchema,
-    need: z.string().min(1).max(64),
-    // Every task of the need, lead first: up to 16. A longer list is cut here,
+    task: z.string().min(1).max(64),
+    // Every operation of the task, lead first: up to 16. A longer list is cut here,
     // never refused, so the whole answer stays usable.
-    tasks: z
-      .array(TaskRowSchema)
+    operations: z
+      .array(OperationRowSchema)
       .min(1)
       .transform((rows) => rows.slice(0, 16)),
     hint: z.string().min(1).max(2_000),
     /** Services a person picks among, as one compare group: each option is a
-     *  task, and `all` runs every one side by side. */
-    choices: TaskOfferChoicesSchema.optional(),
+     *  operation, and `all` runs every one side by side. */
+    choices: OfferChoicesSchema.optional(),
     bound: z
       .object({
-        task: z.string().min(1).max(200),
+        operation: z.string().min(1).max(200),
         input: z
           .record(z.string(), z.unknown())
           .refine(
@@ -867,6 +871,9 @@ const BrowseRowSchema = z.object({
   price: z.string().min(1).max(32),
   free: z.boolean(),
   kind: z.string().min(1).max(120),
+  /** The open input fields of the service a run would use, each with its short
+   *  description, for an operation client. */
+  input: z.record(z.string(), z.unknown()).optional(),
 });
 export type BrowseRow = z.infer<typeof BrowseRowSchema>;
 
@@ -1124,13 +1131,13 @@ export const CLIENT_ACCEPTS: readonly string[] = [
 export const BAZAAR_ACCEPT = 'bazaar';
 export const FREE_QUERY_ACCEPT = 'free-query';
 /**
- * THE TOKEN OF A CLIENT THAT RUNS ROUTED TASKS: it reads a task for free, takes
- * its offers from the free route, and runs a task through a paid run whose
+ * THE TOKEN OF A CLIENT THAT RUNS ROUTED OPERATIONS: it reads an operation for free, takes
+ * its offers from the free route, and runs an operation through a paid run whose
  * answer is the only place a seller shows. Only the task calls send it
  * (`acceptsFor`'s `task`); a call that falls back to today's paid flow never
  * does, so a server that predates it sees the request it always saw.
  */
-export const TASK_ACCEPT = 'task';
+export const OPERATION_ACCEPT = 'operation';
 
 /** Every feature this build has, which a `requires` list is read against:
  *  `bazaar` included, which it runs whether or not it asks for one. */
@@ -1140,7 +1147,7 @@ const CLIENT_FEATURES: ReadonlySet<string> = new Set([
   FREE_QUERY_ACCEPT,
   SETTINGS_ACCEPT,
   MCP_ACCEPT,
-  TASK_ACCEPT,
+  OPERATION_ACCEPT,
 ]);
 
 /** The features a `requires` list names that this build lacks; none when it
@@ -1162,7 +1169,7 @@ export function acceptsFor(bazaar: boolean, settings = false, task = false): str
     ...CLIENT_ACCEPTS,
     ...(bazaar ? [BAZAAR_ACCEPT] : []),
     ...(settings ? [SETTINGS_ACCEPT, MCP_ACCEPT] : []),
-    ...(task ? [TASK_ACCEPT] : []),
+    ...(task ? [OPERATION_ACCEPT] : []),
   ];
 }
 
@@ -1374,9 +1381,9 @@ export interface DecisionDeps {
    *  fee with the stock x402 client. Absent, the call goes unpaid. */
   route?: DecisionRoute;
   /**
-   * A TASK CLIENT'S OFFER: the call goes to the free route ({@link ROUTER_PATH})
-   * as a plain request, with `task` in `accepts`. No payer, no wallet, no turn
-   * on the channel, no 402 read. A router that predates routed tasks answers it
+   * AN OPERATION CLIENT'S OFFER: the call goes to the free route ({@link ROUTER_PATH})
+   * as a plain request, with `operation` in `accepts`. No payer, no wallet, no turn
+   * on the channel, no 402 read. A router that predates routed operations answers it
    * `native` with `fee_required` ({@link isFeeRequired}), and the caller then
    * sends the same call without `free`, which is today's call exactly.
    */
@@ -1550,9 +1557,9 @@ export async function requestDecision(
 }
 
 /**
- * THE ANSWER OF A ROUTER THAT PREDATES ROUTED TASKS to an offer request on the
+ * THE ANSWER OF A ROUTER THAT PREDATES ROUTED OPERATIONS to an offer request on the
  * free route: `native` with the reason code `fee_required`, which says the
- * form belongs on the paid route. A task client then sends the same call there
+ * form belongs on the paid route. A operation client then sends the same call there
  * without `task`, as it always did.
  */
 export function isFeeRequired(decision: { action: string } | undefined): boolean {
@@ -1638,7 +1645,7 @@ export async function requestBrowse(
       blockRedirects: true,
       jsonBody: buildBrowseBody({
         browse,
-        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined, true),
         harness: deps.harness ?? 'claude',
         ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),

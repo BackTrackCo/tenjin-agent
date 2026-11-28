@@ -18,9 +18,9 @@ import {
   type SettingsRefusal,
 } from '../settings-check';
 import { personalSettingsAt } from '../settings';
-import { requestRefusedOffer } from '../task-request';
-import { storeTaskOffer } from '../task-store';
-import { runTask } from '../task-run';
+import { requestRefusedOffer } from '../operation-request';
+import { storeOffer } from '../operation-store';
+import { runOperation } from '../operation-run';
 import { mergedInput, specInputProblems, specText } from '../spec-call';
 import {
   claimSpecPayment,
@@ -337,7 +337,7 @@ async function reask(
   const { decision, settingsHash } = answer.decision;
   // AN OFFER OF TASKS, free: kept by its id, and said beside the refusal.
   if (decision.action === 'offer') {
-    await storeTaskOffer(dataDir, decision, settingsHash);
+    await storeOffer(dataDir, decision, settingsHash);
     return { offer: null, routed: false, task: decision };
   }
   if (decision.action !== 'spec' || isAccountSpec(decision.spec)) return { offer: null, routed };
@@ -936,9 +936,9 @@ async function refusal(
     (await savedAccount(at.deps.ctx.dataDir, account.id))?.onRefusal === 'tenjin'
   ) {
     const here = await personalSettingsAt(at.deps.ctx.dataDir).catch(() => undefined);
-    const picked = task.bound?.task ?? task.tasks[0]!.task;
-    const switched = await runTask(
-      { task: picked, input: at.input, offer: task.id },
+    const picked = task.bound?.operation ?? task.operations[0]!.operation;
+    const switched = await runOperation(
+      { operation: picked, input: at.input, offer: task.id },
       at.deps,
       { sent: here?.wire.status === 'ok' ? here.wire.settings : undefined, improve: false },
       footer,

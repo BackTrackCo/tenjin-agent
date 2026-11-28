@@ -136,7 +136,7 @@ const INSTRUCTIONS =
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
-  "the task's inputs too, free. " +
+  "the operation's input fields too, free. " +
   'When a line lists choices, pick or ask as the line says, then call `{id, choice, input}`; ' +
   'choice `all` runs every option side by side, one payment each, and returns each saved ' +
   'result. ' +
@@ -145,9 +145,9 @@ const INSTRUCTIONS =
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
-  '""), and `{task}` with a row\'s id returns its inputs and output, free. ' +
-  'Run a task with `{task, input}`. Its routing fee is paid when the run is routed, the run ' +
-  "can be retried for 15 minutes with no new fee, and it returns the task's output shape. " +
+  '""), and `{operation}` with a row\'s id returns the input fields of the service a run uses, free. ' +
+  'Run an operation with `{operation, input}`. Each call is a new run, and its routing fee is paid ' +
+  "when the run is routed. It returns the service's own result. " +
   `${SCOPE_RULE} Call it alone and wait for its result. Routing fees and tool charges paid from the Tenjin balance ` +
   'follow the user’s spend limits. Connected-account tools bill that account’s plan. ' +
   'Routing top-ups count once, when sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
@@ -294,7 +294,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
   // rejection is swallowed: a machine with no wallet still browses the tool
-  // list and reads task inputs, which are free, and where the router charges for
+  // list and reads operation inputs, which are free, and where the router charges for
   // routing it is told why it cannot route. With a payer it is
   // the payer's: the same single-flight unlock its calls await, whose verdict
   // the hooks gate on and the observer records. The request tool's provider is
@@ -497,8 +497,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .optional()
           .describe(
             'The id from a hook line, when one is there. It names the service that line ' +
-              "offered. Alone, it returns that task's inputs, an example and its output " +
-              'shape, with nothing paid. With `input`, it runs that service. Leave ' +
+              "offered. Alone, it returns that operation's input fields and price, with " +
+              'nothing paid. With `input`, it runs that service. Leave ' +
               'it out for a different task, and the lookup is decided from the query alone.',
           ),
         input: z
@@ -520,7 +520,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            'Sent alone: a few words for a need, or "" for every tool by kind. Lists the tasks ' +
+            'Sent alone: a few words for a need, or "" for every tool by kind. Lists the operations, each with its input fields. ' +
               'available to run, each with its id, name, what it does and its price. Free. The ' +
               'names a settings rule takes come from `tenjin config names` instead.',
           ),
@@ -530,15 +530,15 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .describe(
             "A free tool's id. With `query`, it runs that tool without a wallet or payment.",
           ),
-        task: z
+        operation: z
           .string()
           .optional()
           .describe(
-            "A task's id, from `browse` or an offer. Alone, it returns the task's inputs, an " +
-              'example, its output shape and its price, with nothing paid. With `input`, it runs ' +
-              'the task: the fee is paid when the run is routed, then the provider. An offer ' +
-              "may list several tasks: send the one you want here, with the offer's `id`, and " +
-              'its input is checked against that task.',
+            "An operation's id, from `browse` or an offer. Alone, it returns the input fields of the " +
+              'service a run uses and the price, with nothing paid. With `input`, it runs the ' +
+              'operation: each call is a new run, its fee is paid when the run is routed, then the ' +
+              'service. An offer may list several operations: send the one you want here, with the ' +
+              "offer's `id`, and its input is checked against that service.",
           ),
         count: z
           .number()
@@ -580,7 +580,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (
-      { query, id, input, choice, browse, tool, task, count, job, source, decide },
+      { query, id, input, choice, browse, tool, operation, count, job, source, decide },
       extra,
     ): Promise<CallToolResult> => {
       if (isModelWorkerProcess(opts.env))
@@ -614,7 +614,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         harness: opts.harness ?? 'claude',
       };
       if (decide !== undefined) {
-        const others = { query, id, input, choice, browse, tool, task, count, job, source };
+        const others = { query, id, input, choice, browse, tool, operation, count, job, source };
         if (Object.values(others).some((value) => value !== undefined)) {
           return toolResult(
             fail('needs_input', '`decide` is sent alone; nothing was sent or paid.'),
@@ -630,7 +630,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(choice !== undefined ? { choice } : {}),
           ...(browse !== undefined ? { browse } : {}),
           ...(tool !== undefined ? { tool } : {}),
-          ...(task !== undefined ? { task } : {}),
+          ...(operation !== undefined ? { operation } : {}),
           ...(count !== undefined ? { count } : {}),
           ...(job !== undefined ? { job } : {}),
           ...(source !== undefined ? { source } : {}),

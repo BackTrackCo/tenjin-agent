@@ -2,21 +2,21 @@ import { z } from 'zod';
 import { readSidecar, writeSidecar } from './specs';
 import { SettingsHashSchema } from './settings-wire';
 import {
-  TaskOfferChoicesSchema as TaskOfferChoices,
-  TaskRowSchema,
+  OfferChoicesSchema as TaskOfferChoices,
+  OperationRowSchema,
   type TaskOffer,
 } from './decision';
-import { RunDecisionSchema, TaskSchema, type Task } from './task-wire';
+import { RunDecisionSchema, OperationSchema, type Operation } from './operation-wire';
 
 /**
- * WHAT THIS MACHINE KEEPS OF A ROUTED TASK, for the 15 minutes the router's
+ * WHAT THIS MACHINE KEEPS OF A ROUTED OPERATION, for the 15 minutes the router's
  * own rows last (`SPEC_TTL_MS`), each as a sidecar beside the specs' files
  * (`writeSidecar`):
  *
- * - THE OFFER, by its id: the need, its tasks (lead first) and any bound
+ * - THE OFFER, by its id: the need, its operations (lead first) and any bound
  *   input. The hook writes it where it shows the line, and `request({id,
- *   input})` reads it to find the task the line named. It holds no seller.
- * - THE TASK READ, by the task's id: its input schema and its price, so a
+ *   input})` reads it to find the operation the line named. It holds no seller.
+ * - THE OPERATION READ, by the operation's id: its input schema and its price, so a
  *   wrong input is refused before anything is sent.
  * - THE RUN, by its run id: the router's whole run answer, which a retry after
  *   a lost seller reply runs from, and the count of seller attempts it has
@@ -28,16 +28,16 @@ import { RunDecisionSchema, TaskSchema, type Task } from './task-wire';
 
 const OfferSchema = z.object({
   id: z.string().min(1).max(64),
-  need: z.string().min(1).max(64),
-  tasks: z.array(TaskRowSchema).min(1).max(16),
+  task: z.string().min(1).max(64),
+  operations: z.array(OperationRowSchema).min(1).max(16),
   hint: z.string().min(1).max(2_000),
   choices: TaskOfferChoices.optional(),
-  bound: z.object({ task: z.string(), input: z.record(z.string(), z.unknown()) }).optional(),
+  bound: z.object({ operation: z.string(), input: z.record(z.string(), z.unknown()) }).optional(),
   settingsHash: SettingsHashSchema.optional(),
 });
-export type KeptTaskOffer = z.infer<typeof OfferSchema>;
+export type KeptOffer = z.infer<typeof OfferSchema>;
 
-export async function storeTaskOffer(
+export async function storeOffer(
   dataDir: string,
   offer: TaskOffer,
   settingsHash: string | undefined,
@@ -48,28 +48,31 @@ export async function storeTaskOffer(
   });
 }
 
-export function readTaskOffer(dataDir: string, id: string): Promise<KeptTaskOffer | null> {
+export function readOffer(dataDir: string, id: string): Promise<KeptOffer | null> {
   return readSidecar(dataDir, id, 'offer', OfferSchema);
 }
 
-const TaskKeptSchema = z.object({ task: TaskSchema, settingsHash: SettingsHashSchema.optional() });
-export type KeptTask = z.infer<typeof TaskKeptSchema>;
+const OperationKeptSchema = z.object({
+  operation: OperationSchema,
+  settingsHash: SettingsHashSchema.optional(),
+});
+export type KeptOperation = z.infer<typeof OperationKeptSchema>;
 
-const taskKey = (id: string): string => `task:${id}`;
+const operationKey = (id: string): string => `operation:${id}`;
 
-export async function storeTaskRead(
+export async function storeOperationRead(
   dataDir: string,
-  task: Task,
+  operation: Operation,
   settingsHash: string | undefined,
 ): Promise<void> {
-  await writeSidecar(dataDir, taskKey(task.id), 'task', {
-    task,
+  await writeSidecar(dataDir, operationKey(operation.id), 'operation', {
+    operation,
     ...(settingsHash !== undefined ? { settingsHash } : {}),
   });
 }
 
-export function readTaskKept(dataDir: string, id: string): Promise<KeptTask | null> {
-  return readSidecar(dataDir, taskKey(id), 'task', TaskKeptSchema);
+export function readOperationKept(dataDir: string, id: string): Promise<KeptOperation | null> {
+  return readSidecar(dataDir, operationKey(id), 'operation', OperationKeptSchema);
 }
 
 /** The run answer as kept: what the router served, the rules it was decided
@@ -80,6 +83,8 @@ const RunKeptSchema = z.object({
   /** What the Tenjin fee of this run was, atomic: what the receipt names. */
   feeAtomic: z.string().regex(/^\d+$/),
   attempts: z.number().int().min(1).max(8),
+  /** The run's result was delivered: it is closed, and nothing serves it again. */
+  closedAt: z.string().max(40).optional(),
 });
 export type KeptRun = z.infer<typeof RunKeptSchema>;
 
@@ -91,18 +96,9 @@ export function readRun(dataDir: string, run: string): Promise<KeptRun | null> {
   return readSidecar(dataDir, run, 'run', RunKeptSchema);
 }
 
-/**
- * THE RUN A (TASK, INPUT) PAIR LAST HELD, by a hash of both: a call repeated
- * while that run is still good and nothing was paid to a seller under it is
- * run again under the same run id, which pays no second Tenjin fee. Only the
- * run id is kept here, never the input.
- */
-const RunKeySchema = z.object({ run: z.string().min(8).max(64) });
-
-export async function storeRunKey(dataDir: string, key: string, run: string): Promise<void> {
-  await writeSidecar(dataDir, `runkey:${key}`, 'runkey', { run });
-}
-
-export async function readRunKey(dataDir: string, key: string): Promise<string | null> {
-  return (await readSidecar(dataDir, `runkey:${key}`, 'runkey', RunKeySchema))?.run ?? null;
+/** Close a run whose result was delivered. Never throws. */
+export async function closeRun(dataDir: string, run: string): Promise<void> {
+  const kept = await readRun(dataDir, run);
+  if (kept === null) return;
+  await storeRun(dataDir, { ...kept, closedAt: new Date().toISOString() });
 }

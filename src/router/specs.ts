@@ -320,7 +320,7 @@ export async function readChoices(dataDir: string, id: string): Promise<KeptChoi
 
 /**
  * A SIDECAR FILE BESIDE AN ID'S SPEC, for a kind of record of its own: the
- * routed-task offers, task reads and runs (`task-store.ts`). One file per id
+ * routed-task offers, task reads and runs (`operation-store.ts`). One file per id
  * and suffix, written 0600 and read back through a schema with O_NOFOLLOW,
  * expired with the specs. The spec's own file is untouched, so a release that
  * reads specs strictly never meets a field it does not know.

@@ -118,7 +118,7 @@ Use Tenjin to make a 10-second welcome voiceover for my app.
 
 Example provider prices vary by tool and inputs and exclude Tenjin's routing fee. The quote for your call applies; [the full catalog has every tool and its current price →](https://tenjin.sh/tools)
 
-Browsing, reading a task and offers are free. A task run pays a 15% routing fee when it is routed, then its provider; selected Context7 docs need no wallet or routing fee.
+Browsing, reading an operation and offers are free. An operation run pays a 15% routing fee when it is routed, then its provider; selected Context7 docs need no wallet or routing fee.
 
 ## Wallet and limits
 

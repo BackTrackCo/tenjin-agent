@@ -8,21 +8,21 @@ import { chainReader, RoutingPayer } from './routing-payer';
 import { runRequestTool, type RequestToolDeps, type RequestToolResult } from './tool';
 
 /**
- * `tenjin request`, FOR SCRIPTS: the `request` tool's task forms from a shell.
- * It prints the tool's own envelope (the same `status`, `task`, `run`,
+ * `tenjin request`, FOR SCRIPTS: the `request` tool's operation forms from a shell.
+ * It prints the tool's own envelope (the same `status`, `operation`, `run`,
  * `output`, `receipt` and `fullResultPath` the model reads), obeys the same
  * spend limits, and ends with an exit code per status. It never asks anyone
  * (no `approve`): a run over the limits is refused with nothing paid, and
  * says what it would cost. The input stays on this machine.
  *
- * Exit codes follow the CLI's: 0 fulfilled; 2 an input the task does not
+ * Exit codes follow the CLI's: 0 fulfilled; 2 an input the operation does not
  * take; 3 refused (over the limits, or not routed); 4 a failure after money
  * may have moved; 1 any other failure.
  */
 
 export interface RequestCommandArgs {
-  task: string;
-  /** The input as JSON text; absent reads the task. */
+  operation: string;
+  /** The input as JSON text; absent reads the operation. */
   input?: string;
   choice?: string;
 }
@@ -74,7 +74,7 @@ export async function runRequestCommand(
   try {
     const result = await runRequestTool(
       {
-        task: args.task,
+        operation: args.operation,
         ...(input !== undefined ? { input } : {}),
         ...(args.choice !== undefined ? { choice: args.choice } : {}),
       },

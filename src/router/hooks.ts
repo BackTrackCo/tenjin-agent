@@ -19,8 +19,8 @@ import {
   type Sealed,
 } from './context';
 import { storeAccountOffer, storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestOffer } from './task-request';
-import { storeTaskOffer } from './task-store';
+import { requestOffer } from './operation-request';
+import { storeOffer } from './operation-store';
 import {
   isAccountSpec,
   REQUIRES_UNMET,
@@ -1035,7 +1035,7 @@ function termsOf(offer: OfferDecision): {
   endpoint?: string;
 } {
   if (offer.action === 'offer') {
-    return { provider: offer.tasks[0]!.label, providerPriceAtomic: '0' };
+    return { provider: offer.operations[0]!.label, providerPriceAtomic: '0' };
   }
   if (offer.action === 'execute') return offer;
   const { candidate } = offer;
@@ -1240,7 +1240,7 @@ export type SwapDecision =
       /** A free offer of tasks whose bound input runs as a task, in the native
        *  call's place: the same checks and one quote as any run. */
       offer: Extract<HookDecision, { action: 'offer' }>;
-      taskBound: { task: string; input: Record<string, unknown> };
+      operationBound: { operation: string; input: Record<string, unknown> };
       tool: 'WebSearch' | 'WebFetch';
       claim: () => Promise<boolean>;
       unmark: () => Promise<void>;
@@ -1344,15 +1344,15 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   // and claim as any run. An offer with picks, or with no bound input, is
   // the user's or the agent's to choose, so the native call runs.
   if (outcome.action === 'offer') {
-    const taskBound = outcome.bound;
-    if (taskBound === undefined || outcome.choices !== undefined) {
+    const operationBound = outcome.bound;
+    if (operationBound === undefined || outcome.choices !== undefined) {
       return back('no input to run in place');
     }
-    await storeTaskOffer(deps.dataDir, outcome, kept.answer?.settingsHash);
+    await storeOffer(deps.dataDir, outcome, kept.answer?.settingsHash);
     await footer.close(outcome);
     return {
       offer: outcome,
-      taskBound,
+      operationBound,
       tool,
       claim: claimFor({ ...offeredTerms(outcome), swap: true as const }),
       unmark: () => markHandedBack(deps.dataDir, session, toolUseId, now()),
@@ -1514,7 +1514,7 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
   const label =
     (offer.action === 'execute' ? offer.label : undefined) ??
     (offer.action === 'offer'
-      ? offer.tasks[0]!.label
+      ? offer.operations[0]!.label
       : offer.specs?.find((spec) => spec.id === offer.id)?.label);
   return {
     offerId: offer.id,
@@ -1900,7 +1900,7 @@ async function openFooter(
         // every call holds the offer to.
         const lead = accountLeadOf(decision);
         if (decision.action === 'offer') {
-          await storeTaskOffer(deps.dataDir, decision, settingsHash);
+          await storeOffer(deps.dataDir, decision, settingsHash);
         } else if (lead !== undefined) {
           await storeAccountOffer(deps.dataDir, lead, settingsHash);
         } else {

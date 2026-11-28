@@ -59,7 +59,7 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-fee-'));
   // These tests are about today's paid flow: the router predates routed tasks.
-  await writeRouterMemo(dir, 'task-absent', 'https://router.test', {
+  await writeRouterMemo(dir, 'operation-absent', 'https://router.test', {
     now: Date.now(),
     ttlMs: 10 ** 12,
   });
@@ -100,7 +100,7 @@ function feeAsked(): {
 }
 
 it('on a cold first call asks the free route once, then pays the fee on the paid route', async () => {
-  await clearRouterMemo(dir, 'task-absent', BASE);
+  await clearRouterMemo(dir, 'operation-absent', BASE);
   const fake = new FakeRouter();
   fake.body = OFFER;
   const out = await runPromptHook(prompt(), deps(fake.fetch, payer(fake)));

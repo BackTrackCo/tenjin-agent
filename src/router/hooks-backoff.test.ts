@@ -38,7 +38,7 @@ beforeEach(async () => {
   );
   clock = 1_800_000_000_000;
   // These tests are about today's paid flow: the router predates routed tasks.
-  await writeRouterMemo(dir, 'task-absent', BASE, { now: clock, ttlMs: 10 ** 12 });
+  await writeRouterMemo(dir, 'operation-absent', BASE, { now: clock, ttlMs: 10 ** 12 });
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -135,7 +135,7 @@ describe('the routing legs back off a router they cannot reach', () => {
   });
 
   it('on a cold first call asks the free route once, then the paid route, as before', async () => {
-    await clearRouterMemo(dir, 'task-absent', BASE);
+    await clearRouterMemo(dir, 'operation-absent', BASE);
     const seen: string[] = [];
     const r = router();
     r.state.down = false;
@@ -161,7 +161,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     await runHookKind('prompt', prompt(), deps(r.fetchImpl));
     expect(r.state.calls).toBe(1);
     expect(
-      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('task-absent')),
+      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('operation-absent')),
     ).toEqual([]);
   });
 
@@ -291,7 +291,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(seen).toEqual([ROUTE_PAID_PATH]);
     // The skip came after an answer, so the router is reachable: the memo goes.
     expect(
-      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('task-absent')),
+      (await readdir(join(dir, 'router-memo'))).filter((n) => !n.startsWith('operation-absent')),
     ).toEqual([]);
   });
 
