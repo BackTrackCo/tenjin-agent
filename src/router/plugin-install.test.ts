@@ -8,7 +8,7 @@ import { testCtx } from '../context-test-utils';
 import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
-import { NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall, withTermsRelay } from './install';
 import { installSandbox, probe400 } from './install-test-utils';
 import { fileURLToPath } from 'node:url';
 import { RECONNECT_FIX } from './mcp-processes';
@@ -180,7 +180,7 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       deps({ env: env({ CLAUDECODE: '1' }) }),
     );
     const next = (result.data as { next: string }).next;
-    expect(next).toBe(RELOAD_STEP);
+    expect(next).toBe(withTermsRelay(RELOAD_STEP));
     const text = [next, ...(result.humanLines ?? [])].join('\n');
     expect(text).not.toMatch(/terminal|restart Claude Code|run the command above|by hand/i);
     expect(result.humanLines).toContain(
@@ -622,7 +622,7 @@ describe('the settings install of an earlier release', () => {
     };
     const install = await runRouterInstall({ yes: true }, ctx(), deps(agent));
     const next = (install.data as { next: string }).next;
-    expect(next).toBe(NEW_SESSION_STEP);
+    expect(next).toBe(withTermsRelay(NEW_SESSION_STEP));
     const text = [next, ...(install.humanLines ?? [])].join('\n');
     expect(text).not.toContain('/reload-plugins in this');
     expect(install.data).toMatchObject({
@@ -640,7 +640,7 @@ describe('the settings install of an earlier release', () => {
     await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
     await runRouterInstall({ refresh: true }, ctx(), deps());
     const after = await runRouterInstall({ yes: true }, ctx(), deps(agent));
-    expect((after.data as { next: string }).next).toBe(RELOAD_STEP);
+    expect((after.data as { next: string }).next).toBe(withTermsRelay(RELOAD_STEP));
   });
 
   it('names the Tenjin status line it removes, in install and in the notices update prints', async () => {
