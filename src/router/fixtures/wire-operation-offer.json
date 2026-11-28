@@ -32,7 +32,7 @@
         }
       }
     ],
-    "hint": "Call request({\"operation\":\"x-post-search\",\"input\":{\"query\":\"<X search terms>\",\"cursor\":\"<pagination cursor>\",\"expand_urls\":false,\"sort\":\"<latest|top>\"}}) alone and wait for its result. Other operations of this task: glim-twitter-tweets-id-replies, glim-twitter..."
+    "hint": "Call request({\"operation\":\"x-post-search\",\"input\":{\"query\":\"<X search terms>\",\"cursor\":\"<pagination cursor>\",\"expand_urls\":false,\"sort\":\"<latest|top>\"}}) alone and wait for its result. Other operations of this task: glim-twitter-tweets-id-replies."
   },
   "jev": {
     "calls": 0,

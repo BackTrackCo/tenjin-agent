@@ -1388,6 +1388,31 @@ describe("the router's real answers", () => {
     expect(offered.summary).toContain('expand_urls (false)');
   });
 
+  it("accepts the server's full hint forms: the task offer's and the hook offer's", async () => {
+    for (const name of ['offer', 'offer-hook']) {
+      const stub = new Stub({ lead: SPEC_A() }, []);
+      const answer = real(name);
+      const inner = (() => {
+        realFetch(stub);
+        return stub.fetch;
+      })();
+      stub.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        if (String(input) === `${ROUTER}${ROUTER_PATH}` && body.operation === undefined) {
+          return new Response(JSON.stringify(answer), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      const d = deps(stub);
+      const offered = await runRequestTool({ query: 'search X' }, d);
+      expect(offered.envelope.status, name).toBe('offer');
+      expect(String(offered.envelope.hint ?? offered.summary)).toContain('request({');
+    }
+  });
+
   it('lists the real browse rows with their input fields', async () => {
     const stub = new Stub({ lead: SPEC_A() }, []);
     realFetch(stub);
