@@ -6,22 +6,28 @@ import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ModelHandoff, type CaptureTiming, type ModelSession } from './model-handoff';
+import { NEON_EFFORTS } from './neon-chat';
+import { neonMissApproval } from './neon-approve';
+import { neonAwaitingApproval } from './neon-transport';
+import { approveCall } from './plan';
+import { quoteClosed, readQuote } from '../lib/spend-quotes';
+import { neonJobLabel, workerNameOf, type NeonTerms } from './neon-terms';
 import { LockTimeoutError } from '../lib/lock';
 import { ModelJobStore, sweepModelRecords, type ModelJob, type NoOffer } from './model-job';
-import { modelSettings } from './model-settings';
+import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
 import {
   qualifiedModelWorker,
   runModelWorker,
   WorkerStartUnconfirmed,
   type EarlyWorkerAccept,
 } from './model-worker';
-import type { ModelTransport } from './model-transport';
+import type { ModelTransport, WorkerTransport } from './model-transport';
 import { hasModelRefundRecords, readModelRefundResult } from './model-refund';
 import type { WorkerRequest } from './model-worker-web';
 import type { Identities } from './identities';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
-import { WORKER_ENDS, workerEnd, workerStop } from './model-worker-control';
+import { workerEnd, workerEndText, workerStop } from './model-worker-control';
 import { unpaid } from './fee';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, nativeBackground, ownedModelReference } from './model-continuation';
@@ -112,7 +118,7 @@ export function acceptProgress(
         params: {
           progressToken,
           progress: seconds,
-          message: `The DeepSeek worker is running (${Math.floor(seconds / 60)} min).`,
+          message: `The worker is running (${Math.floor(seconds / 60)} min).`,
         },
       }),
     ).catch(() => undefined);
@@ -141,8 +147,8 @@ const backgroundJob = (job: Pick<ModelJob, 'native'>) => nativeBackground(job.na
 const PROMPT_WAIT_MS = 2_147_483_647;
 
 /** What the parent reads when a background worker has started, as a native background agent's launch reads. */
-const BACKGROUND_STARTED =
-  'The DeepSeek worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.';
+const backgroundStarted = (name: string) =>
+  `The ${name} worker is running in the background. Its result arrives by itself when it ends, as a message from the Tenjin plugin. You know nothing about its result until that message arrives: do not report, assume or predict it, and do not wait for it or check on it. Continue other work or reply in the meantime. To stop it, call subagent with cancel and this offer_id. Only if the session was resumed or the plugin reloaded and no message came: accept this offer again, which returns the stored result once the worker has ended and starts nothing.`;
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
   await workerShutdown.get(server)?.();
@@ -159,6 +165,13 @@ export function registerModelTool(
      */
     sessionEnded?: (sessionId: string) => void;
     transport: () => Promise<ModelTransport>;
+    /**
+     * The Neon worker's transport, which pays the provider of the job's row straight from the person's wallet.
+     * Absent where the host has none: the explicit Neon door then refuses.
+     */
+    neonTransport?: () => Promise<WorkerTransport>;
+    /** The Neon door's one free lookup of its provider row. */
+    neonTerms?: (signal?: AbortSignal) => Promise<NeonTerms>;
     /** This process was started inside a model worker. Default: read from the environment. */
     modelWorker?: boolean;
     /** `tenjin mcp`'s request executor, which pays for a Claude worker's web searches. */
@@ -189,8 +202,14 @@ export function registerModelTool(
   /** What a parent writes to each running worker of this process, by the worker's handle. */
   const inboxes = new Map<
     string,
-    { inbox: WorkerInbox; owner: ModelConversationOwner; jobId: string }
+    { inbox: WorkerInbox; owner: ModelConversationOwner; jobId: string; provider: WorkerProvider }
   >();
+  /** The transport a job's calls go through: its provider's. */
+  const transportOf = async (provider: WorkerProvider): Promise<WorkerTransport> => {
+    if (provider !== 'neon') return options.transport();
+    if (!options.neonTransport) throw new Error('The Neon worker is unavailable on this host');
+    return options.neonTransport();
+  };
   const runsHere = (id: string) => accepting.has(id) || controllers.has(id);
   /** Who asked for a job to be cancelled, so its end says who or what ended it. */
   const cancelledBy = new Map<string, 'parent_cancel' | 'agent_stopped' | 'session_ended'>();
@@ -237,7 +256,11 @@ export function registerModelTool(
       } catch {
         // Refused below.
       }
-      if (envelope?.status !== 'completed' || envelope.worker_handle !== conversation?.handle)
+      // A finished worker, or the quote a call that did not fit left for it (its worker stays).
+      if (
+        !['completed', 'needs_approval'].includes(String(envelope?.status)) ||
+        envelope?.worker_handle !== conversation?.handle
+      )
         return { refused: 'Stored worker completion is unavailable' };
       // The stored result stands. A local job update that failed earlier is repaired here.
       await jobs.finish(job.id, 'completed').catch(() => undefined);
@@ -261,7 +284,7 @@ export function registerModelTool(
     }
     // The run is over, so what it left uncertain is settled before it is reported.
     const budget = conversation?.originalJob ?? ended;
-    const transport = await options.transport();
+    const transport = await transportOf(providerOf(budget));
     await transport.reconcile(budget, signal);
     const spend = await transport.summary(budget).catch(() => ({ accounting: 'unknown' }));
     return { value: { status: ended.state, ...stopped, spend } };
@@ -301,6 +324,8 @@ export function registerModelTool(
     (handoff ??= new ModelHandoff({
       dataDir: options.dataDir,
       transport: await options.transport(),
+      ...(options.neonTransport ? { neonTransport: options.neonTransport } : {}),
+      ...(options.neonTerms ? { neonTerms: options.neonTerms } : {}),
     }));
   // The capture request may finish while its worker warms. A separate operation in
   // the job window gives a veto, cancel, expiry or shutdown ownership of that child.
@@ -586,6 +611,17 @@ export function registerModelTool(
     // job's record, never a permission.
     reason: z.enum(['agent_stopped', 'session_ended']).optional(),
     offer_ids: z.array(z.string().uuid()).min(2).optional(),
+    // THE EXPLICIT DOOR to a Neon worker, for writing jobs the person, or a skill they run, asked
+    // for. No offer, no routing and no held Agent call, and no setting gates it. The fields are the
+    // Agent call's own, so the same input can later come through the tool router.
+    neon: z
+      .object({
+        prompt: z.string().min(1).max(200_000),
+        description: z.string().max(500).optional(),
+        subagent_type: z.string().min(1).max(200).optional(),
+        effort: z.enum(NEON_EFFORTS).optional(),
+      })
+      .optional(),
   };
   const parseAnswer = (reply: { content: Array<{ type: string; text?: string }> }) => {
     try {
@@ -596,8 +632,12 @@ export function registerModelTool(
     }
   };
   type SubagentOperation = Parameters<ToolCallback<typeof subagentInput>>;
+  // The Neon door wraps the one handler here, so the handler itself keeps its place.
   const registerSubagent = (
-    inWorker ? () => undefined : server.registerTool.bind(server)
+    inWorker
+      ? () => undefined
+      : (name: string, config: object, handler: ToolCallback<typeof subagentInput>) =>
+          server.registerTool(name, config as never, neonDoor(handler) as never)
   ) as typeof server.registerTool;
   const withBatchAccepts =
     (
@@ -667,7 +707,7 @@ export function registerModelTool(
           action: 'continued',
           worker_handle: offer.worker_handle,
           offer_id: offer.offer_id,
-          message: `The DeepSeek worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does. To write to it meanwhile, send another message to the same handle.`,
+          message: `The ${typeof offer.label === 'string' && !/^DeepSeek/i.test(offer.label) ? offer.label : 'DeepSeek'} worker ${String(offer.worker_handle)} continues with your message with its history and the job's remaining budget; nothing was charged for the message itself. Its result arrives by itself when it ends, as a background agent's does, and the host delivers it when your turn ends, not during it: do not wait for it or poll with a sleep or a tool call, end your turn or do other work. To write to it meanwhile, send another message to the same handle.`,
         });
       await Promise.resolve(
         base({ cancel: offer.offer_id } as Parameters<typeof base>[0], extra),
@@ -678,12 +718,44 @@ export function registerModelTool(
             continuationRefusal('The continuation did not start; no worker is running for it'),
           );
     };
+  /**
+   * THE EXPLICIT DOOR TO A NEON WORKER, `subagent({neon: {prompt, ...}})`: the handoff reads the provider
+   * row and makes the job's record, and the accept below runs it as it
+   * runs any accepted offer (the same job store, sandbox, handback and follow-up path). It is
+   * no capture: no Agent call was held, no router was asked and no offer waits to be judged.
+   */
+  const neonDoor =
+    (base: ToolCallback<typeof subagentInput>): ToolCallback<typeof subagentInput> =>
+    async (args, extra) => {
+      const { neon, ...rest } = args;
+      if (neon === undefined) return base(args, extra);
+      const refused = (reason: string) => answer({ action: 'refused', reason, charged: false });
+      if (Object.values(rest).some((value) => value !== undefined))
+        return refused('Use one subagent operation');
+      const session = options.session();
+      if (isModelWorkerProcess()) return refused('A worker starts no other worker.');
+      if (!options.neonTransport) return refused('The Neon worker is unavailable on this host.');
+      if (!session)
+        return refused(
+          'Tenjin has not seen an event of this session yet. Send a message and call again.',
+        );
+      await repaired;
+      let created: Record<string, unknown>;
+      try {
+        created = await (await getHandoff()).neon(session, neon, extra.signal);
+      } catch {
+        return refused('The Neon job could not be prepared. Nothing was sent or charged.');
+      }
+      if (created.action !== 'offer' || typeof created.offer_id !== 'string')
+        return answer(created);
+      return base({ offer_id: created.offer_id } as Parameters<typeof base>[0], extra);
+    };
   registerSubagent(
     'subagent',
     {
       title: 'Tenjin subagent',
       description:
-        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. The offer carries consent and the parent routing policy.',
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id, or accept selected offers together with offer_ids so the workers run in parallel. Cancel with cancel. Accepting the same offer again never starts a second worker or adds a charge: once its worker has ended, it returns the stored result in the same session. A held follow-up to a finished worker runs the same way, with no routing fee, on the budget that job has left. The offer carries consent and the parent routing policy. With neon, start a Neon writing draft when the user or a skill they run requests it.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: subagentInput,
@@ -771,6 +843,26 @@ export function registerModelTool(
             const record = await jobs.owned(offered, session.sessionId);
             // Another session's offer, a swept one and one that never was read the same.
             if (!record) return unavailable('No such offer in this session');
+            // A queued Neon draft waits for the yes to its quote: nothing starts, and the offer stays.
+            const awaiting =
+              providerOf(record) === 'neon'
+                ? await neonAwaitingApproval(options.dataDir, record.id)
+                : null;
+            if (awaiting !== null) {
+              const quote = await readQuote(options.dataDir, awaiting);
+              return answer({
+                status: 'needs_approval',
+                action: 'refused',
+                started: false,
+                reason:
+                  'needs_approval: this draft waits for the user to approve its quote. Nothing was sent and nothing was paid.',
+                instruction:
+                  quote !== null && quoteClosed(quote, Date.now()) === null
+                    ? `Call ${approveCall(quote)}: it asks the user and runs only on their yes. Then run the draft with subagent({offer_id: ${JSON.stringify(record.id)}}).`
+                    : 'The quote is no longer open. Send the Neon call again for a fresh one.',
+                offer_id: record.id,
+              });
+            }
             ownedContinuation ||=
               typeof record.decision.workerHandle === 'string' ||
               (await conversations.findByJob(offered, jobOwner(record))) !== null;
@@ -805,8 +897,9 @@ export function registerModelTool(
                   // A WORKER THAT RUNS TAKES THE MESSAGE AT ITS NEXT TURN, as a native subagent does:
                   // the same job and cap, no offer, no fee, no new consent. Only the session that
                   // accepted it may write to it, and only while its consent still stands.
-                  const current = await modelSettings(options.dataDir, session.cwd);
-                  const transport = await options.transport();
+                  const sentProvider = live.provider;
+                  const current = await modelSettings(options.dataDir, session.cwd, sentProvider);
+                  const transport = await transportOf(sentProvider);
                   // The owner's root is the spelling the accept saw; each is compared by its real path.
                   const [ownerRoot, here] = await Promise.all([
                     realpath(live.owner.root).catch(() => null),
@@ -825,12 +918,12 @@ export function registerModelTool(
                     );
                   if (live.inbox.push(sentTo.task) === 'closed')
                     return unavailable(
-                      'The DeepSeek worker has already reported, so the message was not delivered. Its result arrives next; send the message again after it.',
+                      `The ${sentProvider === 'neon' ? 'Neon' : 'DeepSeek'} worker has already reported, so the message was not delivered. Its result arrives next; send the message again after it.`,
                     );
                   return answer({
                     action: 'delivered',
                     worker_handle: sentTo.handle,
-                    message: `Delivered to the DeepSeek worker ${sentTo.handle}: it reads your message at its next turn and its result will include the answer. It is the same job and budget; nothing was charged for the message.`,
+                    message: `Delivered to the ${sentProvider === 'neon' ? 'Neon' : 'DeepSeek'} worker ${sentTo.handle}: it reads your message at its next turn and its result will include the answer. It is the same job and budget; nothing was charged for the message.`,
                   });
                 }
                 try {
@@ -880,7 +973,10 @@ export function registerModelTool(
                 }
               }
               if (!args.offer_id)
-                return answer({ action: 'native', reason: 'Unsupported submission on this host' });
+                return answer({
+                  action: 'native',
+                  reason: 'Unsupported submission on this host',
+                });
               const model = await getHandoff();
               const pending = offered ? await model.store.owned(offered, session.sessionId) : null;
               const owner: ModelConversationOwner = {
@@ -897,9 +993,13 @@ export function registerModelTool(
                   : await model.conversations.findByJob(pending.id, owner);
                 ownedContinuation ||= resumed || conversation !== null;
               }
-              const current = await modelSettings(options.dataDir, session.cwd);
-              const transport = await options.transport();
-              if (!current || current.routerOrigin !== transport.origin)
+              // A continuation keeps the provider its worker began under.
+              const provider = providerOf(
+                resumed && conversation ? conversation.originalJob : (pending ?? { decision: {} }),
+              );
+              const current = await modelSettings(options.dataDir, session.cwd, provider);
+              const transport = await transportOf(provider).catch(() => null);
+              if (!transport || !current || current.routerOrigin !== transport.origin)
                 return refuseOffer('Inference consent revoked or endpoint changed');
               if (
                 !claudeWorkerPermissionMode(currentClaudeMode()) ||
@@ -937,6 +1037,7 @@ export function registerModelTool(
                 options.dataDir,
                 signal,
                 currentClaudeMode(),
+                provider,
               );
               startMarks.qualified = Date.now();
               const offeredWorkspace = savedClaudeWorkspace(pending?.decision.claudeWorkspace);
@@ -1147,6 +1248,7 @@ export function registerModelTool(
                   inbox,
                   owner: activeConversation.owner,
                   jobId: job.id,
+                  provider,
                 });
               const done = (async () => {
                 const omitted = new Set<string>();
@@ -1190,7 +1292,7 @@ export function registerModelTool(
                         .then(workerPermissionAnswer, () => false);
                     },
                   };
-                  const run = async (workerTransport: ModelTransport) => {
+                  const run = async (workerTransport: WorkerTransport) => {
                     abort.signal.throwIfAborted();
                     const workerOptions = { ...runOptions, transport: workerTransport };
                     if (warm && warm.sdkSessionId === conversation?.sdkSessionId) {
@@ -1213,7 +1315,8 @@ export function registerModelTool(
                   );
                   const envelope = {
                     status: 'completed',
-                    label: 'DeepSeek V4.1 Flash 1017',
+                    label:
+                      provider === 'neon' ? neonJobLabel(job.decision) : 'DeepSeek V4.1 Flash 1017',
                     elapsedMs: Date.now() - started,
                     ...counts(),
                     ...(await refundOutcome()),
@@ -1225,7 +1328,7 @@ export function registerModelTool(
                     ...(activeConversation
                       ? {
                           worker_handle: activeConversation.handle,
-                          continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to DeepSeek at once, so apply the offer's parentPolicy to its text before you send it.`,
+                          continuation: `Continue with SendMessage({to:"${activeConversation.handle}",message:"<complete follow-up and current constraints>"}). In this session, while this Tenjin process still runs, that one call starts the worker again at once in the background and its result arrives by itself when your turn ends, so do not wait for it or poll; when this job's ceiling has no room for it, the call is refused and nothing is held. After a resumed session or a reloaded plugin, Tenjin holds the follow-up as an offer until you run it with subagent({offer_id}), or refuses it when the ceiling has no room. It charges no routing fee and spends this job's remaining budget. A follow-up sent in one call goes to ${workerNameOf(job.decision)} at once, so apply the offer's parentPolicy to its text before you send it.`,
                         }
                       : {}),
                   };
@@ -1259,15 +1362,45 @@ export function registerModelTool(
                   await writeWorkerPhases(options.dataDir, job.id, acceptedAt, endMarks);
                   return answer(envelope);
                 } catch (error) {
-                  const state = abort.signal.aborted ? 'cancelled' : 'unknown';
+                  // A Neon call that did not fit its measured request was sent nowhere and paid for
+                  // nothing: the worker stays (idle, with its history) and the answer is the quote.
+                  const miss =
+                    provider === 'neon' && !abort.signal.aborted && activeConversation
+                      ? // The run measured on the job it ran as (the original job, for a resumed
+                        // worker); the continuation's own offer keeps the answer below.
+                        await neonMissApproval(
+                          options.dataDir,
+                          executionJob,
+                          activeConversation.handle,
+                        ).catch(() => null)
+                      : null;
+                  const state = abort.signal.aborted ? 'cancelled' : miss ? 'completed' : 'unknown';
+                  // The whole answer is what the conversation keeps, so a replay after a reload
+                  // returns the same quote.
+                  const asked =
+                    miss && activeConversation
+                      ? { ...miss, offer_id: job.id, worker_handle: activeConversation.handle }
+                      : null;
                   if (activeConversation)
                     await model.conversations
-                      .finish(activeConversation.handle, activeConversation.owner, job.id, state)
+                      .finish(
+                        activeConversation.handle,
+                        activeConversation.owner,
+                        job.id,
+                        state,
+                        asked ? JSON.stringify(asked) : undefined,
+                      )
                       .catch(() => false);
                   const spend = await transport
                     .summary(executionJob)
                     .catch(() => ({ accounting: 'unknown' }));
                   activity?.finish(state, 'reservedAtomic' in spend ? spend : undefined);
+                  if (asked) {
+                    await model.store
+                      .finish(job.id, 'completed', offered ? JSON.stringify(asked) : undefined)
+                      .catch(() => undefined);
+                    return answer({ ...asked, spend });
+                  }
                   // What the stopped worker already did, so a retry starts from it.
                   const partial = partialHandback(activity?.snapshot());
                   const stop = workerStop(error);
@@ -1296,7 +1429,7 @@ export function registerModelTool(
                           ? 'stopped'
                           : 'unknown',
                     endedBy,
-                    ended: WORKER_ENDS[endedBy],
+                    ended: workerEndText(endedBy, provider),
                     // A model call the payer could not complete: why, and what the person can do,
                     // in the words Tenjin uses for an unpaid routing fee.
                     ...(stop?.payer && unpaid(stop.payer) ? { payment: unpaid(stop.payer) } : {}),
@@ -1370,10 +1503,11 @@ export function registerModelTool(
               return answer({
                 status: 'started',
                 background: true,
-                label: 'DeepSeek V4.1 Flash 1017',
+                label:
+                  provider === 'neon' ? neonJobLabel(job.decision) : 'DeepSeek V4.1 Flash 1017',
                 offer_id: job.id,
                 worker_handle: activeConversation.handle,
-                instruction: BACKGROUND_STARTED,
+                instruction: backgroundStarted(workerNameOf(job.decision)),
               });
             })
             .catch(async () => {

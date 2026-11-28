@@ -303,12 +303,21 @@ test('Agent resume compatibility holds the owned handle through the same capture
   expect(result.deny).not.toMatch(/final veto|risk rules/);
 });
 
-test('disabled routing refuses reserved worker and unstarted-offer addresses before native fallback', async ($, on) => {
+// The setting only decides whether a held call is offered for routing. A follow-up to a worker
+// the session owns goes to the handoff with it off, which refuses a DeepSeek worker's and runs a
+// Neon worker's; neither falls through to a native executor.
+const REFUSED = JSON.stringify({
+  action: 'refused',
+  started: false,
+  reason: 'Current model consent or Claude permission mode is unavailable',
+  instruction: 'No continuation started. Do not pass a Tenjin worker handle to native tools.',
+});
+test('disabled routing hands owned follow-ups to the handoff, which refuses them, before native fallback', async ($, on) => {
   machine(on);
-  let asked = false;
-  on('tool.call', { tool: SUBAGENT }, async () => {
-    asked = true;
-    return { result: offered, text: offered };
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: REFUSED, text: REFUSED };
   });
   const ran = native(on);
   const agent = await $.tool.call({
@@ -327,8 +336,59 @@ test('disabled routing refuses reserved worker and unstarted-offer addresses bef
   });
   expect(send.result).toMatchObject({ success: false });
   expect(JSON.stringify(send.result)).toContain('unavailable');
-  expect(asked).toBe(false);
   expect(ran).toEqual([]);
+});
+
+test('a follow-up to a Neon worker reaches the handoff and runs with the DeepSeek setting off', async ($, on) => {
+  machine(on);
+  const asked: unknown[] = [];
+  const message = `The Test Writer worker ${WORKER} continues with your message.`;
+  const text = JSON.stringify({
+    action: 'continued',
+    worker_handle: WORKER,
+    offer_id: OFFER,
+    message,
+  });
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: text, text };
+  });
+  const ran = native(on);
+  const input = { to: WORKER, message: 'Make it shorter.' };
+  const result = await $.tool.call({ tool: 'SendMessage', tool_use_id: 'neon_off', ...input });
+  expect(asked).toEqual([
+    { session_id: SESSION, tool_use_id: 'neon_off', input, tool: 'SendMessage' },
+  ]);
+  expect(ran).toEqual([]);
+  expect(result.result).toEqual({ success: true, message });
+});
+
+test('a held follow-up to a Neon worker names it, not DeepSeek, and keeps its context', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const neonOffer = JSON.stringify({
+    action: 'offer',
+    started: false,
+    continuation: true,
+    offer_id: OFFER,
+    label: 'Test Writer',
+    capAtomic: '1000000',
+    parentPolicy: 'This follow-up continues a Test Writer worker that was already accepted.',
+    consent: { version: 1, repository: '/repo' },
+  });
+  on('tool.call', { tool: SUBAGENT }, async () => ({ result: neonOffer, text: neonOffer }));
+  native(on);
+  const result = await $.tool.call({
+    tool: 'SendMessage',
+    tool_use_id: 'neon_held',
+    to: WORKER,
+    message: 'Make it shorter.',
+  });
+  const said = (result.result as { message: string }).message;
+  expect(said).toContain('the follow-up to the Test Writer worker is held');
+  expect(said).not.toMatch(/DeepSeek/);
+  expect(result.context?.join(' ')).toContain('no continuation started');
+  expect(result.context?.join(' ')).not.toMatch(/DeepSeek/);
 });
 
 test('owned continuations never fall through after a transport error or invalid response', async ($, on) => {

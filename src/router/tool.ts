@@ -777,6 +777,12 @@ async function requestTool(
   // checked and sent here and paid straight to the provider, with no second
   // decision. The server hears only how it ended.
   if (spec !== null && input !== undefined) {
+    // AN INFERENCE ROW IS NO TOOL: only a worker's door runs it, under its own limits and refund.
+    if ('inference' in spec && spec.inference !== undefined)
+      return fail(
+        'native',
+        'That row is a model provider, which only a subagent door runs. Nothing was sent or paid.',
+      );
     // SEVERAL TAKES: each its own claim and payment, after one spend check
     // for them all (`choices.ts`).
     const run = () =>

@@ -306,6 +306,15 @@ Examples:
         (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
       );
     });
+  // A hidden dev door for the Neon evaluation; it refuses unless TENJIN_NEON_PROBE=1.
+  addGlobalFlags(config.command('neon-probe [file]', { hidden: true })).action(async function (
+    this: Command,
+    file: string | undefined,
+  ) {
+    await runCommand('config neon-probe', this, async (ctx) =>
+      (await import('../commands/config-neon-probe')).runNeonProbe(file, {}, ctx),
+    );
+  });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one value')
     .description("Print one setting's value as Tenjin uses it, defaults and environment included.")
@@ -501,6 +510,17 @@ Examples:
       await runCommand('wallet.reclaim-subagent-credit', this, async (ctx) => {
         const { runReclaimSubagentCredit } = await import('../commands/reclaim-subagent-credit');
         return runReclaimSubagentCredit(ctx);
+      });
+    });
+
+  leaf(WALLET, 'refund', 'get back what a Neon job left in its payment channel')
+    .description(
+      "Ask again for the money a Neon job left in its payment channel. Each channel is asked from the seller and payee its job was paid under, so a change in the catalog never moves a refund. A job's end already asks once. Where a seller does not answer, this starts the channel's timed withdrawal on chain, which costs a little gas and waits the channel's delay (900 seconds or more) before a second run finishes it.",
+    )
+    .action(async function (this: Command) {
+      await runCommand('wallet.refund', this, async (ctx) => {
+        const { runRefund } = await import('../commands/refund');
+        return runRefund(ctx);
       });
     });
 

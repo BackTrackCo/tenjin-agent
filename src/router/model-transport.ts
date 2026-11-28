@@ -1240,3 +1240,26 @@ export class ModelTransport {
     };
   }
 }
+
+/**
+ * WHAT A WORKER'S RUN NEEDS OF ITS MODEL TRANSPORT, whichever provider pays for its calls:
+ * the DeepSeek worker's {@link ModelTransport} through Tenjin's proxy, or the Neon worker's
+ * `NeonTransport` straight to the provider of its row.
+ */
+export type WorkerTransport = Pick<
+  ModelTransport,
+  | 'origin'
+  | 'messages'
+  | 'summary'
+  | 'reconcile'
+  | 'requireResumeBudget'
+  | 'recoverInferenceRefunds'
+  | 'toolCall'
+> & {
+  withInferenceRun<T>(
+    runId: string,
+    signal: AbortSignal,
+    run: (transport: WorkerTransport) => Promise<T>,
+    mark?: (name: 'workerReturned' | 'refundClosed') => void,
+  ): Promise<T>;
+};

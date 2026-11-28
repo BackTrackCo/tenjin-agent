@@ -234,6 +234,69 @@ it("marks the worker's session as one the plugin serves, as the plugin's Session
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+// Failure caught: the first live Neon job ended in 73 ms with "workspace scope changed or is
+// unavailable". The worker recomputed the scope under the DeepSeek consent, which the person
+// had not given, so it had none to match against the scope the Neon door saved.
+it("computes a Neon job's scope under the Neon consent, as the door saved it", async () => {
+  sdkResult({ subtype: 'success', result: 'done' }, '33333333-4444-4555-8666-777777777777');
+  const neon = { ...job, decision: { ...job.decision, provider: 'neon' } } as unknown as ModelJob;
+  await runModelWorker(neon, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'neon-')) });
+  const providers = vi.mocked(modelSettings).mock.calls.map((call) => call[2]);
+  expect(providers.length).toBeGreaterThan(0);
+  expect(providers.every((provider) => provider === 'neon')).toBe(true);
+});
+// Failure caught: a Neon job spent a whole turn's output reasoning about the person's own output
+// style, which a native subagent never applies. No worker child takes it, whichever provider pays
+// for it and whichever way its system prompt is built. A Neon worker is a normal native-agent
+// worker: it keeps the tools and MCP of its agent type, with no lean override.
+it("keeps the person's output style from every worker child, and starts a Neon worker as a normal one", async () => {
+  const optionsOf = async () => given(vi.mocked(query).mock.calls.at(-1)![0].options);
+  const runs: { provider: string; type: string | undefined }[] = [];
+  const byType = new Map<string, unknown>();
+  for (const [provider, subagent_type] of [
+    ['neon', undefined],
+    ['deepseek', undefined],
+    ['neon', 'Explore'],
+    ['deepseek', 'Explore'],
+  ] as const) {
+    sdkResult({ subtype: 'success', result: 'done' }, crypto.randomUUID());
+    // A type with its own prompt builds a custom system prompt; the rest use the preset.
+    if (subagent_type)
+      vi.mocked(readNativeAgentPrompt).mockResolvedValueOnce({
+        prompt: ['You are a file search specialist.'],
+        context: [],
+        withheldTools: [],
+        withheldInstructions: [],
+      });
+    const one = {
+      ...job,
+      native: { ...job.native, ...(subagent_type ? { subagent_type } : {}) },
+      decision: { ...job.decision, ...(provider === 'neon' ? { provider } : {}) },
+    } as unknown as ModelJob;
+    await runModelWorker(one, { ...options(), dataDir: await mkdtemp(join(tmpdir(), 'w-')) });
+    const sent = await optionsOf();
+    // The flag settings layer sits above the person's own settings files.
+    expect(sent.settings).toMatchObject({ outputStyle: 'default' });
+    expect(sent.settingSources).toEqual(['user', 'project', 'local']);
+    // No lean override for Neon: the tools and MCP are the agent type's own.
+    expect(sent.tools).toBeUndefined();
+    expect(sent.mcpServers).toBeUndefined();
+    expect(sent.strictMcpConfig).toBeUndefined();
+    runs.push({ provider, type: (sent.systemPrompt as { type?: string } | undefined)?.type });
+    byType.set(`${provider}:${subagent_type ?? ''}`, {
+      agent: sent.agent,
+      withheld: sent.disallowedTools,
+      settingSources: sent.settingSources,
+      prompt: sent.systemPrompt,
+    });
+  }
+  // A Neon worker of a type gets what a DeepSeek worker of that type gets: the same agent, the
+  // same withheld tools and the same instruction files, as a native subagent of it does.
+  for (const type of ['', 'Explore'])
+    expect(byType.get(`neon:${type}`)).toEqual(byType.get(`deepseek:${type}`));
+  // Both ways of building the system prompt were driven.
+  expect(new Set(runs.map((run) => run.type)).size).toBeGreaterThan(1);
+});
 function sdkResult(
   result: Record<string, unknown>,
   sessionId?: string,
@@ -353,6 +416,151 @@ it('ends at the last turn that its messages caused', async () => {
   proceed();
   await expect(run).resolves.toBe('turn 2');
   expect(seen.map((m) => m.text).slice(1)).toEqual(['first', 'second']);
+});
+
+/**
+ * A fake Claude Code whose shell command runs in the background: it reports a result, goes on
+ * once `ended` opens, and reports again. `inputClosed` says whether the worker closed its input.
+ */
+function backgroundWorker(second: Record<string, unknown>, options: { restart?: boolean } = {}) {
+  const state = { reported: false, inputClosed: false };
+  let ended!: () => void;
+  const gate = new Promise<void>((resolve) => (ended = resolve));
+  vi.mocked(query).mockImplementation(
+    (call) =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          const pump = (async () => {
+            for await (const message of call.prompt as AsyncIterable<unknown>) void message;
+            state.inputClosed = true;
+          })();
+          yield {
+            type: 'system',
+            subtype: 'init',
+            permissionMode: 'default',
+            cwd: '/repo',
+            session_id: 'sess',
+          };
+          yield {
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 'task-1', task_type: 'local_bash', description: 'sleep 40' }],
+          };
+          yield { type: 'result', session_id: 'sess', subtype: 'success', result: 'interim' };
+          state.reported = true;
+          await gate;
+          yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] };
+          if (options.restart !== false) yield { type: 'assistant', session_id: 'sess' };
+          if (options.restart !== false) yield { type: 'result', session_id: 'sess', ...second };
+          await pump;
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  return { state, ended };
+}
+
+// Issue 583: a follow-up whose worker started `sleep 40; echo first-done` in the background
+// reported an interim result, and the run ended as unknown with no result. The result of a run
+// is its last report, so the run stays open until the child has no background work.
+it('keeps the worker open while a background command runs, and returns the last report', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const inbox = new WorkerInbox();
+  const worker = backgroundWorker({ subtype: 'success', result: 'final' });
+  const run = runModelWorker(job, { ...options(), inbox });
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  // Nothing closes the input while the command runs: its end starts the next turn.
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  expect(worker.state.inputClosed).toBe(false);
+  expect(inbox.push('one more thing')).toBe('delivered');
+  worker.ended();
+  await expect(run).resolves.toBe('final');
+  expect(worker.state.inputClosed).toBe(true);
+});
+
+it('ends with the last good report when the child ends after it with a command still in the background', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const worker = backgroundWorker({ subtype: 'error_during_execution' });
+  const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  worker.ended();
+  await expect(run).resolves.toBe('interim');
+});
+
+// Failure caught by review: the catch that lets a run end with its last good report swallowed the
+// size check on that report too, so a 300,000-byte final report after a background command came
+// back whole instead of failing as an oversized handback does.
+it('still fails an oversized final report after a command ran in the background', async () => {
+  const { WorkerInbox } = await import('./model-worker-inbox');
+  const worker = backgroundWorker({ subtype: 'success', result: 'x'.repeat(300_000) });
+  const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+  const failed = run.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+  worker.ended();
+  expect(String(await failed)).toMatch(/size limit/);
+});
+
+it('still fails a run with no report at all after a command ran in the background', async () => {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+          yield {
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 't', task_type: 'local_bash', description: 'sleep 1' }],
+          };
+          yield { type: 'result', subtype: 'success', result: '' };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  await expect(runModelWorker(job, options())).rejects.toThrow();
+});
+
+it('still fails on an error report when no command ran in the background', async () => {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+          yield { type: 'result', subtype: 'success', result: 'first' };
+          yield { type: 'result', subtype: 'error_during_execution' };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  await expect(runModelWorker(job, options())).rejects.toBeInstanceOf(Error);
+});
+
+it('closes the worker when no turn follows the end of its background command', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const { WorkerInbox } = await import('./model-worker-inbox');
+    const worker = backgroundWorker({ subtype: 'success', result: 'unused' }, { restart: false });
+    const run = runModelWorker(job, { ...options(), inbox: new WorkerInbox() });
+    run.catch(() => undefined);
+    await vi.waitFor(() => expect(worker.state.reported).toBe(true));
+    worker.ended();
+    // The command ended and no assistant message follows: the worker waits, then closes.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(worker.state.inputClosed).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(worker.state.inputClosed).toBe(true);
+    await expect(run).resolves.toBe('interim');
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 function authenticationQuery(account: Promise<unknown>) {

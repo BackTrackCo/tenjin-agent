@@ -54,7 +54,7 @@ export function ownedModelReference(native: Record<string, unknown>, tool: Model
     native.team_name ||
     native.name
   )
-    return { owned: true as const, error: 'Invalid or unsupported DeepSeek continuation call' };
+    return { owned: true as const, error: 'Invalid or unsupported worker continuation call' };
   return { owned: true as const, handle, task };
 }
 

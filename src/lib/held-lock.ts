@@ -26,8 +26,8 @@ import { LockTimeoutError } from './lock';
  *
  * Callers pass the lock path WITHOUT the suffix and never branch on the platform. A held lock
  * file is never opened, read or deleted by anything else in a process that may hold it: on
- * Windows a second open fails, and on every platform a sweep may remove a lock file only through
- * {@link discardHeldLock}.
+ * Windows a second open fails. A sweep may remove a lock file only through
+ * {@link discardHeldLock}, which never removes a Linux (SQLite) lock file.
  */
 
 /** The platform or filesystem cannot lock. */
@@ -58,10 +58,14 @@ export interface HeldLockOptions {
   signal?: AbortSignal;
 }
 
-/** One acquisition: `tryOnce` is one attempt, and `abandon` cleans up after a failed wait. */
+/**
+ * One acquisition: `tryOnce` is one attempt, and `abandon` cleans up after a failed wait.
+ * `deletable` says whether a cleanup may delete the primitive's file at all.
+ */
 export interface Attempt {
   tryOnce(): (() => void) | null;
   abandon(): void;
+  readonly deletable: boolean;
 }
 export type AttemptFactory = (heldPath: string) => Attempt;
 
@@ -153,6 +157,9 @@ export function openAttempt(file: string, deps: OpenDeps): Attempt {
     abandon() {
       // Nothing is held between attempts.
     },
+    // The holder's own descriptor is compared with the path, and both files are alive at that
+    // moment, so they cannot share an inode number: a lock on a deleted file is always seen.
+    deletable: true,
   };
 }
 
@@ -186,7 +193,7 @@ function defaultFactory(): AttemptFactory {
   if (platform === 'linux')
     return (held) => {
       const sqlite = loadSqlite();
-      if (!sqlite) throw new LockUnavailableError(SQLITE_MISSING);
+      if (!sqlite) throw new LockUnavailableError(sqliteMissing());
       return sqliteAttempt(held, sqlite);
     };
   return () => {
@@ -195,17 +202,35 @@ function defaultFactory(): AttemptFactory {
 }
 const factory = defaultFactory();
 
-const SQLITE_MISSING = `Subagent workers on Linux need Node 22.13 or later; this is Node ${process.versions.node}.`;
+const sqliteMissing = (version: string = process.versions.node) =>
+  `Subagent workers on Linux need Node 22.13 or later; this is Node ${version}.`;
+
+/** The first Node whose `node:sqlite` loads with no flag. */
+const SQLITE_FROM = [22, 13, 0] as const;
+const atLeastSqliteNode = (version: string) => {
+  const [major = 0, minor = 0, patch = 0] = version.split('.').map(Number);
+  const have = [major, minor, patch];
+  for (const [index, need] of SQLITE_FROM.entries())
+    if (have[index]! !== need) return have[index]! > need;
+  return true;
+};
 
 /**
  * Whether this platform and Node can take a held lock, and if not, one sentence why. Linux needs
- * the built-in node:sqlite (Node 22.13 or later); macOS and Windows need nothing.
+ * the built-in node:sqlite (Node 22.13 or later); macOS and Windows need nothing. `nodeVersion`
+ * is the version of the Node that will take the lock when that is not this process: a terminal
+ * command judging the Node of Tenjin's own runtime, which runs the plugin and its workers.
  */
-export function lockSupport(): { ok: true } | { ok: false; reason: string } {
+export function lockSupport(nodeVersion?: string): { ok: true } | { ok: false; reason: string } {
   const { platform } = process;
   if (platform === 'darwin' || platform === 'win32') return { ok: true };
-  if (platform === 'linux')
-    return loadSqlite() ? { ok: true } : { ok: false, reason: SQLITE_MISSING };
+  if (platform === 'linux') {
+    if (nodeVersion !== undefined)
+      return atLeastSqliteNode(nodeVersion)
+        ? { ok: true }
+        : { ok: false, reason: sqliteMissing(nodeVersion) };
+    return loadSqlite() ? { ok: true } : { ok: false, reason: sqliteMissing() };
+  }
   return { ok: false, reason: `Tenjin cannot lock files on ${platform}.` };
 }
 
@@ -253,22 +278,31 @@ export async function withHeldLock<T>(
 }
 
 /**
- * Removes a lock file no one holds, for the job sweep, except on Linux, where lock files are
- * never removed and this returns false: macOS and Linux probe, unlink while
- * holding and then close (an opener that resolved the old file notices its inode changed and
- * starts over); Windows probes, closes and then unlinks, ignoring a lost race. A lock that is
- * held is left alone. True when the lock is gone afterwards.
+ * Removes a lock file no one holds, for the job sweep, except a Linux (SQLite) lock file, which
+ * is never removed: this returns false for it. macOS probes, unlinks while holding and then
+ * closes (an opener that resolved the old file sees its own descriptor's inode differ from the
+ * path's, and starts over); Windows probes, closes and then unlinks, and an opener that slipped
+ * in keeps a valid lock on a file that stays, because Windows deletes no file a holder has open. A lock
+ * that is held is left alone. True when the lock is gone afterwards. `make` is the primitive;
+ * only tests pass another.
+ *
+ * Why Linux keeps its lock files: a SQLite connection cannot show which file it has open, so a
+ * taker can compare only the path's inode number before its open with the number after it holds
+ * the lock. If the file was deleted in between and another took its place, ext4 can give a later
+ * replacement the freed number back. The taker then holds a deleted file while another process
+ * holds the one the path names: two holders, with no way to see it from the path. If no code
+ * deletes a lock file, that cannot happen. The cost is a few empty files for each job.
  */
-export async function discardHeldLock(lockPath: string): Promise<boolean> {
+export async function discardHeldLock(
+  lockPath: string,
+  make: AttemptFactory = factory,
+): Promise<boolean> {
   const held = `${lockPath}.held`;
-  // Linux keeps every lock file. A deleted lock file can still be locked by the process that
-  // opened it before the delete, while another process creates and locks its replacement: two
-  // holders at once, with no way to see it from the path. If no code deletes a lock file, that
-  // cannot happen. The cost is one empty file for each job.
-  if (process.platform === 'linux') return false;
+  const attempt = make(held);
+  if (!attempt.deletable) return false;
   let release: () => void;
   try {
-    release = await holdLockWith(factory, lockPath, { timeoutMs: 0 });
+    release = await holdLockWith(() => attempt, lockPath, { timeoutMs: 0 });
   } catch (error) {
     if (error instanceof LockTimeoutError) return false;
     throw error;
@@ -302,6 +336,7 @@ export async function sweepHeldLocks(
   dir: string,
   eligible: (name: string) => Promise<boolean>,
   limit = 50_000,
+  make: AttemptFactory = factory,
 ): Promise<void> {
   try {
     let seen = 0;
@@ -310,7 +345,7 @@ export async function sweepHeldLocks(
       const path = join(dir, entry.name);
       if (!entry.name.endsWith('.held')) continue;
       if (await eligible(entry.name).catch(() => false))
-        await discardHeldLock(path.slice(0, -'.held'.length)).catch(() => false);
+        await discardHeldLock(path.slice(0, -'.held'.length), make).catch(() => false);
     }
   } catch {
     // Housekeeping only.

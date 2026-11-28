@@ -122,12 +122,18 @@ let accepted = false;
 let responseFailure;
 const transport = {
   origin,
+  // The transport answers a route with the router's offer and what its payment authorized.
   route: async ({ jobId }) => {
     routes++;
-    return { ...offer, jobId };
+    return { json: { ...offer, jobId }, authorizedAtomic: BigInt(offer.routingFeeAtomic) };
   },
-  messages: async (_job, body) => {
+  // A run is wrapped by its transport: this one has no channel to open or close.
+  withInferenceRun: async (_runId, _signal, run) => run(transport),
+  requireResumeBudget: async () => undefined,
+  recoverInferenceRefunds: async () => undefined,
+  messages: async (_job, body, _signal, beforeSend) => {
     try {
+      await beforeSend?.();
       assert(accepted, 'Inference before acceptance');
       requests++;
       const read = {
@@ -209,6 +215,7 @@ try {
       contents: `
         export { qualifiedModelWorker } from '../../src/router/model-worker';
         export { registerModelTool } from '../../src/router/model-mcp';
+        export { ModelJobStore } from '../../src/router/model-job';
       `,
       resolveDir: import.meta.dirname,
       loader: 'ts',
@@ -220,21 +227,16 @@ try {
     format: 'esm',
     target: 'node22',
   });
-  const { qualifiedModelWorker, registerModelTool } = await import(pathToFileURL(bundle).href);
+  const { qualifiedModelWorker, registerModelTool, ModelJobStore } = await import(
+    pathToFileURL(bundle).href
+  );
   const originalPath = process.env.Path;
   const fixtureExe = join(workspace, 'claude.exe');
   await writeFile(fixtureExe, 'Inert qualification data.');
   try {
     process.env.Path = [workspace, originalPath].join(delimiter);
     assert.equal(
-      await qualifiedModelWorker(
-        workspace,
-        'general-purpose',
-        undefined,
-        dataDir,
-        signal,
-        'default',
-      ),
+      await qualifiedModelWorker(workspace, 'general-purpose', dataDir, signal, 'default'),
       null,
     );
     assert.equal(
@@ -246,9 +248,7 @@ try {
     process.env.Path = originalPath;
     await rm(fixtureExe);
   }
-  assert(
-    await qualifiedModelWorker(workspace, 'general-purpose', undefined, dataDir, signal, 'default'),
-  );
+  assert(await qualifiedModelWorker(workspace, 'general-purpose', dataDir, signal, 'default'));
   const [host, caller] = InMemoryTransport.createLinkedPair();
   model = registerModelTool(server, {
     dataDir,
@@ -259,7 +259,12 @@ try {
   await server.connect(host);
   await client.connect(caller);
   const first = await capture('accepted', 'step-1');
-  assert.equal(first.action, 'offer', JSON.stringify(first));
+  // A call that stayed native names why in the job store's no-offer record: shown with the failure.
+  assert.equal(
+    first.action,
+    'offer',
+    JSON.stringify({ first, noOffers: await new ModelJobStore(dataDir).noOffers() }),
+  );
   console.log('Tenjin recorded the first offer');
   try {
     await waitForChild(0);

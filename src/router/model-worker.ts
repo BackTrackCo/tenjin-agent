@@ -1,3 +1,4 @@
+import { BackgroundWork } from './model-worker-background';
 import { WorkerInbox } from './model-worker-inbox';
 import {
   completedMessageSse,
@@ -38,7 +39,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk/core';
 import { readClaudeCodeCached, meetsFloor } from './claude-cli';
 import { markSessionServed } from './alive';
-import { modelSettings } from './model-settings';
+import { modelSettings, providerOf, type WorkerProvider } from './model-settings';
 import { CLAUDE_TENJIN_TOOLS } from './names';
 import {
   MODEL_MESSAGES_MAX_TOOLS,
@@ -47,7 +48,7 @@ import {
   offeredOutputTokens,
 } from './model-limits';
 import type { ModelJob } from './model-job';
-import type { ModelTransport } from './model-transport';
+import type { WorkerTransport } from './model-transport';
 import {
   assertClaudeWorkerMode,
   claudeDeepSeekWorkerApiKeyHelper,
@@ -151,11 +152,15 @@ export async function qualifiedModelWorker(
   dataDir?: string,
   signal?: AbortSignal,
   claudePermissionMode?: ClaudeWorkerPermissionMode,
+  /** The provider whose consent covers the worker: Neon has its own record. */
+  provider: WorkerProvider = 'deepseek',
 ): Promise<QualifiedWorker | null> {
   if (!dataDir) return null;
   if (!claudeWorkerAuthCompatible(process.env)) return null;
   const windows = await windowsWorkerLaunch(dataDir, cwd);
   if (process.platform === 'win32' && !windows) return null;
+  // The Windows worker's account is set up against Tenjin's router: the Neon worker has none.
+  if (provider === 'neon' && windows) return null;
   // Read at every offer and again at its accept: once per binary file, not per call.
   const state = await readWorkerClaudeCode(cwd, windows ?? undefined);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
@@ -174,7 +179,7 @@ export async function qualifiedModelWorker(
       effective.permissions?.disableBypassPermissionsMode === 'disable')
   )
     return null;
-  const disclosure = await modelSettings(dataDir, cwd);
+  const disclosure = await modelSettings(dataDir, cwd, provider);
   const claudeWorkspace =
     disclosure &&
     (await resolveClaudeWorkspace(
@@ -222,7 +227,7 @@ export type EarlyWorkerAccept = {
   job: ModelJob;
   /** What the parent writes to the worker while it runs. */
   inbox?: WorkerInbox;
-  transport: ModelTransport;
+  transport: WorkerTransport;
   accepted?: { at: number; marks: Record<string, number> };
   /** The job's image and document blocks sent as text, which the released worker adds to. */
   omitted?: Set<string>;
@@ -251,7 +256,7 @@ export async function runModelWorker(
   job: ModelJob,
   options: {
     dataDir: string;
-    transport: ModelTransport;
+    transport: WorkerTransport;
     signal: AbortSignal;
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
@@ -314,6 +319,8 @@ export async function runModelWorker(
       current.dataDir,
       signal,
       current.claudePermissionMode,
+      // The job's own provider: a Neon job's scope is computed under the Neon consent.
+      providerOf(job),
     );
     signal.throwIfAborted();
     assertClaudeWorkerMode(
@@ -359,6 +366,8 @@ async function runQualifiedWorker(
 ) {
   // A worker started at offer time sends nothing until its accept releases it.
   let released = !early;
+  // Whose consent covers the job, and whose model its calls go to.
+  const provider = providerOf(job);
   // The start time for the diagnostic record, which is made further down.
   const workerStart = Date.now();
   options.signal.throwIfAborted();
@@ -374,7 +383,7 @@ async function runQualifiedWorker(
   const assertCurrentWorkspace = async () => {
     if (!claudeWorkerAuthCompatible(process.env))
       throw new Error('Native Claude authentication is owned by its host; keep native');
-    const disclosure = await modelSettings(options.dataDir, job.root);
+    const disclosure = await modelSettings(options.dataDir, job.root, provider);
     const windows = binary.windows ? await windowsWorkerLaunch(options.dataDir, job.root) : null;
     const resolved = await resolveWorkerSettings({
       cwd: job.root,
@@ -629,6 +638,8 @@ async function runQualifiedWorker(
   };
   const fetchFallback = async (event: WorkerFetchEvent, id: unknown) => {
     if (!released || controller.signal.aborted) return null;
+    // The Neon worker sends nothing to Tenjin's router: a page it could not fetch is not read.
+    if (provider === 'neon') return null;
     await assertCurrentSend();
     return workerFetchFallback(event, {
       ...web,
@@ -722,11 +733,13 @@ async function runQualifiedWorker(
         const search = workerWebSearch(raw);
         if (search) {
           const why =
-            search.refused !== null
-              ? `the request's ${search.refused} filter is not supported`
-              : search.query.length === 0
-                ? 'the search had no query'
-                : null;
+            provider === 'neon'
+              ? 'the Neon worker has no web search'
+              : search.refused !== null
+                ? `the request's ${search.refused} filter is not supported`
+                : search.query.length === 0
+                  ? 'the search had no query'
+                  : null;
           if (why !== null) {
             send(searchRefusedMessage(search, why));
             return;
@@ -910,6 +923,12 @@ async function runQualifiedWorker(
     );
   });
   let result: string | undefined;
+  // What the child has running in the background, and whether it ever had (see BackgroundWork).
+  const background = new BackgroundWork();
+  let backgroundRan = false;
+  // The run's report is being checked, not read: an error from here is never the child's end.
+  let verifying = false;
+  let afterBackground: NodeJS.Timeout | undefined;
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
   // Auto and bypass workers never wait on a person; the sandbox still applies.
@@ -1043,6 +1062,10 @@ async function runQualifiedWorker(
           // Auto memory is undeclared input outside this job's disclosure scope.
           // Native settings, instruction files and owned session history still load.
           autoMemoryEnabled: false,
+          // Above the person's own `outputStyle`: the flag layer outranks their settings files. A
+          // native subagent does not apply an output style, so no worker does either: one that
+          // read the person's style spent a whole turn's output reasoning about it.
+          outputStyle: 'default',
           // Above an `alwaysThinkingEnabled: false` in the person's own settings.
           alwaysThinkingEnabled: true,
           // The CLAUDE.md files a native subagent of this type starts without (all of them
@@ -1435,6 +1458,17 @@ async function runQualifiedWorker(
     }
     let activityReady = false;
     for await (const message of worker) {
+      if (message.type !== 'system') clearTimeout(afterBackground);
+      if (background.observe(message)) {
+        // Its last background command ended after a report: the notice of that end starts one
+        // more turn, which the run waits for, but not for ever if none comes.
+        if (!background.busy && result !== undefined) {
+          clearTimeout(afterBackground);
+          afterBackground = setTimeout(() => options.inbox?.closeIfEmpty(), BACKGROUND_TURN_MS);
+          afterBackground.unref();
+        }
+      }
+      if (background.busy) backgroundRan = true;
       if (message.type === 'assistant') diagnostics.mark('firstActivity');
       if (message.type === 'system' && message.subtype === 'init') {
         diagnostics.mark('childReady');
@@ -1478,20 +1512,44 @@ async function runQualifiedWorker(
         diagnostics.mark('resultMessage');
         diagnostics.stop(message);
         session?.assert(message.session_id);
-        if (message.subtype !== 'success') throw workerResultError(message);
+        if (message.subtype !== 'success') {
+          // A later report that failed, after one that succeeded while a command ran in the
+          // background, is that command's end, not a failure of the worker: the last report
+          // that succeeded is the result.
+          if (result !== undefined && backgroundRan && !controller.signal.aborted) {
+            if (!background.busy) options.inbox?.closeIfEmpty();
+            continue;
+          }
+          throw workerResultError(message);
+        }
         result = message.result;
         // Reported with nothing waiting: the input closes and the worker ends. A message
-        // queued meanwhile is sent first, and its turn reports again.
-        options.inbox?.closeIfEmpty();
+        // queued meanwhile is sent first, and its turn reports again. The input stays open
+        // while a background command runs: its end starts another turn, which reports last.
+        if (!background.busy) options.inbox?.closeIfEmpty();
       }
     }
     if (proxyFailure) throw proxyFailure.error;
+    // From here the checks are the handback's own, never the child's end: a report that is empty
+    // or too big fails the run, whatever ran in the background.
+    verifying = true;
     if (!result) throw new Error('DeepSeek worker returned no completed result');
     if (Buffer.byteLength(result, 'utf8') > MODEL_NATIVE_TEXT_BYTES)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
   } catch (error) {
-    executionFailure = proxyFailure ?? { error };
+    // The child ended after a report that succeeded, with a command still running in the
+    // background: its end, with the result of its last report, not a failure of the worker.
+    const childEnded =
+      !verifying &&
+      !proxyFailure &&
+      result !== undefined &&
+      backgroundRan &&
+      workerStop(error) === undefined &&
+      !controller.signal.aborted &&
+      !options.signal.aborted;
+    if (!childEnded) executionFailure = proxyFailure ?? { error };
   } finally {
+    clearTimeout(afterBackground);
     authorizePrompt(false);
     // Seal, not close: what was queued and never read is the caller's to report.
     options.inbox?.seal();
@@ -1545,6 +1603,9 @@ async function runQualifiedWorker(
   if (executionFailure) throw executionFailure.error;
   return redactAll(result!);
 }
+
+/** How long a run waits for the turn a background command's end starts, before it closes. */
+const BACKGROUND_TURN_MS = 30_000;
 
 /** Native local settings and MCP config of repositories nested in a worker root: closed. */
 const NESTED_PRIVATE = ['.claude/settings.local.json', '.mcp.json'];

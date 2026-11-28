@@ -7,6 +7,7 @@ import { runConfigSubagents } from './config-subagents';
 import { modelSettings } from '../router/model-settings';
 import { ModelJobStore } from '../router/model-job';
 import * as windowsWorkerConfig from '../router/windows-worker-config';
+import { forgetSqlite } from '../lib/held-lock-sqlite';
 
 let dir: string;
 afterEach(async () => {
@@ -461,4 +462,50 @@ it.each([
   const text = (result.humanLines ?? []).join('\n');
   expect(text.includes('run on Claude Code only')).toBe(said);
   expect(JSON.stringify(result.data).includes('run on Claude Code only')).toBe(said);
+});
+
+// Issue 577: the Node check judged the terminal, which can be older than the Node of Tenjin's own
+// runtime that runs the plugin and its workers.
+it('judges the Node of the runtime that runs the worker, not the terminal command', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'config-node-')));
+  dir = join(home, '.tenjin');
+  const repo = join(home, 'repo');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  const runtime = async (node: string) => {
+    await mkdir(join(dir, 'runtime'), { recursive: true });
+    await writeFile(
+      join(dir, 'runtime', 'state.json'),
+      JSON.stringify({ current: { cli: '0.1.0-alpha.100', node }, previous: null, pending: null }),
+    );
+  };
+  vi.stubEnv('HOME', home);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const builtin = process.getBuiltinModule;
+  // A Linux terminal whose Node has no node:sqlite.
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+  process.getBuiltinModule = (() => undefined) as typeof process.getBuiltinModule;
+  forgetSqlite();
+  try {
+    await runtime('24.22.3');
+    const result = await runConfigSubagents('on', { repository: repo, maxJob: '1' }, testCtx(dir));
+    expect(JSON.stringify(result.data)).toContain('After acceptance');
+    // The runtime's own Node is the old one: the refusal names it.
+    await runtime('22.12.0');
+    await expect(
+      runConfigSubagents('on', { repository: repo, maxJob: '1' }, testCtx(dir)),
+    ).rejects.toMatchObject({ message: expect.stringContaining('this is Node 22.12.0') });
+    // No runtime: the terminal's own Node is the one that runs it.
+    await rm(join(dir, 'runtime'), { recursive: true, force: true });
+    await expect(
+      runConfigSubagents('on', { repository: repo, maxJob: '1' }, testCtx(dir)),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(`this is Node ${process.versions.node}`),
+    });
+  } finally {
+    process.getBuiltinModule = builtin;
+    Object.defineProperty(process, 'platform', platform);
+    forgetSqlite();
+    vi.unstubAllEnvs();
+    await rm(home, { recursive: true, force: true });
+  }
 });

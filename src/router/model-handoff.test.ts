@@ -6,6 +6,23 @@ import { randomUUID } from 'node:crypto';
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
+// A Linux Node without node:sqlite: it says so and takes no lock, as `held-lock.ts` does there.
+const oldNode = vi.hoisted(() => ({ on: false }));
+vi.mock('../lib/held-lock', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../lib/held-lock')>();
+  const refuse = () => {
+    throw new real.LockUnavailableError('Subagent workers on Linux need Node 22.13 or later.');
+  };
+  return {
+    ...real,
+    lockSupport: (version?: string) =>
+      oldNode.on ? { ok: false as const, reason: 'old Node' } : real.lockSupport(version),
+    holdLock: (...args: Parameters<typeof real.holdLock>) =>
+      oldNode.on ? refuse() : real.holdLock(...args),
+    withHeldLock: (...args: Parameters<typeof real.withHeldLock>) =>
+      oldNode.on ? refuse() : real.withHeldLock(...args),
+  };
+});
 import { qualifiedModelWorker } from './model-worker';
 import {
   fitAdmission,
@@ -1219,4 +1236,23 @@ it('fits a route request by giving up parent context, oldest first, and never th
   expect(over.subagentTask).toHaveLength(17_000);
   expect(over.parentContext).toEqual([{ role: 'user', content: '' }]);
   expect(size(over)).toBeGreaterThan(MODEL_ROUTE_BODY_BYTES);
+});
+
+// Issue 577: the Node check ran after the repeat check, which takes the job store's lock, so on a
+// Node that cannot lock the call failed there and its reason was lost.
+it('a Linux Node that cannot lock keeps the call native with its reason, before any lock is taken', async () => {
+  const f = await routedFixture();
+  oldNode.on = true;
+  try {
+    expect(
+      await f.model.capture(f.session, 'old-node-call', { prompt: 'Read the fixture.' }),
+    ).toEqual({ action: 'native' });
+    expect((await f.model.store.noOffers()).at(-1)).toMatchObject({
+      code: 'worker_unqualified',
+      detail: 'linux_needs_node_22_13',
+    });
+    expect(f.route).not.toHaveBeenCalled();
+  } finally {
+    oldNode.on = false;
+  }
 });

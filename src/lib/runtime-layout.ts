@@ -70,6 +70,16 @@ export function readRuntimeState(root: string): RuntimeState | null {
   return { current, previous: pointer(record.previous), pending: pointer(record.pending) };
 }
 
+/**
+ * The Node version of Tenjin's own runtime, the one that runs the plugin and its workers, or
+ * undefined where there is no runtime. A terminal command that judges what a worker needs
+ * reads this, not the Node of the terminal it was typed in.
+ */
+export function runtimeNodeVersion(dataDir: string, home: string = homedir()): string | undefined {
+  if (!hasRuntime(dataDir, home)) return undefined;
+  return readRuntimeState(runtimeDir(dataDir))?.current.node;
+}
+
 export function nodeBinPath(
   root: string,
   nodeVersion: string,

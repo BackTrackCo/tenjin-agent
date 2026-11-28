@@ -43,7 +43,7 @@ A request to a host the router or a server named connects to the one address tha
 
 Routing sends bounded task context with known secrets masked. This is pattern matching, not a guarantee: an unusual credential or sensitive prose can still leave the machine. The [sharing guide](./agent-permissions.md#what-the-hooks-send) lists recipients, payloads, retention and controls. Mask rules live in `src/lib/redact-rules.json`; matches become type markers and counts rather than partial secrets.
 
-**A DeepSeek worker is the exception.** What a worker reads and runs reaches Tenjin and DeepSeek as written, as a native subagent's work reaches Anthropic: env file values, secrets in a known token shape and the output of a credential command are not masked. Only the job's own tokens and your wallet key and passphrase are removed by value, and the keychain is closed to its sandbox. The routing packet before an offer is still masked. [DeepSeek subagents →](./subagents.md#what-goes-where-and-when)
+**Subagent workers are the exception.** What a subagent reads and runs reaches its model provider as written and also reaches Tenjin when Tenjin proxies the job. This includes env file values, secrets in a known token shape and the output of a credential command. Only the job's own tokens and your wallet key and passphrase are removed by value, and the keychain is closed to its sandbox. The routing packet sent before an offer is still masked. Jobs you or your skills start directly skip the offer and its routing packet. [DeepSeek subagents →](./subagents.md#what-goes-where-and-when) · [Neon subagents →](./neon-subagent.md)
 
 ## Deployment origins
 

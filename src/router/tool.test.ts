@@ -1707,6 +1707,35 @@ describe('an offer with a request spec', () => {
     expect(await claimIgnored(dir, { now: now + SPEC_TTL_MS + 1 })).toEqual([]);
   });
 
+  // Failure caught: an inference row is a model provider that only a worker's door runs, under its
+  // own limits, its saved terms and its refund. The request tool running it would pay a provider
+  // outside all three.
+  it('refuses to run an inference row with an input: nothing is signed and nothing is sent', async () => {
+    await storeSpecs(dir, [
+      quoteSpec({
+        inference: {
+          model: 'test/model',
+          wire: 'chat',
+          scheme: 'batch-settlement',
+          usage: 'nanogpt',
+          price: {
+            inputAtomicPerMillion: '3150000',
+            outputAtomicPerMillion: '15750000',
+            cacheReadAtomicPerMillion: '157500',
+          },
+        },
+      }),
+    ]);
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool({ id: SPEC_ID, input: { symbol: 'BTC' } }, deps(fetchImpl));
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(result.envelope.reason).toContain('only a subagent door runs');
+    // No provider call, no unpaid probe, no paid request, and no report to the router.
+    expect(calls).toEqual([]);
+    expect(result.envelope).not.toHaveProperty('result');
+  });
+
   it('builds the request from the input, pays the provider, and reports how it ended', async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);

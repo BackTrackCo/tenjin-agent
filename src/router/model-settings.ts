@@ -19,19 +19,37 @@ const RECIPIENTS = ['Tenjin', 'DeepSeek', 'Exa'] as const;
  * record never moves from the limited scope to the wide one but by the person's own
  * `on` with no `--repository`.
  */
-export const modelConsentSchema = z.object({
-  version: z.literal(2),
+const consentFields = {
   routerOrigin: z.url(),
   instructions: z.literal('applicable'),
   /** A worker reads the person's global Claude Code folder, session transcripts included. */
   reads: z.literal('claude-home'),
-  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
   /** The limited scope: only sessions inside these directories, whose workers get all of them. */
   repositories: z.array(z.string()).min(1).optional(),
   /** A ceiling named with `--max-job`. Absent, a job's cap is the per-call spend limit. */
   maxJobAtomic: z.string().regex(/^\d+$/).optional(),
+};
+export const modelConsentSchema = z.object({
+  ...consentFields,
+  version: z.literal(2),
+  recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek'), z.literal('Exa')]),
 });
 export type ModelConsent = z.infer<typeof modelConsentSchema>;
+
+/**
+ * A NEON JOB HAS NO TENJIN ROUTER AND NO CONSENT RECORD. The router never offers Neon, so a job
+ * starts only when the person, or a skill the person runs, asks for it by calling the door.
+ * Its settings and its transport carry this fixed marker where a DeepSeek job carries the
+ * router's origin. The seller is never named here: a job's seller comes from the provider row
+ * the door read, saved with the job.
+ */
+export const NEON_ROUTER_ORIGIN = 'tenjin:neon';
+/** Which provider's consent and worker a job or a call belongs to. */
+export type WorkerProvider = 'deepseek' | 'neon';
+/** The provider a job runs on: Neon only when its decision says so, else DeepSeek. */
+export function providerOf(job: { decision: Record<string, unknown> }): WorkerProvider {
+  return job.decision.provider === 'neon' ? 'neon' : 'deepseek';
+}
 
 /** The person's per-call spend limit, the same one the tool router applies to one paid call. */
 export function perCallLimitAtomic(config: PartialConfig): bigint {
@@ -93,10 +111,31 @@ export function disclosureCovers(repositories: readonly string[], path: string):
     (root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`),
   );
 }
-/** Separate inference consent: legacy native-tier/effort settings grant nothing. */
-export async function modelSettings(dataDir: string, cwd: string) {
+/**
+ * What a worker's job runs under. A DeepSeek job needs the person's saved consent. A Neon job
+ * needs none: the person or a skill they run asks for it, and only the router's own off switch
+ * and the person's spend limits apply. Legacy native-tier/effort settings grant nothing.
+ */
+export async function modelSettings(
+  dataDir: string,
+  cwd: string,
+  provider: WorkerProvider = 'deepseek',
+) {
   const config = await loadRawConfig(dataDir);
   const settings = await routerSettings({ cwd, dataDir, config });
+  if (provider === 'neon') {
+    const root = settings.enabled.value ? await realpath(cwd).catch(() => null) : null;
+    if (!root) return null;
+    return {
+      version: 1 as const,
+      scope: 'native-workspace' as const,
+      root,
+      repositories: [root],
+      maxJobAtomic: jobCapAtomic(undefined, perCallLimitAtomic(config)),
+      routerOrigin: NEON_ROUTER_ORIGIN as string,
+      context: settings.context.value,
+    };
+  }
   const block = config.router as Record<string, unknown> | undefined;
   const parsed = modelConsentSchema.safeParse(block?.subagentConsent);
   if (

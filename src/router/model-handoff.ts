@@ -10,9 +10,15 @@ import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore, routingAuthorizedAtomic, type NoOffer } from './model-job';
-import { modelSettings, type ModelSettings } from './model-settings';
+import {
+  modelSettings,
+  NEON_ROUTER_ORIGIN,
+  providerOf,
+  type ModelSettings,
+  type WorkerProvider,
+} from './model-settings';
 import { modelGithubRepositories } from './model-repositories';
-import type { ModelTransport } from './model-transport';
+import type { ModelTransport, WorkerTransport } from './model-transport';
 import type { ModelJob } from './model-job';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
@@ -28,6 +34,20 @@ import {
   type ClaudeWorkspace,
 } from './claude-workspace';
 import { homedir } from 'node:os';
+import { realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import {
+  neonMinimumJobAtomic,
+  NEON_DEFAULT_EFFORT,
+  NEON_EFFORTS,
+  NEON_TURN_MAX_TOKENS,
+  type NeonEffort,
+} from './neon-chat';
+import { neonJobLabel, neonTermsSchema, workerNameOf, type NeonTerms } from './neon-terms';
+import { NEON_CHANNEL_DEPOSIT_CAP_ATOMIC } from './neon-seller';
+import { neonFirstCallApproval, neonRevisionApproval } from './neon-approve';
+import { neonFirstCallNeedAtomic, neonJobRoom, neonNextCallNeedAtomic } from './neon-transport';
+import { neonLimits, neonShortfall } from './neon-room';
 import { resolve } from 'node:path';
 import { requestToolAccess, setsOwnMode, WORKER_BUILTIN_AGENTS, workerAgent } from './agent-tools';
 import { SUBAGENT_TOOL } from './names';
@@ -46,8 +66,8 @@ import { callLimitSchema } from './model-pace';
  * worker suits it. What binds any assignment still binds this text, since it goes to
  * another model: the person's own restrictions, and planning, which stays native.
  */
-const continuationPolicy =
-  "This follow-up continues a DeepSeek worker that was already accepted, with its history. It is not a new offer, and its suitability is not judged again. Binding restrictions apply to its text as to any assignment: an explicit instruction of the person that restricts this worker's model, privacy, disclosure or paid inference still binds, and plan authoring and substantive plan review stay native. Where the follow-up would break one of those, cancel it and do that work natively. It carries no permission: the worker keeps its permission mode, rules and sandbox, and only the person can approve what those ask about. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.";
+const continuationPolicy = (name: string) =>
+  `This follow-up continues a ${name} worker that was already accepted, with its history. It is not a new offer, and its suitability is not judged again. Binding restrictions apply to its text as to any assignment: an explicit instruction of the person that restricts this worker's model, privacy, disclosure or paid inference still binds, and plan authoring and substantive plan review stay native. Where the follow-up would break one of those, cancel it and do that work natively. It carries no permission: the worker keeps its permission mode, rules and sandbox, and only the person can approve what those ask about. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.`;
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -92,7 +112,11 @@ export interface ModelSession {
  * What the offer tells the parent of its consent: under the wide scope the directories are
  * the worker's own, under the limited one the directories the person named.
  */
-function offerConsent(settings: ModelSettings, nativeRepositories: readonly string[]) {
+function offerConsent(
+  settings: ModelSettings,
+  nativeRepositories: readonly string[],
+  provider: WorkerProvider = 'deepseek',
+) {
   const repositories =
     settings.scope === 'native-workspace' ? [...nativeRepositories] : settings.repositories;
   return {
@@ -101,9 +125,14 @@ function offerConsent(settings: ModelSettings, nativeRepositories: readonly stri
     repository: settings.root,
     repositories,
     githubRepositories: modelGithubRepositories(repositories),
-    routerOrigin: settings.routerOrigin,
-    // As the consent record names them: Exa reads a page the worker's WebFetch could not fetch.
-    recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+    // A Neon job has no router and no consent record: its provider is the one its row names.
+    ...(provider === 'neon'
+      ? {}
+      : {
+          routerOrigin: settings.routerOrigin,
+          // As the consent record names them: Exa reads a page the worker's WebFetch could not fetch.
+          recipients: ['Tenjin', 'DeepSeek', 'Exa'],
+        }),
   };
 }
 
@@ -223,13 +252,25 @@ export type CaptureTiming = {
 export class ModelHandoff {
   readonly store: ModelJobStore;
   readonly conversations: ModelConversationStore;
-  constructor(private options: { dataDir: string; transport: ModelTransport }) {
+  constructor(
+    private options: {
+      dataDir: string;
+      transport: ModelTransport;
+      /** The Neon worker's transport, made when a Neon job's follow-up needs it. */
+      neonTransport?: () => Promise<WorkerTransport>;
+      /** The door's one free lookup of the Neon provider row. A failure fails the job. */
+      neonTerms?: (signal?: AbortSignal) => Promise<NeonTerms>;
+    },
+  ) {
     this.store = new ModelJobStore(options.dataDir);
     this.conversations = new ModelConversationStore(options.dataDir);
   }
-  private async currentConsent(cwd: string) {
-    const settings = await modelSettings(this.options.dataDir, cwd);
-    return settings?.routerOrigin === this.options.transport.origin ? settings : null;
+  private async currentConsent(cwd: string, provider: WorkerProvider = 'deepseek') {
+    const settings = await modelSettings(this.options.dataDir, cwd, provider);
+    return settings?.routerOrigin ===
+      (provider === 'neon' ? NEON_ROUTER_ORIGIN : this.options.transport.origin)
+      ? settings
+      : null;
   }
   /** Records why a call got no offer and answers that it runs natively. Codes only. */
   private async stay(
@@ -269,7 +310,7 @@ export class ModelHandoff {
     const reference = ownedModelReference(native, nativeTool);
     if (reference.owned) {
       if (reference.error || !reference.handle || !reference.task)
-        return continuationRefusal(reference.error ?? 'Unavailable DeepSeek continuation');
+        return continuationRefusal(reference.error ?? 'Unavailable worker continuation');
       try {
         return await this.continue(
           session,
@@ -281,7 +322,7 @@ export class ModelHandoff {
           direct,
         );
       } catch {
-        return continuationRefusal('DeepSeek continuation is unavailable or interrupted');
+        return continuationRefusal('Worker continuation is unavailable or interrupted');
       }
     }
     if (nativeTool === 'SendMessage' || isModelWorkerProcess()) return { action: 'native' };
@@ -293,6 +334,9 @@ export class ModelHandoff {
     if (!claudeWorkerPermissionMode(session.claudePermissionMode))
       return stay('permission_mode', { detail: modeName(session.claudePermissionMode) });
     signal?.throwIfAborted();
+    // A Linux Node without node:sqlite cannot take the job store's lock, which the repeat check
+    // just below needs: this comes first, so the reason is the one that is kept. No offer, no fee.
+    if (!lockSupport().ok) return stay('worker_unqualified', { detail: 'linux_needs_node_22_13' });
     // The parent kept a held call native by sending it again unchanged: no new routing, no fee.
     const kept = await this.store.nativeRepeat(
       session.sessionId,
@@ -322,8 +366,6 @@ export class ModelHandoff {
           homeDir: homedir(),
         });
     if (custom && 'unmatched' in custom) return stay('input_filter', { detail: custom.unmatched });
-    // A Linux Node without node:sqlite cannot take the worker's locks: no offer, no fee.
-    if (!lockSupport().ok) return stay('worker_unqualified', { detail: 'linux_needs_node_22_13' });
     const worker = await qualifiedModelWorker(
       session.cwd,
       agentType,
@@ -359,6 +401,129 @@ export class ModelHandoff {
     }
     return this.route(session, job, signal, timing);
   }
+  /**
+   * THE EXPLICIT DOOR to a Neon worker: the parent chose it, so there is no held call, no
+   * routing and no offer to judge. The person, or a skill the person runs, asks for Neon by
+   * calling it; the router never offers it, and no setting (the DeepSeek subagent switch, on or
+   * off, included) gates it. It reads its provider row once, free, and saves the row's terms
+   * with the job: its model, seller, payee and price rule. A lookup that fails fails the job
+   * with nothing sent. It makes the job's record, the way a held call's offer does, and answers
+   * with the offer the accept then runs. It refuses in every case the DeepSeek worker would
+   * also stay out: no permission mode, a Windows host, a worker that does not qualify, a job
+   * ceiling with no room for one call. It sends nothing and pays nothing.
+   */
+  async neon(
+    session: ModelSession,
+    input: { prompt: string; description?: string; subagent_type?: string; effort?: string },
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const refuse = (reason: string) => ({ action: 'refused' as const, reason, charged: false });
+    if (isModelWorkerProcess()) return refuse('A worker starts no other worker.');
+    const settings = await this.currentConsent(session.cwd, 'neon');
+    if (!settings)
+      return refuse('Tenjin is switched off here. Nothing was sent and nothing was charged.');
+    if (!claudeWorkerPermissionMode(session.claudePermissionMode))
+      return refuse(
+        `A Neon worker cannot run in this session's permission mode (${modeName(session.claudePermissionMode)}).`,
+      );
+    if (!lockSupport().ok)
+      return refuse('A Neon worker needs Node 22.13 or later on Linux; this one cannot run it.');
+    const effort = input.effort ?? NEON_DEFAULT_EFFORT;
+    if (!(NEON_EFFORTS as readonly string[]).includes(effort))
+      return refuse(`The effort is one of ${NEON_EFFORTS.join(', ')}. Nothing was sent.`);
+    const agentType = input.subagent_type ?? 'general-purpose';
+    signal?.throwIfAborted();
+    if (!this.options.neonTerms)
+      return refuse('The provider of a Neon job cannot be looked up here. Nothing was sent.');
+    let terms: NeonTerms;
+    try {
+      terms = await this.options.neonTerms(signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return refuse(
+        `The Tenjin router did not give the provider for this job${error instanceof Error && error.message ? ` (${error.message})` : ''}. Nothing was sent and nothing was charged.`,
+      );
+    }
+    signal?.throwIfAborted();
+    const worker = await qualifiedModelWorker(
+      session.cwd,
+      agentType,
+      this.options.dataDir,
+      signal,
+      session.claudePermissionMode,
+      'neon',
+    );
+    if (!worker?.claudeWorkspace)
+      return refuse(
+        'This Claude Code, its login, policy, sandbox or the subagent type does not qualify for a worker here.',
+      );
+    if (settings.maxJobAtomic < neonMinimumJobAtomic(terms))
+      return refuse('The job ceiling has no room for one Neon call. Raise the per-call limit.');
+    // A DRAFT THE LIMITS CANNOT CARRY IS ASKED ABOUT, NOT SENT. Its first call is sized from the
+    // draft and the row's price rule, and met against the per-call limit, the job's ceiling and
+    // the day's budget by the one rule the transport also uses (neon-room.ts). Where a grant can
+    // carry it, the answer is the quote and the `approve` call, and the queued job does not run
+    // before that yes; where none can (more than one channel deposit holds), it is refused.
+    const need = neonFirstCallNeedAtomic(terms, Buffer.byteLength(input.prompt));
+    const shortfall = neonShortfall(
+      need,
+      await neonLimits({ dataDir: this.options.dataDir }, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC),
+      { jobLeftAtomic: settings.maxJobAtomic, approvedLeftAtomic: 0n },
+    );
+    if (shortfall && 'impossible' in shortfall)
+      return refuse(
+        'This draft is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent and nothing was charged. Send a shorter draft.',
+      );
+    const native = {
+      prompt: input.prompt,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      subagent_type: agentType,
+    };
+    const job = await this.store.offer({
+      sessionId: session.sessionId,
+      turnId: session.turnId,
+      // A door call is no held call: its id is its own, so a repeat is a second job.
+      callId: `neon-${randomUUID()}`,
+      root: settings.root,
+      task: input.prompt,
+      native,
+      decision: {
+        action: 'model',
+        provider: 'neon',
+        model: terms.model,
+        routerOrigin: NEON_ROUTER_ORIGIN,
+        // The row's terms, saved: every call, revision and refund of this job uses these.
+        neonTerms: terms,
+        neonEffort: effort as NeonEffort,
+        // No routing call was paid: the job starts with nothing spent.
+        routingAuthorizedAtomic: '0',
+        maxOutputTokens: NEON_TURN_MAX_TOKENS,
+        claudePermissionMode: session.claudePermissionMode,
+        claudeWorkspace: worker.claudeWorkspace,
+      },
+      capAtomic: settings.maxJobAtomic.toString(),
+    });
+    if (shortfall)
+      return neonFirstCallApproval(
+        this.options.dataDir,
+        job,
+        workerHandleFor(job.id),
+        terms,
+        shortfall.grantAtomic,
+        need,
+        shortfall.why,
+      );
+    return {
+      action: 'offer',
+      started: false,
+      offer_id: job.id,
+      label: terms.label,
+      capAtomic: job.capAtomic,
+      workspace: worker.claudeWorkspace,
+      consent: offerConsent(settings, nativeRepositories(worker.claudeWorkspace), 'neon'),
+      worker_handle: workerHandleFor(job.id),
+    };
+  }
   private async continue(
     session: ModelSession,
     callId: string,
@@ -368,23 +533,32 @@ export class ModelHandoff {
     signal?: AbortSignal,
     direct = false,
   ) {
-    const { dataDir, transport } = this.options;
-    const settings = await this.currentConsent(session.cwd);
+    const { dataDir } = this.options;
+    const here = await realpath(session.cwd).catch(() => null);
     if (
-      !settings ||
+      !here ||
       isModelWorkerProcess() ||
       !claudeWorkerPermissionMode(session.claudePermissionMode)
     )
       return continuationRefusal('Current model consent or Claude permission mode is unavailable');
     const owner = {
       parentSessionId: session.sessionId,
-      root: settings.root,
-      configDir: claudeWorkerConfigDir(settings.root),
+      root: here,
+      configDir: claudeWorkerConfigDir(here),
     };
     const conversation = await this.conversations.lookup(handle, owner);
     if (!conversation || !['idle', 'offered'].includes(conversation.state))
       return continuationRefusal('Worker history is foreign, unavailable or already active');
     const original = conversation.originalJob;
+    // A follow-up runs under the consent of the provider its worker began under.
+    const provider = providerOf(original);
+    const settings = await this.currentConsent(session.cwd, provider);
+    if (!settings || settings.root !== here)
+      return continuationRefusal('Current model consent or Claude permission mode is unavailable');
+    const transport =
+      provider === 'neon' && this.options.neonTransport
+        ? await this.options.neonTransport()
+        : this.options.transport;
     if (
       native.subagent_type !== undefined &&
       native.subagent_type !== (original.native.subagent_type ?? 'general-purpose')
@@ -396,6 +570,36 @@ export class ModelHandoff {
     // uncertain is settled with the server before it counts against this one.
     await transport.reconcile(original, signal ?? new AbortController().signal);
     await transport.requireResumeBudget(original);
+    // A NEON REVISION PAST THE JOB CEILING is asked about, not refused: nothing is sent, and the
+    // answer is the quote of one more ceiling for the same worker (`approve` grants it).
+    if (provider === 'neon') {
+      const terms = neonTermsSchema.safeParse(original.decision.neonTerms);
+      if (!terms.success) return continuationRefusal('Original Neon seller terms are unavailable');
+      const room = await neonJobRoom(dataDir, original, settings.maxJobAtomic);
+      const need = await neonNextCallNeedAtomic(dataDir, original, terms.data);
+      const needed =
+        need > neonMinimumJobAtomic(terms.data) ? need : neonMinimumJobAtomic(terms.data);
+      // The same rule as the transport's, over the job's budget and its unused approval alike.
+      const shortfall = neonShortfall(
+        needed,
+        await neonLimits({ dataDir }, NEON_CHANNEL_DEPOSIT_CAP_ATOMIC),
+        room,
+      );
+      if (shortfall && 'impossible' in shortfall)
+        return continuationRefusal(
+          'The next call is larger than one Neon call can carry (more than one channel deposit holds). Nothing was sent.',
+        );
+      if (shortfall)
+        return neonRevisionApproval(
+          dataDir,
+          original,
+          handle,
+          terms.data,
+          shortfall.grantAtomic,
+          room.jobLeftAtomic,
+          shortfall.why,
+        );
+    }
     await prepareClaudeWorkerSession(
       { resume: conversation.sdkSessionId, onSession: async () => {} },
       settings.root,
@@ -406,6 +610,7 @@ export class ModelHandoff {
       dataDir,
       signal,
       session.claudePermissionMode,
+      provider,
     );
     const originalWorkspace = savedClaudeWorkspace(original.decision.claudeWorkspace);
     if (
@@ -418,7 +623,7 @@ export class ModelHandoff {
         'Current native workspace scope changed or its original disclosure is unavailable',
       );
     signal?.throwIfAborted();
-    const latest = await this.currentConsent(session.cwd);
+    const latest = await this.currentConsent(session.cwd, provider);
     if (
       !latest ||
       latest.root !== settings.root ||
@@ -464,17 +669,20 @@ export class ModelHandoff {
       worker_handle: handle,
       continuation: true,
       ...(direct ? { direct: true } : {}),
-      label: 'DeepSeek V4.1 Flash 1017',
+      label: provider === 'neon' ? neonJobLabel(original.decision) : 'DeepSeek V4.1 Flash 1017',
       routingFeeAtomic: '0',
       proxyFeePercent: 5,
       capAtomic: cap,
-      reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
-      parentPolicy: continuationPolicy,
+      reason: `Continue the owned ${provider === 'neon' ? 'Neon' : 'DeepSeek'} worker with its history and remaining original budget`,
+      parentPolicy: continuationPolicy(workerNameOf(original.decision)),
       workspace: worker.claudeWorkspace,
       ...droppedNote(worker.claudeWorkspace),
-      consent: offerConsent(latest, modelClaudeRepositories(worker.claudeWorkspace, latest)),
-      instruction:
-        "Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a DeepSeek worker. Do not send a Tenjin handle to native tools. No assignment has been sent.",
+      consent: offerConsent(
+        latest,
+        modelClaudeRepositories(worker.claudeWorkspace, latest),
+        provider,
+      ),
+      instruction: `Run this follow-up with subagent({offer_id}) as one call; to stop it, subagent({cancel: offer_id}). It charges no routing fee, and its inference is charged to the original job's remaining budget. Cancel it where the parentPolicy's binding restrictions forbid this text for a ${workerNameOf(original.decision)} worker. Do not send a Tenjin handle to native tools. No assignment has been sent.`,
     };
   }
   private async route(
