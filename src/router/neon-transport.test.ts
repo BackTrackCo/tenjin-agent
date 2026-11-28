@@ -227,15 +227,20 @@ it('keeps the funded channel config the seller named, for a withdrawal that cann
 // Failure caught by review: the channel config was kept only after a paid reply succeeded, so a
 // funded first request that got a 503 left a deposit that `tenjin refund` and the timed
 // withdrawal could not recover while the seller was offline. It is kept before the payment leaves.
-it('keeps the funded channel config when the paid request fails with a 503', async () => {
+it('keeps the channel config and deposit deadline before sending a paid request', async () => {
   const { ctx, repo, data } = await fixture();
   const account = privateKeyToAccount(generatePrivateKey());
   const secret = 'SECRET-DRAFT-TEXT';
   const bodies: string[] = [];
+  const refunds = new NeonRefunds({ dataDir: data, payer: () => ({ refund: async () => ({}) }) });
+  let holdBeforeSending: number | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
     const request = input instanceof Request ? input.clone() : new Request(input, init);
     bodies.push(await request.clone().text());
-    if (request.headers.has('payment-signature')) return new Response('down', { status: 503 });
+    if (request.headers.has('payment-signature')) {
+      holdBeforeSending = (await refunds.entries())[0]?.holdUntil;
+      return new Response('down', { status: 503 });
+    }
     return new Response('{}', {
       status: 402,
       headers: {
@@ -280,10 +285,9 @@ it('keeps the funded channel config when the paid request fails with a 503', asy
   // The request that is quoted is the request that is paid: the same body both times.
   expect(bodies[0]).toContain(secret);
   expect(bodies[0]).toBe(bodies[1]);
-  const [entry] = await new NeonRefunds({
-    dataDir: data,
-    payer: () => ({ refund: async () => ({}) }),
-  }).entries();
+  const [entry] = await refunds.entries();
+  expect(holdBeforeSending).toBeGreaterThan(Date.now());
+  expect(entry?.holdUntil).toBe(holdBeforeSending);
   expect(entry!.channel).toEqual({
     salt: expect.stringMatching(/^0x[0-9a-f]{64}$/),
     payer: account.address,
@@ -487,8 +491,8 @@ it('keeps a call the seller answered 402 uncharged-unproven: counted, with its a
 it('retires a channel whose earlier job left a voucher unsettled, before the next call pays on it', async () => {
   const { ctx, repo, data } = await fixture();
   const refunds = new NeonRefunds({ dataDir: data, payer: () => ({ refund: async () => ({}) }) });
-  await refunds.open('old-job', TERMS);
-  await refunds.saveChannel(TERMS, {
+  const { salt } = await refunds.open('old-job', TERMS);
+  await refunds.saveChannel(TERMS, salt, {
     payer: '0x00000000000000000000000000000000000000c1',
     receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
     withdrawDelay: 900,

@@ -260,6 +260,8 @@ export type BatchSellerOptions = {
    * nothing is signed.
    */
   onChannel?: (channel: ChannelConfig) => Promise<void>;
+  /** Keep the deposit's expiry before the signed authorization leaves the client. */
+  onDeposit?: (validBeforeMs: number) => Promise<void>;
   /** The channel's salt, part of its identity: none is the SDK's own, and a retired channel's successor has its own. */
   salt?: Hex;
   /** What the person approved past their per-call limit, if anything is left of it. */
@@ -443,10 +445,14 @@ export class BatchSeller {
       return undefined;
     });
     const base = this.fetcher();
-    const watched: typeof fetch = (input, init) => {
+    const watched: typeof fetch = async (input, init) => {
       // The payment wrapper calls fetch with a Request and no init: read its headers too.
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
-      if (headers.has('payment-signature')) this.transmitted = true;
+      if (headers.has('payment-signature')) {
+        if (this.signed) await this.options.onDeposit?.(Number(this.signed.validBefore) * 1000);
+        signal.throwIfAborted();
+        this.transmitted = true;
+      }
       return base(input, { ...init, signal });
     };
     let response: Response;

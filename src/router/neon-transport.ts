@@ -17,7 +17,7 @@ import { readJsonFile, writePrivate } from './store-files';
 import {
   BatchSeller,
   channelKey,
-  type ChannelConfig,
+  type BatchSellerOptions,
   type PaymentApproval,
   type SignedDeposit,
   ChannelDepositRefused,
@@ -407,7 +407,13 @@ export class NeonTransport {
     this.refunds = new NeonRefunds({
       dataDir: options.dataDir,
       payer: (terms, salt) =>
-        this.batchPayer(terms, async () => refusedDeposit(), undefined, undefined, undefined, salt),
+        this.batchPayer(
+          terms,
+          async () => refusedDeposit(),
+          undefined,
+          undefined,
+          salt ? { salt: salt as Hex } : undefined,
+        ),
       live:
         options.liveJob ??
         ((jobId) => (this.store ??= new ModelJobStore(options.dataDir)).runnerLive(jobId)),
@@ -613,7 +619,7 @@ export class NeonTransport {
     );
     // A record an older build left: nothing says when its authorization lapses, so it is held an hour.
     if (active && (await this.leftUnsettled(active.jobIds.slice(-50))))
-      await this.refunds.retire(terms, this.now() + 3_600_000);
+      await this.refunds.retire(terms, active.salt, this.now() + 3_600_000);
     const { salt } = await this.refunds.open(job.id, terms);
     // A deposit meets the person's limits like any payment, and is sized to what they admit.
     const batch = this.batchPayer(
@@ -637,10 +643,11 @@ export class NeonTransport {
             },
           }
         : undefined,
-      // The channel's own config is kept BEFORE the first payment leaves, so a call that was
-      // funded and then failed still leaves what a withdrawal needs without asking the seller.
-      (channel) => this.refunds.saveChannel(terms, channel),
-      salt,
+      {
+        ...(salt ? { salt: salt as Hex } : {}),
+        onChannel: (channel) => this.refunds.saveChannel(terms, salt, channel),
+        onDeposit: (validBeforeMs) => this.refunds.holdDeposit(terms, salt, validBeforeMs),
+      },
     );
     let answer;
     try {
@@ -659,6 +666,7 @@ export class NeonTransport {
         batch.transmitted,
         room,
         signal,
+        salt,
         batch.signed,
       );
     }
@@ -679,6 +687,7 @@ export class NeonTransport {
         true,
         answer.ceilingAtomic ?? room,
         signal,
+        salt,
         batch.signed,
       );
     // The real charge where the seller said it; else the ceiling, which it may not exceed.
@@ -704,13 +713,13 @@ export class NeonTransport {
     // A seller that named no charge leaves its voucher unsettled: the channel is retired.
     if (!settled)
       await this.refunds
-        .retire(terms, batch.signed ? Number(batch.signed.validBefore) * 1000 : undefined)
+        .retire(terms, salt, batch.signed ? Number(batch.signed.validBefore) * 1000 : undefined)
         .catch(() => undefined);
     if (process.env[NEON_CAPTURE_ENV] === '1')
       await this.capture(job, n, capturedRequest(chat), answer.text).catch(() => undefined);
     // The funded channel's own config is kept, so a withdrawal never has to ask the seller.
     if (answer.channel)
-      await this.refunds.saveChannel(terms, answer.channel).catch(() => undefined);
+      await this.refunds.saveChannel(terms, salt, answer.channel).catch(() => undefined);
     await this.ledger(job, terms, n, quoted, settled);
     const call: NeonCall = {
       n,
@@ -768,8 +777,7 @@ export class NeonTransport {
     admit: (amountAtomic: bigint) => Promise<bigint | void>,
     requestKey = `neon:${Date.now()}`,
     approval?: PaymentApproval,
-    onChannel?: (channel: ChannelConfig) => Promise<void>,
-    salt?: string,
+    channel?: Pick<BatchSellerOptions, 'salt' | 'onChannel' | 'onDeposit'>,
   ): BatchLike {
     if (this.options.batch) return this.options.batch(terms, admit);
     return new BatchSeller({
@@ -780,8 +788,7 @@ export class NeonTransport {
       authorizer: this.options.authorizer,
       requestKey,
       ...(approval ? { approval } : {}),
-      ...(onChannel ? { onChannel } : {}),
-      ...(salt ? { salt: salt as Hex } : {}),
+      ...channel,
       ...(this.options.readContract ? { readContract: this.options.readContract } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
       ...(this.options.destination ? { destination: this.options.destination } : {}),
@@ -805,6 +812,7 @@ export class NeonTransport {
     transmitted: boolean,
     atRisk: bigint,
     signal: AbortSignal,
+    salt: string | undefined,
     signed?: SignedDeposit,
   ): Promise<unknown> {
     if (signal.aborted && !transmitted) return signal.reason ?? error;
@@ -841,7 +849,7 @@ export class NeonTransport {
     // A voucher left unsettled: the channel is never deposited into again.
     if (savedTerms)
       await this.refunds
-        .retire(savedTerms, signed ? Number(signed.validBefore) * 1000 : undefined)
+        .retire(savedTerms, salt, signed ? Number(signed.validBefore) * 1000 : undefined)
         .catch(() => undefined);
     if (signed?.onlyThroughDeposit && savedTerms)
       await appendPaidRecord(this.options.dataDir, {

@@ -231,8 +231,7 @@ export class NeonRefunds {
 
   /**
    * A job paid on this channel: it is on record before any money moves, under the job's terms.
-   * It names the channel's salt: none for the first channel of a payer and seller, and a salt of
-   * its own for one that follows a retired channel.
+   * It names the channel's salt. Only journals from before salts were added can have none.
    */
   async open(jobId: string, terms: NeonTerms): Promise<{ salt?: string }> {
     const key = channelKey(terms);
@@ -292,36 +291,59 @@ export class NeonRefunds {
    * The refund and the timed withdrawal still reach the retired channel. `holdUntilMs` is when a
    * deposit authorization signed for it can no longer arrive.
    */
-  async retire(terms: NeonTerms, holdUntilMs?: number): Promise<void> {
+  async retire(terms: NeonTerms, salt: string | undefined, holdUntilMs?: number): Promise<void> {
     const key = channelKey(terms);
     await this.change((channels) =>
-      channels.map((entry) =>
-        entry.key !== key
-          ? entry
-          : {
-              ...entry,
-              key: `${key}.${this.now().toString(36)}`,
-              retired: true,
-              at: this.now(),
-              ...(holdUntilMs !== undefined ? { holdUntil: holdUntilMs } : {}),
-            },
-      ),
+      channels.map((entry) => {
+        if (entry.salt !== salt || channelKey(entry.terms) !== key) return entry;
+        const held =
+          holdUntilMs === undefined
+            ? entry
+            : { ...entry, holdUntil: Math.max(entry.holdUntil ?? 0, holdUntilMs) };
+        return entry.retired
+          ? held
+          : { ...held, key: `${key}.${salt ?? 'zero'}`, retired: true, at: this.now() };
+      }),
     );
+  }
+
+  private async updateActive(
+    terms: NeonTerms,
+    salt: string | undefined,
+    update: (entry: ChannelEntry) => ChannelEntry,
+  ) {
+    const key = channelKey(terms);
+    await this.change((channels) => {
+      const active = channels.find((entry) => entry.key === key && entry.salt === salt);
+      if (!active) throw new Error('The Neon channel was retired before the payment was sent');
+      return channels.map((entry) => (entry === active ? update(entry) : entry));
+    });
   }
 
   /**
    * Keeps the config of the channel a job funded. The first one saved stays: a later call whose
    * seller names another receiver authorizer or delay is not the channel the money is in.
    */
-  async saveChannel(terms: NeonTerms, channel: SavedChannel): Promise<void> {
-    const key = channelKey(terms);
-    await this.change((channels) =>
-      channels.map((entry) =>
-        entry.key === key && entry.channel === undefined
-          ? { ...entry, channel: entry.salt ? { ...channel, salt: entry.salt } : channel }
-          : entry,
-      ),
+  async saveChannel(
+    terms: NeonTerms,
+    salt: string | undefined,
+    channel: SavedChannel,
+  ): Promise<void> {
+    await this.updateActive(terms, salt, (entry) =>
+      entry.channel ? entry : { ...entry, channel: salt ? { ...channel, salt } : channel },
     );
+  }
+
+  /** Keeps every deposit's deadline before sending it, even when the caller cannot record the reply. */
+  async holdDeposit(
+    terms: NeonTerms,
+    salt: string | undefined,
+    holdUntilMs: number,
+  ): Promise<void> {
+    await this.updateActive(terms, salt, (entry) => ({
+      ...entry,
+      holdUntil: Math.max(entry.holdUntil ?? 0, holdUntilMs),
+    }));
   }
 
   private async record(key: string, result: RefundResult, epoch: number) {
@@ -412,8 +434,9 @@ export class NeonRefunds {
    */
   async retry(chain?: WithdrawChain): Promise<ChannelEntry[]> {
     for (const entry of await this.entries()) {
-      if (entry.state === 'refunded' || entry.state === 'empty' || entry.state === 'withdrawn')
-        continue;
+      const complete =
+        entry.state === 'refunded' || entry.state === 'empty' || entry.state === 'withdrawn';
+      if (complete && (!entry.retired || !entry.channel || !chain)) continue;
       // The same rule as a job's end: a channel a live job in another session pays from is left
       // alone, whether for a refund or for a withdrawal that would pull its money out from under it.
       if (await this.inUse(entry)) {
@@ -429,10 +452,18 @@ export class NeonRefunds {
         );
         continue;
       }
-      if (entry.state !== 'withdrawal_started') {
+      let pendingWithdrawal = entry.state === 'withdrawal_started';
+      if (complete && chain) {
+        // A previously signed deposit can land after a refund or withdrawal completed.
+        const seen = await chain.channel(entry.terms, entry.channel).catch(() => undefined);
+        if (!seen || (seen.balanceAtomic <= seen.claimedAtomic && seen.pendingAtomic === 0n))
+          continue;
+        pendingWithdrawal = seen.pendingAtomic > 0n;
+      }
+      if (!pendingWithdrawal) {
         const result = await cooperativeRefund(this.options.payer(entry.terms, entry.salt));
         await this.record(entry.key, result, entry.epoch);
-        if (result.state !== 'failed' || !chain) continue;
+        if (result.state === 'refunded' || (result.state === 'empty' && !entry.retired)) continue;
       }
       if (chain) await this.withdraw(entry, chain);
     }
@@ -450,11 +481,11 @@ export class NeonRefunds {
    * created for it, so it never held anything. A channel the read cannot prove stays.
    */
   async prune(chain?: WithdrawChain): Promise<number> {
-    const finished = new Set<string>();
+    const finished = new Map<string, ChannelEntry>();
     for (const entry of await this.entries()) {
       if (!entry.retired) continue;
       if (!entry.channel) {
-        finished.add(entry.key);
+        finished.set(entry.key, entry);
         continue;
       }
       // Every deposit authorization signed for it is past its expiry, and no job of it is live.
@@ -462,14 +493,23 @@ export class NeonRefunds {
       try {
         const seen = await chain.channel(entry.terms, entry.channel);
         if (seen.balanceAtomic === seen.claimedAtomic && seen.pendingAtomic === 0n)
-          finished.add(entry.key);
+          finished.set(entry.key, entry);
       } catch {
         // Unproven stays.
       }
     }
     if (finished.size === 0) return 0;
-    await this.change((channels) => channels.filter((entry) => !finished.has(entry.key)));
-    return finished.size;
+    let removed = 0;
+    await this.change((channels) =>
+      channels.filter((entry) => {
+        const checked = finished.get(entry.key);
+        // A call may extend the hold while the chain read is in flight.
+        if (!checked || entry.holdUntil !== checked.holdUntil) return true;
+        removed += 1;
+        return false;
+      }),
+    );
+    return removed;
   }
 
   private async withdraw(entry: ChannelEntry, chain: WithdrawChain) {

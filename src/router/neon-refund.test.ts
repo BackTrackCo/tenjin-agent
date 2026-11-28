@@ -120,17 +120,21 @@ it('retires a channel and opens the next with a salt of its own, and refunds bot
     receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
     withdrawDelay: 900,
   };
-  await refunds.saveChannel(TERMS, config);
-  await refunds.retire(TERMS);
+  await refunds.saveChannel(TERMS, first.salt, config);
+  await refunds.retire(TERMS, first.salt, 1_000);
   const next = await refunds.open('job-a', TERMS);
   expect(next.salt).toMatch(/^0x[0-9a-f]{64}$/);
-  await refunds.saveChannel(TERMS, config);
+  await refunds.saveChannel(TERMS, next.salt, config);
+  // Late outcomes apply to the original salt and can only extend its deadline.
+  await refunds.retire(TERMS, first.salt, 3_000);
+  await refunds.retire(TERMS, first.salt, 2_000);
   const entries = await refunds.entries();
   expect(entries).toHaveLength(2);
   const old = entries.find((entry) => entry.retired)!;
   expect(old).toMatchObject({
     jobIds: ['job-a'],
     channel: { ...config, salt: first.salt },
+    holdUntil: 3_000,
   });
   expect(old.salt).toBe(first.salt);
   expect(next.salt).not.toBe(first.salt);
@@ -160,7 +164,7 @@ it('refuses to write over a journal it cannot read, and keeps the file as it is'
   for (const [, content] of cases) {
     await writeFile(path, content);
     await expect(refunds.open('job-a', TERMS)).rejects.toThrow(/cannot be read/);
-    await expect(refunds.retire(TERMS)).rejects.toThrow(/cannot be read/);
+    await expect(refunds.retire(TERMS, undefined)).rejects.toThrow(/cannot be read/);
     await expect(refunds.entries()).rejects.toThrow(/Nothing was changed/);
     expect(await readFile(path, 'utf8')).toBe(content);
   }
@@ -192,12 +196,12 @@ it('prunes a retired channel only on the proof that nothing is left in it', asyn
   };
   // Four retired channels with a payment behind them, and one that never had one.
   for (const seed of ['1', '2', '3', '4']) {
-    await refunds.open(`job-${seed}`, TERMS);
-    await refunds.saveChannel(TERMS, channel(seed));
-    await refunds.retire(TERMS);
+    const { salt } = await refunds.open(`job-${seed}`, TERMS);
+    await refunds.saveChannel(TERMS, salt, channel(seed));
+    await refunds.retire(TERMS, salt);
   }
-  await refunds.open('job-none', TERMS);
-  await refunds.retire(TERMS);
+  const emptyChannel = await refunds.open('job-none', TERMS);
+  await refunds.retire(TERMS, emptyChannel.salt);
   // One active channel, never retired.
   await refunds.open('job-live', TERMS);
   expect(await refunds.entries()).toHaveLength(6);
@@ -267,9 +271,9 @@ it('keeps a retired entry while an authorization can still arrive or a job is li
   };
   const salts: string[] = [];
   salts.push((await refunds.open('job-1', TERMS)).salt!);
-  await refunds.saveChannel(TERMS, config);
+  await refunds.saveChannel(TERMS, salts[0], config);
   // Retired with a deposit authorization that expires at 2,000,000.
-  await refunds.retire(TERMS, 2_000_000);
+  await refunds.retire(TERMS, salts[0], 2_000_000);
   // The channel reads empty, but the authorization has not expired: kept, with its salt.
   expect(await refunds.prune(empty as never)).toBe(0);
   clock = 2_000_001;
@@ -280,16 +284,74 @@ it('keeps a retired entry while an authorization can still arrive or a job is li
   const failing = { ...empty, channel: async () => Promise.reject(new Error('rpc down')) };
   expect(await refunds.prune(failing as never)).toBe(0);
   expect((await refunds.entries()).filter((entry) => entry.retired)).toHaveLength(1);
+  // A newer hold recorded while the chain read was in flight also keeps the entry.
+  expect(
+    await refunds.prune({
+      ...empty,
+      channel: async () => {
+        await refunds.retire(TERMS, salts[0], 3_000_000);
+        return empty.channel();
+      },
+    }),
+  ).toBe(0);
+  clock = 3_000_001;
   // Expired, empty, no pending withdrawal, no live job: pruned.
   expect(await refunds.prune(empty as never)).toBe(1);
   expect(await refunds.entries()).toEqual([]);
   // The next channel never reuses an earlier identity, though no record of it is left.
   salts.push((await refunds.open('job-2', TERMS)).salt!);
-  await refunds.retire(TERMS, 1);
+  await refunds.retire(TERMS, salts[1], 1);
   await refunds.prune(empty as never);
   salts.push((await refunds.open('job-3', TERMS)).salt!);
   expect(new Set(salts).size).toBe(3);
   expect(salts.every((salt) => /^0x[0-9a-f]{64}$/.test(salt) && !/^0x0+$/.test(salt))).toBe(true);
+});
+
+it('recovers funds that arrive after a retired channel was marked empty', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'neon-refund-'));
+  const refunds = new NeonRefunds({
+    dataDir: dir,
+    now: () => 1_000,
+    payer: () => ({
+      refund: async () => {
+        throw new Error('no remaining balance');
+      },
+    }),
+  });
+  const { salt } = await refunds.open('job-a', TERMS);
+  const config = {
+    payer: '0x00000000000000000000000000000000000000c1',
+    receiverAuthorizer: '0x3721824a31197dcDD2984cF43b92B6cc8A87c0Fb',
+    withdrawDelay: 900,
+  };
+  await refunds.saveChannel(TERMS, salt, config);
+  await refunds.retire(TERMS, salt, 2_000);
+  let balance = 0n;
+  const attempts: bigint[] = [];
+  const chain = {
+    channel: async () => ({
+      id: '0x',
+      balanceAtomic: balance,
+      claimedAtomic: 0n,
+      pendingAtomic: 0n,
+      initiatedAt: 0,
+      delayS: 900,
+      nowS: 1,
+    }),
+    initiate: async (_terms: NeonTerms, amount: bigint, saved?: { salt?: string }) => {
+      expect(saved?.salt).toBe(salt);
+      attempts.push(amount);
+      return '0xinit';
+    },
+    finalize: async () => '0x',
+  };
+  expect(await refunds.retry(chain)).toMatchObject([{ state: 'empty' }]);
+  expect(attempts).toEqual([]);
+  balance = 7n;
+  expect(await refunds.retry(chain)).toMatchObject([
+    { state: 'withdrawal_started', withdrawal: { amountAtomic: '7' } },
+  ]);
+  expect(attempts).toEqual([7n]);
 });
 
 // Failure caught by review: the timed withdrawal read the channel's receiver authorizer and delay
@@ -311,8 +373,8 @@ it('hands the saved channel config to every withdrawal step, with no call to the
       },
     }),
   });
-  await refunds.open('job-a', TERMS);
-  await refunds.saveChannel(TERMS, config);
+  const { salt } = await refunds.open('job-a', TERMS);
+  await refunds.saveChannel(TERMS, salt, config);
   const seen: unknown[] = [];
   const chain = {
     channel: async (_terms: NeonTerms, saved: unknown) => {
@@ -339,7 +401,7 @@ it('hands the saved channel config to every withdrawal step, with no call to the
     { ...config, salt: expect.stringMatching(/^0x[0-9a-f]{64}$/) },
   ]);
   // A second save does not replace what funded the channel with what a later call saw.
-  await refunds.saveChannel(TERMS, {
+  await refunds.saveChannel(TERMS, salt, {
     ...config,
     receiverAuthorizer: '0x00000000000000000000000000000000000000d2',
   });
