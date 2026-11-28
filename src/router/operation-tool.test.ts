@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testWalletProvider, buildPaymentRequired } from '../lib/read-test-utils';
 import { httpRequest } from '../lib/http';
@@ -981,7 +983,7 @@ describe('a set of runs', () => {
     expect(stub.signatures.get(SERVICE_B)).toBe(1);
   });
 
-  it.each(['unknown_choice', 'count_over_max', 'offer_expired'])(
+  it.each(['unknown_choice', 'count_over_max', 'offer_expired', 'run_id_taken', 'over_caps'])(
     'says %s plainly and pays nothing',
     async (code) => {
       const stub = new Stub({ lead: SPEC_A(), noRun: code }, [A]);
@@ -1315,5 +1317,113 @@ describe('the files a run leaves', () => {
     const stub = new Stub({ lead: SPEC_A() }, [A]);
     const result = await runRequestTool({ operation: OP, input: INPUT }, deps(stub));
     await expect(stat(String(result.envelope.fullResultPath))).resolves.toBeDefined();
+  });
+});
+
+/**
+ * THE SERVER'S REAL ANSWERS, as its code produced them (fixtures copied, not
+ * written from the plan). Each goes through the client's real parse path. A key
+ * this build does not know (`holds`, `returnsExample`, `jev`) must not make it
+ * drop the answer.
+ */
+describe("the router's real answers", () => {
+  const real = (name: string) =>
+    JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL(`./fixtures/wire-operation-${name}.json`, import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+  const RUN = real('run');
+  const GLIM = 'https://glim.sh/api/v1/twitter/search';
+
+  /** The router's real answers on its own paths; the service stays scripted. */
+  function realFetch(stub: Stub, noRun?: boolean): typeof fetch {
+    const inner = stub.fetch;
+    const wrapped = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      const json = (v: unknown) =>
+        new Response(JSON.stringify(v), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      if (url === `${ROUTER}${ROUTE_PAID_PATH}`) {
+        stub.calls.push({ url, body, signed: false });
+        stub.feePayments += 1;
+        if (noRun === true) return json(real('no-run'));
+        const decision = {
+          ...(RUN.decision as Record<string, unknown>),
+          run: body.run,
+        };
+        return json({ ...RUN, decision });
+      }
+      if (url === `${ROUTER}${ROUTER_PATH}`) {
+        if (body.browse !== undefined) {
+          return json({ schemaVersion: 1, routerVersion: 'local', rows: real('browse-rows') });
+        }
+        if (body.operation !== undefined) return json(real('read'));
+        return json(real('offer'));
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    stub.fetch = wrapped;
+    return wrapped;
+  }
+  const glim = (): ServiceScript => ({
+    url: GLIM,
+    live: '5000',
+    payTo: '0xC751344Ee09B5159160173F77D4a1169bCd386A1',
+    body: { count: 1, tweets: [{ id: '1', text: 'hi', author: { username: 'ana' } }] },
+  });
+
+  it("shows the real offer, with each row's input fields of any type", async () => {
+    const stub = new Stub({ lead: SPEC_A() }, []);
+    realFetch(stub);
+    const d = deps(stub);
+    const offered = await runRequestTool({ query: 'search X' }, d);
+    expect(offered.envelope).toMatchObject({ status: 'offer', task: 'x post search' });
+    expect((offered.envelope.operations as unknown[]).length).toBe(2);
+    expect(offered.summary).toContain('Input fields: query (<X search terms>)');
+    expect(offered.summary).toContain('expand_urls (false)');
+  });
+
+  it('lists the real browse rows with their input fields', async () => {
+    const stub = new Stub({ lead: SPEC_A() }, []);
+    realFetch(stub);
+    const d = deps(stub);
+    const listed = await runRequestTool({ browse: 'x search' }, d);
+    expect(listed.envelope.status).toBe('browse');
+    expect(listed.summary).toContain('x-post-search');
+    expect(listed.summary).toContain('query (<X search terms>)');
+  });
+
+  it('reads the real operation, and a real run answer runs end to end', async () => {
+    const stub = new Stub({ lead: SPEC_A() }, [glim()]);
+    realFetch(stub);
+    const d = deps(stub);
+    const read = await runRequestTool({ operation: 'x-post-search' }, d);
+    expect(read.envelope).toMatchObject({ status: 'operation', operation: 'x-post-search' });
+    const ran = await runRequestTool(
+      { operation: 'x-post-search', input: { query: 'x402 from:coinbase' } },
+      d,
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled', operation: 'x-post-search' });
+    expect(stub.signatures.get(GLIM)).toBe(1);
+    expect(stub.runBodies()[0]).toMatchObject({ caps: { fee: '750', service: '5500' } });
+    expect(textOf(ran)).not.toContain('glim.sh');
+  });
+
+  it('stops on the real over_caps answer with nothing paid to a service', async () => {
+    const stub = new Stub({ lead: SPEC_A() }, [glim()]);
+    realFetch(stub, true);
+    const d = deps(stub);
+    const stopped = await runRequestTool(
+      { operation: 'x-post-search', input: { query: 'x402' } },
+      d,
+    );
+    expect(stopped.envelope.status).not.toBe('fulfilled');
+    expect(stopped.summary).toContain('Read the operation again');
+    expect(stub.totalSignatures()).toBe(0);
   });
 });

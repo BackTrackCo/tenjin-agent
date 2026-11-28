@@ -1,0 +1,27 @@
+[
+  {
+    "id": "glim-twitter-get",
+    "label": "X post or profile read",
+    "does": "Posts and threads",
+    "price": "0.5\u00a2",
+    "free": false,
+    "kind": "Posts and threads",
+    "input": {
+      "ref": "<post's or profile's URL>"
+    }
+  },
+  {
+    "id": "x-post-search",
+    "label": "X post search",
+    "does": "finds public X posts that match search words and operators, with each post's author and engagement",
+    "price": "0.5\u00a2",
+    "free": false,
+    "kind": "X post search",
+    "input": {
+      "query": "<X search terms>",
+      "cursor": "<pagination cursor>",
+      "expand_urls": false,
+      "sort": "<latest|top>"
+    }
+  }
+]

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "local",
+  "decision": {
+    "action": "offer",
+    "id": "24961ce4-1fd2-4b39-ac67-c85b2fd0dc29",
+    "task": "x post search",
+    "operations": [
+      {
+        "operation": "x-post-search",
+        "label": "X post search",
+        "does": "finds public X posts that match search words and operators, with each post's author and engagement",
+        "price": "$0.005",
+        "input": {
+          "query": "<X search terms>",
+          "cursor": "<pagination cursor>",
+          "expand_urls": false,
+          "sort": "<latest|top>"
+        }
+      },
+      {
+        "operation": "glim-twitter-tweets-id-replies",
+        "label": "glim X replies",
+        "does": "Replies to a tweet.",
+        "price": "$0.004",
+        "input": {
+          "id": "<tweet id>",
+          "sort": "Relevance",
+          "cursor": "<pagination cursor>",
+          "since": "<since, a number>",
+          "until": "<until, a number>"
+        }
+      }
+    ],
+    "hint": "Call request({\"operation\":\"x-post-search\",\"input\":{\"query\":\"<X search terms>\",\"cursor\":\"<pagination cursor>\",\"expand_urls\":false,\"sort\":\"<latest|top>\"}}) alone and wait for its result. Other operations of this task: glim-twitter-tweets-id-replies, glim-twitter..."
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}

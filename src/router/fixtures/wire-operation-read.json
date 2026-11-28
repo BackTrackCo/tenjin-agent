@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "local",
+  "operation": {
+    "id": "x-post-search",
+    "label": "X post search",
+    "does": "finds public X posts that match search words and operators, with each post's author and engagement",
+    "input": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "description": "Pagination cursor",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "expand_urls": {
+          "default": false,
+          "description": "When true, auto-crawl entity URLs and attach crawled_content to tweets. Off by default: responses can grow by up to 4KB per expanded URL. Use glim_web_crawl(url) for targeted crawls instead.",
+          "type": "boolean"
+        },
+        "query": {
+          "description": "X search terms, not a sentence: a few keywords plus operators such as from:handle, min_faves:N or since:YYYY-MM-DD, e.g. x402 from:coinbase min_faves:50. A sentence matches few or no posts. Put the sort in `sort`, not here. min_faves holds only with sort \"latest\": under \"top\", posts below it still come back.",
+          "maxLength": 1000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sort": {
+          "description": "Sort order: \"top\" (most engaged matching tweets) or \"latest\" (newest first). Default: \"top\".",
+          "enum": ["latest", "top"],
+          "type": "string"
+        }
+      },
+      "required": ["query"],
+      "additionalProperties": true
+    },
+    "price": {
+      "expectedAtomic": "5000",
+      "maxAtomic": "5500",
+      "feeAtomic": "750"
+    },
+    "free": false,
+    "kind": "Posts and threads"
+  }
+}

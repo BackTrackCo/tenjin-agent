@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "local",
+  "decision": {
+    "action": "run",
+    "run": "0b8f2a0e-5c1d-4f3a-9d65-0a1c0d7e9b11",
+    "operation": "x-post-search",
+    "expiresAt": "2026-11-28T00:41:18.289Z",
+    "routingFeeAtomic": "750",
+    "spec": {
+      "capabilityId": "glim-x-search",
+      "provider": "glim",
+      "label": "X search",
+      "holds": {
+        "WebSearch": "query"
+      },
+      "output": "json",
+      "description": "searches X (Twitter) posts with advanced operators (from:, min_faves:, since:) and returns the matching posts with their engagement",
+      "priceAtomic": "5000",
+      "priceVaries": false,
+      "maxAmountAtomic": "5500",
+      "payTo": "0xC751344Ee09B5159160173F77D4a1169bCd386A1",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://glim.sh/api/v1/twitter/search",
+        "fields": {
+          "cursor": "body",
+          "expand_urls": "body",
+          "query": "body",
+          "sort": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "description": "Pagination cursor",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "expand_urls": {
+            "default": false,
+            "description": "When true, auto-crawl entity URLs and attach crawled_content to tweets. Off by default: responses can grow by up to 4KB per expanded URL. Use glim_web_crawl(url) for targeted crawls instead.",
+            "type": "boolean"
+          },
+          "query": {
+            "description": "X search terms, not a sentence: a few keywords plus operators such as from:handle, min_faves:N or since:YYYY-MM-DD, e.g. x402 from:coinbase min_faves:50. A sentence matches few or no posts. Put the sort in `sort`, not here. min_faves holds only with sort \"latest\": under \"top\", posts below it still come back.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sort": {
+            "description": "Sort order: \"top\" (most engaged matching tweets) or \"latest\" (newest first). Default: \"top\".",
+            "enum": ["latest", "top"],
+            "type": "string"
+          }
+        },
+        "required": ["query"],
+        "additionalProperties": true
+      },
+      "pinned": {},
+      "example": {
+        "query": "from:elonmusk AI min_faves:100"
+      },
+      "returnsExample": {
+        "count": 1,
+        "has_more": true,
+        "next_cursor": "abc123",
+        "tweets": [
+          {
+            "author": {
+              "username": "elonmusk"
+            },
+            "id": "123",
+            "text": "Hello"
+          }
+        ]
+      }
+    }
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}

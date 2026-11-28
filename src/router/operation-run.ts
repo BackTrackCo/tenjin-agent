@@ -671,7 +671,11 @@ function noRun(code: string, reason: string, label: string): RequestToolResult {
   const next: Record<string, { status: FailStatus; step: string }> = {
     over_caps: {
       status: 'needs_input',
-      step: 'The price moved above what was approved. Call request again for a fresh quote.',
+      step: 'Read the operation again with request({operation}) for its current price, then call again.',
+    },
+    run_id_taken: {
+      status: 'needs_input',
+      step: 'Call request again: each call takes a new run id.',
     },
     unknown_choice: {
       status: 'needs_input',

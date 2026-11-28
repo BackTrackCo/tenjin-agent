@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "local",
+  "decision": {
+    "action": "no_run",
+    "code": "over_caps",
+    "reason": "The price moved past the amounts this run approved. Read the operation again for its current price."
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}
